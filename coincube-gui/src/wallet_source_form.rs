@@ -3,11 +3,14 @@
 //! This component owns only the source choice, descriptor text and public
 //! hardware-account reader. Callers own discovery, persistence and spending.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::theme::tenshu::button::ActionKind;
 use coincube_ui::{
-    component::{button, text::*},
+    component::{tenshu::ActionButton, text::*},
     theme,
     widget::{Column, Element, Row},
 };
+use iced::advanced::widget::Id;
 use iced::{widget::text_input, Length, Subscription, Task};
 
 use crate::{
@@ -23,10 +26,15 @@ pub enum Source {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Focus(Id),
     SourceSelected(Source),
     Hardware(HardwareMessage),
     ExternalEdited(String),
     InternalEdited(String),
+}
+
+fn focus(id: Id) -> Message {
+    Message::Focus(id)
 }
 
 pub struct WalletSourceForm {
@@ -115,6 +123,11 @@ impl WalletSourceForm {
     pub(crate) fn hardware_mut(&mut self) -> &mut HardwareSource {
         &mut self.hardware
     }
+
+    #[cfg(test)]
+    pub(crate) fn hardware_action_id(&self, name: impl AsRef<str>) -> Id {
+        self.hardware.action_id(name)
+    }
 }
 
 /// Flow-specific copy around the same controls. Split's text is kept verbatim
@@ -145,16 +158,20 @@ impl SourceFormCopy {
 
 pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a, Message> {
     let source_button = |label, source| {
-        let button = if form.source == source {
-            button::primary(None, label)
+        let kind = if form.source == source {
+            ActionKind::Primary
         } else {
-            button::secondary(None, label)
+            ActionKind::Secondary
         };
-        button.on_press(Message::SourceSelected(source))
+        let id = match source {
+            Source::Descriptor => "tenshu.source.descriptor",
+            Source::Hardware => "tenshu.source.hardware",
+        };
+        ActionButton::new(id, label, kind, focus).on_press(Message::SourceSelected(source))
     };
     let content = Column::new()
         .spacing(12)
-        .push(p1_bold("Source wallet"))
+        .push(p1_bold(localized_copy("Source wallet")))
         .push(
             Row::new()
                 .spacing(10)
@@ -168,9 +185,10 @@ pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a
             .into()
     } else {
         content
-            .push(p1_bold("External / receive descriptor"))
+            .push(p1_bold(localized_copy("External / receive descriptor")))
             .push(
                 text_input("wpkh([fingerprint/path]xpub.../0/*)", &form.external)
+                    .id("tenshu.source.receive")
                     .on_input(Message::ExternalEdited)
                     .padding(10)
                     .width(Length::Fill),
@@ -178,6 +196,7 @@ pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a
             .push(p1_bold(copy.internal_label))
             .push(
                 text_input("wpkh([fingerprint/path]xpub.../1/*)", &form.internal)
+                    .id("tenshu.source.change")
                     .on_input(Message::InternalEdited)
                     .padding(10)
                     .width(Length::Fill),

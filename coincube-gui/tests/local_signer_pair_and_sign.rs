@@ -406,8 +406,12 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         None,
         paired_clone,
-        DESC.to_string(),
-        coincube_core::chain::ChainId::Regtest,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(
+            DESC,
+            coincube_core::chain::ChainId::Regtest,
+        )
+        .expect("vault policy"),
+        durable_pairing_test_dir(),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
 

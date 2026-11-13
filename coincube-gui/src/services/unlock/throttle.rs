@@ -22,12 +22,426 @@
 //! It is deliberately **not** inside a Cube's data directory either: a duress
 //! wipe takes those, and a wipe must not hand the attacker a fresh counter.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use coincube_core::signer::SignerError;
+
+use super::{CubeLocation, PinOutcome, UnlockError};
 
 const FILE_NAME: &str = "unlock-throttle.json";
+const LOCK_NAME: &str = "unlock-throttle.lock";
+
+/// One serialized PIN trial, shared by normal Cube open and a temporary
+/// destination unlock. The lock covers the persisted check, seed/duress trial,
+/// and outcome write, including attempts made by another app process.
+pub enum PinAttempt {
+    Locked(Duration),
+    Classified(PinOutcome),
+}
+
+/// A permanent-seed export trial. `Words` is zeroizing from the moment it
+/// leaves the locked check; no duress outcome can carry a seed or seed blob.
+pub enum SeedExportAttempt {
+    Words(Zeroizing<Vec<String>>),
+    Duress,
+    Wrong(Duration),
+    Locked(Duration),
+}
+
+/// One-use evidence that this root/Cube's marker opened under the submitted
+/// PIN. Only `classify_seed_export_cube` can mint it. UI navigation may revoke
+/// a pending seed reveal, but cannot revoke a confirmed emergency activation.
+#[derive(Clone)]
+pub struct VerifiedSeedExportDuress {
+    root: PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+    account_id: Option<String>,
+    claimed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for VerifiedSeedExportDuress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedSeedExportDuress(<redacted>)")
+    }
+}
+
+impl VerifiedSeedExportDuress {
+    pub(crate) fn origin(
+        &self,
+    ) -> (
+        &Path,
+        &str,
+        crate::chain::ChainId,
+        crate::app::cache::AppGeneration,
+    ) {
+        (&self.root, &self.cube_id, self.chain, self.app)
+    }
+    /// Consume the capability once. Root and account came from the verified
+    /// trial, not whichever Cube happens to be visible when it resolves.
+    pub(crate) fn claim(
+        self,
+    ) -> Option<(
+        PathBuf,
+        String,
+        crate::chain::ChainId,
+        crate::app::cache::AppGeneration,
+        Option<String>,
+    )> {
+        (!self.claimed.swap(true, Ordering::AcqRel)).then_some((
+            self.root,
+            self.cube_id,
+            self.chain,
+            self.app,
+            self.account_id,
+        ))
+    }
+}
+
+/// The cross-Cube Transfer's destination unlock runs the same throttled
+/// trial (`classify_pin_scoped`) on another Cube of this root. A duress match
+/// there is the same emergency: mint the one-use proof the App hands to the
+/// tab, exactly as the seed-export trial does. Its origin is the open Cube's
+/// App (`cube_id`, `chain`, `app`), the only origin the tab accepts; duress
+/// then arms every Cube of `root`. Called only by that trial's
+/// `PinOutcome::Duress` arm.
+pub(crate) fn destination_unlock_duress(
+    root: &Path,
+    cube_id: &str,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+) -> VerifiedSeedExportDuress {
+    let account_id = crate::services::duress::DuressLocalState::load(root)
+        .map(|state| state.account_id)
+        .unwrap_or(None);
+    VerifiedSeedExportDuress {
+        root: root.to_path_buf(),
+        cube_id: cube_id.to_string(),
+        chain,
+        app,
+        account_id,
+        claimed: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verified_seed_export_duress_for_test(
+    root: PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    app: crate::app::cache::AppGeneration,
+) -> VerifiedSeedExportDuress {
+    VerifiedSeedExportDuress {
+        root,
+        cube_id,
+        chain,
+        app,
+        account_id: None,
+        claimed: Arc::new(AtomicBool::new(false)),
+    }
+}
+
+pub enum SeedExportCubeAttempt {
+    Words(Zeroizing<Vec<String>>),
+    Duress(VerifiedSeedExportDuress),
+    Wrong(Duration),
+    Locked(Duration),
+}
+
+/// Share the ordinary Cube PIN's serialized throttle and duress policy across
+/// settings surfaces that can reveal the permanent master seed. The first
+/// verifier preserves the active session's correct-PIN fast path; on an
+/// incorrect PIN, `unlock_blocking` applies the existing seed/marker/keystore
+/// classification at full cost. Wrong and duress both take that path.
+///
+/// `validate` must re-read the exact Cube/chain/marker selection. It runs under
+/// the attempt lock before decryption and before a successful or wrong result
+/// is committed. A verified duress marker remains an emergency signal even if
+/// the selection changes while Argon2 is running, as in `classify_pin_scoped`.
+pub fn classify_seed_export(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    verify: impl FnOnce() -> Result<Vec<String>, SignerError>,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<SeedExportAttempt, String> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(loc.cube_id);
+        if !remaining.is_zero() {
+            return Ok(SeedExportAttempt::Locked(remaining));
+        }
+        validate().map_err(|error| error.to_string())?;
+        match verify() {
+            Ok(words) => {
+                let words = Zeroizing::new(words);
+                validate().map_err(|error| error.to_string())?;
+                state.record_success(root, loc.cube_id);
+                Ok(SeedExportAttempt::Words(words))
+            }
+            Err(SignerError::InvalidPassword) => match super::unlock_blocking(loc, pin) {
+                Ok(PinOutcome::Duress) => {
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Duress)
+                }
+                Ok(PinOutcome::Wrong) => {
+                    validate().map_err(|error| error.to_string())?;
+                    let penalty = state.record_failure(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Wrong(penalty))
+                }
+                // The session and disk disagreed, but the seed on disk opened.
+                // Return its words after the same fingerprint/selection check
+                // instead of treating a real PIN as an incorrect attempt.
+                Ok(PinOutcome::Unlock(signer)) => {
+                    let secp =
+                        coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+                    if loc.master_signer_fingerprint != Some(signer.fingerprint(&secp)) {
+                        return Err(
+                            "Cube master seed identity changed during PIN verification".into()
+                        );
+                    }
+                    let words = Zeroizing::new(
+                        signer
+                            .words()
+                            .iter()
+                            .map(|word| (*word).to_string())
+                            .collect(),
+                    );
+                    validate().map_err(|error| error.to_string())?;
+                    state.record_success(root, loc.cube_id);
+                    Ok(SeedExportAttempt::Words(words))
+                }
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        }
+    })
+    .map_err(|error| error.to_string())?
+}
+
+/// Settings callers capture their Cube at submission. Refuse if its security
+/// selection changes while the PIN is being classified, including a rotated
+/// duress slot or a re-associated master seed.
+pub fn classify_seed_export_cube(
+    root: &Path,
+    cube: &crate::app::settings::CubeSettings,
+    app: crate::app::cache::AppGeneration,
+    pin: &str,
+    verify: impl FnOnce() -> Result<Vec<String>, SignerError>,
+) -> Result<SeedExportCubeAttempt, String> {
+    let loc = CubeLocation::new(root, cube);
+    let validate = || {
+        let directory =
+            crate::dir::CoincubeDirectory::new(root.to_path_buf()).network_directory(cube.network);
+        let settings = crate::app::settings::Settings::from_file(&directory)
+            .map_err(|error| UnlockError::Io(error.to_string()))?;
+        let current = settings
+            .cubes
+            .iter()
+            .find(|candidate| candidate.id == cube.id && candidate.network == cube.network)
+            .ok_or_else(|| UnlockError::Io("Cube changed during PIN verification".into()))?;
+        if current.created_at != cube.created_at
+            || current.master_signer_fingerprint != cube.master_signer_fingerprint
+            || current.duress_slot_file != cube.duress_slot_file
+            || current.is_passkey_cube() != cube.is_passkey_cube()
+        {
+            return Err(UnlockError::Io(
+                "Cube changed during PIN verification".into(),
+            ));
+        }
+        Ok(())
+    };
+    let result = classify_seed_export(root, &loc, pin, verify, validate)?;
+    Ok(match result {
+        SeedExportAttempt::Words(words) => SeedExportCubeAttempt::Words(words),
+        SeedExportAttempt::Wrong(penalty) => SeedExportCubeAttempt::Wrong(penalty),
+        SeedExportAttempt::Locked(remaining) => SeedExportCubeAttempt::Locked(remaining),
+        SeedExportAttempt::Duress => {
+            let account_id = crate::services::duress::DuressLocalState::load(root)
+                .map(|state| state.account_id)
+                .unwrap_or(None);
+            SeedExportCubeAttempt::Duress(VerifiedSeedExportDuress {
+                root: root.to_path_buf(),
+                cube_id: cube.id.clone(),
+                chain: cube.network,
+                app,
+                account_id,
+                claimed: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    })
+}
+
+pub fn classify_pin(root: &Path, loc: &CubeLocation, pin: &str) -> Result<PinAttempt, UnlockError> {
+    classify_pin_scoped(root, loc, pin, || Ok(()))
+}
+
+/// PIN-only checks outside the normal unlock path require the regular PIN.
+/// A duress marker is a failed trial here, not a successful unlock or an
+/// emergency wipe. Charge it without disclosing which wrong PIN was entered.
+pub fn classify_regular_pin(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+) -> Result<PinAttempt, UnlockError> {
+    classify_regular_pin_with(root, loc.cube_id, || super::unlock_blocking(loc, pin))
+}
+
+fn classify_regular_pin_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(
+        root,
+        cube_id,
+        || match verify()? {
+            PinOutcome::Duress => Ok(PinOutcome::Wrong),
+            other => Ok(other),
+        },
+        || Ok(()),
+    )
+}
+
+/// The fork keeps its PIN-only seed trial and Connect admission in the caller.
+/// It still shares the Cube-ID counter with Bitcoin and seed-export trials.
+pub fn classify_connect_fork(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+) -> Result<PinAttempt, UnlockError> {
+    classify_connect_fork_with(root, loc.cube_id, || super::unlock_connect_fork(loc, pin))
+}
+
+fn classify_connect_fork_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(root, cube_id, verify, || Ok(()))
+}
+
+/// The destination variant rechecks selected Cube metadata under the same
+/// attempt lock, before and after decryption. A rotated duress marker cannot
+/// turn a pending attempt into an ordinary wrong-PIN charge.
+pub fn classify_pin_scoped(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(
+        root,
+        loc.cube_id,
+        || super::unlock_blocking(loc, pin),
+        validate,
+    )
+}
+
+#[cfg(test)]
+fn classify_pin_with(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(root, cube_id, verify, || Ok(()))
+}
+
+fn classify_pin_with_guard(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<PinOutcome, UnlockError>,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(cube_id);
+        if !remaining.is_zero() {
+            return Ok(PinAttempt::Locked(remaining));
+        }
+        validate()?;
+        match verify() {
+            Ok(PinOutcome::Unlock(signer)) => {
+                validate()?;
+                state.record_success(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Unlock(signer)))
+            }
+            Ok(PinOutcome::Duress) => {
+                state.record_success(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Duress))
+            }
+            Ok(PinOutcome::Wrong) => {
+                validate()?;
+                state.record_failure(root, cube_id);
+                Ok(PinAttempt::Classified(PinOutcome::Wrong))
+            }
+            Err(error) => Err(error),
+        }
+    })?
+}
+
+/// Shared backup/recovery PIN door. The mnemonic stays in the caller's
+/// zeroizing result; only wrong-password errors spend a throttle attempt.
+pub fn classify_verification<T, E: std::fmt::Display>(
+    root: &Path,
+    cube_id: &str,
+    verify: impl FnOnce() -> Result<T, E>,
+    is_wrong: impl FnOnce(&E) -> bool,
+) -> Result<Result<T, String>, UnlockError> {
+    with_locked_throttle(root, |state| {
+        let remaining = state.remaining_lockout(cube_id);
+        if !remaining.is_zero() {
+            return Err(lockout_message(remaining));
+        }
+        match verify() {
+            Ok(value) => {
+                state.record_success(root, cube_id);
+                Ok(value)
+            }
+            Err(error) if !is_wrong(&error) => Err(error.to_string()),
+            Err(_) => {
+                let penalty = state.record_failure(root, cube_id);
+                Err(if penalty.is_zero() {
+                    "Incorrect PIN. Please try again.".to_string()
+                } else {
+                    lockout_message(penalty)
+                })
+            }
+        }
+    })
+}
+
+fn with_locked_throttle<T>(
+    root: &Path,
+    action: impl FnOnce(&mut ThrottleState) -> T,
+) -> Result<T, UnlockError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(LOCK_NAME))
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+    file.lock_exclusive()
+        .map_err(|e| UnlockError::Io(e.to_string()))?;
+
+    let mut state = ThrottleState::load(root);
+    let answer = action(&mut state);
+    let _ = FileExt::unlock(&file);
+    Ok(answer)
+}
 
 /// Delay after the Nth consecutive failure: 0, 0, 1s, 2s, 4s, 8s… capped.
 ///
@@ -46,17 +460,19 @@ pub struct ThrottleState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct CubeThrottle {
     consecutive_failures: u32,
-    /// Unix seconds of the last failure. Absolute rather than an `Instant` so
-    /// the penalty survives a restart — otherwise "quit and relaunch" is the
-    /// bypass.
+    /// Absolute Unix time keeps the penalty across a restart. Retain the
+    /// seconds field so existing counter files remain readable.
     last_failure_unix: u64,
+    /// New counter files retain the fraction of a second as well. Without it,
+    /// a one-second penalty can expire immediately at a Unix-second boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_failure_subsec_nanos: Option<u32>,
 }
 
-fn now_unix() -> u64 {
+fn now_unix() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(Duration::ZERO)
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -64,6 +480,14 @@ fn path(root: &Path) -> PathBuf {
 }
 
 impl ThrottleState {
+    /// The last attempt's full penalty, before wall-clock expiry. The PIN UI
+    /// shows the same message it did when it recorded that attempt itself.
+    pub fn current_penalty(&self, cube_id: &str) -> Duration {
+        self.failures
+            .get(cube_id)
+            .map(|entry| penalty_for(entry.consecutive_failures))
+            .unwrap_or(Duration::ZERO)
+    }
     /// Load, mapping a missing file to the empty state.
     ///
     /// A **corrupt** file also maps to empty rather than erroring. That is the
@@ -81,7 +505,7 @@ impl ThrottleState {
         let Ok(bytes) = serde_json::to_vec_pretty(self) else {
             return;
         };
-        if let Err(e) = std::fs::write(path(root), bytes) {
+        if let Err(e) = write_atomically(root, &bytes, || Ok(())) {
             tracing::debug!("could not persist the unlock throttle: {e}");
         }
     }
@@ -92,7 +516,7 @@ impl ThrottleState {
         self.remaining_lockout_at(cube_id, now_unix())
     }
 
-    fn remaining_lockout_at(&self, cube_id: &str, now_unix: u64) -> Duration {
+    fn remaining_lockout_at(&self, cube_id: &str, now_unix: Duration) -> Duration {
         let Some(entry) = self.failures.get(cube_id) else {
             return Duration::ZERO;
         };
@@ -100,15 +524,27 @@ impl ThrottleState {
         if penalty.is_zero() {
             return Duration::ZERO;
         }
-        let elapsed = now_unix.saturating_sub(entry.last_failure_unix);
-        penalty.saturating_sub(Duration::from_secs(elapsed))
+        let last_failure = match entry.last_failure_subsec_nanos {
+            Some(nanos) if nanos < 1_000_000_000 => Duration::new(entry.last_failure_unix, nanos),
+            // Legacy counter files only know the whole second. Use its end
+            // so upgrading cannot shorten an already-recorded penalty.
+            _ => {
+                Duration::from_secs(entry.last_failure_unix).saturating_add(Duration::from_secs(1))
+            }
+        };
+        penalty.saturating_sub(now_unix.saturating_sub(last_failure))
     }
 
     /// Record a wrong PIN and return the new lockout.
     pub fn record_failure(&mut self, root: &Path, cube_id: &str) -> Duration {
+        self.record_failure_at(root, cube_id, now_unix())
+    }
+
+    fn record_failure_at(&mut self, root: &Path, cube_id: &str, now: Duration) -> Duration {
         let entry = self.failures.entry(cube_id.to_string()).or_default();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-        entry.last_failure_unix = now_unix();
+        entry.last_failure_unix = now.as_secs();
+        entry.last_failure_subsec_nanos = Some(now.subsec_nanos());
         let penalty = penalty_for(entry.consecutive_failures);
         self.save(root);
         penalty
@@ -125,6 +561,35 @@ impl ThrottleState {
     }
 }
 
+fn write_atomically(
+    root: &Path,
+    bytes: &[u8],
+    before_commit: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    struct PendingFile(PathBuf);
+    impl Drop for PendingFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    let pending = PendingFile(root.join(format!(".unlock-throttle-{}.tmp", uuid::Uuid::new_v4())));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&pending.0)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    before_commit()?;
+    std::fs::rename(&pending.0, path(root))?;
+    #[cfg(unix)]
+    std::fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
 /// 1s, 2s, 4s, 8s… after the free attempts, capped at [`MAX_DELAY`].
 fn penalty_for(consecutive_failures: u32) -> Duration {
     if consecutive_failures <= FREE_ATTEMPTS {
@@ -139,7 +604,10 @@ fn penalty_for(consecutive_failures: u32) -> Duration {
 
 /// User-facing text for a remaining lockout.
 pub fn lockout_message(remaining: Duration) -> String {
-    let secs = remaining.as_secs().max(1);
+    let secs = remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+        .max(1);
     if secs < 60 {
         format!("Too many incorrect PINs. Try again in {secs}s.")
     } else {
@@ -151,14 +619,195 @@ pub fn lockout_message(remaining: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn synthetic_seed(root: &Path, cube: &mut crate::app::settings::CubeSettings) {
+        use coincube_core::miniscript::bitcoin::{secp256k1::Secp256k1, Network};
+        use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
+
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let secp = Secp256k1::signing_only();
+        cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        signer
+            .store_encrypted(
+                root,
+                Network::Bitcoin,
+                &secp,
+                Some((
+                    format!("{}{}", MASTER_SEED_LABEL, cube.created_at),
+                    cube.created_at,
+                )),
+                "1234",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn seed_export_trial_classifies_real_wrong_duress_and_lockout() {
+        use crate::{app::settings::CubeSettings, chain::ChainId};
+
+        let root = tmp("seed-export-outcomes");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let marker = super::super::marker::new_file_name(cube.created_at);
+        super::super::marker::write(&root, ChainId::Bitcoin, &cube.id, &marker, "9999", None)
+            .unwrap();
+        cube.duress_slot_file = Some(marker);
+        let loc = CubeLocation::new(&root, &cube);
+        let verify = |pin: &str| {
+            super::super::open_seed_by_fingerprint(
+                &root,
+                ChainId::Bitcoin,
+                cube.master_signer_fingerprint.unwrap(),
+                pin,
+                &cube.id,
+            )
+            .map(|signer| {
+                signer
+                    .words()
+                    .iter()
+                    .map(|word| (*word).to_string())
+                    .collect()
+            })
+        };
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "4321", || verify("4321"), || Ok(())).unwrap(),
+            SeedExportAttempt::Wrong(Duration::ZERO)
+        ));
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "1234", || verify("1234"), || Ok(())).unwrap(),
+            SeedExportAttempt::Words(_)
+        ));
+        assert!(matches!(
+            classify_seed_export(&root, &loc, "9999", || verify("9999"), || Ok(())).unwrap(),
+            SeedExportAttempt::Duress
+        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                classify_seed_export(&root, &loc, "4321", || verify("4321"), || Ok(())).unwrap(),
+                SeedExportAttempt::Wrong(_)
+            ));
+        }
+        assert!(matches!(
+            classify_seed_export(
+                &root,
+                &loc,
+                "1234",
+                || panic!("lockout must prevent seed export"),
+                || Ok(())
+            )
+            .unwrap(),
+            SeedExportAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seed_export_fallback_refuses_a_substituted_signer() {
+        use crate::{app::settings::CubeSettings, chain::ChainId};
+        use coincube_core::miniscript::bitcoin::{secp256k1::Secp256k1, Network};
+        use coincube_core::signer::MasterSigner;
+
+        let root = tmp("seed-export-substitution");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let actual = cube.master_signer_fingerprint.unwrap();
+        let expected = MasterSigner::generate(Network::Bitcoin)
+            .unwrap()
+            .fingerprint(&Secp256k1::signing_only());
+        let folder = super::super::seed_folder(&root, ChainId::Bitcoin);
+        let path = std::fs::read_dir(&folder)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let changed_name = path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace(&actual.to_string(), &expected.to_string());
+        std::fs::rename(&path, folder.join(changed_name)).unwrap();
+        cube.master_signer_fingerprint = Some(expected);
+        let loc = CubeLocation::new(&root, &cube);
+        let result = classify_seed_export(
+            &root,
+            &loc,
+            "1234",
+            || Err(SignerError::InvalidPassword),
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(message) if message.contains("identity changed")));
+        let counters = serde_json::to_value(ThrottleState::load(&root)).unwrap();
+        assert!(counters["failures"].get("export-cube").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_duress_survives_slot_rotation_during_trial_but_words_do_not() {
+        use crate::{app::settings::CubeSettings, chain::ChainId, dir::CoincubeDirectory};
+        let root = tmp("seed-export-rotation");
+        let mut cube =
+            CubeSettings::new_with_raw_id("export-cube".into(), "Export".into(), ChainId::Bitcoin);
+        synthetic_seed(&root, &mut cube);
+        let marker = super::super::marker::new_file_name(cube.created_at);
+        super::super::marker::write(&root, ChainId::Bitcoin, &cube.id, &marker, "9999", None)
+            .unwrap();
+        cube.duress_slot_file = Some(marker);
+        let directory = CoincubeDirectory::new(root.clone()).network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let path = directory
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME);
+        let mut settings = crate::app::settings::Settings::default();
+        settings.cubes.push(cube.clone());
+        std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        let rotate = || {
+            let mut settings = crate::app::settings::Settings::from_file(&directory).unwrap();
+            settings.cubes[0].duress_slot_file = Some("rotated-marker".into());
+            std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+        };
+        let duress = classify_seed_export_cube(
+            &root,
+            &cube,
+            crate::app::cache::AppGeneration::next(),
+            "9999",
+            || {
+                rotate();
+                Err(SignerError::InvalidPassword)
+            },
+        )
+        .unwrap();
+        assert!(matches!(duress, SeedExportCubeAttempt::Duress(_)));
+        // A real seed result from the old selection cannot become exportable.
+        let stale_words = classify_seed_export_cube(
+            &root,
+            &cube,
+            crate::app::cache::AppGeneration::next(),
+            "1234",
+            || panic!("rotated selection must fail before seed decrypt"),
+        );
+        assert!(matches!(stale_words, Err(message) if message.contains("Cube changed")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn remaining_at_last_failure(state: &ThrottleState, cube_id: &str) -> Duration {
-        let last_failure_unix = state
+        let entry = state
             .failures
             .get(cube_id)
-            .expect("the test must record a failure first")
-            .last_failure_unix;
-        state.remaining_lockout_at(cube_id, last_failure_unix)
+            .expect("the test must record a failure first");
+        state.remaining_lockout_at(
+            cube_id,
+            Duration::new(
+                entry.last_failure_unix,
+                entry.last_failure_subsec_nanos.unwrap_or(0),
+            ),
+        )
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -171,6 +820,202 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn concurrent_pin_trials_share_one_persisted_counter() {
+        let root = tmp("concurrent-attempts");
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap()
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            assert!(matches!(
+                handle.join().unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        let state = ThrottleState::load(&root);
+        assert_eq!(state.failures["cube-a"].consecutive_failures, 3);
+        assert!(matches!(
+            classify_pin_with(&root, "cube-a", || panic!("locked trial must not decrypt")).unwrap(),
+            PinAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_and_unlock_trials_share_the_lock_and_counter() {
+        let root = tmp("cross-surface");
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if i == 0 {
+                        let answer =
+                            classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap();
+                        assert!(matches!(answer, PinAttempt::Classified(PinOutcome::Wrong)));
+                    } else {
+                        let answer = classify_verification::<(), _>(
+                            &root,
+                            "cube-a",
+                            || Err("wrong"),
+                            |_| true,
+                        )
+                        .unwrap();
+                        assert!(answer.is_err());
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            3
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bitcoin_and_fork_trials_share_one_atomic_cube_counter() {
+        let root = tmp("cross-chain-fork");
+        let barrier = Arc::new(Barrier::new(4));
+        let handles: Vec<_> = (0..3)
+            .map(|i| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let attempt = if i == 0 {
+                        // Fork seed decryption remains distinct, but trial and
+                        // counter update must use the same lock as Bitcoin.
+                        classify_connect_fork_with(&root, "shared-cube", || Ok(PinOutcome::Wrong))
+                    } else {
+                        classify_pin_with(&root, "shared-cube", || Ok(PinOutcome::Wrong))
+                    }
+                    .unwrap();
+                    assert!(matches!(attempt, PinAttempt::Classified(PinOutcome::Wrong)));
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["shared-cube"].consecutive_failures,
+            3
+        );
+        assert!(matches!(
+            classify_connect_fork_with(&root, "shared-cube", || {
+                panic!("lockout must refuse before fork seed decryption")
+            })
+            .unwrap(),
+            PinAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_rotation_refuses_stale_pin_without_a_wrong_attempt() {
+        let root = tmp("metadata-rotation");
+        let checks = std::cell::Cell::new(0);
+        let answer = classify_pin_with_guard(
+            &root,
+            "cube-a",
+            || Ok(PinOutcome::Wrong),
+            || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(UnlockError::Io("rotated".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(answer, Err(UnlockError::Io(_))));
+        assert!(!ThrottleState::load(&root).failures.contains_key("cube-a"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duress_clears_the_counter_and_operational_error_does_not_charge_it() {
+        let root = tmp("equivalent-outcomes");
+        for _ in 0..2 {
+            assert!(matches!(
+                classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Wrong)).unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        let error = classify_pin_with(&root, "cube-a", || Err(UnlockError::NoPinConfigured));
+        assert!(matches!(error, Err(UnlockError::NoPinConfigured)));
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            2
+        );
+        assert!(matches!(
+            classify_pin_with(&root, "cube-a", || Ok(PinOutcome::Duress)).unwrap(),
+            PinAttempt::Classified(PinOutcome::Duress)
+        ));
+        assert!(!ThrottleState::load(&root).failures.contains_key("cube-a"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_cube_duress_is_charged_as_wrong_and_lockout_precedes_decryption() {
+        let root = tmp("delete-duress");
+        for _ in 0..3 {
+            assert!(matches!(
+                classify_regular_pin_with(&root, "cube-a", || Ok(PinOutcome::Duress)).unwrap(),
+                PinAttempt::Classified(PinOutcome::Wrong)
+            ));
+        }
+        assert_eq!(
+            ThrottleState::load(&root).failures["cube-a"].consecutive_failures,
+            3
+        );
+        assert!(matches!(
+            classify_regular_pin_with(&root, "cube-a", || panic!("locked PIN must not decrypt"))
+                .unwrap(),
+            PinAttempt::Locked(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_counter_replacement_keeps_previous_state() {
+        let root = tmp("interrupted-save");
+        let mut state = ThrottleState::default();
+        state.record_failure(&root, "cube-a");
+        let original = std::fs::read(path(&root)).unwrap();
+        let mut updated = state.clone();
+        updated
+            .failures
+            .get_mut("cube-a")
+            .unwrap()
+            .consecutive_failures = 20;
+        let bytes = serde_json::to_vec(&updated).unwrap();
+        assert!(write_atomically(&root, &bytes, || Err(io::Error::other("interrupted"))).is_err());
+        assert_eq!(std::fs::read(path(&root)).unwrap(), original);
+        assert_eq!(ThrottleState::load(&root), state);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        write_atomically(&root, &bytes, || Ok(())).unwrap();
+        assert_eq!(ThrottleState::load(&root), updated);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -215,10 +1060,13 @@ mod tests {
         for _ in 0..3 {
             st.record_failure(&root, "cube-a");
         }
-        st.failures
+        let old = now_unix().saturating_sub(Duration::from_secs(2));
+        let entry = st
+            .failures
             .get_mut("cube-a")
-            .expect("the test must record a failure first")
-            .last_failure_unix = now_unix().saturating_sub(2);
+            .expect("the test must record a failure first");
+        entry.last_failure_unix = old.as_secs();
+        entry.last_failure_subsec_nanos = Some(old.subsec_nanos());
 
         assert_eq!(st.remaining_lockout("cube-a"), Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
@@ -236,6 +1084,42 @@ mod tests {
         let reloaded = ThrottleState::load(&root);
         assert!(remaining_at_last_failure(&reloaded, "cube-a") > Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_second_penalty_survives_a_second_boundary_and_restart() {
+        let root = tmp("second-boundary");
+        let mut state = ThrottleState::default();
+        let failure_time = Duration::new(100, 999_999_999);
+        for _ in 0..3 {
+            state.record_failure_at(&root, "cube-a", failure_time);
+        }
+
+        let reloaded = ThrottleState::load(&root);
+        assert_eq!(
+            reloaded.remaining_lockout_at("cube-a", Duration::from_secs(101)),
+            Duration::from_nanos(999_999_999)
+        );
+        assert_eq!(
+            reloaded.remaining_lockout_at("cube-a", failure_time + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_whole_second_counter_remains_readable_and_conservative() {
+        let legacy =
+            br#"{"failures":{"cube-a":{"consecutive_failures":3,"last_failure_unix":100}}}"#;
+        let state: ThrottleState = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(
+            state.remaining_lockout_at("cube-a", Duration::from_secs(101)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            state.remaining_lockout_at("cube-a", Duration::from_secs(102)),
+            Duration::ZERO
+        );
     }
 
     /// Guesses must accumulate across *every* surface that checks the PIN, not
@@ -303,5 +1187,9 @@ mod tests {
         assert!(lockout_message(Duration::from_secs(120)).contains("2 minute"));
         // Sub-second remainders still say something, never "0s".
         assert!(lockout_message(Duration::from_millis(200)).contains("1s"));
+        // Fractional remainders must not promise an earlier retry than the
+        // lockout actually allows.
+        assert!(lockout_message(Duration::from_millis(1_999)).contains("2s"));
+        assert!(lockout_message(Duration::from_millis(60_001)).contains("2 minute"));
     }
 }

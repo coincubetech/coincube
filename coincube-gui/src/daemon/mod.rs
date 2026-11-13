@@ -1,6 +1,7 @@
 pub mod client;
 pub mod embedded;
 pub mod model;
+pub mod stopping;
 
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -9,10 +10,7 @@ use std::io::ErrorKind;
 use std::iter::FromIterator;
 
 use coincube_core::miniscript::bitcoin::{
-    address,
-    bip32::{ChildNumber, Fingerprint},
-    psbt::Psbt,
-    secp256k1, Address, Network, OutPoint, Txid,
+    address, bip32::ChildNumber, psbt::Psbt, secp256k1, Address, BlockHash, Network, OutPoint, Txid,
 };
 use coincubed::bip329::Labels;
 use coincubed::commands::UpdateDerivIndexesResult;
@@ -22,7 +20,7 @@ use coincubed::{
     StartupError,
 };
 
-use crate::{hw::HardwareWalletConfig, node};
+use crate::node;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -45,13 +43,16 @@ pub enum DaemonError {
     // Error at start up.
     Start(StartupError),
     ConnectAnchor(crate::services::coincube::network_anchor::AnchorStartupError),
-    PoisonSubmission(coincubed::poison_broadcast::SubmissionError),
     // Error if the client is not supported.
     ClientNotSupported,
     /// Error when selecting coins for spend.
     CoinSelectionError,
     /// Not implemented feature
     NotImplemented,
+    /// Construction fee exceeded the caller's ceiling before a change index was committed.
+    FeeCeilingExceeded,
+    /// Measured sat/vB exceeded the requested rate before a change index was committed.
+    FeeRateExceeded,
 }
 
 impl std::fmt::Display for DaemonError {
@@ -66,10 +67,11 @@ impl std::fmt::Display for DaemonError {
             Self::UnsafeLegacyAlternative(e) => write!(f, "{}", e),
             Self::Start(e) => write!(f, "Daemon did not start: {}", e),
             Self::ConnectAnchor(e) => write!(f, "{}", e),
-            Self::PoisonSubmission(e) => write!(f, "{}", e),
             Self::ClientNotSupported => write!(f, "Daemon communication is not supported"),
             Self::CoinSelectionError => write!(f, "Coin selection error"),
             Self::NotImplemented => write!(f, "This feature is not implemented for this backend"),
+            Self::FeeCeilingExceeded => write!(f, "Actual fee exceeds the supplied ceiling"),
+            Self::FeeRateExceeded => write!(f, "Measured fee rate exceeds the supplied rate"),
         }
     }
 }
@@ -78,7 +80,6 @@ impl std::fmt::Display for DaemonError {
 pub enum DaemonBackend {
     EmbeddedCoincubed(Option<node::NodeType>),
     ExternalCoincubed,
-    RemoteBackend,
 }
 
 impl DaemonBackend {
@@ -91,10 +92,6 @@ impl DaemonBackend {
             self,
             DaemonBackend::EmbeddedCoincubed(_) | DaemonBackend::ExternalCoincubed
         )
-    }
-
-    pub fn is_remote(&self) -> bool {
-        matches!(self, DaemonBackend::RemoteBackend)
     }
 
     pub fn node_type(&self) -> Option<node::NodeType> {
@@ -120,6 +117,11 @@ pub trait Daemon: Debug {
     ) -> Result<(), DaemonError>;
     async fn stop(&self) -> Result<(), DaemonError>;
     async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError>;
+    /// The embedded wallet's actual tip hash. Other backends fail closed for
+    /// local MCP prepared-draft freshness checks.
+    async fn chain_tip_hash(&self) -> Result<BlockHash, DaemonError> {
+        Err(DaemonError::NotImplemented)
+    }
     /// Ask the daemon's poller to run a sync now, bypassing both
     /// the remaining sleep on the poll-interval timer and the
     /// Esplora backend's smart-poll tip-guard. Fire-and-forget —
@@ -154,6 +156,19 @@ pub trait Daemon: Debug {
         feerate_vb: u64,
         change_address: Option<Address<address::NetworkUnchecked>>,
     ) -> Result<model::CreateSpendResult, DaemonError>;
+    /// Same construction as [`Self::create_spend_tx`], rejecting an over-ceiling
+    /// fee or measured rate before the daemon commits a change index.
+    /// Backends without this check fail closed.
+    async fn create_spend_tx_capped(
+        &self,
+        _coins_outpoints: &[OutPoint],
+        _destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        _feerate_vb: u64,
+        _change_address: Option<Address<address::NetworkUnchecked>>,
+        _max_fee_sats: u64,
+    ) -> Result<model::CreateSpendResult, DaemonError> {
+        Err(DaemonError::NotImplemented)
+    }
     async fn rbf_psbt(
         &self,
         txid: &Txid,
@@ -163,169 +178,6 @@ pub trait Daemon: Debug {
     async fn update_spend_tx(&self, psbt: &Psbt) -> Result<(), DaemonError>;
     async fn delete_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
-    /// Durably reserve a fresh local change index for this wallet.
-    ///
-    /// This unbound form remains embedded-only. The separate
-    /// `reserve_claim_change` method requires the exact chain and descriptor
-    /// and can be served over the local JSON-RPC socket. A Claim transaction
-    /// needs a reserved change destination; reusing a live index could put
-    /// another spend on that address.
-    /// Returns the reserved index only. The reservation object itself stays
-    /// inside the daemon: `DaemonControl::reserve_change` binds it to the
-    /// persisted chain and descriptor before returning, so the check that
-    /// matters has already happened where the state lives.
-    async fn reserve_change(
-        &self,
-    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Reserve a change index in a wallet that positively matches both
-    /// identities. This is the cross-Cube Claim operation; a generic remote
-    /// wallet cannot implement it by reading an index or generating a receive
-    /// address. Unsupported backends fail closed.
-    async fn reserve_claim_change(
-        &self,
-        _chain: coincube_core::chain::ChainId,
-        _descriptor: &coincube_core::descriptors::CoincubeDescriptor,
-    ) -> Result<ChildNumber, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Process-local binding captured from the current embedded controller.
-    async fn claim_backend_binding(
-        &self,
-    ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Exact-byte, single-attempt submission to the reviewed Connect origin.
-    async fn submit_verified_poison_to_connect(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        _origin: String,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Exact-byte Connect submission for the verified ancestry path.
-    async fn submit_verified_ancestry_to_connect(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        _origin: String,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Exact-byte, single-attempt submission to a reviewed direct node.
-    async fn submit_verified_poison_to_node(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Exact-byte direct-node submission for the verified ancestry path.
-    async fn submit_verified_ancestry_to_node(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Embedded-only exact-byte transport, not Claim authorization. External
-    /// backends must not serialize or reconstruct the opaque verified artifact.
-    async fn submit_verified_poison(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Embedded-only ancestry transport. Fresh qualification, user approval and
-    /// durable intent remain mandatory at the coordinator; no RPC serialization.
-    async fn submit_verified_ancestry(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Embedded-only fork transport. The coordinator must provide fresh split
-    /// evidence and durable intent; verified signatures alone grant no permission.
-    /// External backends cannot encode the opaque artifact over JSON-RPC.
-    async fn submit_verified_claim_fork(
-        &self,
-        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Split (#568 B3b) step 2, embedded only: exact verified bytes through
-    /// the BTCB2 Vault daemon's own backend, once. The daemon refuses unless
-    /// the one output is its Vault receive address at `target_index`, and
-    /// unless its backend is still the reviewed `binding`. The coordinator
-    /// owns the fresh checks, preflight, approval and intent.
-    async fn submit_verified_split_step2(
-        &self,
-        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
-        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Split step 2 to the bound node of a BTCB2 Vault on a managed Knots
-    /// node (#568 P4): the same checks plus the reviewed backend binding.
-    async fn submit_verified_split_step2_to_node(
-        &self,
-        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
-        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// Split (#568 B4b) unified sweep, embedded only: the exact verified
-    /// `ALL|UNIFIED` bytes through the BTCB2 Vault daemon's own backend,
-    /// once, with step 2's checks (one output at this Vault's receive index,
-    /// the reviewed backend binding). The coordinator owns the fresh checks,
-    /// preflight, approval and intent; a Protected witness is not permission.
-    async fn submit_verified_unified_sweep(
-        &self,
-        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
-        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
-    /// The unified sweep to the bound node of a BTCB2 Vault on a managed
-    /// Knots node (#568 P4): the same checks plus the reviewed binding.
-    async fn submit_verified_unified_sweep_to_node(
-        &self,
-        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
-        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        Err(DaemonError::ClientNotSupported)
-    }
-
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
     async fn replay_wallet_records(&self) -> Result<(), DaemonError> {
         Err(DaemonError::ClientNotSupported)
@@ -353,9 +205,6 @@ pub trait Daemon: Debug {
         labels: &HashMap<LabelItem, Option<String>>,
     ) -> Result<(), DaemonError>;
     async fn get_labels_bip329(&self, offset: u32, limit: u32) -> Result<Labels, DaemonError>;
-    async fn send_wallet_invitation(&self, _email: &str) -> Result<(), DaemonError> {
-        Ok(())
-    }
 
     // List spend transactions, optionally filtered to the specified `txids`.
     // Set `txids` to `None` for no filter (passing an empty slice returns no transactions).
@@ -585,16 +434,6 @@ pub trait Daemon: Debug {
         });
 
         Ok(events)
-    }
-
-    /// Reimplemented by LianaLite backend
-    async fn update_wallet_metadata(
-        &self,
-        _wallet_alias: Option<String>,
-        _fingerprint_aliases: &HashMap<Fingerprint, String>,
-        _hws: &[HardwareWalletConfig],
-    ) -> Result<(), DaemonError> {
-        Ok(())
     }
 }
 

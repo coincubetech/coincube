@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Send · page head with Back</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--gutter:clamp(24px,3vw,48px);--page-max:1120px;color-scheme:dark}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);color-scheme:light}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul,.tenshu ol{margin:0}
+.tenshu ul,.tenshu ol{padding:0;list-style:none}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.ok{color:var(--good)}
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:8px;font-size:14px;line-height:1.3;color:var(--ink);text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni.on{background:var(--selected);font-weight:600}.ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
+.foot{border-top:1px solid var(--line);padding:10px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 8px 10px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.av{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--panel);color:var(--acc-ink);flex:none}
+.cubeidt{flex:1;display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+.cubeidt img{width:14px;height:14px;border-radius:50%}
+/* page head: shared pattern. A sub-page (Send, Receive) puts its Back button last in the head's action group, on the right. */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.phead{flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead .in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 20px}
+.phead.ctl .in{padding-bottom:0}
+.back{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px 0 8px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font-size:13px;font-weight:500;line-height:1;text-decoration:none;white-space:nowrap}
+.tenshu a.back{color:var(--ink)}.back:hover{background:var(--hover)}.back .ic{color:var(--muted)}
+.hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.hrow h1{font-size:22px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl img{width:16px;height:16px;display:block;border-radius:50%}
+.hact{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.steps{display:flex;gap:4px;margin-top:16px}
+.step{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.step .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);font-size:12px;font-weight:600}
+.step.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.step.on .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.scroll{flex:1;min-height:0;overflow:hidden}
+.pg{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 40px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.lay{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:32px;align-items:start}
+.form{border:1px solid var(--line);border-radius:16px;background:var(--panel)}
+.fs{padding:20px 24px;border-top:1px solid var(--line)}
+.fs:first-child{border-top:0}
+.pair{display:grid;grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr);gap:16px;align-items:center}
+.blk{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.blk .k{font-size:13px;color:var(--muted)}
+.asset{display:flex;align-items:center;gap:10px;margin-top:8px;font-weight:600;font-size:16px}
+.coin{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#f7931a;color:#1a1208;font-weight:700;font-size:13px}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;margin-top:8px;border:1px solid var(--accent);border-radius:999px;font-size:11.5px;font-weight:600;color:var(--acc-ink)}
+.lbl{display:block;font-weight:600;margin-bottom:8px}
+.inp{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;font-size:15px}
+.inp::placeholder{color:var(--muted)}
+.ff{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.aside .k{font-size:13px;color:var(--muted)}
+.aside .v{font-size:18px;font-weight:600;margin-top:4px}
+.ic.spk{stroke-width:2}
+/* Send body follows the shipped app screen (Payment details card, Change pickers); only the head changed. */
+.form .fh{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--line)}
+.form .fh h2{font-size:18px;font-weight:600}
+.fs:first-of-type{border-top:0}
+.blk .bt{display:flex;justify-content:space-between;align-items:baseline}
+.chg{border:0;background:none;padding:0;color:var(--acc-ink);font-size:13px;font-weight:500;cursor:pointer}.chg:hover{text-decoration:underline}
+.coinw{position:relative;width:32px;height:32px;flex:none}
+.coinw .coin{width:32px;height:32px}
+.coin.usd{background:var(--panel);color:var(--ink);border:1px solid var(--line);font-size:9.5px;letter-spacing:.02em}
+.coin.usdt{background:#26a17b;color:#fff;font-size:15px}
+.coin.usdc{background:#2775ca;color:#fff;font-size:14px}
+.bdg{position:absolute;right:-4px;bottom:-4px;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--bg)}
+.bdg svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round}
+.bdg.spark{background:#111;color:#fff}.bdg.ln{background:#f5c33b;color:#1a1208}.bdg.ln svg{fill:currentColor;stroke-width:1}.bdg.oc{background:#f7931a;color:#1a1208}
+.tagr{display:flex;align-items:center;gap:10px;margin-top:8px}.tagr .tag{margin-top:0}.tagr .muted{font-size:13px}
+.blk .bal{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+.avl{display:flex;justify-content:flex-end;gap:6px;margin-top:10px;font-size:13px;color:var(--muted)}.avl b{color:var(--ink);font-weight:500}
+.cvn{display:flex;gap:10px;margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:13px;color:var(--muted)}
+.cvn .ic{color:var(--acc-ink);margin-top:1px}
+.aside .r{display:flex;justify-content:space-between;gap:12px;margin-top:10px}.aside .r b{font-weight:600}
+.aside .r .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+.aside .tot{border-top:1px solid var(--line);margin-top:12px;padding-top:10px;font-size:13px;color:var(--muted);display:flex;justify-content:space-between}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;z-index:5}
+.tenshu.light .scrim{background:rgba(32,32,32,.35)}
+.pick{width:520px;border:1px solid var(--line);border-radius:20px;background:var(--panel);padding:24px;box-shadow:0 24px 64px rgba(0,0,0,.45)}
+.pick h2{font-size:15px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.pick .gl{margin-top:16px;color:var(--muted);font-size:13px}
+.pick .opts{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.opt{display:flex;align-items:center;gap:14px;width:100%;min-height:60px;padding:10px 16px;border:1px solid transparent;border-radius:12px;background:var(--bg);cursor:pointer;text-align:left}
+.opt:hover{border-color:var(--line)}
+.opt[aria-checked="true"]{border-color:var(--accent);background:var(--selected)}
+.opt .nm{font-weight:600;font-size:15px}.opt .tag{margin-top:0}
+.opt .sub{margin-left:auto;text-align:right;font-size:13px;color:var(--muted)}.opt .sub b{display:block;color:var(--ink);font-weight:600;font-size:14px}
+.opt .ic{color:var(--acc-ink);margin-left:8px}
+.opt .ck{width:18px;margin-left:8px;flex:none}
+.pick .note{margin-top:14px;font-size:13px;color:var(--muted)}
+.pick .act{display:flex;justify-content:flex-end;margin-top:18px}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye.tb{width:32px;height:32px}.eye:hover{background:var(--hover);color:var(--ink)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* coins (Robert, 2026-10-29): the Bitcoin and USDB logos (USDB from Flashnet's token list), network badge at bottom right. */
+.coin.btc,.coin.usd{background:none;border:0;padding:0;overflow:hidden}
+.coin>img{width:100%;height:100%;display:block;border-radius:50%}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}}" style="width:1440px;height:900px;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+  <header class="top">
+    <span class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</span>
+    <div class="chips">
+      <button type="button" class="eye tb" aria-label="Hide balances" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"></path><circle cx="9" cy="9" r="2.25"></circle></svg></button>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></span>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></span>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
+    </div>
+  </header>
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="navp">
+        <div class="cubeid"><span class="av" aria-hidden="true"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></span><span class="cubeidt"><b>Everyday</b><span><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></div>
+        <a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni {{sparkOn}}" href="#"><svg class="ic spk" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"></path></svg><span>Spark · Daily spending</span></a><a class="ni {{vaultOn}}" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+      </div>
+      <div class="foot"><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a></div>
+    </nav>
+    <main class="main" style="position:relative">
+      <div class="phead sub ctl"><div class="in">
+        <div class="hrow">
+          <div><h1>Send</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{w.name}} · Everyday · Bitcoin mainnet</p></div>
+          <div class="hact"><a class="back" href="#" aria-label="Back to {{w.name}}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Back to {{w.short}}</a></div>
+        </div>
+        <ol class="steps" aria-label="Progress">
+          <sc-for list="{{w.steps}}" as="s" hint-placeholder-count="3"><li class="step {{s.cls}}"><span class="n">{{s.n}}</span>{{s.label}}</li></sc-for>
+        </ol>
+      </div></div>
+      <div class="scroll">
+        <div class="pg">
+          <div class="lay">
+            <section class="form" aria-label="Payment details">
+              <div class="fh"><h2>Payment details</h2><sc-if value="{{w.stable}}" hint-placeholder-val="{{ true }}"><div class="seg" role="group" aria-label="Asset"><button type="button" aria-pressed="true">Bitcoin</button><button type="button" aria-pressed="false">Stablecoin (cross-chain)</button></div></sc-if></div>
+              <div class="fs">
+                <div class="pair">
+                  <div class="blk"><div class="bt"><span class="k">You send</span><sc-if value="{{w.canPick}}" hint-placeholder-val="{{ true }}"><button type="button" class="chg" aria-label="Change what you send from">Change</button></sc-if></div>
+                    <div class="asset"><sc-if value="{{fromUsd}}" hint-placeholder-val="{{ false }}"><span class="coinw"><span class="coin usd" aria-hidden="true"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span>US Dollar</sc-if><sc-if value="{{fromBtc}}" hint-placeholder-val="{{ true }}"><sc-if value="{{w.canPick}}" hint-placeholder-val="{{ true }}"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span></sc-if><sc-if value="{{w.vault}}" hint-placeholder-val="{{ false }}"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></span></sc-if>Bitcoin</sc-if></div>
+                    <div class="tagr"><span class="tag">{{w.from}}</span><span class="muted">{{f.bal}}</span></div></div>
+                  <svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9h12M11 5l4 4-4 4"/></svg>
+                  <div class="blk"><div class="bt"><span class="k">They receive</span><button type="button" class="chg" aria-label="Change what they receive">Change</button></div>
+                    <div class="asset"><sc-if value="{{w.canPick}}" hint-placeholder-val="{{ true }}"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg ln"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M10 2 4.5 10H9l-1 6 5.5-8H9z"/></svg></span></span></sc-if><sc-if value="{{w.vault}}" hint-placeholder-val="{{ false }}"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg oc"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M7.5 10.5l3-3M6 8 4.5 9.5a2.1 2.1 0 0 0 3 3L9 11M12 10l1.5-1.5a2.1 2.1 0 0 0-3-3L9 7"/></svg></span></span></sc-if>Bitcoin</div>
+                    <div class="tagr"><span class="tag">{{w.to}}</span><span class="muted">Add a destination</span></div></div>
+                </div>
+              </div>
+              <div class="fs"><label class="lbl" for="dest">Destination</label><input id="dest" class="inp" type="text" placeholder="{{w.destHint}}"></div>
+              <div class="fs"><label class="lbl" for="amt">Amount (sats)</label><input id="amt" class="inp" type="text" placeholder="{{w.amtHint}}">
+                <p class="avl">Available <b>{{f.avail}}</b></p>
+                <sc-if value="{{fromUsd}}" hint-placeholder-val="{{ false }}"><p class="cvn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg><span>Paid from USDB: the amount converts to bitcoin at send. Review shows the rate and conversion fee before anything moves.</span></p></sc-if>
+              </div>
+              <div class="fs ff"><span class="muted">{{w.foot}}</span><button type="button" class="btn pri">{{w.cta}}</button></div>
+            </section>
+            <aside class="aside"><p class="k">Available in {{w.short}}</p>
+              <sc-if value="{{w.canPick}}" hint-placeholder-val="{{ true }}">
+                <p class="r"><span>Bitcoin</span><b>5,000,000<span class="u">SATS</span></b></p>
+                <p class="r"><span>US Dollar</span><b>10,376.19<span class="u">USDB</span></b></p>
+                <p class="tot"><span>Total</span><span>$14,387.19</span></p>
+              </sc-if>
+              <sc-if value="{{w.vault}}" hint-placeholder-val="{{ false }}"><p class="v">52,410,000 SATS</p></sc-if>
+            </aside>
+          </div>
+        </div>
+      </div>
+      <sc-if value="{{pickFrom}}" hint-placeholder-val="{{ false }}">
+      <div class="scrim"><div class="pick" role="dialog" aria-modal="true" aria-labelledby="pf">
+        <h2 id="pf">You send from</h2>
+        <div class="opts" role="radiogroup" aria-labelledby="pf">
+          <button type="button" class="opt" role="radio" aria-checked="{{btcChk}}"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span><span class="nm">Bitcoin</span><span class="tag">SPARK</span><span class="sub"><b>5,000,000 SATS</b>$4,011.00</span><span class="ck"><sc-if value="{{fromBtc}}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m4 9.5 3.25 3.25L14 6"/></svg></sc-if></span></button>
+          <button type="button" class="opt" role="radio" aria-checked="{{usdChk}}"><span class="coinw"><span class="coin usd" aria-hidden="true"><img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgdmlld0JveD0iMCAwIDEyOCAxMjgiIGZpbGw9Im5vbmUiCiAgICB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPHJlY3Qgd2lkdGg9IjEyOCIgaGVpZ2h0PSIxMjgiIGZpbGw9IiMwMDg3NUEiLz4KICAgIDxwYXRoIGQ9Ik00MCA2OS4wMjE3QzM3Ljc5MDkgNjkuMDIxNyAzNiA2Ny4yMzA4IDM2IDY1LjAyMTdMMzYuMDAwNCAzNS41MTQ1QzM2LjAwMDQgMzMuMzA1NCAzNy43OTEzIDMxLjUxNDUgNDAuMDAwNCAzMS41MTQ1SDU0LjAyNTZINTguNDcyNUg2MS4xNDA1SDY1LjU4NzVINjguMjU2TDcyLjcwMyAzMS42MzE5Qzc1LjQ4NTYgMzEuODY1OCA3OC4wNTUzIDMyLjQ1MTkgODAuMzk2MSAzMy40MTExQzgzLjU4NiAzNC43MDY2IDg2LjE1IDM2LjY4MiA4OC4wMDk4IDM5LjM1MjVDODkuOTM3MSA0Mi4wNDk2IDkwLjg0NzMgNDUuMjk5NiA5MC44NDczIDQ4Ljk4NzRDOTAuODQ3MyA1MC4xOTA5IDkwLjc2NTYgNTEuMzM2NiA5MC41OTY0IDUyLjQyMDdDOTAuNDQ2MiA1My4zODI4IDg5LjYxNzcgNTQuMDkyIDg4LjY0NCA1NC4wOTJIODEuMTk1N0M3OS45OTgyIDU0LjA5MiA3OS4wNzYgNTMuMDM1NSA3OS4yMzc4IDUxLjg0OTFDNzkuMzA0MSA1MS4zNjI0IDc5LjMzOSA1MC44MzYxIDc5LjMzOSA1MC4yNjgxQzc5LjMzOSA0Ny4xOTA5IDc4LjM3MzkgNDUuMzA1MiA3Ni43NTMxIDQ0LjE1MDRMNzYuNzQzNSA0NC4xNDM1Qzc0LjkzNSA0Mi44Mzg2IDcyLjM2ODEgNDIuMDgzNyA2OC44NDkyIDQyLjA4MzdINDkuNzIyMkM0OC42MTc3IDQyLjA4MzcgNDcuNzIyMiA0Mi45NzkxIDQ3LjcyMjIgNDQuMDgzN1Y1Ni40NTI1QzQ3LjcyMjIgNTcuNTU3MSA0OC42MTc3IDU4LjQ1MjUgNDkuNzIyMiA1OC40NTI1SDY4Ljg0OTJDNzMuNTc5IDU4LjQ1MjUgNzcuODAxNSA1OS44MjYgODEuMDkzMSA2MS40OTExQzg0LjMwNjEgNjMuMTE2NSA4Ni43NTQ4IDY1LjA4MjggODguMDAwNiA2Ni40OTU1QzkwLjc5NzEgNjkuMjMxNyA5MiA3My4yODY4IDkyIDc4LjIzMDdDOTIgODIuMTk1NyA5MS4wNTExIDg1LjY5MDggODkuMDUxMSA4OC42MDk5Qzg3LjExMDMgOTEuNDU1NCA4NC40MzI2IDkzLjU2NzcgODEuMDkwNyA5NC45NTQ5TDgxLjA4MiA5NC45NTg1Qzc4LjUyNzUgOTYuMDA0NiA3NS43Mjk4IDk2LjYyNzcgNzIuNzA1NCA5Ni44NDk0TDY1LjU4OTcgOTYuOTQxNkg2MS4yMzc1SDYxLjE0MjdINTguNDc0N0w1OC41Njk1IDk2Ljk0MTZINTQuMTIyNUw1NC4wMjc4IDk2Ljk0MTZINDAuMDAwNEMzNy43OTEzIDk2Ljk0MTYgMzYuMDAwNCA5NS4xNTA4IDM2LjAwMDQgOTIuOTQxNkwzNi4wMDAyIDc2Ljk2MTNDMzYuMDAwMiA3NS44NTY3IDM2Ljg5NTYgNzQuOTYxMyAzOC4wMDAyIDc0Ljk2MTNINDUuNzIyMkM0Ni44MjY4IDc0Ljk2MTMgNDcuNzIyMiA3NS44NTY3IDQ3LjcyMjIgNzYuOTYxM1Y4NC4zNzI1QzQ3LjcyMjIgODUuNDc3IDQ4LjYxNzcgODYuMzcyNSA0OS43MjIyIDg2LjM3MjVINjkuMjMzNUM3MS42NzU0IDg2LjM3MjUgNzMuNzA4OSA4Ni4wNDA0IDc1LjM3NDQgODUuNDI5NEM3Ni45OTg3IDg0LjgxNiA3OC4xNzggODMuODk4OCA3OS4wMDYyIDgyLjdMNzkuMDEwNCA4Mi42OTRDNzkuODMxIDgxLjUxNTcgODAuMzIwOSA3OS44OTI5IDgwLjMyMDkgNzcuNjc1N0M4MC4zMjA5IDc1LjQ1NjUgNzkuODMwMiA3My44NTY0IDc5LjAyMDEgNzIuNzEzOUw3OS4wMTMxIDcyLjcwNDFMNzkuMDA2MiA3Mi42OTQyQzc4LjE4MTEgNzEuNDk5OSA3Ny4wMDgyIDcwLjU5OTUgNzUuMzkwOSA3MC4wMTM1TDc1LjM3NDUgNzAuMDA3Nkw3NS4zNTgzIDcwLjAwMTRDNzMuNjk5IDY5LjM2NjkgNzEuNjcxNiA2OS4wMjE3IDY5LjIzMzUgNjkuMDIxN0g0MFoiIGZpbGw9IiNGQUZBRkEiLz4KICAgIDxyZWN0IHg9IjU2LjY1NjMiIHk9IjIyIiB3aWR0aD0iMTIuMDgzOCIgaGVpZ2h0PSIxMy42NDI5IiByeD0iMiIgZmlsbD0iI0ZBRkFGQSIvPgogICAgPHJlY3QgeD0iNTYuNjU2MyIgeT0iOTIuMjc4MiIgd2lkdGg9IjEyLjA4MzgiIGhlaWdodD0iMTMuMzI5NyIgcng9IjIiIGZpbGw9IiNGQUZBRkEiLz4KPC9zdmc+Cg==" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span><span class="nm">US Dollar</span><span class="tag">USDB</span><span class="sub"><b>10,376.19 USDB</b>≈ 12,934,000 SATS</span><span class="ck"><sc-if value="{{fromUsd}}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m4 9.5 3.25 3.25L14 6"/></svg></sc-if></span></button>
+        </div>
+        <p class="note">Bitcoin is used first. If it can't cover a payment, just enough USDB converts to cover the rest, and Review shows it.</p>
+        <div class="act"><button type="button" class="btn">Close</button></div>
+      </div></div>
+      </sc-if>
+      <sc-if value="{{pickTo}}" hint-placeholder-val="{{ false }}">
+      <div class="scrim"><div class="pick" role="dialog" aria-modal="true" aria-labelledby="pt">
+        <h2 id="pt">They receive</h2>
+        <p class="gl">Bitcoin</p>
+        <div class="opts" role="radiogroup" aria-label="Bitcoin">
+          <button type="button" class="opt" role="radio" aria-checked="true"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg ln"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M10 2 4.5 10H9l-1 6 5.5-8H9z"/></svg></span></span><span class="nm">Bitcoin</span><span class="tag">LIGHTNING</span><span class="sub"></span><span class="ck"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m4 9.5 3.25 3.25L14 6"/></svg></span></button>
+          <button type="button" class="opt" role="radio" aria-checked="false"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg oc"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M7.5 10.5l3-3M6 8 4.5 9.5a2.1 2.1 0 0 0 3 3L9 11M12 10l1.5-1.5a2.1 2.1 0 0 0-3-3L9 7"/></svg></span></span><span class="nm">Bitcoin</span><span class="tag">ON-CHAIN</span><span class="sub"></span><span class="ck"></span></button>
+          <button type="button" class="opt" role="radio" aria-checked="false"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg spark"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"/></svg></span></span><span class="nm">Bitcoin</span><span class="tag">SPARK</span><span class="sub"></span><span class="ck"></span></button>
+        </div>
+        <p class="gl">Stablecoin (cross-chain)</p>
+        <div class="opts" role="radiogroup" aria-label="Stablecoin (cross-chain)">
+          <button type="button" class="opt" role="radio" aria-checked="false"><span class="coinw"><span class="coin usdt" aria-hidden="true">₮</span></span><span class="nm">USDt</span><span class="tag">CROSS-CHAIN</span><span class="sub"></span><span class="ck"></span></button>
+          <button type="button" class="opt" role="radio" aria-checked="false"><span class="coinw"><span class="coin usdc" aria-hidden="true">$</span></span><span class="nm">USDC</span><span class="tag">CROSS-CHAIN</span><span class="sub"></span><span class="ck"></span></button>
+        </div>
+        <div class="act"><button type="button" class="btn">Close</button></div>
+      </div></div>
+      </sc-if>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"wallet":{"editor":"enum","options":["spark","vault"],"default":"spark"},"payFrom":{"editor":"enum","options":["bitcoin","usdb"],"default":"bitcoin"},"picker":{"editor":"enum","options":["none","youSend","theyReceive"],"default":"theyReceive"},"light":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+const vault = this.props.wallet === 'vault';
+const usd = !vault && this.props.payFrom === 'usdb';
+const labels = vault ? ['Details','Review','Sign','Sent'] : ['Details','Review','Sent'];
+const w = vault
+  ? {vault:true,canPick:false,name:'Vault · Family savings',short:'Vault',stable:false,from:'VAULT',to:'ON-CHAIN',destHint:'Bitcoin address',amtHint:'Amount in sats',foot:'Create builds an unsigned transaction. Nothing is sent yet.',cta:'Create'}
+  : {vault:false,canPick:true,name:'Spark · Daily spending',short:'Spark',stable:true,from:usd ? 'USDB' : 'SPARK',to:'LIGHTNING',destHint:'Lightning invoice or Lightning address',amtHint:'Amount in sats (optional for invoices with amount)',foot:'Prepare gets a fee quote. Nothing is sent yet.',cta:'Prepare'};
+w.steps = labels.map((label, i) => ({label, n: i + 1, cls: i === 0 ? 'on' : ''}));
+const f = vault ? {bal:'52,410,000 SATS',avail:'52,410,000 SATS'}
+  : usd ? {bal:'10,376.19 USDB',avail:'10,376.19 USDB ≈ 12,934,000 SATS'}
+  : {bal:'5,000,000 SATS',avail:'5,000,000 SATS'};
+const pick = vault ? 'none' : this.props.picker;
+return {
+w, f,
+fromUsd: usd, fromBtc: !usd,
+pickFrom: pick === 'youSend', pickTo: pick === 'theyReceive',
+btcChk: usd ? 'false' : 'true', usdChk: usd ? 'true' : 'false',
+sparkOn: vault ? '' : 'on',
+vaultOn: vault ? 'on' : '',
+themeClass: this.props.light ? 'light' : ''
+};
+}
+}
+</script>
+</body>
+</html>

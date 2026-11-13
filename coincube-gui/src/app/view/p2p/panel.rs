@@ -1,8 +1,10 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 
-use coincube_ui::component::text::Text;
+use coincube_ui::component::tenshu::{page::PAGE_BOTTOM, page_head::BODY_TOP, PageWidth};
 use coincube_ui::{
     component::{button, card, form, text::*},
     icon, theme,
@@ -25,7 +27,11 @@ use crate::app::{
 };
 use coincube_spark_protocol::PrepareSendOk;
 
-use super::components::order_card::TakeOrderState;
+#[cfg(test)]
+use super::components::order_card::detail_action_id;
+use super::components::order_card::{
+    detail_input_id, detail_primary_id, order_row_id, order_table_header, TakeOrderState,
+};
 use super::components::trade_card::{TradeRole, TradeStatus};
 use super::components::{
     order_card, order_detail, order_filter_sidebar, payment_methods_for, trade_card,
@@ -665,6 +671,109 @@ impl P2PPanel {
         }
     }
 
+    /// Responsive production Book presenter, shared with the synthetic layout test.
+    fn book_view<'a>(&'a self) -> Element<'a, view::Message> {
+        crate::app::view::responsive(move |size: iced::Size| {
+            let filtered_orders = self.filtered_orders();
+            // BUY BTC is the taker's intent: it matches maker sell orders.
+            let buy_count = self
+                .orders
+                .iter()
+                .filter(|o| o.order_type == OrderType::Sell && self.order_passes_filters(o))
+                .count();
+            let sell_count = self
+                .orders
+                .iter()
+                .filter(|o| o.order_type == OrderType::Buy && self.order_passes_filters(o))
+                .count();
+            let filter_state = OrderFilterState {
+                buy_sell: &self.buy_sell_filter,
+                buy_count,
+                sell_count,
+                filter_currency: &self.filter_currency,
+                currency_combo_state: &self.filter_currency_combo_state,
+                available_payment_methods: &self.filter_available_payment_methods,
+                deselected_payment_methods: &self.filter_deselected_payment_methods,
+                min_rating: self.filter_min_rating,
+                min_days_active: self.filter_min_days_active,
+                filtered_count: filtered_orders.len(),
+            };
+            let stacked = size.width < 640.0;
+            let compact_rows = stacked || size.width - 264.0 < 660.0;
+            let filters = order_filter_sidebar(filter_state, stacked);
+            let mut list = column![].spacing(0).width(Length::Fill);
+            if !compact_rows {
+                list = list
+                    .push(order_table_header())
+                    .push(iced::widget::rule::horizontal(1));
+            }
+            if filtered_orders.is_empty() {
+                list = list.push(
+                    container(p1_bold(localized_copy("No orders found")))
+                        .padding(40)
+                        .align_x(Alignment::Center)
+                        .width(Length::Fill),
+                );
+            } else {
+                for order in filtered_orders {
+                    list = list
+                        .push(order_card(order, compact_rows))
+                        .push(iced::widget::rule::horizontal(1));
+                }
+            }
+            let list = container(list).width(Length::Fill);
+            if stacked {
+                column![filters, list]
+                    .spacing(24)
+                    .width(Length::Fill)
+                    .into()
+            } else {
+                row![filters, list]
+                    .spacing(32)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .width(Length::Fill)
+                    .into()
+            }
+        })
+        .height(Length::Shrink)
+        .into()
+    }
+
+    fn select_order_for_detail(&mut self, id: String) -> Option<iced::advanced::widget::Id> {
+        let focus_id = self
+            .orders
+            .iter()
+            .find(|order| order.id == id)
+            .map(detail_primary_id);
+        self.selected_order = Some(id);
+        self.taking_order = false;
+        self.take_order_amount = Default::default();
+        self.take_order_invoice = Default::default();
+        self.take_order_submitting = false;
+        focus_id
+    }
+
+    fn close_order_detail_view(&mut self) -> Option<iced::advanced::widget::Id> {
+        let return_to = self.selected_order.take().map(|id| order_row_id(&id));
+        self.taking_order = false;
+        return_to
+    }
+
+    fn first_take_input_id(&self) -> Option<iced::advanced::widget::Id> {
+        self.selected_order
+            .as_ref()
+            .and_then(|id| self.orders.iter().find(|order| order.id == *id))
+            .and_then(|order| {
+                if order.is_range_order() {
+                    Some(detail_input_id(&order.id, "amount").into())
+                } else if order.order_type == OrderType::Sell {
+                    Some(detail_input_id(&order.id, "invoice").into())
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Orders matching the current buy/sell tab + all active filters.
     fn filtered_orders(&self) -> Vec<&P2POrder> {
         self.orders
@@ -936,17 +1045,26 @@ impl P2PPanel {
         let below_min = self.node_min_order_sats.is_some_and(|m| sats < m);
         let above_max = self.node_max_order_sats.is_some_and(|m| sats > m);
         if below_min {
-            caption(format!("≈ {formatted} sats — below trade minimum"))
-                .style(theme::text::warning)
-                .into()
+            caption(localized_format!(
+                "≈ {formatted} sats — below trade minimum",
+                "♥ {formatted} sats - debajo del mínimo de comercio"
+            ))
+            .style(theme::text::warning)
+            .into()
         } else if above_max {
-            caption(format!("≈ {formatted} sats — exceeds trade maximum"))
-                .style(theme::text::warning)
-                .into()
+            caption(localized_format!(
+                "≈ {formatted} sats — exceeds trade maximum",
+                "♥ {formatted} sats - excede el máximo de comercio"
+            ))
+            .style(theme::text::warning)
+            .into()
         } else {
-            caption(format!("≈ {formatted} sats"))
-                .style(theme::text::secondary)
-                .into()
+            caption(localized_format!(
+                "≈ {formatted} sats",
+                "Ω {formatted} sats"
+            ))
+            .style(theme::text::secondary)
+            .into()
         }
     }
 
@@ -1212,17 +1330,17 @@ impl P2PPanel {
 
         // Order type toggle
         let buy_btn = if self.create_order_type == OrderType::Buy {
-            button::primary(None, "Buy")
+            button::primary(None, localized_copy("Buy"))
         } else {
-            button::secondary(None, "Buy")
+            button::secondary(None, localized_copy("Buy"))
         }
         .on_press(p2p(P2PMessage::OrderTypeSelected(OrderType::Buy)))
         .width(Length::Fill);
 
         let sell_btn = if self.create_order_type == OrderType::Sell {
-            button::primary(None, "Sell")
+            button::primary(None, localized_copy("Sell"))
         } else {
-            button::secondary(None, "Sell")
+            button::secondary(None, localized_copy("Sell"))
         }
         .on_press(p2p(P2PMessage::OrderTypeSelected(OrderType::Sell)))
         .width(Length::Fill);
@@ -1264,24 +1382,24 @@ impl P2PPanel {
 
         // Amount card with Single / Range toggle
         let amount_label = match (&self.create_order_type, is_range) {
-            (OrderType::Buy, false) => "Enter amount you want to send",
-            (OrderType::Buy, true) => "Enter amount range you want to send",
-            (OrderType::Sell, false) => "Enter amount you want to receive",
-            (OrderType::Sell, true) => "Enter amount range you want to receive",
+            (OrderType::Buy, false) => localized_copy("Enter amount you want to send"),
+            (OrderType::Buy, true) => localized_copy("Enter amount range you want to send"),
+            (OrderType::Sell, false) => localized_copy("Enter amount you want to receive"),
+            (OrderType::Sell, true) => localized_copy("Enter amount range you want to receive"),
         };
 
         let single_btn = if !is_range {
-            button::primary(None, "Single")
+            button::primary(None, localized_copy("Single"))
         } else {
-            button::secondary(None, "Single")
+            button::secondary(None, localized_copy("Single"))
         }
         .on_press(p2p(P2PMessage::RangeOrderToggled(false)))
         .width(Length::Fill);
 
         let range_btn = if is_range {
-            button::primary(None, "Range")
+            button::primary(None, localized_copy("Range"))
         } else {
-            button::secondary(None, "Range")
+            button::secondary(None, localized_copy("Range"))
         }
         .on_press(p2p(P2PMessage::RangeOrderToggled(true)))
         .width(Length::Fill);
@@ -1362,8 +1480,9 @@ impl P2PPanel {
         // Show node order limits as a hint, or a warning if not loaded
         if let (Some(min), Some(max)) = (self.node_min_order_sats, self.node_max_order_sats) {
             amount_col = amount_col.push(
-                caption(format!(
+                caption(localized_format!(
                     "Trade size must be between {} and {} sats",
+                    "El importe de la operación debe estar entre {} y {} sats",
                     super::components::format_with_separators(min),
                     super::components::format_with_separators(max),
                 ))
@@ -1371,8 +1490,10 @@ impl P2PPanel {
             );
         } else if v.node_limits_missing {
             amount_col = amount_col.push(
-                caption("Node limits not loaded — order may be rejected")
-                    .style(theme::text::warning),
+                caption(localized_copy(
+                    "Node limits not loaded — order may be rejected",
+                ))
+                .style(theme::text::warning),
             );
         }
         let amount_card = card::simple(amount_col).width(Length::Fill);
@@ -1440,17 +1561,17 @@ impl P2PPanel {
 
         // Combined price type + pricing input card
         let market_btn = if *effective_pricing_mode == PricingMode::Market {
-            button::primary(None, "Market Rate")
+            button::primary(None, localized_copy("Market Rate"))
         } else {
-            button::secondary(None, "Market Rate")
+            button::secondary(None, localized_copy("Market Rate"))
         }
         .on_press(p2p(P2PMessage::PricingModeSelected(PricingMode::Market)))
         .width(Length::Fill);
 
         let fixed_btn = if *effective_pricing_mode == PricingMode::Fixed {
-            button::primary(None, "Fixed Price")
+            button::primary(None, localized_copy("Fixed Price"))
         } else {
-            button::secondary(None, "Fixed Price")
+            button::secondary(None, localized_copy("Fixed Price"))
         }
         .width(Length::Fill);
         let fixed_btn = if is_range {
@@ -1494,8 +1615,9 @@ impl P2PPanel {
             }
             if let (Some(min), Some(max)) = (self.node_min_order_sats, self.node_max_order_sats) {
                 sats_col = sats_col.push(
-                    caption(format!(
+                    caption(localized_format!(
                         "Allowed: {} - {} sats",
+                        "Permitido: {} - sats {}",
                         super::components::format_with_separators(min),
                         super::components::format_with_separators(max),
                     ))
@@ -1682,8 +1804,8 @@ impl P2PPanel {
                 OrderType::Sell => theme::pill::warning as fn(&_) -> _,
             };
             let heading = match trade.order_type {
-                OrderType::Buy => "You are buying",
-                OrderType::Sell => "You are selling",
+                OrderType::Buy => localized_copy("You are buying"),
+                OrderType::Sell => localized_copy("You are selling"),
             };
 
             let info_card = card::simple(
@@ -1772,7 +1894,7 @@ impl P2PPanel {
             ]
             .spacing(4);
 
-            let close_btn = button::secondary(None, "Close")
+            let close_btn = button::secondary(None, localized_copy("Close"))
                 .on_press(p2p(P2PMessage::CloseTradeDetail))
                 .width(Length::Fill);
             let cancel_btn = button::alert(None, "Cancel Order")
@@ -1971,10 +2093,12 @@ impl P2PPanel {
                 );
             } else {
                 actions = actions.push(
-                    container(p2_regular("Time expired").style(theme::text::warning))
-                        .width(Length::Fill)
-                        .center_x(Length::Fill)
-                        .padding([8, 0]),
+                    container(
+                        p2_regular(localized_copy("Time expired")).style(theme::text::warning),
+                    )
+                    .width(Length::Fill)
+                    .center_x(Length::Fill)
+                    .padding([8, 0]),
                 );
             }
         }
@@ -2063,7 +2187,7 @@ impl P2PPanel {
                 );
                 // Chat with Admin button
                 actions = actions.push(
-                    button::primary(Some(icon::chat_icon()), "Chat with Admin")
+                    button::primary(Some(icon::chat_icon()), localized_copy("Chat with Admin"))
                         .on_press(p2p(P2PMessage::OpenDisputeChat))
                         .width(Length::Fill),
                 );
@@ -2136,11 +2260,12 @@ impl P2PPanel {
                                 .width(Length::Fill),
                             );
                             actions = actions.push(if !loading {
-                                button::primary(None, "Confirm Fiat Sent")
+                                button::primary(None, localized_copy("Confirm Fiat Sent"))
                                     .on_press(p2p(P2PMessage::ConfirmFiatSent))
                                     .width(Length::Fill)
                             } else {
-                                button::primary(None, "Confirm Fiat Sent").width(Length::Fill)
+                                button::primary(None, localized_copy("Confirm Fiat Sent"))
+                                    .width(Length::Fill)
                             });
                         } else {
                             actions = actions.push(
@@ -2167,11 +2292,11 @@ impl P2PPanel {
 
                         if let Some(ref invoice) = trade.hold_invoice {
                             took_col = took_col.push(
-                                p2_regular(
+                                p2_regular(localized_copy(
                                     "Pay the hold invoice to lock your sats \
                                     and start the trade. If you don't pay in time, \
                                     the trade will be canceled.",
-                                )
+                                ))
                                 .style(theme::text::secondary),
                             );
                             took_col = self.push_hold_invoice_elements(
@@ -2182,11 +2307,11 @@ impl P2PPanel {
                             );
                         } else {
                             took_col = took_col.push(
-                                p2_regular(
+                                p2_regular(localized_copy(
                                     "A buyer has taken your order. Please wait while \
                                     they decide to proceed. If they accept, you'll \
                                     be notified to complete your part.",
-                                )
+                                ))
                                 .style(theme::text::secondary),
                             );
                         }
@@ -2210,27 +2335,27 @@ impl P2PPanel {
 
                             if let Some(sats) = trade.sats_amount.filter(|&s| s > 0) {
                                 invoice_col = invoice_col.push(
-                                    caption(format!(
+                                    caption(localized_format!(
                                         "Expected amount: {} sats. Use a zero-amount invoice \
                                         or one matching this amount exactly. Invoice must not \
-                                        expire within 1 hour.",
+                                        expire within 1 hour.", "Cantidad esperada: {} sats. Utilice una factura de valor cero o una que coincida con esta cantidad exactamente. La factura no debe expirar dentro de 1 hora.",
                                         super::components::format_with_separators(sats),
                                     ))
                                     .style(theme::text::warning),
                                 );
                             } else {
                                 invoice_col = invoice_col.push(
-                                    caption(
+                                    caption(localized_copy(
                                         "Use a zero-amount invoice or a Lightning address. \
                                         Invoice must not expire within 1 hour.",
-                                    )
+                                    ))
                                     .style(theme::text::warning),
                                 );
                             }
 
                             invoice_col = invoice_col.push(
                                 form::Form::new_trimmed(
-                                    "Enter lightning invoice or address",
+                                    localized_copy("Enter lightning invoice or address"),
                                     &self.trade_invoice_input,
                                     |v| view::Message::P2P(P2PMessage::TradeInvoiceEdited(v)),
                                 )
@@ -2239,11 +2364,12 @@ impl P2PPanel {
 
                             invoice_col = invoice_col.push(
                                 if !self.trade_invoice_input.value.is_empty() && !loading {
-                                    button::primary(None, "Submit Invoice")
+                                    button::primary(None, localized_copy("Submit Invoice"))
                                         .on_press(p2p(P2PMessage::SubmitInvoice))
                                         .width(Length::Fill)
                                 } else {
-                                    button::primary(None, "Submit Invoice").width(Length::Fill)
+                                    button::primary(None, localized_copy("Submit Invoice"))
+                                        .width(Length::Fill)
                                 },
                             );
 
@@ -2287,11 +2413,12 @@ impl P2PPanel {
                                 .width(Length::Fill),
                             );
                             actions = actions.push(if !loading {
-                                button::primary(None, "Confirm Fiat Sent")
+                                button::primary(None, localized_copy("Confirm Fiat Sent"))
                                     .on_press(p2p(P2PMessage::ConfirmFiatSent))
                                     .width(Length::Fill)
                             } else {
-                                button::primary(None, "Confirm Fiat Sent").width(Length::Fill)
+                                button::primary(None, localized_copy("Confirm Fiat Sent"))
+                                    .width(Length::Fill)
                             });
                         } else {
                             actions = actions.push(
@@ -2330,11 +2457,12 @@ impl P2PPanel {
                                 .width(Length::Fill),
                             );
                             actions = actions.push(if !loading {
-                                button::primary(None, "Release Sats")
+                                button::primary(None, localized_copy("Release Sats"))
                                     .on_press(p2p(P2PMessage::ConfirmFiatReceived))
                                     .width(Length::Fill)
                             } else {
-                                button::primary(None, "Release Sats").width(Length::Fill)
+                                button::primary(None, localized_copy("Release Sats"))
+                                    .width(Length::Fill)
                             });
                         } else {
                             actions = actions.push(
@@ -2526,21 +2654,28 @@ impl P2PPanel {
                             }
                             TradeStatus::Active if is_buyer => {
                                 actions = actions.push(if !loading {
-                                    button::primary(None, "Confirm Fiat Sent")
+                                    button::primary(None, localized_copy("Confirm Fiat Sent"))
                                         .on_press(p2p(P2PMessage::ConfirmFiatSent))
                                         .width(Length::Fill)
                                 } else {
-                                    button::primary(None, "Confirm Fiat Sent").width(Length::Fill)
+                                    button::primary(None, localized_copy("Confirm Fiat Sent"))
+                                        .width(Length::Fill)
                                 });
                             }
                             TradeStatus::FiatSent if !is_buyer => {
                                 actions = actions.push(if !loading {
-                                    button::primary(None, "Release (Confirm Fiat Received)")
-                                        .on_press(p2p(P2PMessage::ConfirmFiatReceived))
-                                        .width(Length::Fill)
+                                    button::primary(
+                                        None,
+                                        localized_copy("Release (Confirm Fiat Received)"),
+                                    )
+                                    .on_press(p2p(P2PMessage::ConfirmFiatReceived))
+                                    .width(Length::Fill)
                                 } else {
-                                    button::primary(None, "Release (Confirm Fiat Received)")
-                                        .width(Length::Fill)
+                                    button::primary(
+                                        None,
+                                        localized_copy("Release (Confirm Fiat Received)"),
+                                    )
+                                    .width(Length::Fill)
                                 });
                             }
                             _ => {}
@@ -2624,7 +2759,7 @@ impl P2PPanel {
                 } else {
                     // In dispute — only Close
                     actions = actions.push(
-                        button::secondary(None, "Close")
+                        button::secondary(None, localized_copy("Close"))
                             .on_press(p2p(P2PMessage::CloseTradeDetail))
                             .width(Length::Fill),
                     );
@@ -2632,7 +2767,7 @@ impl P2PPanel {
             } else {
                 // Terminal / loading / past release — just Close
                 actions = actions.push(
-                    button::secondary(None, "Close")
+                    button::secondary(None, localized_copy("Close"))
                         .on_press(p2p(P2PMessage::CloseTradeDetail))
                         .width(Length::Fill),
                 );
@@ -2640,7 +2775,7 @@ impl P2PPanel {
         } else {
             // Terminal state — only Close
             actions = actions.push(
-                button::secondary(None, "Close")
+                button::secondary(None, localized_copy("Close"))
                     .on_press(p2p(P2PMessage::CloseTradeDetail))
                     .width(Length::Fill),
             );
@@ -2664,7 +2799,7 @@ impl P2PPanel {
 
         if chat_available {
             content = content.push(
-                button::secondary(Some(icon::chat_icon()), "Contact")
+                button::secondary(Some(icon::chat_icon()), localized_copy("Contact"))
                     .on_press(p2p(P2PMessage::OpenChat))
                     .width(Length::Fill),
             );
@@ -2693,22 +2828,34 @@ impl P2PPanel {
 
         // ── Accordion tab buttons (Trade Information / User Information) ──
         let trade_info_btn = if self.chat_show_trade_info {
-            button::primary(Some(icon::receipt_icon()), "Trade Information")
-                .on_press(p2p(P2PMessage::ToggleChatTradeInfo))
-                .width(Length::Fill)
+            button::primary(
+                Some(icon::receipt_icon()),
+                localized_copy("Trade Information"),
+            )
+            .on_press(p2p(P2PMessage::ToggleChatTradeInfo))
+            .width(Length::Fill)
         } else {
-            button::secondary(Some(icon::receipt_icon()), "Trade Information")
-                .on_press(p2p(P2PMessage::ToggleChatTradeInfo))
-                .width(Length::Fill)
+            button::secondary(
+                Some(icon::receipt_icon()),
+                localized_copy("Trade Information"),
+            )
+            .on_press(p2p(P2PMessage::ToggleChatTradeInfo))
+            .width(Length::Fill)
         };
         let user_info_btn = if self.chat_show_user_info {
-            button::primary(Some(icon::person_icon()), "User Information")
-                .on_press(p2p(P2PMessage::ToggleChatUserInfo))
-                .width(Length::Fill)
+            button::primary(
+                Some(icon::person_icon()),
+                localized_copy("User Information"),
+            )
+            .on_press(p2p(P2PMessage::ToggleChatUserInfo))
+            .width(Length::Fill)
         } else {
-            button::secondary(Some(icon::person_icon()), "User Information")
-                .on_press(p2p(P2PMessage::ToggleChatUserInfo))
-                .width(Length::Fill)
+            button::secondary(
+                Some(icon::person_icon()),
+                localized_copy("User Information"),
+            )
+            .on_press(p2p(P2PMessage::ToggleChatUserInfo))
+            .width(Length::Fill)
         };
         let tab_row = container(row![trade_info_btn, user_info_btn].spacing(8))
             .padding([12, 16])
@@ -2728,7 +2875,8 @@ impl P2PPanel {
             let dt = chrono::DateTime::from_timestamp(trade.created_at_ts, 0)
                 .unwrap_or_default()
                 .with_timezone(&chrono::Local);
-            dt.format("%B %d, %Y").to_string()
+            dt.format(&coincube_ui::locale::date_pattern("%B %d, %Y", &dt))
+                .to_string()
         };
 
         let trade_info_panel: Element<'_, view::Message> = if self.chat_show_trade_info {
@@ -3002,7 +3150,7 @@ impl P2PPanel {
                             .spacing(10)
                             .align_y(iced::alignment::Vertical::Center);
 
-                            let download_btn = button::secondary(None, "Download")
+                            let download_btn = button::secondary(None, localized_copy("Download"))
                                 .on_press(p2p(P2PMessage::SaveFile {
                                     blossom_url: save_url,
                                     filename: save_name,
@@ -3116,7 +3264,7 @@ impl P2PPanel {
             .width(Length::Fill)
             .into()
         } else if !chat_messages.is_empty() {
-            container(p2_regular("Chat is read-only").style(theme::text::secondary))
+            container(p2_regular(localized_copy("Chat is read-only")).style(theme::text::secondary))
                 .padding([12, 16])
                 .width(Length::Fill)
                 .center_x(Length::Fill)
@@ -3162,10 +3310,9 @@ impl P2PPanel {
             async move { spark.get_info().await },
             move |result| match result {
                 Ok(info) => {
-                    let usdb_sats = info
-                        .stable_balance
+                    let usdb_sats = crate::app::breez_spark::assets::usdb_holding(&info)
                         .map(|sb| {
-                            crate::app::breez_spark::assets::stable_token_as_sats(
+                            crate::app::breez_spark::assets::stable_token_as_sats_u128(
                                 sb.balance,
                                 sb.decimals,
                                 reference_price,
@@ -3255,10 +3402,10 @@ impl P2PPanel {
         let mut col = col;
         let Some(invoice) = invoice else {
             return col.push(
-                caption(
+                caption(localized_copy(
                     "Hold invoice not available. \
                     Please check your external wallet for a pending invoice.",
-                )
+                ))
                 .style(theme::text::warning),
             );
         };
@@ -3313,7 +3460,7 @@ impl P2PPanel {
                 );
             }
             col = col.push(
-                button::primary(None, "Copy Invoice")
+                button::primary(None, localized_copy("Copy Invoice"))
                     .on_press(view::Message::Clipboard(invoice.clone()))
                     .width(Length::Fill),
             );
@@ -3321,7 +3468,7 @@ impl P2PPanel {
             // from Spark but the user is currently in the QR fallback.
             if self.spark_backend.is_some() && spark_can_cover && self.show_qr_fallback {
                 col = col.push(
-                    button::transparent(None, "← Pay with Spark")
+                    button::transparent(None, localized_copy("← Pay with Spark"))
                         .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(false))),
                 );
             }
@@ -3351,10 +3498,10 @@ impl P2PPanel {
     ) -> Element<'a, view::Message> {
         let balance_text = self
             .spark_balance_sat
-            .map(|b| format!("Spark balance: {} sats", b))
+            .map(|b| localized_format!("Spark balance: {} sats", "Saldo de Spark: {} sats", b))
             .unwrap_or_default();
         let hold_text = hold_amount_sat
-            .map(|a| format!("Lock amount: {} sats", a))
+            .map(|a| localized_format!("Lock amount: {} sats", "Importe a bloquear: {} sats", a))
             .unwrap_or_else(|| "Lock amount: TBD".to_string());
 
         let summary = container(
@@ -3370,8 +3517,9 @@ impl P2PPanel {
 
         let action: Element<'a, view::Message> = match &self.spark_pay_phase {
             SparkPayPhase::Idle => {
-                let switch_to_qr = button::transparent(None, "Pay from another wallet")
-                    .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(true)));
+                let switch_to_qr =
+                    button::transparent(None, localized_copy("Pay from another wallet"))
+                        .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(true)));
                 let bottom: Element<'a, view::Message> = match cancel_button {
                     Some(c) => row![switch_to_qr, c].spacing(8).into(),
                     None => switch_to_qr.into(),
@@ -3395,8 +3543,9 @@ impl P2PPanel {
                     .into()
             }
             SparkPayPhase::Prepared(preview) => {
-                let switch_to_qr = button::transparent(None, "Pay from another wallet")
-                    .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(true)));
+                let switch_to_qr =
+                    button::transparent(None, localized_copy("Pay from another wallet"))
+                        .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(true)));
                 let bottom: Element<'a, view::Message> = match cancel_button {
                     Some(c) => row![switch_to_qr, c].spacing(8).into(),
                     None => switch_to_qr.into(),
@@ -3583,7 +3732,7 @@ impl P2PPanel {
         let spark_can_cover = self.spark_can_cover(hold_amount_sat);
         if self.spark_backend.is_some() && spark_can_cover && self.show_qr_fallback {
             col = col.push(
-                button::transparent(None, "← Back to Spark")
+                button::transparent(None, localized_copy("← Back to Spark"))
                     .on_press(view::Message::P2P(P2PMessage::ToggleQrFallback(false))),
             );
         }
@@ -3692,10 +3841,10 @@ impl P2PPanel {
             let can_send = !self.dispute_chat_input.value.trim().is_empty()
                 && self.pending_dispute_chat_message.is_none();
             let send_btn = if can_send {
-                button::primary(Some(icon::send_icon()), "Send")
+                button::primary(Some(icon::send_icon()), localized_copy("Send"))
                     .on_press(p2p(P2PMessage::SendDisputeChatMessage))
             } else {
-                button::primary(Some(icon::send_icon()), "Send")
+                button::primary(Some(icon::send_icon()), localized_copy("Send"))
             };
             container(
                 row![
@@ -3713,8 +3862,10 @@ impl P2PPanel {
             .into()
         } else {
             container(
-                p2_regular("Chat will be available when an admin is assigned")
-                    .style(theme::text::secondary),
+                p2_regular(localized_copy(
+                    "Chat will be available when an admin is assigned",
+                ))
+                .style(theme::text::secondary),
             )
             .padding(12)
             .width(Length::Fill)
@@ -3806,9 +3957,9 @@ impl P2PPanel {
                 };
 
                 let select_btn = if is_active {
-                    button::primary(None, "Active").width(Length::Shrink)
+                    button::primary(None, localized_copy("Active")).width(Length::Shrink)
                 } else {
-                    button::secondary(None, "Select")
+                    button::secondary(None, localized_copy("Select"))
                         .on_press(p2p(P2PMessage::MostroSelectActiveNode(
                             node.pubkey_hex.clone(),
                         )))
@@ -3978,7 +4129,7 @@ impl P2PPanel {
 
         // Tab buttons (same style as buy/sell tabs)
         let messages_tab = iced::widget::button(
-            container(p1_bold("Messages"))
+            container(p1_bold(localized_copy("Messages")))
                 .padding([12, 0])
                 .align_x(iced::alignment::Horizontal::Center)
                 .width(Length::Fill),
@@ -3992,7 +4143,7 @@ impl P2PPanel {
         .width(Length::Fill);
 
         let disputes_tab = iced::widget::button(
-            container(p1_bold("Disputes"))
+            container(p1_bold(localized_copy("Disputes")))
                 .padding([12, 0])
                 .align_x(iced::alignment::Horizontal::Center)
                 .width(Length::Fill),
@@ -4106,8 +4257,16 @@ impl P2PPanel {
                     };
                     let order_short = trade.id[..8.min(trade.id.len())].to_string();
                     let action_label = match trade.order_type {
-                        OrderType::Buy => format!("You are buying from {}", nick),
-                        OrderType::Sell => format!("You are selling to {}", nick),
+                        OrderType::Buy => localized_format!(
+                            "You are buying from {}",
+                            "Usted está comprando de {}",
+                            nick
+                        ),
+                        OrderType::Sell => localized_format!(
+                            "You are selling to {}",
+                            "Usted está vendiendo a {}",
+                            nick
+                        ),
                     };
                     let time_str = {
                         let dt = chrono::DateTime::from_timestamp(*last_ts as i64, 0)
@@ -4117,7 +4276,8 @@ impl P2PPanel {
                         if dt.date_naive() == today {
                             dt.format("%H:%M").to_string()
                         } else {
-                            dt.format("%b %d, %H:%M").to_string()
+                            dt.format(&coincube_ui::locale::date_pattern("%b %d, %H:%M", &dt))
+                                .to_string()
                         }
                     };
                     let subtitle = format!("{} · {}", action_label, order_short);
@@ -4171,6 +4331,8 @@ impl State for P2PPanel {
                     // If an order is selected, show its detail view
                     // Built separately (not inside dashboard's scrollable) to avoid
                     // first-click issues when switching from the order list.
+                    // The page head is pinned above that scrollable, as the
+                    // headed dashboards pin theirs.
                     if let Some(ref selected_id) = self.selected_order {
                         if let Some(order) = self.orders.iter().find(|o| o.id == *selected_id) {
                             let take_state = if self.taking_order {
@@ -4182,100 +4344,48 @@ impl State for P2PPanel {
                             } else {
                                 None
                             };
-                            let has_vault = cache.has_vault;
-                            let detail_content = iced::widget::scrollable(row![
-                                Space::new().width(Length::FillPortion(1)),
-                                column![
-                                    Space::new().height(Length::Fixed(30.0)),
+                            let detail_content = iced::widget::scrollable(
+                                view::page(
                                     column![
-                                        h3("Order Details").bold(),
                                         p2_regular("View order information")
-                                            .style(theme::text::secondary),
+                                            .style(theme::text::secondary)
+                                            .width(Length::Fill),
+                                        container(order_detail(order, take_state))
+                                            .width(Length::Fill),
                                     ]
-                                    .spacing(8)
+                                    .spacing(16)
                                     .width(Length::Fill),
-                                    container(order_detail(order, take_state)).width(Length::Fill),
-                                    Space::new().height(Length::Fixed(40.0)),
-                                ]
-                                .spacing(16)
-                                .width(Length::FillPortion(8))
-                                .max_width(1500),
-                                Space::new().width(Length::FillPortion(1)),
-                            ]);
-
-                            return row![]
-                                .push(view::nav::sidebar(
-                                    menu,
-                                    &view::nav::NavContext {
-                                        has_vault,
-                                        has_imported_bitcoin: cache.has_imported_bitcoin,
-                                        has_p2p: cache.has_p2p,
-                                        network: cache.chain(),
-                                        p2p_test_coordinator: cache.p2p_test_coordinator,
-                                        marketplace_flags: cache.marketplace_flags,
-                                        liquid_gate: cache.liquid_gate,
-                                        btcb2_server_enabled: cache.btcb2_server_enabled,
-                                        btcb2_already_claimed: cache.btcb2_already_claimed,
-                                        btcb2_claim_resume: cache.btcb2_claim_resume,
-                                        cube_name: &cache.cube_name,
-                                        lightning_address: None,
-                                        avatar: None,
-                                        theme_mode: cache.theme_mode,
-                                        connect_authenticated: cache.connect_authenticated,
-                                        connect_stream_status: &cache.connect_stream_status,
-                                    },
-                                ))
-                                .push(
-                                    iced::widget::Column::new()
-                                        .push(view::warn(None))
-                                        .push(
-                                            container(detail_content)
-                                                .center_x(Length::Fill)
-                                                .style(theme::container::background)
-                                                .height(Length::Fill),
-                                        )
-                                        .width(Length::Fill),
+                                    PageWidth::Reading,
                                 )
-                                .width(Length::Fill)
-                                .height(Length::Fill)
-                                .into();
+                                .vertical(BODY_TOP, PAGE_BOTTOM),
+                            );
+
+                            return view::dashboard_shell(
+                                menu,
+                                cache,
+                                iced::widget::Column::new()
+                                    .push(view::warn(None))
+                                    .push(
+                                        view::page_head(cache, "Order Details")
+                                            .view(view::page_gutter),
+                                    )
+                                    .push(
+                                        container(detail_content)
+                                            .width(Length::Fill)
+                                            .style(theme::container::background)
+                                            .height(Length::Fill),
+                                    )
+                                    .width(Length::Fill),
+                            );
                         }
                     }
 
-                    let filtered_orders = self.filtered_orders();
-
-                    // Count offers per tab (applying all filters except buy/sell)
-                    let buy_count = self
-                        .orders
-                        .iter()
-                        .filter(|o| o.order_type == OrderType::Sell && self.order_passes_filters(o))
-                        .count();
-                    let sell_count = self
-                        .orders
-                        .iter()
-                        .filter(|o| o.order_type == OrderType::Buy && self.order_passes_filters(o))
-                        .count();
-
-                    let filter_state = OrderFilterState {
-                        buy_sell: &self.buy_sell_filter,
-                        buy_count,
-                        sell_count,
-                        filter_currency: &self.filter_currency,
-                        currency_combo_state: &self.filter_currency_combo_state,
-                        available_payment_methods: &self.filter_available_payment_methods,
-                        deselected_payment_methods: &self.filter_deselected_payment_methods,
-                        min_rating: self.filter_min_rating,
-                        min_days_active: self.filter_min_days_active,
-                        filtered_count: filtered_orders.len(),
-                    };
-
                     // --- Header ---
-                    let mut overview_col = column![column![
-                        h3("P2P Order Book").bold(),
-                        p2_regular("Browse and take P2P trading orders from the Mostro network")
-                            .style(theme::text::secondary),
-                    ]
-                    .spacing(8)
+                    // The title is in the page head.
+                    let mut overview_col = column![p2_regular(
+                        "Browse and take P2P trading orders from the Mostro network"
+                    )
+                    .style(theme::text::secondary)
                     .width(Length::Fill),]
                     .spacing(16);
 
@@ -4287,32 +4397,15 @@ impl State for P2PPanel {
                         );
                     }
 
-                    // --- Sidebar + order list side by side ---
-                    let sidebar = order_filter_sidebar(filter_state);
-
-                    let order_list: Element<'_, view::Message> = if filtered_orders.is_empty() {
-                        container(p1_bold("No orders found"))
-                            .padding(40)
-                            .align_x(Alignment::Center)
-                            .width(Length::Fill)
-                            .into()
-                    } else {
-                        column(filtered_orders.iter().map(|order| order_card(order).into()))
-                            .spacing(16)
-                            .width(Length::Fill)
-                            .into()
-                    };
-
-                    let content_row = row![sidebar, container(order_list).width(Length::Fill),]
-                        .spacing(20)
-                        .align_y(iced::alignment::Vertical::Top)
-                        .width(Length::Fill);
-
-                    overview_col = overview_col.push(content_row);
+                    overview_col = overview_col.push(self.book_view());
                     overview_col = overview_col.push(Space::new().height(Length::Fixed(40.0)));
 
-                    let overview_content: Element<'_, view::Message> =
-                        view::dashboard(menu, cache, overview_col);
+                    let overview_content: Element<'_, view::Message> = view::dashboard_headed(
+                        menu,
+                        cache,
+                        view::page_head(cache, "P2P Order Book"),
+                        overview_col,
+                    );
 
                     // Show payment invoice modal if seller took a buy order
                     if let Some((ref oid, ref inv, amt, ref qr_data)) = self.pending_payment_invoice
@@ -4334,7 +4427,6 @@ impl State for P2PPanel {
                             if self.active_chat == ActiveChat::Peer {
                                 // Separate chat view — built without dashboard()
                                 // to avoid nested scrollables.
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let trade_type_label = match trade.order_type {
                                     OrderType::Buy => "BUY",
@@ -4372,47 +4464,23 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             } else if self.active_chat == ActiveChat::Dispute {
                                 // Dispute chat view
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let header = container(
                                     row![
@@ -4437,56 +4505,30 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.dispute_chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.dispute_chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             }
-                            return view::dashboard(
+                            return view::dashboard_headed(
                                 menu,
                                 cache,
+                                view::page_head(cache, "Trade Details"),
                                 column![
-                                    column![
-                                        h3("Trade Details").bold(),
-                                        p2_regular("View trade information and take actions")
-                                            .style(theme::text::secondary),
-                                    ]
-                                    .spacing(8)
-                                    .width(Length::Fill),
+                                    p2_regular("View trade information and take actions")
+                                        .style(theme::text::secondary)
+                                        .width(Length::Fill),
                                     container(self.trade_detail_view(trade)).width(Length::Fill),
                                     Space::new().height(Length::Fixed(40.0)),
                                 ]
@@ -4498,18 +4540,14 @@ impl State for P2PPanel {
                     let filtered = self.filtered_trades();
                     let shown_count = filtered.len();
 
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "My Trades"),
                         column![
-                            // Title
-                            column![
-                                h3("My Trades").bold(),
-                                p2_regular("Your active and completed P2P trades")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your active and completed P2P trades")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             // Trade status filter
                             container(trade_status_filter(&self.trade_filters, shown_count,))
                                 .width(Length::Fill),
@@ -4523,9 +4561,11 @@ impl State for P2PPanel {
                                 )
                             } else {
                                 Element::from(
-                                    column(filtered.iter().map(|trade| trade_card(trade).into()))
-                                        .spacing(16)
-                                        .width(Length::Fill),
+                                    column(filtered.iter().map(|trade| {
+                                        trade_card(trade, cache.balance_amounts_masked()).into()
+                                    }))
+                                    .spacing(16)
+                                    .width(Length::Fill),
                                 )
                             },
                             Space::new().height(Length::Fixed(40.0)),
@@ -4538,7 +4578,6 @@ impl State for P2PPanel {
                     if let Some(ref selected_id) = self.chat_selected_trade {
                         if let Some(trade) = self.trades.iter().find(|t| t.id == *selected_id) {
                             if self.active_chat == ActiveChat::Peer {
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let trade_type_label = match trade.order_type {
                                     OrderType::Buy => "BUY",
@@ -4574,46 +4613,22 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             } else if self.active_chat == ActiveChat::Dispute {
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let header = container(
                                     row![
@@ -4636,60 +4651,34 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.dispute_chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.dispute_chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             }
                         }
                     }
 
                     // Default: show chat list
-                    view::dashboard(
+                    view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Chat"),
                         column![
-                            column![
-                                h3("Chat").bold(),
-                                p2_regular("Your P2P trade conversations")
-                                    .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Your P2P trade conversations")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.chat_list_view()).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4697,19 +4686,14 @@ impl State for P2PPanel {
                     )
                 }
                 P2PSubMenu::CreateOrder => {
-                    let content: Element<'_, view::Message> = view::dashboard(
+                    let content: Element<'_, view::Message> = view::dashboard_headed(
                         menu,
                         cache,
+                        view::page_head(cache, "Create P2P Order"),
                         column![
-                            column![
-                                h3("Create P2P Order").bold(),
-                                p2_regular(
-                                    "Create a new buy or sell order for the P2P marketplace"
-                                )
-                                .style(theme::text::secondary),
-                            ]
-                            .spacing(8)
-                            .width(Length::Fill),
+                            p2_regular("Create a new buy or sell order for the P2P marketplace")
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                             container(self.create_order_view(cache)).width(Length::Fill),
                             Space::new().height(Length::Fixed(40.0)),
                         ]
@@ -4727,17 +4711,14 @@ impl State for P2PPanel {
                         content
                     }
                 }
-                P2PSubMenu::Settings => view::dashboard(
+                P2PSubMenu::Settings => view::dashboard_headed(
                     menu,
                     cache,
+                    view::page_head(cache, "P2P Settings"),
                     column![
-                        column![
-                            h3("P2P Settings").bold(),
-                            p2_regular("Configure Mostro nodes and relays")
-                                .style(theme::text::secondary),
-                        ]
-                        .spacing(8)
-                        .width(Length::Fill),
+                        p2_regular("Configure Mostro nodes and relays")
+                            .style(theme::text::secondary)
+                            .width(Length::Fill),
                         container(self.mostro_settings_view()).width(Length::Fill),
                         Space::new().height(Length::Fixed(40.0)),
                     ]
@@ -5064,15 +5045,14 @@ impl State for P2PPanel {
                 }
             }
             P2PMessage::SelectOrder(id) => {
-                self.selected_order = Some(id);
-                self.taking_order = false;
-                self.take_order_amount = Default::default();
-                self.take_order_invoice = Default::default();
-                self.take_order_submitting = false;
+                if let Some(focus_id) = self.select_order_for_detail(id) {
+                    return Task::done(Message::View(view::Message::FocusAction(focus_id)));
+                }
             }
             P2PMessage::CloseOrderDetail => {
-                self.selected_order = None;
-                self.taking_order = false;
+                if let Some(return_to) = self.close_order_detail_view() {
+                    return Task::done(Message::View(view::Message::FocusAction(return_to)));
+                }
             }
             P2PMessage::CopyOrderId(id) => {
                 return Task::done(Message::View(view::Message::Clipboard(id)));
@@ -5314,11 +5294,16 @@ impl State for P2PPanel {
                     })
                     .unwrap_or(true);
 
+                let first_input = self.first_take_input_id();
+
                 if needs_input {
                     self.taking_order = true;
                     self.take_order_amount = Default::default();
                     self.take_order_invoice = Default::default();
                     self.take_order_submitting = false;
+                    if let Some(first_input) = first_input {
+                        return Task::done(Message::View(view::Message::FocusAction(first_input)));
+                    }
                 } else {
                     // No input needed — proceed directly
                     self.taking_order = true;
@@ -6602,5 +6587,358 @@ impl State for P2PPanel {
             },
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod book_filter_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    fn order(id: &str, order_type: OrderType, currency: &str, method: &str) -> P2POrder {
+        P2POrder {
+            id: id.into(),
+            order_type,
+            fiat_amount: 100.0,
+            fiat_currency: currency.into(),
+            min_amount: None,
+            max_amount: None,
+            sats_amount: None,
+            premium_percent: None,
+            payment_methods: vec![method.into()],
+            seller_rating: Some(4.5),
+            seller_reviews: Some(10),
+            seller_days_old: Some(30),
+            created_at: String::new(),
+            created_at_ts: 0,
+            time_ago: String::new(),
+            is_mine: false,
+        }
+    }
+
+    #[test]
+    fn book_keeps_taker_side_and_active_filters() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![
+            order("maker-sell-eur", OrderType::Sell, "EUR", "SEPA instant"),
+            order("maker-sell-usd", OrderType::Sell, "USD", "Cash App"),
+            order("maker-buy-eur", OrderType::Buy, "EUR", "SEPA instant"),
+        ];
+
+        panel.buy_sell_filter = BuySellFilter::Buy;
+        assert_eq!(panel.filtered_orders().len(), 2);
+        assert!(panel
+            .filtered_orders()
+            .iter()
+            .all(|order| order.order_type == OrderType::Sell));
+
+        panel.filter_currency = "EUR".into();
+        panel
+            .filter_deselected_payment_methods
+            .insert("Cash App".into());
+        assert_eq!(panel.filtered_orders()[0].id, "maker-sell-eur");
+        panel.filter_min_rating = 5.0;
+        assert!(panel.filtered_orders().is_empty());
+
+        panel.filter_min_rating = 0.0;
+        panel.buy_sell_filter = BuySellFilter::Sell;
+        assert_eq!(panel.filtered_orders()[0].id, "maker-buy-eur");
+    }
+
+    /// Order details keeps its own scrollable (the first-click fix), with the
+    /// page head pinned above it: the order scrolls, the title doesn't.
+    #[test]
+    fn order_details_scrolls_under_a_pinned_head() {
+        use crate::app::view::page_head_tests::{frame, renderer, wheel};
+        use iced::{advanced::widget::Tree, Vector};
+
+        let renderer = renderer();
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-detail",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        panel.select_order_for_detail("synthetic-detail".into());
+        // The take form makes the order taller than the window.
+        panel.taking_order = true;
+        let cache = Cache {
+            cube_name: "Everyday".into(),
+            ..Cache::default()
+        };
+        let menu = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
+
+        let mut element = State::view(&panel, &menu, &cache);
+        let mut tree = Tree::new(element.as_widget());
+        let (node, before) = frame(&mut tree, &renderer, &mut element);
+        let title = before.text("Order Details");
+        let line = before.text("Everyday · Bitcoin mainnet");
+        let lead = before.text("View order information");
+        let (viewport, offset) = before.scroller_of(lead);
+        assert_eq!(offset, Vector::ZERO);
+        assert!(
+            viewport.y >= title.y + title.height && viewport.y >= line.y + line.height,
+            "the head sits above the order's viewport: {:?} {:?} {:?}",
+            title,
+            line,
+            viewport
+        );
+
+        wheel(
+            &mut tree,
+            &renderer,
+            &mut element,
+            &node,
+            lead.center(),
+            400.0,
+        );
+        // The next frame is a new view over the same tree.
+        let mut element = State::view(&panel, &menu, &cache);
+        let (_, after) = frame(&mut tree, &renderer, &mut element);
+        let (_, offset) = after.scroller_of(after.text("View order information"));
+        assert!(offset.y > 0.0, "the order scrolled: {:?}", offset);
+        assert_eq!(
+            after.text("Order Details"),
+            title,
+            "the title does not move"
+        );
+        assert_eq!(after.text("Everyday · Bitcoin mainnet"), line);
+    }
+
+    /// Order details under its pinned head, at the top and scrolled (Tenshu
+    /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib page_head_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_p2p_order() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-detail",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        panel.select_order_for_detail("synthetic-detail".into());
+        panel.taking_order = true;
+        let menu = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
+        for (appearance, palette) in capture_tests::themes() {
+            let cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "p2p-order",
+                appearance,
+                &palette,
+                || State::view(&panel, &menu, &cache),
+            );
+        }
+    }
+
+    #[test]
+    fn selecting_and_closing_detail_moves_focus_between_stable_controls() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.orders = vec![order(
+            "synthetic-focus",
+            OrderType::Sell,
+            "EUR",
+            "SEPA instant",
+        )];
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "take"))
+        );
+        assert_eq!(panel.selected_order.as_deref(), Some("synthetic-focus"));
+        assert_eq!(
+            panel.close_order_detail_view(),
+            Some(order_row_id("synthetic-focus"))
+        );
+        assert!(panel.selected_order.is_none());
+
+        panel.orders[0].is_mine = true;
+        assert_eq!(
+            panel.select_order_for_detail("synthetic-focus".into()),
+            Some(detail_action_id("synthetic-focus", "close"))
+        );
+
+        panel.orders[0].min_amount = Some(50.0);
+        panel.orders[0].max_amount = Some(200.0);
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "amount").into())
+        );
+        panel.orders[0].min_amount = None;
+        panel.orders[0].max_amount = None;
+        assert_eq!(
+            panel.first_take_input_id(),
+            Some(detail_input_id("synthetic-focus", "invoice").into())
+        );
+        panel.orders[0].order_type = OrderType::Buy;
+        assert!(panel.first_take_input_id().is_none());
+    }
+
+    /// R06A_CAPTURE_DIR writes content-only screenshots of the production Book
+    /// presenter with clearly synthetic orders and no network or wallet session.
+    #[test]
+    fn book_layout_has_actionable_rows_at_compact_and_wide_sizes() {
+        let mut panel = P2PPanel::new(
+            None,
+            None,
+            zeroize::Zeroizing::new(String::new()),
+            Some("All".into()),
+            Network::Bitcoin,
+        );
+        panel.buy_sell_filter = BuySellFilter::Buy;
+        panel.orders = vec![
+            order("synthetic-1", OrderType::Sell, "EUR", "SEPA instant"),
+            order("synthetic-2", OrderType::Sell, "USD", "Cash App"),
+            order("synthetic-own-ngn", OrderType::Sell, "NGN", "Bank Transfer"),
+            order("synthetic-kes", OrderType::Sell, "KES", "M-Pesa"),
+        ];
+        panel.orders[0].seller_rating = None;
+        panel.orders[0].seller_reviews = None;
+        panel.orders[2].is_mine = true;
+        panel.orders[2].min_amount = Some(50_000.0);
+        panel.orders[2].max_amount = Some(200_000.0);
+        panel.orders[2].sats_amount = Some(450_000);
+        panel.orders[2].payment_methods =
+            vec!["Bank Transfer".into(), "Cash App".into(), "M-Pesa".into()];
+        panel.orders[3].min_amount = Some(10_000.0);
+        panel.orders[3].max_amount = Some(50_000.0);
+        panel.recompute_available_payment_methods();
+
+        for (appearance, palette) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for size in [(1024, 768), (1440, 900)] {
+                let inspection =
+                    capture::inspect("r20-p2p-book", panel.book_view(), size, appearance, palette);
+                assert!(inspection.contains("BUY BTC (4)"));
+                assert!(inspection.contains("BUYING"));
+                assert!(inspection.contains("YOU ARE SELLING"));
+                assert!(inspection.contains("SEPA instant"));
+                assert!(inspection.contains("100.00 EUR"));
+                assert!(inspection.contains("50,000 – 200,000 NGN"));
+                assert!(inspection.contains("10,000 – 50,000 KES"));
+                assert!(inspection.contains("Fixed · 450,000 sats"));
+                assert!(inspection.contains("Market"));
+                assert!(inspection.contains("No rating"));
+                assert!(inspection.contains("Bank Transfer, Cash App, M-Pesa"));
+                assert_eq!(inspection.contains("Creator Reputation"), size.0 == 1440);
+                if size.0 == 1440 {
+                    for label in [
+                        "Payment Method",
+                        "Bank Transfer, Cash App, M-Pesa",
+                        "YOU ARE SELLING",
+                        "50,000 – 200,000 NGN",
+                        "10,000 – 50,000 KES",
+                        "Fixed · 450,000 sats",
+                    ] {
+                        let bounds = inspection
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == label)
+                            .expect("realistic book value")
+                            .1;
+                        assert!(
+                            bounds.height < 25.0,
+                            "{label} wrapped at 1440: {bounds:?}",
+                            label = label,
+                            bounds = bounds
+                        );
+                    }
+                }
+                if size.0 == 1024 {
+                    let side = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == "BUYING")
+                        .expect("compact order side")
+                        .1;
+                    let filter_note = inspection
+                        .text
+                        .iter()
+                        .find(|(value, _)| {
+                            value.contains("Showing all traders regardless of reputation")
+                        })
+                        .expect("reputation filter note")
+                        .1;
+                    assert!(side.x > 232.0, "order stays beside compact filters");
+                    assert!(side.y < filter_note.y, "orders start above filter footer");
+                }
+            }
+        }
+
+        let target = order_row_id("synthetic-1");
+        for size in [(1024, 768), (1440, 900)] {
+            for pointer in [false, true] {
+                let messages = capture::activate(panel.book_view(), target.clone(), size, pointer);
+                let selections = messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            view::Message::P2P(P2PMessage::SelectOrder(id))
+                                if id == "synthetic-1"
+                        )
+                    })
+                    .count();
+                assert_eq!(selections, 1, "{size:?} pointer={pointer}: {messages:?}");
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| matches!(message, view::Message::FocusAction(_)))
+                        .count(),
+                    usize::from(pointer),
+                    "{size:?} pointer={pointer}: {messages:?}"
+                );
+            }
+        }
+        let space = capture::activate_with_key(
+            panel.book_view(),
+            target,
+            (1024, 768),
+            false,
+            iced::keyboard::key::Named::Space,
+        );
+        assert!(matches!(
+            space.as_slice(),
+            [view::Message::P2P(P2PMessage::SelectOrder(id))] if id == "synthetic-1"
+        ));
     }
 }

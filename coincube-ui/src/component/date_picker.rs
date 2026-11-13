@@ -1,5 +1,6 @@
 //! A compact calendar trigger with an overlay that does not enlarge its form.
 
+use crate::locale::copy as localized_copy;
 use chrono::NaiveDate;
 use iced::widget::{button, text, Themer};
 use iced_aw::DatePicker;
@@ -21,7 +22,7 @@ pub fn calendar_button<'a, Message: Clone + 'static>(
 ) -> Element<'a, Message> {
     // Match the compact secondary trigger while using a calendar-only theme.
     let trigger: iced::widget::Button<'a, Message, CalendarTheme> = button(
-        text("Choose date")
+        text(localized_copy("Choose date"))
             .font(font::REGULAR)
             .shaping(iced::advanced::text::Shaping::Advanced)
             .size(16),
@@ -92,51 +93,6 @@ mod tests {
         );
         tree.diff(reopened.as_widget());
         assert_eq!(tree.tag, opened.as_widget().tag());
-    }
-
-    fn assert_calendar_buttons_visible(
-        buttons: &[iced::Rectangle],
-        pixels: &[u8],
-        theme: &theme::Theme,
-        name: &str,
-    ) {
-        for bounds in buttons {
-            let mut fill = 0;
-            let mut ink = 0;
-            let palette = theme.colors.buttons.primary.active;
-            for y in bounds.y.ceil() as u32..(bounds.y + bounds.height).floor() as u32 {
-                for x in bounds.x.ceil() as u32..(bounds.x + bounds.width).floor() as u32 {
-                    let offset = ((y * 600 + x) * 4) as usize;
-                    let rgb = &pixels[offset..offset + 3];
-                    if rgb == &palette.background.into_rgba8()[..3] {
-                        fill += 1;
-                    }
-                    if rgb == &palette.text.into_rgba8()[..3] {
-                        ink += 1;
-                    }
-                }
-            }
-            assert!(
-                fill > 100,
-                "{name}: calendar action has no visible primary fill"
-            );
-            assert!(ink > 5, "{name}: calendar action icon is faded or missing");
-        }
-    }
-
-    fn save_calendar_preview(action: usize, name: &str, pixels: &[u8]) {
-        if action == 0 {
-            if let Ok(directory) = std::env::var("CALENDAR_PREVIEW_DIR") {
-                image::save_buffer(
-                    std::path::Path::new(&directory).join(format!("calendar-{name}.png")),
-                    pixels,
-                    600,
-                    540,
-                    image::ColorType::Rgba8,
-                )
-                .unwrap();
-            }
-        }
     }
 
     #[test]
@@ -211,8 +167,40 @@ mod tests {
                 );
                 let pixels =
                     renderer.screenshot(Size::new(600, 540), 1.0, theme.colors.general.background);
-                assert_calendar_buttons_visible(&buttons, &pixels, &theme, name);
-                save_calendar_preview(action, name, &pixels);
+                for bounds in &buttons {
+                    let mut fill = 0;
+                    let mut ink = 0;
+                    let palette = theme.colors.buttons.primary.active;
+                    for y in bounds.y.ceil() as u32..(bounds.y + bounds.height).floor() as u32 {
+                        for x in bounds.x.ceil() as u32..(bounds.x + bounds.width).floor() as u32 {
+                            let offset = ((y * 600 + x) * 4) as usize;
+                            let rgb = &pixels[offset..offset + 3];
+                            if rgb == &palette.background.into_rgba8()[..3] {
+                                fill += 1;
+                            }
+                            if rgb == &palette.text.into_rgba8()[..3] {
+                                ink += 1;
+                            }
+                        }
+                    }
+                    assert!(
+                        fill > 100,
+                        "{name}: calendar action has no visible primary fill"
+                    );
+                    assert!(ink > 5, "{name}: calendar action icon is faded or missing");
+                }
+                if action == 0 {
+                    if let Ok(directory) = std::env::var("CALENDAR_PREVIEW_DIR") {
+                        image::save_buffer(
+                            std::path::Path::new(&directory).join(format!("calendar-{name}.png")),
+                            &pixels,
+                            600,
+                            540,
+                            image::ColorType::Rgba8,
+                        )
+                        .unwrap();
+                    }
+                }
 
                 let center = buttons[action].center();
                 let cursor = mouse::Cursor::Available(Point::new(center.x, center.y));

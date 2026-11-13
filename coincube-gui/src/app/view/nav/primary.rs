@@ -13,10 +13,7 @@ use crate::app::{
 };
 use coincube_ui::{
     color,
-    icon::{
-        cube_icon, droplet_outline_icon, lightning_outline_icon, shield_plus_icon, shop_icon,
-        vault_icon,
-    },
+    icon::{cube_icon, droplet_outline_icon, shield_plus_icon, shop_icon, spark_icon, vault_icon},
     theme,
     widget::{Button, Column, Element, Row, Text},
 };
@@ -129,7 +126,7 @@ fn item_with_route<'a>(
 
     let body: Column<Message> = column![
         icon_el,
-        iced::widget::text(t.label())
+        iced::widget::text(coincube_ui::locale::copy(t.label()))
             .size(LABEL_SIZE)
             .align_x(Alignment::Center),
     ]
@@ -185,9 +182,11 @@ fn item_with_route<'a>(
             r,
             // Padded, bordered popover so the text reads as a floating
             // bubble instead of overlapping the adjacent rail icons.
-            container(coincube_ui::component::text::caption(reason))
-                .padding([6, 10])
-                .style(theme::container::border_grey),
+            container(coincube_ui::component::text::caption(
+                coincube_ui::locale::copy(&reason).to_owned(),
+            ))
+            .padding([6, 10])
+            .style(theme::container::border_grey),
             iced::widget::tooltip::Position::Right,
         )
         .gap(6)
@@ -207,7 +206,7 @@ fn item_with_route<'a>(
 /// to Settings (where the user adds a coordinator to lift the network gate;
 /// the greyed rail item is otherwise inert, so this avoids a configure
 /// catch-22), Buy/Sell to its own (greyed) panel.
-fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
+pub(super) fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
     let p2p = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview));
     let p2p_settings = Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Settings));
     let buy_sell = Menu::Marketplace(MarketplaceSubMenu::BuySell);
@@ -236,7 +235,7 @@ fn marketplace_landing_menu(ctx: &NavContext<'_>) -> Menu {
 fn icon_for<'a>(t: TopLevel) -> Text<'a> {
     match t {
         TopLevel::Cube => cube_icon(),
-        TopLevel::Spark => lightning_outline_icon(),
+        TopLevel::Spark => spark_icon(),
         TopLevel::Liquid => droplet_outline_icon(),
         TopLevel::Vault => vault_icon(),
         TopLevel::Marketplace => shop_icon(),

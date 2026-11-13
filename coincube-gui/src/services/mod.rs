@@ -1,36 +1,41 @@
 pub mod bitcoin_import;
 pub mod branta;
-pub(crate) mod claim_ancestry_gate;
-pub mod claim_coordinator;
-pub mod claim_inventory;
 pub mod claim_observation;
-#[allow(dead_code)] // Kept behind the paired ancestry gate until GUI admission is wired.
-pub(crate) mod claim_pair_signing;
 pub mod connect;
+pub mod connect_esplora;
 pub(crate) mod esplora_backoff;
 pub mod feeestimation;
 pub mod fiat;
-pub mod foreign_psbt;
 pub mod foreign_scan;
-pub mod foreign_split_inventory;
-pub mod foreign_wallet_source;
+#[allow(dead_code)] // Keys admission will consume this read-only device proof.
+pub(crate) mod imported_device_identity;
+// The signer API is staged behind the external inventory anchor/recovery gate.
+// Only owner-verified import removal calls it in production at this head.
+#[allow(dead_code)]
+pub(crate) mod imported_inventory_anchor;
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+pub mod imported_keys;
+#[cfg(not(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe")))]
+pub(crate) mod imported_keys;
+#[cfg(test)]
+pub(crate) mod imported_signer;
 pub mod psbt_file;
 pub mod public_account_source;
 pub mod public_hardware_source;
-pub mod public_wallet_pair;
-pub mod split_evidence;
+// Test fixtures for the imported-wallet hardware binder (`split_hardware`).
+#[cfg(test)]
+pub(crate) mod public_wallet_pair;
 pub mod split_fees;
-pub mod split_psbt_file;
-pub mod split_seed;
-pub mod split_source;
+#[cfg(test)]
+pub(crate) mod split_source;
 #[cfg(test)]
 pub(crate) mod split_test_connect;
 #[cfg(test)]
 pub(crate) mod split_test_wallets;
 
 pub mod http;
-pub mod keys;
 
+pub mod chain_status;
 pub mod coincube;
 pub mod duress;
 pub mod entangled;
@@ -40,6 +45,7 @@ pub mod meld;
 pub mod passkey;
 pub mod recovery;
 pub mod sideshift;
+pub mod split_coins;
 pub mod unlock;
 
 /// Resolves the Coincube API base URL with this precedence:
@@ -73,7 +79,14 @@ fn resolve_api_base_url(runtime: Option<&str>, compiled: Option<&str>, fallback:
         Some(value) if !value.is_empty() => value,
         _ => compiled.unwrap_or(fallback),
     };
-    raw.trim_end_matches('/').to_string()
+    let url = raw.trim_end_matches('/').to_string();
+    // A release binary must not follow COINCUBE_API_URL onto cleartext HTTP.
+    // Debug builds keep http:// for local API servers.
+    #[cfg(not(debug_assertions))]
+    if url.starts_with("http://") {
+        panic!("COINCUBE_API_URL must use https:// in release builds, got {url}");
+    }
+    url
 }
 
 fn default_base_url() -> String {
@@ -87,9 +100,6 @@ fn default_base_url() -> String {
         env!("COINCUBE_API_URL").to_string()
     }
 }
-
-pub mod claim_preflight;
-pub mod claim_workflow;
 
 #[cfg(test)]
 mod tests {

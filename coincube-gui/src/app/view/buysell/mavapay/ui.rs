@@ -5,6 +5,8 @@ use crate::{
     },
     services::{coincube::Country, mavapay::*},
 };
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 
 use iced::{widget, Alignment, Length};
 
@@ -12,23 +14,31 @@ use coincube_ui::component::amount::{format_f64_as_string, format_u64_as_string}
 use coincube_ui::component::{button, card, text};
 use coincube_ui::{color, icon::*, theme};
 
-pub fn form<'a>(state: &'a MavapayState) -> iced::Element<'a, ViewMessage, theme::Theme> {
+/// `liquid_shown` is the Liquid gate ([`crate::app::features::LiquidGate::show`]):
+/// while it is off, a sell checkout offers no Liquid fulfilment.
+pub fn form<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+    liquid_shown: bool,
+) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    // The eye covers saved orders and completed checkout. Entry and an
+    // unfulfilled checkout show amounts for active payment review.
     let form = match state
         .steps
         .last()
         .expect("`MavapayState` must have at least one flow-step")
     {
-        MavapayFlowStep::BuyInputFrom { .. } => buy_input_form,
-        MavapayFlowStep::SellInputForm { .. } => sell_input_form,
-        MavapayFlowStep::Checkout { .. } => checkout_form,
-        MavapayFlowStep::History { .. } => history_view,
-        MavapayFlowStep::OrderDetail { .. } => order_detail_view,
+        MavapayFlowStep::BuyInputFrom { .. } => buy_input_form(state),
+        MavapayFlowStep::SellInputForm { .. } => sell_input_form(state),
+        MavapayFlowStep::Checkout { .. } => checkout_form(state, mask_amounts, liquid_shown),
+        MavapayFlowStep::History { .. } => history_view(state, mask_amounts),
+        MavapayFlowStep::OrderDetail { .. } => order_detail_view(state, mask_amounts),
     };
 
     let element: iced::Element<'a, BuySellMessage, theme::Theme> = widget::column![
-        form(state),
+        form,
         widget::Space::new().height(Length::Fixed(5.0)),
-        text::caption("Powered by Mavapay").style(theme::text::secondary)
+        text::caption(localized_copy("Powered by Mavapay")).style(theme::text::secondary)
     ]
     .align_x(iced::Alignment::Center)
     .into();
@@ -75,7 +85,7 @@ fn buy_input_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMess
                     .align_x(Alignment::Center),
                     widget::container(left_right_icon().size(20).center()).padding(12),
                     widget::column![
-                        widget::text("Satoshis (BTCSAT)")
+                        widget::text(localized_copy("Satoshis (BTCSAT)"))
                             .size(14)
                             .style(theme::text::secondary),
                         widget::space().height(5),
@@ -97,12 +107,20 @@ fn buy_input_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMess
                 .spacing(20)
                 .padding(0),
                 match getting_invoice {
-                    true => button::secondary(Some(clock_icon()), "[1] Getting Invoice..."),
+                    true => button::secondary(
+                        Some(clock_icon()),
+                        localized_copy("[1] Getting Invoice..."),
+                    ),
                     false => match sending_quote {
-                        true => button::secondary(Some(clock_icon()), "[2] Getting Quote..."),
-                        false => button::primary(Some(card_icon()), "Generate Invoice").on_press(
-                            BuySellMessage::Mavapay(MavapayMessage::GenerateLightningInvoice)
+                        true => button::secondary(
+                            Some(clock_icon()),
+                            localized_copy("[2] Getting Quote..."),
                         ),
+                        false =>
+                            button::primary(Some(card_icon()), localized_copy("Generate Invoice"))
+                                .on_press(BuySellMessage::Mavapay(
+                                    MavapayMessage::GenerateLightningInvoice
+                                )),
                     },
                 }
                 .width(Length::Fill)
@@ -112,9 +130,11 @@ fn buy_input_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMess
             .width(Length::Fill),
         ),
         None => widget::container(
-            text::p1_italic("Getting recent conversion rates, please wait")
-                .width(Length::Fill)
-                .center(),
+            text::p1_italic(localized_copy(
+                "Getting recent conversion rates, please wait",
+            ))
+            .width(Length::Fill)
+            .center(),
         )
         .align_y(Alignment::Center)
         .align_x(Alignment::Center),
@@ -123,14 +143,14 @@ fn buy_input_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMess
     .style(theme::card::simple)
     .width(Length::Fixed(600.0));
 
-    let previous_btn = button::secondary(Some(previous_icon()), "Back")
+    let previous_btn = button::secondary(Some(previous_icon()), localized_copy("Back"))
         .width(Length::Fixed(150.0))
         .on_press(BuySellMessage::Mavapay(MavapayMessage::NavigateBack));
 
     widget::column![
         widget::container(previous_btn).width(Length::Fill),
         // header text
-        text::h4_bold("Buy Bitcoin using Fiat Money").center(),
+        text::h4_bold(localized_copy("Buy Bitcoin using Fiat Money")).center(),
         widget::Space::new().height(Length::Fixed(20.0)),
         form,
     ]
@@ -152,7 +172,7 @@ fn sell_input_form<'a>(
 
     let input_field = |value: &'a str, caption: &'static str, field: &'static str| {
         widget::column![
-            text::caption(caption),
+            text::caption(localized_copy(caption)),
             widget::text_input("...", value)
                 .size(20)
                 .padding(10)
@@ -168,7 +188,7 @@ fn sell_input_form<'a>(
      -> Option<widget::Column<'a, BuySellMessage, theme::Theme>> {
         price.map(|p| {
             widget::column![
-                text::caption("Input Transfer Amount (in Satoshis)"),
+                text::caption(localized_copy("Input Transfer Amount (in Satoshis)")),
                 widget::row![
                     iced_aw::number_input(&sat_amount, .., |a| BuySellMessage::Mavapay(
                         MavapayMessage::SatAmountChanged(a as _)
@@ -214,7 +234,7 @@ fn sell_input_form<'a>(
             }
 
             widget::column![
-                text::h3("Setup Bank Details (Nigeria)"),
+                text::h3(localized_copy("Setup Bank Details (Nigeria)")),
                 widget::container(widget::Space::default().width(iced::Length::Fill).height(2))
                     .style(theme::card::border),
                 widget::space().width(iced::Length::Fill),
@@ -227,7 +247,7 @@ fn sell_input_form<'a>(
                 match banks {
                     Some(MavapayBanks::Nigerian(banks)) => {
                         widget::column![
-                            text::caption("Select Recipient Bank"),
+                            text::caption(localized_copy("Select Recipient Bank")),
                             widget::row![
                                 widget::pick_list(
                                     banks.as_slice(),
@@ -244,24 +264,27 @@ fn sell_input_form<'a>(
                                 .width(iced::Length::Fill)
                                 .text_size(16)
                                 .padding(10),
-                                widget::button("Verify Details").padding(10).on_press_maybe(
-                                    (!(bank_account_number.is_empty() || bank_code.is_empty()))
-                                        .then_some(BuySellMessage::Mavapay(
-                                            MavapayMessage::VerifyNgnBankDetails
-                                        ))
-                                )
+                                widget::button(localized_copy("Verify Details"))
+                                    .padding(10)
+                                    .on_press_maybe(
+                                        (!(bank_account_number.is_empty() || bank_code.is_empty()))
+                                            .then_some(BuySellMessage::Mavapay(
+                                                MavapayMessage::VerifyNgnBankDetails
+                                            ))
+                                    )
                             ]
                             .align_y(iced::Alignment::Center)
                             .spacing(5),
                         ]
                     }
                     Some(MavapayBanks::SouthAfrican(_)) => unreachable!(),
-                    None => widget::column!["loading banks..."].align_x(iced::Alignment::Center),
+                    None => widget::column![localized_copy("loading banks...")]
+                        .align_x(iced::Alignment::Center),
                 }
                 .spacing(0),
                 bank_account_name.as_ref().map(|s| {
                     widget::column![
-                        text::caption("Is this the recipient's registered name?")
+                        text::caption(localized_copy("Is this the recipient's registered name?"))
                             .style(theme::text::success),
                         widget::container(widget::text(s).size(20))
                             .padding(8)
@@ -287,7 +310,7 @@ fn sell_input_form<'a>(
             }
 
             widget::column![
-                text::h3("Setup Bank Details (South Africa)"),
+                text::h3(localized_copy("Setup Bank Details (South Africa)")),
                 widget::container(widget::Space::default().width(iced::Length::Fill).height(2))
                     .style(theme::card::border),
                 widget::space().width(iced::Length::Fill),
@@ -302,7 +325,7 @@ fn sell_input_form<'a>(
                 match banks {
                     Some(MavapayBanks::SouthAfrican(banks)) => {
                         widget::column![
-                            text::caption("Select Recipient Bank"),
+                            text::caption(localized_copy("Select Recipient Bank")),
                             widget::pick_list(
                                 banks.as_slice(),
                                 banks.iter().find(|b| *b == bank_name),
@@ -318,7 +341,8 @@ fn sell_input_form<'a>(
                         ]
                     }
                     Some(MavapayBanks::Nigerian(_)) => unreachable!(),
-                    None => widget::column!["loading banks..."].align_x(iced::Alignment::Center),
+                    None => widget::column![localized_copy("loading banks...")]
+                        .align_x(iced::Alignment::Center),
                 }
                 .spacing(0),
             ]
@@ -334,7 +358,7 @@ fn sell_input_form<'a>(
             }
 
             widget::column![
-                text::h3("Setup Mobile Money Details (Kenya-MPESA)"),
+                text::h3(localized_copy("Setup Mobile Money Details (Kenya-MPESA)")),
                 widget::container(widget::Space::default().width(iced::Length::Fill).height(2))
                     .style(theme::card::border),
                 widget::space().width(iced::Length::Fill),
@@ -357,7 +381,7 @@ fn sell_input_form<'a>(
     .spacing(10)
     .width(iced::Length::Fill);
 
-    let previous_btn = button::secondary(Some(previous_icon()), "Back")
+    let previous_btn = button::secondary(Some(previous_icon()), localized_copy("Back"))
         .width(Length::Fixed(150.0))
         .on_press(BuySellMessage::Mavapay(MavapayMessage::NavigateBack));
 
@@ -376,19 +400,20 @@ fn sell_input_form<'a>(
             widget::row![
                 card::simple(widget::space().height(iced::Length::Fill).width(5)).padding(1),
                 widget::space().width(10),
-                text::p2_medium("Sell Bitcoin to Fiat Money").center(),
+                text::p2_medium(localized_copy("Sell Bitcoin to Fiat Money")).center(),
             ]
             .align_y(iced::Alignment::Center),
             widget::space().width(iced::Length::Fill),
             match validation_message {
                 None => match sending_quote {
                     true =>
-                        button::secondary(Some(clock_icon()), "Fetching Quote..").style(|th, st| {
-                            let mut base = theme::button::secondary(th, st);
-                            base.border = iced::Border::default().rounded(3);
-                            base
-                        }),
-                    false => button::primary(Some(enter_box_icon()), "Get Quote")
+                        button::secondary(Some(clock_icon()), localized_copy("Fetching Quote.."))
+                            .style(|th, st| {
+                                let mut base = theme::button::secondary(th, st);
+                                base.border = iced::Border::default().rounded(3);
+                                base
+                            }),
+                    false => button::primary(Some(enter_box_icon()), localized_copy("Get Quote"))
                         .on_press_maybe(
                             (banks.is_some() || state.country.code == "KE")
                                 .then_some(BuySellMessage::Mavapay(MavapayMessage::CreateQuote))
@@ -400,7 +425,7 @@ fn sell_input_form<'a>(
                         }),
                 },
                 Some(m) => {
-                    widget::button(widget::text(m).size(14))
+                    widget::button(widget::text(localized_copy(m)).size(14))
                         .padding(12)
                         .style(|th, st| {
                             let mut base = theme::button::secondary(th, st);
@@ -417,8 +442,9 @@ fn sell_input_form<'a>(
     .align_x(Alignment::Center)
 }
 
+/// `label` is an English literal, localized here at render time.
 fn detail_row<'a>(
-    label: &'a str,
+    label: &'static str,
     value: impl Into<std::borrow::Cow<'a, str>>,
     text_style: Option<fn(&theme::Theme) -> widget::text::Style>,
 ) -> widget::Row<'a, BuySellMessage, theme::Theme> {
@@ -426,7 +452,7 @@ fn detail_row<'a>(
 
     widget::row![
         widget::column![
-            text::p2_medium(label).color(color::GREY_2),
+            text::p2_medium(localized_copy(label)).color(color::GREY_2),
             text::p2_bold(value.clone()).style(move |th| match text_style {
                 Some(f) => f(th),
                 None => theme::text::primary(th),
@@ -473,9 +499,13 @@ fn summary_card<'a>(
                 success_icon_badge(),
                 widget::Space::new().width(10),
                 widget::column![
-                    text::p1_bold("Order Created Successfully"),
-                    text::p2_medium(format!("{}: {}", reference_label, reference))
-                        .style(theme::text::secondary)
+                    text::p1_bold(localized_copy("Order Created Successfully")),
+                    text::p2_medium(format!(
+                        "{}: {}",
+                        localized_copy(reference_label),
+                        reference
+                    ))
+                    .style(theme::text::secondary)
                 ]
             ]
             .align_y(Alignment::Center)
@@ -488,13 +518,21 @@ fn summary_card<'a>(
         widget::row![
             widget::space().width(iced::Length::Fill),
             widget::column![
-                text::caption("You Send").style(theme::text::success),
-                text::p1_bold(format!("{} {}", source_amount, source_currency))
+                text::caption(localized_copy("You Send")).style(theme::text::success),
+                text::p1_bold(format!(
+                    "{} {}",
+                    source_amount,
+                    localized_copy(currency_label(&source_currency))
+                ))
             ]
             .spacing(1),
             widget::column![
-                text::caption("You Receive").color(color::ORANGE),
-                text::p1_bold(format!("{} {}", target_amount, target_currency))
+                text::caption(localized_copy("You Receive")).color(color::ORANGE),
+                text::p1_bold(format!(
+                    "{} {}",
+                    target_amount,
+                    localized_copy(currency_label(&target_currency))
+                ))
             ]
             .spacing(1),
             widget::space().width(iced::Length::Fill)
@@ -532,13 +570,13 @@ fn instructions_card<'a>(
                 }),
                 widget::Space::new().width(10),
                 widget::column![
-                text::p1_bold("Payment Instructions"),
-                text::p2_medium("Follow these steps to complete your order").style(theme::text::secondary)
+                text::p1_bold(localized_copy("Payment Instructions")),
+                text::p2_medium(localized_copy("Follow these steps to complete your order")).style(theme::text::secondary)
             ]
             ]
             .align_y(Alignment::Center),
             widget::Space::new().height(15),
-            text::p2_medium("STEP 1: TRANSFER FUNDS TO OUR ACCOUNT")
+            text::p2_medium(localized_copy("STEP 1: TRANSFER FUNDS TO OUR ACCOUNT"))
             .style(theme::text::secondary),
             widget::Space::new().height(10),
             quote.bank_name.as_deref().map(|bn|
@@ -559,7 +597,7 @@ fn instructions_card<'a>(
                 Some(theme::text::success),
             ),
             widget::Space::new().height(20),
-            text::p2_medium("STEP 2: INCLUDE THIS REFERENCE IN YOUR TRANSFER")
+            text::p2_medium(localized_copy("STEP 2: INCLUDE THIS REFERENCE IN YOUR TRANSFER"))
                 .style(theme::text::secondary),
             widget::Space::new().height(10),
             card::simple(
@@ -567,7 +605,7 @@ fn instructions_card<'a>(
                     widget::row![
                         warning_icon().size(20).style(theme::text::warning),
                         widget::Space::new().width(10),
-                        text::p2_medium("Critical: Include this reference number").style(theme::text::warning),
+                        text::p2_medium(localized_copy("Critical: Include this reference number")).style(theme::text::warning),
                     ].align_y(Alignment::Center),
                     widget::Space::new().height(20),
                     widget::row![
@@ -577,21 +615,21 @@ fn instructions_card<'a>(
                             .style(theme::button::transparent),
                     ].align_y(Alignment::Center),
                     widget::Space::new().height(20),
-                    text::p2_medium("This helps us match your payment to your order. Without this reference, your order may be delayed.")
+                    text::p2_medium(localized_copy("This helps us match your payment to your order. Without this reference, your order may be delayed."))
                     .style(theme::text::secondary)
                 ].width(Length::Fill)
             ).style(theme::card::modal),
             widget::Space::new().height(20),
-            text::p2_medium("STEP 3: WAIT FOR CONFIRMATION"),
+            text::p2_medium(localized_copy("STEP 3: WAIT FOR CONFIRMATION")),
             widget::Space::new().height(10),
             widget::row![
                 reload_icon().size(16).style(theme::text::secondary),
                 widget::Space::new().width(10),
-                text::p2_medium("Waiting for payment confirmation...")
+                text::p2_medium(localized_copy("Waiting for payment confirmation..."))
                     .style(theme::text::secondary)
             ].align_y(Alignment::Center),
             widget::Space::new().height(10),
-            button::primary(Some(reload_icon()), "Start Over")
+            button::primary(Some(reload_icon()), localized_copy("Start Over"))
                 .on_press(BuySellMessage::ResetWidget)
         ].width(Length::Fill).padding(15)
     ).width(Length::Fill)
@@ -600,7 +638,7 @@ fn instructions_card<'a>(
 fn notes_card<'a>() -> widget::Container<'a, BuySellMessage, theme::Theme> {
     card::simple(
         widget::column![
-            text::p1_bold("Important Notes"),
+            text::p1_bold(localized_copy("Important Notes")),
             widget::Space::new().height(10),
             note_item("Your order will begin execution once we confirm receipt of funds"),
             note_item("Execution time will depend on market liquidity"),
@@ -612,11 +650,11 @@ fn notes_card<'a>() -> widget::Container<'a, BuySellMessage, theme::Theme> {
     )
 }
 
-fn note_item<'a>(content: &'a str) -> widget::Row<'a, BuySellMessage, theme::Theme> {
+fn note_item<'a>(content: &'static str) -> widget::Row<'a, BuySellMessage, theme::Theme> {
     widget::row![
         dot_icon().size(4).color(color::ORANGE),
         widget::Space::new().width(8),
-        text::p2_medium(content)
+        text::p2_medium(localized_copy(content))
     ]
     .align_y(Alignment::Center)
 }
@@ -627,6 +665,7 @@ fn order_success_view<'a>(
     sats: u64,
     buy_or_sell: &'a BuyOrSell,
     _country: &'static Country,
+    mask_amounts: bool,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let (title, subtitle) = match buy_or_sell {
         BuyOrSell::Sell => (
@@ -640,7 +679,7 @@ fn order_success_view<'a>(
     };
 
     widget::column![
-        text::h4_bold("Order Confirmation"),
+        text::h4_bold(localized_copy("Order Confirmation")),
         widget::Space::new().height(10),
         widget::container(widget::column![
             card::simple(
@@ -648,8 +687,8 @@ fn order_success_view<'a>(
                     success_icon_badge(),
                     widget::Space::new().width(15),
                     widget::column![
-                        text::h4_bold(title),
-                        text::p2_medium(subtitle).style(theme::text::secondary)
+                        text::h4_bold(localized_copy(title)),
+                        text::p2_medium(localized_copy(subtitle)).style(theme::text::secondary)
                     ]
                 ]
                 .align_y(Alignment::Center)
@@ -658,43 +697,49 @@ fn order_success_view<'a>(
             widget::Space::new().height(10),
             card::simple(
                 widget::column![
-                    text::p1_bold("Order Details"),
+                    text::p1_bold(localized_copy("Order Details")),
                     widget::Space::new().height(15),
                     detail_row("Order Id", &order.order_id, None),
                     widget::Space::new().height(15),
                     widget::row![
                         widget::column![
-                            text::p2_medium("Amount Paid").style(theme::text::secondary),
-                            text::p1_bold(format_amount(order.amount, &order.currency))
+                            text::p2_medium(localized_copy("Amount Paid"))
+                                .style(theme::text::secondary),
+                            text::p1_bold(passive_amount(mask_amounts, || {
+                                format_amount(order.amount, &order.currency)
+                            }))
                         ]
                         .width(Length::Fill),
                         widget::column![
-                            text::p2_medium("Bitcoin Received").style(theme::text::secondary),
-                            text::p1_bold(format!(
+                            text::p2_medium(localized_copy("Bitcoin Received"))
+                                .style(theme::text::secondary),
+                            text::p1_bold(passive_amount(mask_amounts, || format!(
                                 "{} BTC",
                                 format_f64_as_string(sats as f64 / 100_000_000.0, ",", 8, false)
-                            ))
+                            )))
                         ]
                         .width(Length::Fill)
                     ],
                     widget::Space::new().height(15),
                     widget::row![
                         widget::column![
-                            text::p2_medium("Order Status").style(theme::text::secondary),
-                            text::p2_bold(order_status_text(&order.status))
+                            text::p2_medium(localized_copy("Order Status"))
+                                .style(theme::text::secondary),
+                            text::p2_bold(localized_copy(order_status_text(&order.status)))
                                 .style(status_style(&order.status))
                         ]
                         .width(Length::Fill),
                         widget::column![
-                            text::p2_medium("Payment Method").style(theme::text::secondary),
-                            text::p1_bold(order.payment_method.as_str())
+                            text::p2_medium(localized_copy("Payment Method"))
+                                .style(theme::text::secondary),
+                            text::p1_bold(localized_copy(order.payment_method.as_str()))
                         ]
                         .width(Length::Fill)
                     ],
                     widget::column![
                         widget::Space::new().height(15),
-                        text::p2_medium("Order Date").style(theme::text::secondary),
-                        text::p2_bold(pretty_timestamp(&order.created_at))
+                        text::p2_medium(localized_copy("Order Date")).style(theme::text::secondary),
+                        text::p2_bold(display_timestamp(&order.created_at))
                     ],
                     // separator
                     widget::container(
@@ -703,7 +748,7 @@ fn order_success_view<'a>(
                             .width(Length::Fill)
                     )
                     .style(theme::container::border_grey),
-                    button::primary(Some(reload_icon()), "Start New Transaction")
+                    button::primary(Some(reload_icon()), localized_copy("Start New Transaction"))
                         .on_press(BuySellMessage::ResetWidget)
                         .width(Length::Fill)
                 ]
@@ -716,7 +761,10 @@ fn order_success_view<'a>(
     ]
 }
 
-fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessage, theme::Theme> {
+fn history_view<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::History {
         transactions,
         loading,
@@ -730,7 +778,8 @@ fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessag
             widget::column![
                 reload_icon().size(24).style(theme::text::secondary),
                 widget::Space::new().height(10),
-                text::p2_medium("Loading transaction history...").style(theme::text::secondary),
+                text::p2_medium(localized_copy("Loading transaction history..."))
+                    .style(theme::text::secondary),
             ]
             .align_x(Alignment::Center),
         )
@@ -742,10 +791,12 @@ fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessag
             widget::column![
                 history_icon().size(48).style(theme::text::secondary),
                 widget::Space::new().height(15),
-                text::p1_bold("No transactions found"),
+                text::p1_bold(localized_copy("No transactions found")),
                 widget::Space::new().height(5),
-                text::p2_medium("Your transactions will appear here once you buy or sell bitcoin.")
-                    .style(theme::text::primary)
+                text::p2_medium(localized_copy(
+                    "Your transactions will appear here once you buy or sell bitcoin.",
+                ))
+                .style(theme::text::primary)
             ]
             .padding(40)
             .align_x(Alignment::Center)
@@ -757,21 +808,21 @@ fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessag
             .iter()
             .enumerate()
             .fold(widget::column![].spacing(10), |col, (idx, transaction)| {
-                col.push(transaction_row(idx, transaction))
+                col.push(transaction_row(idx, transaction, mask_amounts))
             })
             .width(Length::Fill)
             .into(),
-        (false, None) => button::primary(Some(reload_icon()), "Retry")
+        (false, None) => button::primary(Some(reload_icon()), localized_copy("Retry"))
             .on_press(BuySellMessage::Mavapay(MavapayMessage::FetchTransactions))
             .into(),
     };
 
     widget::column![
-        button::secondary(Some(previous_icon()), "Back")
+        button::secondary(Some(previous_icon()), localized_copy("Back"))
             .width(Length::Fixed(150.0))
             .on_press(BuySellMessage::ResetWidget),
         widget::Space::new().height(10),
-        text::h4_bold("Order History"),
+        text::h4_bold(localized_copy("Order History")),
         content
     ]
     .padding(20)
@@ -791,9 +842,19 @@ fn pretty_timestamp(ts: &str) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// `pretty_timestamp` for display: the English fallback stays in the helper
+/// (tests assert it); the localized one is chosen here, never by comparing.
+fn display_timestamp(ts: &str) -> String {
+    match ts.parse::<chrono::DateTime<chrono::Utc>>() {
+        Ok(_) => pretty_timestamp(ts),
+        Err(_) => localized_copy("unknown").to_string(),
+    }
+}
+
 fn transaction_row<'a>(
     idx: usize,
     transaction: &'a OrderTransaction,
+    mask_amounts: bool,
 ) -> widget::Container<'a, BuySellMessage, theme::Theme> {
     let (tx_status_text, tx_status_color) = transaction_status_info(transaction);
     let (order_type, order_type_color) =
@@ -803,36 +864,39 @@ fn transaction_row<'a>(
         widget::column![
             widget::row![
                 widget::column![
-                    text::p2_medium("Order ID").style(theme::text::secondary),
+                    text::p2_medium(localized_copy("Order ID")).style(theme::text::secondary),
                     text::p2_bold(&transaction.order_id)
                 ]
                 .width(Length::Fill),
-                badge(order_type, order_type_color),
+                badge(localized_copy(order_type), order_type_color),
                 widget::Space::new().width(8),
-                badge(tx_status_text, tx_status_color)
+                badge(localized_copy(tx_status_text), tx_status_color)
             ]
             .align_y(Alignment::Center),
             widget::Space::new().height(12),
             widget::row![
                 widget::column![
-                    text::p2_medium("Amount").style(theme::text::secondary),
-                    text::p2_bold(format_amount(transaction.amount, &transaction.currency))
+                    text::p2_medium(localized_copy("Amount")).style(theme::text::secondary),
+                    text::p2_bold(passive_amount(mask_amounts, || {
+                        format_amount(transaction.amount, &transaction.currency)
+                    }))
                 ]
                 .width(Length::Fill),
                 transaction
                     .payment_method
                     .as_ref()
                     .map(|pm| widget::column![
-                        text::p2_medium("Payment Method").style(theme::text::secondary),
-                        text::p2_bold(pm.as_str())
+                        text::p2_medium(localized_copy("Payment Method"))
+                            .style(theme::text::secondary),
+                        text::p2_bold(localized_copy(pm.as_str()))
                     ]
                     .width(Length::Fill)),
                 widget::column![
-                    text::p2_medium("Date").style(theme::text::secondary),
-                    text::p2_bold(pretty_timestamp(&transaction.created_at))
+                    text::p2_medium(localized_copy("Date")).style(theme::text::secondary),
+                    text::p2_bold(display_timestamp(&transaction.created_at))
                 ]
                 .width(Length::Fill),
-                button::secondary(None, "View")
+                button::secondary(None, localized_copy("View"))
                     .on_press(BuySellMessage::Mavapay(MavapayMessage::SelectTransaction(
                         idx
                     )))
@@ -846,12 +910,13 @@ fn transaction_row<'a>(
     .width(Length::Fill)
 }
 
+/// `label` is an English literal, localized here at render time.
 fn info_field<'a>(
-    label: &'a str,
+    label: &'static str,
     value: impl ToString,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     widget::column![
-        text::p2_medium(label).style(theme::text::secondary),
+        text::p2_medium(localized_copy(label)).style(theme::text::secondary),
         text::p2_bold(value.to_string())
     ]
     .width(Length::Fill)
@@ -882,6 +947,7 @@ fn format_currency_amount(amount: u64, currency: &MavapayUnitCurrency) -> String
 
 fn order_detail_view<'a>(
     state: &'a MavapayState,
+    mask_amounts: bool,
 ) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::OrderDetail {
         transaction,
@@ -900,7 +966,7 @@ fn order_detail_view<'a>(
         widget::row![
             previous_icon().size(16).style(theme::text::secondary),
             widget::Space::new().width(5),
-            text::p2_medium("Back to History").style(theme::text::secondary)
+            text::p2_medium(localized_copy("Back to History")).style(theme::text::secondary)
         ]
         .align_y(Alignment::Center),
     )
@@ -908,42 +974,44 @@ fn order_detail_view<'a>(
     .on_press(BuySellMessage::Mavapay(MavapayMessage::NavigateBack));
 
     let header = widget::row![
-        text::h4_bold("Order Details"),
+        text::h4_bold(localized_copy("Order Details")),
         widget::Space::new().width(Length::Fill),
-        badge(order_type, order_type_color),
+        badge(localized_copy(order_type), order_type_color),
         widget::Space::new().width(8),
-        badge(tx_status_text, tx_status_color)
+        badge(localized_copy(tx_status_text), tx_status_color)
     ]
     .align_y(Alignment::Center);
 
     // Get total fees from all quotes if available, otherwise use transaction fees
-    let fees_display = order
-        .as_ref()
-        .map(|o| {
-            let quotes = o.quotes();
-            if quotes.is_empty() {
-                return format_fees(transaction.fees, &transaction.currency);
-            }
+    let fees_display = passive_amount(mask_amounts, || {
+        order
+            .as_ref()
+            .map(|o| {
+                let quotes = o.quotes();
+                if quotes.is_empty() {
+                    return format_fees(transaction.fees, &transaction.currency);
+                }
 
-            // Sum up fees from all quotes (use target currency fees)
-            let total_fees: u64 = quotes
-                .iter()
-                .map(|q| q.transaction_fees_in_target_currency)
-                .sum();
+                // Sum up fees from all quotes (use target currency fees)
+                let total_fees: u64 = quotes
+                    .iter()
+                    .map(|q| q.transaction_fees_in_target_currency)
+                    .sum();
 
-            // Use the target currency from the first quote for formatting
-            if let Some(first_quote) = quotes.first() {
-                format_currency_amount(total_fees, &first_quote.target_currency)
-            } else {
-                format_fees(transaction.fees, &transaction.currency)
-            }
-        })
-        .unwrap_or_else(|| format_fees(transaction.fees, &transaction.currency));
+                // Use the target currency from the first quote for formatting
+                if let Some(first_quote) = quotes.first() {
+                    format_currency_amount(total_fees, &first_quote.target_currency)
+                } else {
+                    format_fees(transaction.fees, &transaction.currency)
+                }
+            })
+            .unwrap_or_else(|| format_fees(transaction.fees, &transaction.currency))
+    });
 
     // Transaction summary card (always shown)
     let transaction_card = card::simple(
         widget::column![
-            text::p1_bold("Transaction Summary"),
+            text::p1_bold(localized_copy("Transaction Summary")),
             widget::Space::new().height(15),
             detail_row("Transaction ID", transaction.transaction_id.clone(), None),
             widget::Space::new().height(8),
@@ -952,7 +1020,9 @@ fn order_detail_view<'a>(
             widget::row![
                 info_field(
                     "Amount",
-                    format_amount(transaction.amount, &transaction.currency)
+                    passive_amount(mask_amounts, || {
+                        format_amount(transaction.amount, &transaction.currency)
+                    })
                 ),
                 info_field("Fees", fees_display),
             ],
@@ -961,8 +1031,8 @@ fn order_detail_view<'a>(
                 transaction
                     .payment_method
                     .as_ref()
-                    .map(|pm| info_field("Payment Method", pm.as_str())),
-                info_field("Date", pretty_timestamp(&transaction.created_at)),
+                    .map(|pm| info_field("Payment Method", localized_copy(pm.as_str()))),
+                info_field("Date", display_timestamp(&transaction.created_at)),
             ]
         ]
         .padding(20)
@@ -976,7 +1046,8 @@ fn order_detail_view<'a>(
             widget::column![
                 reload_icon().size(24).style(theme::text::secondary),
                 widget::Space::new().height(10),
-                text::p2_medium("Loading order details...").style(theme::text::secondary)
+                text::p2_medium(localized_copy("Loading order details..."))
+                    .style(theme::text::secondary)
             ]
             .align_x(Alignment::Center),
         )
@@ -997,18 +1068,26 @@ fn order_detail_view<'a>(
                 widget::Space::new().height(10),
                 card::simple(
                     widget::column![
-                        text::p1_bold("Order Information"),
+                        text::p1_bold(localized_copy("Order Information")),
                         widget::Space::new().height(15),
                         detail_row("Order ID", order.order_id.clone(), None),
                         widget::Space::new().height(8),
                         widget::row![
-                            info_field("Amount", format_amount(order.amount, &order.currency)),
-                            info_field("Status", order_status_text(&order.status)),
+                            info_field(
+                                "Amount",
+                                passive_amount(mask_amounts, || {
+                                    format_amount(order.amount, &order.currency)
+                                })
+                            ),
+                            info_field("Status", localized_copy(order_status_text(&order.status))),
                         ],
                         widget::Space::new().height(8),
                         widget::row![
-                            info_field("Currency", &order.currency),
-                            info_field("Payment Method", order.payment_method.as_str()),
+                            info_field("Currency", localized_copy(currency_label(&order.currency))),
+                            info_field(
+                                "Payment Method",
+                                localized_copy(order.payment_method.as_str())
+                            ),
                         ],
                     ]
                     .padding(20)
@@ -1025,15 +1104,17 @@ fn order_detail_view<'a>(
             .iter()
             .enumerate()
             .map(|(idx, quote)| {
-                let (paid_amount, received_amount) = (
-                    format_currency_amount(quote.total_amount, &quote.source_currency),
-                    format_currency_amount(quote.equivalent_amount, &quote.target_currency),
-                );
+                let paid_amount = passive_amount(mask_amounts, || {
+                    format_currency_amount(quote.total_amount, &quote.source_currency)
+                });
+                let received_amount = passive_amount(mask_amounts, || {
+                    format_currency_amount(quote.equivalent_amount, &quote.target_currency)
+                });
 
                 let title = if quotes.len() > 1 {
-                    format!("Quote #{}", idx + 1)
+                    localized_format!("Quote #{}", "Cotización #{}", idx + 1)
                 } else {
-                    "Quote Details".to_string()
+                    localized_copy("Quote Details").to_string()
                 };
 
                 card::simple(
@@ -1048,24 +1129,24 @@ fn order_detail_view<'a>(
                         widget::row![
                             info_field(
                                 "Source Fee",
-                                format_currency_amount(
+                                passive_amount(mask_amounts, || format_currency_amount(
                                     quote.transaction_fees_in_source_currency,
                                     &quote.source_currency
-                                )
+                                ))
                             ),
                             info_field(
                                 "Target Fee",
-                                format_currency_amount(
+                                passive_amount(mask_amounts, || format_currency_amount(
                                     quote.transaction_fees_in_target_currency,
                                     &quote.target_currency
-                                )
+                                ))
                             ),
                             info_field(
                                 "Fee (USD)",
-                                format!(
+                                passive_amount(mask_amounts, || format!(
                                     "${}",
                                     format_fiat_cents(quote.transaction_fees_in_usd_cent)
-                                )
+                                ))
                             ),
                         ],
                         widget::Space::new().height(8),
@@ -1094,7 +1175,7 @@ fn order_detail_view<'a>(
                 widget::row![
                     warning_icon().size(20).style(theme::text::warning),
                     widget::Space::new().width(10),
-                    text::p1_bold("Failed to load order details")
+                    text::p1_bold(localized_copy("Failed to load order details"))
                 ]
                 .align_y(Alignment::Center),
             )
@@ -1119,7 +1200,11 @@ fn order_detail_view<'a>(
 }
 
 // TODO: Use Breez SDK to satisfy lightning invoice, with user confirmation
-fn checkout_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessage, theme::Theme> {
+fn checkout_form<'a>(
+    state: &'a MavapayState,
+    mask_amounts: bool,
+    liquid_shown: bool,
+) -> widget::Column<'a, BuySellMessage, theme::Theme> {
     let Some(MavapayFlowStep::Checkout {
         fulfilled_order,
         quote,
@@ -1152,23 +1237,27 @@ fn checkout_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessa
                             invoice_qr_code_data
                                 .as_ref()
                                 .map(|data| invoice_qr_code_display(
-                                    "Deposit into the following address to proceed",
+                                    localized_copy("Deposit into the following address to proceed"),
                                     quote.invoice.as_str(),
                                     data
                                 )),
-                            match can_fulfil_sell_order {
+                            // Only while Liquid is shown: the deposit QR
+                            // above is how a sell order is paid otherwise.
+                            liquid_shown.then(|| match can_fulfil_sell_order {
                                 true => button::primary(
                                     Some(bitcoin_icon()),
-                                    "Fulfil Order from Liquid Wallet"
+                                    localized_copy("Fulfil Order from Liquid Wallet")
                                 )
                                 .on_press(BuySellMessage::Mavapay(
                                     MavapayMessage::FulfillSellInvoice
                                 )),
                                 false => button::secondary(
                                     Some(restore_icon()),
-                                    "Liquid Balance insufficient. Manually fulfill invoice"
+                                    localized_copy(
+                                        "Liquid Balance insufficient. Manually fulfill invoice"
+                                    )
                                 ),
-                            }
+                            }),
                         ]
                         .spacing(10)
                     }
@@ -1182,9 +1271,13 @@ fn checkout_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessa
                 }),
             ]
         }
-        Some(order) => {
-            order_success_view(order, state.sat_amount, &state.buy_or_sell, state.country)
-        }
+        Some(order) => order_success_view(
+            order,
+            state.sat_amount,
+            &state.buy_or_sell,
+            state.country,
+            mask_amounts,
+        ),
     }
     .align_x(Alignment::Center)
     .width(600)
@@ -1322,6 +1415,25 @@ fn transaction_status_info(transaction: &OrderTransaction) -> (&'static str, ice
     }
 }
 
+/// English name of a Mavapay currency for display; the same text as its
+/// `Display`, as a literal so the view can localize it.
+fn currency_label(currency: &MavapayCurrency) -> &'static str {
+    match currency {
+        MavapayCurrency::KenyanShilling => "Kenyan Shilling (KES)",
+        MavapayCurrency::SouthAfricanRand => "South African Rand (ZAR)",
+        MavapayCurrency::NigerianNaira => "Nigerian Naira (NGN)",
+        MavapayCurrency::Bitcoin => "Bitcoin (BTC)",
+    }
+}
+
+fn passive_amount(mask_amounts: bool, format: impl FnOnce() -> String) -> String {
+    if mask_amounts {
+        "••••••".into()
+    } else {
+        format()
+    }
+}
+
 fn format_amount(amount: u64, currency: &MavapayCurrency) -> String {
     match currency {
         MavapayCurrency::Bitcoin => format!(
@@ -1377,7 +1489,7 @@ fn success_icon_badge() -> widget::Container<'static, BuySellMessage, theme::The
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::breez_liquid::BreezClient;
+    use crate::{app::breez_liquid::BreezClient, app::view::shared::landing::capture};
     use coincube_core::miniscript::bitcoin;
     use std::sync::Arc;
 
@@ -1622,7 +1734,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&buy);
+        let _ = form(&buy, false, false);
 
         let mut buy_without_price = state(
             BuyOrSell::Buy,
@@ -1634,7 +1746,7 @@ mod tests {
             "NG",
         );
         buy_without_price.btc_price = None;
-        let _ = form(&buy_without_price);
+        let _ = form(&buy_without_price, false, false);
 
         let ngn = state(
             BuyOrSell::Sell,
@@ -1654,7 +1766,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&ngn);
+        let _ = form(&ngn, false, false);
 
         let zar = state(
             BuyOrSell::Sell,
@@ -1673,7 +1785,7 @@ mod tests {
             },
             "ZA",
         );
-        let _ = form(&zar);
+        let _ = form(&zar, false, false);
 
         let kes = state(
             BuyOrSell::Sell,
@@ -1688,7 +1800,7 @@ mod tests {
             },
             "KE",
         );
-        let _ = form(&kes);
+        let _ = form(&kes, false, false);
 
         let invalid_ngn = state(
             BuyOrSell::Sell,
@@ -1705,7 +1817,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&invalid_ngn);
+        let _ = form(&invalid_ngn, false, false);
     }
 
     #[test]
@@ -1727,7 +1839,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&checkout);
+        let _ = form(&checkout, false, false);
 
         let fulfilled = state(
             BuyOrSell::Buy,
@@ -1746,7 +1858,7 @@ mod tests {
             },
             "NG",
         );
-        let _ = form(&fulfilled);
+        let _ = form(&fulfilled, false, false);
 
         for step in [
             MavapayFlowStep::History {
@@ -1771,7 +1883,7 @@ mod tests {
             },
         ] {
             let history = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&history);
+            let _ = form(&history, false, false);
         }
     }
 
@@ -1818,7 +1930,200 @@ mod tests {
             },
         ] {
             let detail = state(BuyOrSell::Buy, step, "NG");
-            let _ = form(&detail);
+            let _ = form(&detail, false, false);
         }
+    }
+
+    fn inspect(state: &MavapayState, mask_amounts: bool) -> capture::Inspection {
+        capture::inspect(
+            "mavapay-passive-order-privacy",
+            form(state, mask_amounts, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        )
+    }
+
+    #[test]
+    fn hidden_order_history_masks_saved_amount_but_preserves_status() {
+        let history = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::History {
+                transactions: Some(vec![transaction(
+                    TransactionStatus::Success,
+                    TransactionType::Withdrawal,
+                    Some(MavapayPaymentMethod::BankTransfer),
+                )]),
+                loading: false,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&history, true);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("123.45 NGN"));
+        assert!(hidden.contains("Order History"));
+        assert!(hidden.contains("Complete"));
+
+        let shown = inspect(&history, false);
+        assert!(shown.contains("123.45 NGN"));
+    }
+
+    #[test]
+    fn hidden_order_detail_masks_transaction_order_quote_and_fee_amounts() {
+        let transaction = transaction(
+            TransactionStatus::Paid,
+            TransactionType::Withdrawal,
+            Some(MavapayPaymentMethod::BankTransfer),
+        );
+        for quotes in [
+            Vec::new(),
+            vec![order_quote(
+                MavapayUnitCurrency::NigerianNairaKobo,
+                MavapayUnitCurrency::BitcoinSatoshi,
+            )],
+        ] {
+            let detail = state(
+                BuyOrSell::Buy,
+                MavapayFlowStep::OrderDetail {
+                    transaction: transaction.clone(),
+                    order: Some(order(TransactionStatus::Paid, quotes)),
+                    loading: false,
+                },
+                "NG",
+            );
+
+            let hidden = inspect(&detail, true);
+            for amount in [
+                "123.45 NGN",
+                "2.50 NGN",
+                "1.11 NGN",
+                "0.00006789 BTC",
+                "0.00000022 BTC",
+                "$0.33",
+            ] {
+                assert!(!hidden.contains(amount), "hidden order showed {}", amount);
+            }
+            assert!(hidden.contains("••••••"));
+            assert!(hidden.contains("Order Details"));
+            assert!(hidden.contains("Complete"));
+
+            let shown = inspect(&detail, false);
+            assert!(shown.contains("123.45 NGN"));
+            assert!(shown.contains("2.50 NGN") || shown.contains("0.00000022 BTC"));
+        }
+    }
+
+    /// Tenshu v175 hides Liquid, so a sell checkout pays only by its deposit
+    /// QR, even for an account with the grant and a Liquid wallet on disk.
+    #[test]
+    fn sell_checkout_offers_no_liquid_fulfilment_while_liquid_is_hidden() {
+        let quote = quote(
+            "quote-sell",
+            MavapayUnitCurrency::BitcoinSatoshi,
+            MavapayUnitCurrency::NigerianNairaKobo,
+            MavapayPaymentMethod::Lightning,
+        );
+        // A balance that covers the order and one that doesn't: each would
+        // show its own Liquid line if Liquid were shown.
+        for liquid_balance in [Some(quote.total_amount_in_source_currency), Some(0)] {
+            let checkout = state(
+                BuyOrSell::Sell,
+                MavapayFlowStep::Checkout {
+                    quote: quote.clone(),
+                    fulfilled_order: None,
+                    invoice_qr_code_data: Some(
+                        iced::widget::qr_code::Data::new(quote.invoice.as_bytes()).unwrap(),
+                    ),
+                    liquid_balance,
+                    fulfilling_ln_invoice: false,
+                    stream_order_id: None,
+                },
+                "NG",
+            );
+            let gate = crate::app::features::LiquidGate {
+                server_enabled: true,
+                local_state_exists: true,
+            };
+            let hidden = capture::inspect(
+                "mavapay-sell-checkout-liquid-hidden",
+                form(&checkout, false, gate.show()),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(hidden.contains("Deposit into the following address to proceed"));
+            assert!(!hidden.contains("Liquid"), "{:?}", liquid_balance);
+
+            // The same checkout with Liquid shown still offers it, so the
+            // absence above is the gate's doing.
+            let shown = capture::inspect(
+                "mavapay-sell-checkout-liquid-shown",
+                form(&checkout, false, true),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(shown.contains("Liquid"), "{:?}", liquid_balance);
+        }
+    }
+
+    #[test]
+    fn checkout_keeps_amount_visible_for_active_payment_review() {
+        let checkout = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::Checkout {
+                quote: quote(
+                    "quote-1",
+                    MavapayUnitCurrency::NigerianNairaKobo,
+                    MavapayUnitCurrency::BitcoinSatoshi,
+                    MavapayPaymentMethod::BankTransfer,
+                ),
+                fulfilled_order: None,
+                invoice_qr_code_data: None,
+                liquid_balance: None,
+                fulfilling_ln_invoice: false,
+                stream_order_id: None,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&checkout, true);
+        assert!(hidden.contains("125 Nigerian Naira (NGN)"));
+        assert!(hidden.contains("Amount to Send"));
+    }
+
+    #[test]
+    fn fulfilled_checkout_masks_confirmation_amounts_when_hidden() {
+        let fulfilled = state(
+            BuyOrSell::Buy,
+            MavapayFlowStep::Checkout {
+                quote: quote(
+                    "quote-2",
+                    MavapayUnitCurrency::NigerianNairaKobo,
+                    MavapayUnitCurrency::BitcoinSatoshi,
+                    MavapayPaymentMethod::BankTransfer,
+                ),
+                fulfilled_order: Some(order(TransactionStatus::Paid, Vec::new())),
+                invoice_qr_code_data: None,
+                liquid_balance: None,
+                fulfilling_ln_invoice: false,
+                stream_order_id: None,
+            },
+            "NG",
+        );
+
+        let hidden = inspect(&fulfilled, true);
+        assert!(hidden.contains("Order Confirmation"));
+        assert!(hidden.contains("Amount Paid"));
+        assert!(hidden.contains("Bitcoin Received"));
+        assert!(hidden.contains("Start New Transaction"));
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("123.45 NGN"));
+        assert!(!hidden.contains("0.00123456 BTC"));
+
+        let shown = inspect(&fulfilled, false);
+        assert!(shown.contains("123.45 NGN"));
+        assert!(shown.contains("0.00123456 BTC"));
     }
 }

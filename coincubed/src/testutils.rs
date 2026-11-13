@@ -60,6 +60,9 @@ pub struct DummyBitcoind {
     /// (always empty) mempool answers are trusted. Set to `false` to model
     /// Esplora, whose mempool reads are always empty whatever is in it.
     pub sees_mempool: bool,
+    /// What the next `sync_wallet` reports as a reorg's common ancestor, the way
+    /// Electrum/Esplora hand it over. Reported once, then `None`.
+    pub sync_reorg_ancestor: Option<BlockChainTip>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -102,6 +105,7 @@ impl DummyBitcoind {
             walks_ancestors: true,
             history_sync: Default::default(),
             sees_mempool: true,
+            sync_reorg_ancestor: None,
         }
     }
 }
@@ -192,7 +196,7 @@ impl BitcoinInterface for DummyBitcoind {
         _receive_index: bip32::ChildNumber,
         _change_index: bip32::ChildNumber,
     ) -> Result<Option<BlockChainTip>, String> {
-        Ok(None)
+        Ok(self.sync_reorg_ancestor.take())
     }
 
     fn received_coins(
@@ -359,23 +363,6 @@ impl DatabaseInterface for DummyDatabase {
         Box::new(DummyDatabase {
             db: self.db.clone(),
         })
-    }
-}
-
-fn record_txid_in_range(
-    rows: &mut Vec<(bitcoin::Txid, u32)>,
-    time: Option<u32>,
-    start: u32,
-    end: u32,
-    txid: impl FnOnce() -> bitcoin::Txid,
-) {
-    if let Some(time) = time {
-        if time >= start && time <= end {
-            let row = (txid(), time);
-            if !rows.contains(&row) {
-                rows.push(row);
-            }
-        }
     }
 }
 
@@ -699,20 +686,22 @@ impl DatabaseConnection for DummyDatabase {
         // Get txid and block time of every transactions that happened between start and end
         // timestamps.
         for coin in coins.values() {
-            record_txid_in_range(
-                &mut txids_and_time,
-                coin.block_info.map(|b| b.time),
-                start,
-                end,
-                || coin.outpoint.txid,
-            );
-            record_txid_in_range(
-                &mut txids_and_time,
-                coin.spend_block.map(|b| b.time),
-                start,
-                end,
-                || coin.spend_txid.expect("spent_at is not none"),
-            );
+            if let Some(time) = coin.block_info.map(|b| b.time) {
+                if time >= start && time <= end {
+                    let row = (coin.outpoint.txid, time);
+                    if !txids_and_time.contains(&row) {
+                        txids_and_time.push(row);
+                    }
+                }
+            }
+            if let Some(time) = coin.spend_block.map(|b| b.time) {
+                if time >= start && time <= end {
+                    let row = (coin.spend_txid.expect("spent_at is not none"), time);
+                    if !txids_and_time.contains(&row) {
+                        txids_and_time.push(row);
+                    }
+                }
+            }
         }
         // Apply order and limit
         txids_and_time.sort_by(|(_, t1), (_, t2)| t2.cmp(t1));

@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wallet · Vault</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--gutter:clamp(24px,3vw,48px);--page-max:1120px;color-scheme:dark}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);color-scheme:light}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul{margin:0}
+.tenshu ul{padding:0;list-style:none}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.ok{color:var(--good)}
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;white-space:nowrap}
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:8px;font-size:14px;line-height:1.3;color:var(--ink);text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni.on{background:var(--selected);font-weight:600}.ni.on .ic{color:var(--acc-ink)}
+.ni{justify-content:flex-start}
+.ni>span{flex:1 1 auto;min-width:0;text-align:left}
+.foot{border-top:1px solid var(--line);padding:10px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 8px 10px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.av{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--panel);color:var(--acc-ink);flex:none}
+.cubeidt{flex:1;display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+.cubeidt img{width:14px;height:14px;border-radius:50%}
+/* page head: the shared pattern (from Activity). Pinned; the rule spans the whole content pane; content scrolls under it. */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.phead{flex:none;background:var(--bg);border-bottom:1px solid var(--line)}
+.phead .in{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:28px var(--gutter) 20px}
+.phead.ctl .in{padding-bottom:0}
+.hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.hrow h1{font-size:22px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl img{width:16px;height:16px;display:block;border-radius:50%}
+.hact{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.tabs{display:flex;gap:4px;margin-top:16px}
+.tab{padding:10px 12px;border:0;background:none;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.tab:hover{color:var(--ink)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.scroll{flex:1;min-height:0;overflow:hidden}
+.pg{max-width:calc(var(--page-max) + 2 * var(--gutter));padding:24px var(--gutter) 40px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.acc{border-color:var(--accent);color:var(--acc-ink);font-weight:600}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.k{font-size:13px;color:var(--muted)}
+.big{font-size:36px;font-weight:600;line-height:1.2;margin-top:2px}
+.sats{font-size:14px;color:var(--muted)}.sats b{color:var(--ink);font-weight:600}
+.badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border:1px solid var(--accent);border-radius:999px;font-size:11.5px;font-weight:600;color:var(--acc-ink);vertical-align:middle;margin-left:8px}
+.coin{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#f7931a;color:#1a1208;font-weight:700;font-size:13px}
+.coin.usd{background:var(--panel);color:var(--ink);border:1px solid var(--line);font-size:11px}
+.arow{display:grid;grid-template-columns:32px 96px minmax(0,1fr) auto;column-gap:14px;align-items:center;min-height:64px;border-bottom:1px solid var(--line)}
+.arow .tk{font-weight:600}
+.arow .amt{font-weight:600}.arow .amt .u{color:var(--muted);font-weight:400;font-size:12px;margin-left:3px}
+.arow .fx{font-size:13px;color:var(--muted)}
+.ac{display:flex;gap:8px}
+.sec{margin-top:32px}
+.sec h2{font-size:16px;font-weight:600}
+.tx{display:grid;grid-template-columns:28px minmax(0,1fr) auto;column-gap:12px;align-items:center;min-height:56px;padding:6px 4px;border-bottom:1px solid var(--line)}
+.txl{margin-top:10px;border-top:1px solid var(--line)}
+.tx .dir{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted)}
+.tx .nm{font-weight:500}.tx .when{font-size:13px;color:var(--muted);display:block}
+.tx .v{text-align:right;font-weight:600}.tx .v .f{display:block;font-size:13px;color:var(--muted);font-weight:400}
+.grp{margin-top:8px}
+.grp+.grp{margin-top:36px}
+.grp h3{font-size:16px;font-weight:600}
+.rows{margin-top:12px;border-bottom:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;align-items:center;min-height:56px;padding:12px 0;border-top:1px solid var(--line)}
+.row .t{font-weight:500}.row .d{font-size:13px;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:16px}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:18px}
+.card .ch{display:flex;align-items:center;gap:8px;font-weight:600}
+.card .ch .ic{color:var(--muted)}
+.card .amt{font-size:22px;font-weight:600;margin-top:12px}
+.card .ac{margin-top:16px}
+.pill{display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:8px;border:1px solid var(--accent);background:transparent;font-weight:600;font-size:13px;color:var(--acc-ink)}
+.pill.fill{background:var(--accent);color:var(--on-accent)}
+.pill.ghost{gap:6px;border-color:var(--line);color:var(--ink);font-weight:500;cursor:pointer;font-family:inherit}.pill.ghost:hover{background:var(--hover)}.pill.ghost .ic{color:var(--muted)}
+.ic.spk{stroke-width:2}
+.eye{width:36px;height:36px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye.tb{width:32px;height:32px}.eye:hover{background:var(--hover);color:var(--ink)}
+/* Recent activity: the Activity tab's row, unchanged (columns, day groups, status) */
+.tenshu{--bad:#ffad9b}.tenshu.light{--bad:#8f2e1d}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.warn{color:var(--warn)}.bad{color:var(--bad)}
+.sech{display:flex;align-items:baseline;justify-content:space-between;gap:16px}
+.lnk{font-size:13px;font-weight:500;text-decoration:none}
+.act{margin:10px -12px 0}
+.act .cols,.act .row{display:grid;grid-template-columns:44px 112px minmax(0,1fr) 128px 132px;column-gap:12px;align-items:center;padding:0 12px}
+.act .cols{height:36px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+.act .r{text-align:right}
+.act .day{display:flex;align-items:center;gap:12px;padding:20px 12px 8px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
+.act .day .dn{color:var(--muted);font-weight:500}
+.act .row{width:100%;height:56px;min-height:0;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;cursor:pointer;text-align:left;font-size:14px}
+.act .row:hover{background:var(--hover)}
+.act .row .tm{font-size:13px;color:var(--muted)}
+.act .cell{display:flex;align-items:center;gap:8px;min-width:0}
+.act .cell .ic{color:var(--muted)}
+.act .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.act .wn{font-size:13px}
+.act .amt{font-weight:600;white-space:nowrap;font-size:14px;margin:0}
+.act .amt .u{font-weight:400;color:var(--muted);font-size:12px;margin-left:3px}
+.act .amt .fx{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:1px}
+.act .stc{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;white-space:nowrap}
+.tenshu a.btn{color:var(--ink);text-decoration:none}.btn:hover{background:var(--hover)}
+/* App preferences (Robert, 2026-10-29): a sliders icon button at the right end of the top bar (the gear stays with Cube Settings), styled like the eye, with an "App preferences" tooltip on hover or focus. */
+.tenshu .top{position:relative;z-index:8}
+.tenshu a.apg{position:relative;text-decoration:none;color:var(--muted)}.tenshu a.apg:hover{color:var(--ink)}
+.apg::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s}
+.apg:hover::after,.apg:focus-visible::after{opacity:1}
+/* coins (Robert, 2026-10-29): the Bitcoin and USDB logos (USDB from Flashnet's token list), network badge at bottom right. */
+.coin.btc,.coin.usd{background:none;border:0;padding:0;overflow:hidden}
+.coin>img{width:100%;height:100%;display:block;border-radius:50%}
+.coinw{position:relative;width:32px;height:32px;flex:none}
+.coinw .coin{width:32px;height:32px}
+.bdg{position:absolute;right:-4px;bottom:-4px;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;border:2px solid var(--bg)}
+.bdg svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round}
+.warn{color:var(--warn)}
+.bdg.vlt{background:#2b2b2b;color:var(--ink)}
+/* Vault-only: protection strip, the place Spark has no equivalent for. */
+.prot{margin-top:28px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.prot .pr{display:grid;grid-template-columns:28px minmax(0,1fr) auto;column-gap:14px;align-items:center;padding:14px 18px;border-top:1px solid var(--line)}
+.prot .pr:first-child{border-top:0}
+.prot .pr>.ic{color:var(--muted)}.prot .pr.att>.ic{color:var(--warn)}
+.prot .t{font-weight:500}.prot .d{font-size:13px;color:var(--muted)}
+.bdg.spark{background:#111;color:#fff}.bdg.ln{background:#f5c33b;color:#1a1208}.bdg.ln svg{fill:currentColor;stroke-width:1}.bdg.oc{background:#f7931a;color:#1a1208}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye first, then the status chips, then App preferences; the eye and App preferences are borderless icons. */
+.tenshu .top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.top .brand .ic{width:20px;height:20px}
+.top .chips .eye:not(.apg){order:-1}
+.top .chips .eye{width:32px;height:32px;border:0;background:transparent}
+.top .chips .eye:hover{background:var(--hover);color:var(--ink)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}}" style="width:1440px;height:900px;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+  <header class="top">
+    <span class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</span>
+    <div class="chips">
+      <button type="button" class="eye tb" aria-label="Hide balances" aria-pressed="false"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"></path><circle cx="9" cy="9" r="2.25"></circle></svg></button>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></span>
+      <span class="chip"><span class="ok" style="display:inline-flex;align-items:center;gap:5px"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></span>
+      <a class="eye apg" href="P-AppPrefs-InCube.dc.html" aria-label="App preferences" data-tip="App preferences"><svg class="ic s" aria-hidden="true" viewBox="0 0 24 24" style="stroke-width:1.75"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></a>
+    </div>
+  </header>
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="navp">
+        <div class="cubeid"><span class="av" aria-hidden="true"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></span><span class="cubeidt"><b>Everyday</b><span><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></div>
+        <a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="#"><svg class="ic spk" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v13M3.37 5.75l11.26 6.5M3.37 12.25l11.26-6.5"></path></svg><span>Spark · Daily spending</span></a><a class="ni on" href="#" aria-current="page"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+      </div>
+      <div class="foot"><a class="ni" href="#"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a></div>
+    </nav>
+    <main class="main">
+      <div class="phead"><div class="in">
+        <div class="hrow">
+          <div><h1>Vault · Family savings</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet · 2 of 3 keys</p></div>
+          <div class="hact"><a class="btn acc" href="P-Advanced.dc.html" aria-label="Vault tools: coins, PSBTs, recovery"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h7M13 5h2M3 13h3M9 13h6"></path><circle cx="11.5" cy="5" r="1.5"></circle><circle cx="7.5" cy="13" r="1.5"></circle></svg>Tools</a><a class="btn" href="#" aria-label="Vault wallet settings"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"></circle><circle cx="9" cy="9" r="5"></circle><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"></path></svg>Wallet settings</a></div>
+        </div>
+      </div></div>
+      <div class="scroll">
+        <div class="pg" style="{{shift}}">
+          <p class="k">Total balance</p>
+          <p class="big">$9,812.66</p>
+          <p class="sats"><b>12,231,690</b> SATS · <span class="warn">+100,000 pending</span></p>
+          <ul class="sec" style="border-top:1px solid var(--line);margin-top:24px" aria-label="Assets">
+            <li class="arow"><span class="coinw"><span class="coin btc" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span><span class="bdg vlt"><svg viewBox="0 0 18 18" aria-hidden="true"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></span></span><span class="tk">Bitcoin</span><span><span class="amt">12,231,690<span class="u">SATS</span></span><span class="fx" style="display:block">$9,812.66</span></span><span class="ac"><span class="pill fill">Send</span><span class="pill">Receive</span></span></li>
+          </ul>
+          <div class="prot" role="list" aria-label="Protection">
+            <div class="pr att" role="listitem"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><div><p class="t">Recovery path opens in 23 days for 2 coins</p><p class="d">1 of 2 recovery keys can spend after 180 days without spending. Refresh the coins to restart the time lock.</p></div><a class="btn" href="P-Advanced.dc.html">Refresh coins</a></div>
+            <div class="pr" role="listitem"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M4 2.75h6.5L14 6.25v9H4z"/><path d="M10.25 2.75v3.5H14M6.75 10h4.5M6.75 12.75h3"/></svg><div><p class="t">1 PSBT waiting for signatures</p><p class="d">To bc1q…synthetic…f41c · 1 of 2 signatures collected. Keychain · Alex's phone still needs to sign.</p></div><a class="btn" href="P-Advanced.dc.html">Review</a></div>
+          </div>
+          <div class="sec"><div class="sech"><h2>Recent activity</h2><a class="lnk" href="#">See all Vault activity</a></div>
+          <div class="act"><div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span>Status</span></div><h3 class="day">Today<span class="dn">Thu 29 Oct 2026</span></h3><button type="button" class="row" title="From bc1q…synthetic…8m3k"><span class="tm">22:25</span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"></path></svg><span class="sr">Vault wallet</span><span class="wn ell">Family savings</span></span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7.5V13h5.5"></path></svg><span class="sr">Received:</span><span class="ell">From bc1q…synthetic…8m3k</span></span><span class="amt r">+100,000<span class="u">SATS</span><span class="fx">$80.22</span></span><span class="stc warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="M9 5.5V9l2 1.5"></path></svg><span class="ell">Pending</span></span></button><h3 class="day">Monday<span class="dn">Mon 26 Oct 2026</span></h3><button type="button" class="row" title="Transfer from Spark · Daily spending"><span class="tm">08:40</span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"></path></svg><span class="sr">Vault wallet</span><span class="wn ell">Family savings</span></span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg><span class="sr">Transfer:</span><span class="ell">Transfer from Spark · Daily spending</span></span><span class="amt r">+500,000<span class="u">SATS</span><span class="fx">$401.10</span></span><span class="stc ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="m6.25 9.25 1.9 1.9 3.6-3.9"></path></svg><span class="ell">Confirmed</span></span></button><h3 class="day">Earlier<span class="dn">Tue 20 Oct 2026</span></h3><button type="button" class="row" title="To bc1q…synthetic…a7d2 · signed 2 of 3"><span class="tm">11:05</span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"></path></svg><span class="sr">Vault wallet</span><span class="wn ell">Family savings</span></span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7.5 5H13v5.5"></path></svg><span class="sr">Sent:</span><span class="ell">To bc1q…synthetic…a7d2 · signed 2 of 3</span></span><span class="amt r">−250,000<span class="u">SATS</span><span class="fx">$200.55</span></span><span class="stc ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="m6.25 9.25 1.9 1.9 3.6-3.9"></path></svg><span class="ell">Confirmed</span></span></button><button type="button" class="row" title="Coin refresh · time lock restarted"><span class="tm">10:58</span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"></path></svg><span class="sr">Vault wallet</span><span class="wn ell">Family savings</span></span><span class="cell"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"></path></svg><span class="sr">Refresh:</span><span class="ell">Coin refresh · time lock restarted</span></span><span class="amt r">−1,240<span class="u">SATS</span><span class="fx">$0.99</span></span><span class="stc ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"></circle><path d="m6.25 9.25 1.9 1.9 3.6-3.9"></path></svg><span class="ell">Confirmed</span></span></button></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"light":{"editor":"boolean","default":false},"scrolled":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {
+themeClass: this.props.light ? 'light' : '',
+shift: this.props.scrolled ? 'margin-top:-200px' : ''
+};
+}
+}
+</script>
+</body>
+</html>

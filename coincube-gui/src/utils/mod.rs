@@ -16,6 +16,12 @@ pub mod mock;
 #[cfg(test)]
 pub mod source_text;
 
+/// Percentage for an ongoing sync, safe to format with at least one decimal.
+/// Completion comes from the sync state, never from a rounded estimate.
+pub fn syncing_percent(progress: f64) -> f64 {
+    (progress * 100.0).clamp(0.0, 99.9)
+}
+
 /// Returns the current time as a [`Duration`] since the UNIX epoch.
 pub fn now() -> Duration {
     now_fallible().expect("cannot fail")
@@ -50,11 +56,15 @@ pub fn format_timestamp(timestamp: u64) -> Option<String> {
 
     let dt = DateTime::<Utc>::from_timestamp(timestamp as i64, 0)?;
 
-    Some(
-        dt.with_timezone(&Local)
-            .format("%b. %d, %Y - %T")
-            .to_string(),
-    )
+    Some({
+        let local = dt.with_timezone(&Local);
+        local
+            .format(&coincube_ui::locale::date_pattern(
+                "%b. %d, %Y - %T",
+                &local,
+            ))
+            .to_string()
+    })
 }
 
 pub fn format_time_ago(timestamp: i64) -> String {
@@ -105,6 +115,15 @@ pub mod device;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syncing_percent_never_rounds_to_complete() {
+        for progress in [0.9995, 0.9999, 0.999999, 1.0] {
+            assert_eq!(format!("{:.1}%", syncing_percent(progress)), "99.9%");
+        }
+        assert_eq!(format!("{:.1}%", syncing_percent(0.975)), "97.5%");
+        assert_eq!(format!("{:.1}%", syncing_percent(0.0)), "0.0%");
+    }
 
     #[test]
     fn truncate_middle_short_unchanged() {

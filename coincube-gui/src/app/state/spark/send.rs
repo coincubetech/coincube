@@ -32,8 +32,8 @@ use std::sync::{
 
 use coincube_core::miniscript::bitcoin::bech32;
 use coincube_spark_protocol::{
-    CrossChainAddress, CrossChainRoute, CrossChainRoutesOk, ParseInputKind, ParseInputOk,
-    PrepareSendOk, SendPaymentOk,
+    ConversionQuote, CrossChainAddress, CrossChainRoute, CrossChainRoutesOk, ParseInputKind,
+    ParseInputOk, PrepareSendFromOk, PrepareSendOk, SendPaymentOk, TokenPayment, WalletAsset,
 };
 use coincube_ui::component::amount::{format_u64_as_string, BitcoinDisplayUnit};
 use coincube_ui::widget::Element;
@@ -45,6 +45,7 @@ use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::message::Message;
 use crate::app::state::{redirect, State};
+use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::spark::SparkSendView;
 use crate::app::wallets::SparkBackend;
 use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket, RecipientIdentity};
@@ -236,7 +237,11 @@ fn payment_matches_intent(
     payments.iter().any(|p| {
         p.direction.eq_ignore_ascii_case("outgoing")
             && p.timestamp as i64 >= floor
-            && p.amount_sat.unsigned_abs() == pending.amount_sat
+            && match pending.token_amount {
+                // A token payment's sats figure is zero: match its token amount.
+                Some(token_amount) => p.token_amount == Some(token_amount),
+                None => p.amount_sat.unsigned_abs() == pending.amount_sat,
+            }
     })
 }
 
@@ -286,6 +291,10 @@ pub struct PendingSend {
     pub dispatched_at: i64,
     /// Amount in sats, as prepared.
     pub amount_sat: u64,
+    /// For a send that moves a token directly (a USDB invoice), its amount
+    /// in token base units, which history matching then compares instead of
+    /// `amount_sat`.
+    pub token_amount: Option<u64>,
     pub guard: RetryGuard,
 }
 
@@ -324,6 +333,10 @@ pub enum SparkSendTarget {
     OnChain,
     /// Bitcoin over Spark (Spark address / invoice).
     Spark,
+    /// US Dollar (USDB) over Spark: a Spark address, for an amount in US
+    /// Dollars, or a Spark invoice asking for US Dollar. Paid from the US
+    /// Dollar balance, with no conversion.
+    SparkUsd,
     /// USDt on another chain — a BTC-funded cross-chain send.
     Usdt,
     /// USDC on another chain — a BTC-funded cross-chain send.
@@ -332,11 +345,12 @@ pub enum SparkSendTarget {
 
 impl SparkSendTarget {
     /// Display order for the picker.
-    pub fn all() -> [SparkSendTarget; 5] {
+    pub fn all() -> [SparkSendTarget; 6] {
         [
             Self::Lightning,
             Self::OnChain,
             Self::Spark,
+            Self::SparkUsd,
             Self::Usdt,
             Self::Usdc,
         ]
@@ -357,10 +371,30 @@ impl SparkSendTarget {
         self.stablecoin().is_some()
     }
 
+    /// The balance this target always pays from, when it leaves no choice: a
+    /// cross-chain stablecoin is funded from bitcoin, and US Dollar over
+    /// Spark moves the US Dollar balance itself.
+    pub fn fixed_pay_from(self) -> Option<WalletAsset> {
+        match self {
+            Self::Usdt | Self::Usdc => Some(WalletAsset::Bitcoin),
+            Self::SparkUsd => Some(WalletAsset::Usdb),
+            Self::Lightning | Self::OnChain | Self::Spark => None,
+        }
+    }
+
+    /// The rail a destination for this target travels on.
+    fn rail(self) -> Self {
+        match self {
+            Self::SparkUsd => Self::Spark,
+            other => other,
+        }
+    }
+
     /// Card / picker-row asset label.
     pub fn label(self) -> &'static str {
         match self {
             Self::Lightning | Self::OnChain | Self::Spark => "Bitcoin",
+            Self::SparkUsd => "US Dollar",
             Self::Usdt => "USDt",
             Self::Usdc => "USDC",
         }
@@ -371,7 +405,7 @@ impl SparkSendTarget {
         match self {
             Self::Lightning => "Lightning",
             Self::OnChain => "On-chain",
-            Self::Spark => "Spark",
+            Self::Spark | Self::SparkUsd => "Spark",
             Self::Usdt | Self::Usdc => "Cross-chain",
         }
     }
@@ -382,6 +416,7 @@ impl SparkSendTarget {
             Self::Lightning => "Lightning invoice or Lightning address",
             Self::OnChain => "Bitcoin address",
             Self::Spark => "Spark address or invoice",
+            Self::SparkUsd => "Spark address or US Dollar invoice",
             Self::Usdt => "Recipient's USDt address on Ethereum, Tron, or Solana",
             Self::Usdc => "Recipient's USDC address on Ethereum, Tron, or Solana",
         }
@@ -401,7 +436,7 @@ impl SparkSendTarget {
             ParseInputKind::SparkAddress | ParseInputKind::SparkInvoice => Some(Self::Spark),
             ParseInputKind::Other => None,
         };
-        rail.is_none_or(|r| r == self)
+        rail.is_none_or(|r| r == self.rail())
     }
 }
 
@@ -426,6 +461,8 @@ pub struct SparkSend {
     /// when the wallet holds no USDB — then there is nothing to convert and
     /// the send simply fails on funds.
     usdb_holding: Option<String>,
+    /// The USDB holding as last loaded, for the side panel's US Dollar row.
+    usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     /// Free-text destination input (BOLT11 / BIP21 / on-chain address).
     pub destination_input: String,
     /// Amount override for amountless invoices / on-chain sends, in sats.
@@ -447,6 +484,9 @@ pub struct SparkSend {
     /// Quote and image handle for the celebration screen.
     sent_quote: coincube_ui::component::quote_display::Quote,
     sent_image_handle: iced::widget::image::Handle,
+    /// Last few payments fetched from the bridge, rendered under the
+    /// send form. Populated on reload and after each successful send.
+    recent_transactions: Vec<SparkRecentTransaction>,
     /// The cross-chain destination + routes, when the current send is one.
     /// Outlives the phases that read it so a failed send can be re-prepared —
     /// see [`CrossChainContext`].
@@ -493,8 +533,18 @@ pub struct SparkSend {
     /// two-card selector, the destination placeholder, and which send path
     /// `PrepareRequested` takes.
     receive_target: SparkSendTarget,
-    /// Whether the "THEY RECEIVE" picker modal is open.
+    /// Whether the "THEY RECEIVE" menu is open under its tile.
     receive_picker_open: bool,
+    /// The balance this send pays from (S4): Bitcoin by default.
+    pay_from: WalletAsset,
+    pay_from_picker_open: bool,
+    /// What the prepared preview pays from, and the conversion funding it,
+    /// for Review's Paid from and Conversion rows.
+    prepared_pay_from: WalletAsset,
+    prepared_conversion: Option<Box<ConversionQuote>>,
+    /// The token the prepared send moves directly (a USDB invoice paid from
+    /// USDB), for Review's amounts. Its preview's sats figures are zero.
+    prepared_token_payment: Option<TokenPayment>,
 }
 
 impl SparkSend {
@@ -507,6 +557,7 @@ impl SparkSend {
             balance_sats: 0,
             btc_balance_sats: 0,
             usdb_holding: None,
+            usdb_balance: None,
             destination_input: String::new(),
             amount_input: String::new(),
             invoice_amount_sat: None,
@@ -518,6 +569,7 @@ impl SparkSend {
             sent_image_handle: coincube_ui::component::quote_display::image_handle_for_context(
                 "lightning-send",
             ),
+            recent_transactions: Vec::new(),
             cross_chain: None,
             slippage_input: String::new(),
             advanced_open: false,
@@ -527,6 +579,11 @@ impl SparkSend {
             quote_countdown: None,
             receive_target: SparkSendTarget::Lightning,
             receive_picker_open: false,
+            pay_from: WalletAsset::Bitcoin,
+            pay_from_picker_open: false,
+            prepared_pay_from: WalletAsset::Bitcoin,
+            prepared_conversion: None,
+            prepared_token_payment: None,
         }
     }
 
@@ -569,6 +626,90 @@ impl SparkSend {
         self.recipient_receipt = None;
         self.phase = SparkSendPhase::Preparing;
         self.preparation_generation
+    }
+
+    /// The amount this send pays, when known: the invoice's, or the one typed.
+    fn known_amount_sat(&self, unit: BitcoinDisplayUnit) -> Option<u64> {
+        self.invoice_amount_sat
+            .or_else(|| parse_amount_to_sats(&self.amount_input, unit).ok())
+    }
+
+    /// Whether US Dollar can pay this send, or why not (S4: offered only
+    /// when the USDB covers it). The fees are known only once prepared, and
+    /// the bridge refuses a USDB that can't cover them, so this checks the
+    /// amount at the BTC/USD quote.
+    /// Whether US Dollar can be picked as the balance to pay from. Picking it
+    /// only needs a USDB balance: whether that balance covers this send is
+    /// checked at Prepare ([`Self::usdb_covers`]), which says why when it
+    /// doesn't — so US Dollar can be chosen before an amount is typed.
+    pub fn usdb_selectable(&self) -> Result<(), &'static str> {
+        if self.receive_target.is_stablecoin() {
+            return Err("Stablecoin sends are paid from bitcoin.");
+        }
+        match self.usdb_balance.as_ref() {
+            Some(usdb) if usdb.balance > 0 => Ok(()),
+            _ => Err("You have no USDB."),
+        }
+    }
+
+    pub fn usdb_covers(&self, cache: &Cache) -> Result<(), &'static str> {
+        if self.receive_target.is_stablecoin() {
+            return Err("Stablecoin sends are paid from bitcoin.");
+        }
+        // The amount is US Dollars already, so no price is needed. With none
+        // typed, a US Dollar invoice names its own and the bridge checks the
+        // balance against it.
+        if self.receive_target == SparkSendTarget::SparkUsd {
+            let Some(usdb) = self.usdb_balance.as_ref() else {
+                return Err("You have no US Dollar balance.");
+            };
+            return match self.usd_amount() {
+                Some(amount) if amount > usdb.balance => {
+                    Err("Your US Dollar balance doesn't cover this amount.")
+                }
+                _ => Ok(()),
+            };
+        }
+        let Some(usdb) = self.usdb_balance.as_ref() else {
+            return Err("You have no USDB.");
+        };
+        let Some(price) = super::reference_btc_usd_price(cache) else {
+            return Err("Waiting for a BTC/USD price.");
+        };
+        let Some(amount) = self.known_amount_sat(cache.bitcoin_unit) else {
+            return Err("Enter an amount first.");
+        };
+        let covers = crate::app::breez_spark::assets::stable_token_as_sats_u128(
+            usdb.balance,
+            usdb.decimals,
+            Some(price),
+        );
+        if covers < amount {
+            return Err("Your USDB doesn't cover this amount.");
+        }
+        Ok(())
+    }
+
+    /// The typed amount in USDB base units, for a US Dollar send. `None`
+    /// unless it is a positive amount with no more decimals than USDB has.
+    fn usd_amount(&self) -> Option<u128> {
+        let typed = self.amount_input.trim();
+        super::swap::parse_amount(
+            typed.strip_prefix('$').unwrap_or(typed),
+            WalletAsset::Usdb,
+            self.usdb_decimals(),
+        )
+    }
+
+    /// USDB's precision, for formatting a USDB amount this panel shows.
+    fn usdb_decimals(&self) -> u32 {
+        self.usdb_balance
+            .as_ref()
+            .map_or(super::swap::USDB_DEFAULT_DECIMALS, |usdb| usdb.decimals)
+    }
+
+    pub fn pay_from(&self) -> WalletAsset {
+        self.pay_from
     }
 
     /// The cross-chain destination + routes for the current send, if any.
@@ -661,9 +802,11 @@ impl SparkSend {
         let amount_sat = match parse_amount_to_sats(&self.amount_input, bitcoin_unit) {
             Ok(n) if n > 0 => n,
             _ => {
-                self.phase = SparkSendPhase::Error(format!(
+                self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                     "Enter the amount to send, in {}. Cross-chain sends are funded from your \
                      Bitcoin balance and converted when they're paid.",
+                    "Ingresa el importe que quieres enviar, en {}. Los envíos entre cadenas se \
+                     financian con tu saldo de Bitcoin y se convierten al pagarse.",
                     amount_unit_word(bitcoin_unit),
                 ));
                 return Task::none();
@@ -680,6 +823,7 @@ impl SparkSend {
                 backend
                     .prepare_cross_chain(destination, route, amount_sat, slippage)
                     .await
+                    .map(PreparedSend::from)
                     .map_err(|e| format!("Couldn't quote this send: {e}"))
             },
             move |result| {
@@ -720,6 +864,9 @@ impl SparkSend {
         // rails, where the key *is* the guard.
         let guard = retry_guard_for(&prepare);
         let amount_sat = prepare.amount_sat;
+        let token_amount = self
+            .prepared_token_payment
+            .map(|payment| payment.amount.amount.min(u64::MAX as u128) as u64);
         if prepare.cross_chain.is_some() {
             self.cross_chain_prepare = Some(prepare);
         }
@@ -734,6 +881,7 @@ impl SparkSend {
             request_id: None,
             dispatched_at: chrono::Utc::now().timestamp(),
             amount_sat,
+            token_amount,
             guard,
         });
 
@@ -836,66 +984,94 @@ impl State for SparkSend {
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
         let backend_available = self.backend.is_some();
-        let content = crate::app::view::dashboard(
+        // The sent celebration takes the whole page, head included.
+        let head = (!matches!(self.phase, SparkSendPhase::Sent(_))).then(|| {
+            crate::app::view::spark::sub_page_head(cache, "Send").rule(
+                coincube_ui::component::tenshu::steps(
+                    &crate::app::view::spark::SEND_STEPS,
+                    crate::app::view::spark::send::send_step(&self.phase),
+                ),
+            )
+        });
+        crate::app::view::dashboard_payment(
             menu,
             cache,
+            head,
             SparkSendView {
                 backend_available,
+                cube_name: &cache.cube_name,
                 destination_input: &self.destination_input,
                 amount_input: &self.amount_input,
                 amount_set_by_invoice: self.invoice_amount_sat.is_some(),
                 phase: &self.phase,
                 recipient_identities: self.recipient_identities(),
                 recipient_mismatch: self.recipient_mismatch(),
+                recipient_checks_enabled: branta::enabled(),
+                recipient_lookup_eligible: recipient_lookup_request(
+                    self.receive_target,
+                    &self.destination_input,
+                )
+                .is_some(),
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_quote: &self.sent_quote,
                 sent_image_handle: &self.sent_image_handle,
+                recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
-                usdb_conversion_hint: usdb_conversion_hint(
-                    self.invoice_amount_sat.or_else(|| {
-                        parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()
-                    }),
-                    // Cross-chain fees are quoted in the destination asset, not
-                    // sats (see `PrepareSendOk::cross_chain`), so only a plain
-                    // prepare's fee can be added to the sats comparison.
-                    match &self.phase {
-                        SparkSendPhase::Prepared(ok) if ok.cross_chain.is_none() => {
-                            Some(ok.fee_sat)
-                        }
-                        _ => None,
-                    },
+                balances: crate::app::view::spark::SparkBalances::new(
+                    cache,
                     self.btc_balance_sats,
-                    self.usdb_holding.as_deref(),
-                    cache.bitcoin_unit,
+                    self.usdb_balance.as_ref(),
                 ),
+                pay_from: self.pay_from,
+                usdb_unavailable: self.usdb_selectable().err(),
+                open_menu: if self.pay_from_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::PayFrom)
+                } else if self.receive_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::TheyReceive)
+                } else {
+                    None
+                },
+                paid_from: self.prepared_pay_from,
+                conversion: self.prepared_conversion.as_deref(),
+                token_payment: self.prepared_token_payment.as_ref(),
+                // A US Dollar send converts nothing, and its amount isn't sats.
+                usdb_conversion_hint: (self.receive_target != SparkSendTarget::SparkUsd)
+                    .then(|| {
+                        usdb_conversion_hint(
+                            self.invoice_amount_sat.or_else(|| {
+                                parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()
+                            }),
+                            // Cross-chain fees are quoted in the destination asset, not
+                            // sats (see `PrepareSendOk::cross_chain`), so only a plain
+                            // prepare's fee can be added to the sats comparison.
+                            match &self.phase {
+                                SparkSendPhase::Prepared(ok) if ok.cross_chain.is_none() => {
+                                    Some(ok.fee_sat)
+                                }
+                                _ => None,
+                            },
+                            self.btc_balance_sats,
+                            self.usdb_holding.as_deref(),
+                            cache.bitcoin_unit,
+                        )
+                    })
+                    .flatten(),
                 bitcoin_unit: cache.bitcoin_unit,
                 reference_btc_usd_price: super::reference_btc_usd_price(cache),
+                show_direction_badges: cache.show_direction_badges,
+                mask_amounts: cache.balance_amounts_masked(),
                 cross_chain_ctx: self.cross_chain.as_ref(),
                 slippage_input: &self.slippage_input,
                 advanced_open: self.advanced_open,
                 quote_countdown: self.quote_countdown.clone(),
                 receive_target: self.receive_target,
                 network: cache.network,
+                chain: cache.chain(),
                 theme_mode: cache.theme_mode,
             }
             .render(),
-        );
-
-        // The "THEY RECEIVE" picker overlays the panel when open — same pattern
-        // as the Spark Receive redesign.
-        if self.receive_picker_open {
-            let modal_content = crate::app::view::spark::send_target_picker_modal(
-                self.receive_target,
-                cache.network,
-            );
-            return coincube_ui::widget::modal::Modal::new(content, modal_content)
-                .on_blur(Some(crate::app::view::Message::SparkSend(
-                    crate::app::view::SparkSendMessage::CloseReceivePicker,
-                )))
-                .into();
-        }
-        content
+        )
     }
 
     fn reload(
@@ -903,7 +1079,10 @@ impl State for SparkSend {
         _daemon: Option<Arc<dyn crate::daemon::Daemon + Sync + Send>>,
         _wallet: Option<Arc<crate::app::wallet::Wallet>>,
     ) -> Task<Message> {
-        fetch_balance_task(self.backend.clone())
+        Task::batch(vec![
+            fetch_payments_task(self.backend.clone()),
+            fetch_balance_task(self.backend.clone()),
+        ])
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -941,7 +1120,10 @@ impl State for SparkSend {
             SparkSendMessage::DestinationInputChanged(_)
                 | SparkSendMessage::AmountInputChanged(_)
                 | SparkSendMessage::SetReceiveTarget(_)
+                | SparkSendMessage::SelectPayFrom(_)
+                | SparkSendMessage::StartFrom(_)
                 | SparkSendMessage::PrepareRequested
+                | SparkSendMessage::EditDetails
                 | SparkSendMessage::Reset
         ) {
             return Task::none();
@@ -957,7 +1139,10 @@ impl State for SparkSend {
                 // than an empty box. Clearing on the way out matters as much as
                 // filling in: swapping one invoice for another must not leave
                 // the previous invoice's amount sitting there.
-                let carried = bolt11_amount_sat(&self.destination_input);
+                // Not under US Dollar: the field holds dollars there, and a
+                // Lightning invoice is refused at prepare anyway.
+                let carried = bolt11_amount_sat(&self.destination_input)
+                    .filter(|_| self.receive_target != SparkSendTarget::SparkUsd);
                 if carried.is_some() || self.invoice_amount_sat.is_some() {
                     self.amount_input = carried
                         .map(|sats| format_amount_for_input(sats, cache.bitcoin_unit))
@@ -981,6 +1166,9 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::OpenReceivePicker => {
+                // One menu at a time: the other tile is still reachable from
+                // the keyboard while a menu is open.
+                self.pay_from_picker_open = false;
                 self.receive_picker_open = true;
                 Task::none()
             }
@@ -988,11 +1176,69 @@ impl State for SparkSend {
                 self.receive_picker_open = false;
                 Task::none()
             }
+            SparkSendMessage::OpenPayFromPicker => {
+                // A stablecoin send is BTC-funded cross-chain and a US Dollar
+                // send moves US Dollar: no choice.
+                if self.receive_target.fixed_pay_from().is_none() {
+                    self.receive_picker_open = false;
+                    self.pay_from_picker_open = true;
+                }
+                Task::none()
+            }
+            SparkSendMessage::ClosePayFromPicker => {
+                self.pay_from_picker_open = false;
+                Task::none()
+            }
+            SparkSendMessage::SelectPayFrom(asset) => {
+                if asset == WalletAsset::Usdb && self.usdb_selectable().is_err() {
+                    return Task::none();
+                }
+                if self
+                    .receive_target
+                    .fixed_pay_from()
+                    .is_some_and(|fixed| fixed != asset)
+                {
+                    return Task::none();
+                }
+                self.pay_from_picker_open = false;
+                if asset != self.pay_from {
+                    self.pay_from = asset;
+                    // A preview from the other balance no longer applies.
+                    self.phase = SparkSendPhase::Idle;
+                    self.abandon_payment_intent();
+                }
+                Task::none()
+            }
+            SparkSendMessage::StartFrom(asset) => {
+                // A stablecoin send is BTC-funded cross-chain and a US Dollar
+                // send moves US Dollar: no choice.
+                if self.receive_target.fixed_pay_from().is_some() || asset == self.pay_from {
+                    return Task::none();
+                }
+                self.pay_from_picker_open = false;
+                self.pay_from = asset;
+                self.phase = SparkSendPhase::Idle;
+                self.abandon_payment_intent();
+                Task::none()
+            }
             SparkSendMessage::SetReceiveTarget(target) => {
+                if self.receive_target == target {
+                    self.receive_picker_open = false;
+                    return Task::none();
+                }
                 // Switching what the recipient gets is a different payment —
                 // clear the destination/amount and any in-flight prepare.
                 self.receive_picker_open = false;
-                self.receive_target = target;
+                let previous = std::mem::replace(&mut self.receive_target, target);
+                match target.fixed_pay_from() {
+                    Some(asset) => self.pay_from = asset,
+                    // Leaving US Dollar over Spark goes back to the default
+                    // rather than keep a balance the user didn't pick.
+                    None if previous == SparkSendTarget::SparkUsd => {
+                        self.pay_from = WalletAsset::Bitcoin
+                    }
+                    None => {}
+                }
                 self.tampered_request = None;
                 self.phase = SparkSendPhase::Idle;
                 self.destination_input.clear();
@@ -1020,18 +1266,39 @@ impl State for SparkSend {
                 // override for an amountless invoice, and passing one alongside
                 // an invoice that already commits to an amount is rejected. The
                 // field is display-only in that case.
-                let amount_sat =
-                    if self.invoice_amount_sat.is_some() || self.amount_input.trim().is_empty() {
-                        None
-                    } else {
-                        match parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit) {
-                            Ok(n) => Some(n),
-                            Err(e) => {
-                                self.phase = SparkSendPhase::Error(e);
-                                return Task::none();
-                            }
+                //
+                // A US Dollar send takes its amount in US Dollars instead.
+                let usd_send = self.receive_target == SparkSendTarget::SparkUsd;
+                let usd_amount = if !usd_send || self.amount_input.trim().is_empty() {
+                    None
+                } else {
+                    match self.usd_amount() {
+                        Some(amount) => Some(amount),
+                        None => {
+                            self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
+                                "Enter the amount in US Dollars, with at most {} decimal places.",
+                                "Ingresa el importe en dólares estadounidenses, con un máximo de \
+                                 {} decimales.",
+                                self.usdb_decimals(),
+                            ));
+                            return Task::none();
                         }
-                    };
+                    }
+                };
+                let amount_sat = if usd_send
+                    || self.invoice_amount_sat.is_some()
+                    || self.amount_input.trim().is_empty()
+                {
+                    None
+                } else {
+                    match parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit) {
+                        Ok(n) => Some(n),
+                        Err(e) => {
+                            self.phase = SparkSendPhase::Error(e);
+                            return Task::none();
+                        }
+                    }
+                };
                 let input = self.destination_input.trim().to_string();
                 let generation = self.begin_preparation();
 
@@ -1066,6 +1333,22 @@ impl State for SparkSend {
                 // `prepare_lnurl_pay`) in one task, so the user sees a single
                 // "Preparing…" regardless of the underlying rail.
                 let target = self.receive_target;
+                let pay_from = self.pay_from;
+                if pay_from == WalletAsset::Usdb {
+                    if let Err(reason) = self.usdb_covers(cache) {
+                        // A US Dollar send has no other balance to suggest.
+                        self.phase = SparkSendPhase::Error(if usd_send {
+                            coincube_ui::locale::copy(reason).to_string()
+                        } else {
+                            coincube_ui::localized_format!(
+                                "{} Pay from bitcoin instead, or lower the amount.",
+                                "{} Paga con bitcoin o reduce el importe.",
+                                coincube_ui::locale::copy(reason)
+                            )
+                        });
+                        return Task::none();
+                    }
+                }
                 let recipient =
                     branta::begin(cache.network).zip(recipient_lookup_request(target, &input));
                 Task::perform(
@@ -1073,7 +1356,9 @@ impl State for SparkSend {
                         // Review waits for both: a bounded lookup cannot arrive
                         // after confirmation and turn a sent payment into a mismatch.
                         let (result, recipient) = tokio::join!(
-                            resolve_and_prepare(backend, input, amount_sat, target),
+                            resolve_and_prepare(
+                                backend, input, amount_sat, usd_amount, target, pay_from
+                            ),
                             async move {
                                 match recipient {
                                     Some((ticket, request)) => {
@@ -1112,7 +1397,16 @@ impl State for SparkSend {
                     self.tampered_request = Some(self.destination_input.trim().to_string());
                 }
                 match result {
-                    Ok(ok) => {
+                    Ok(prepared) => {
+                        let PreparedSend {
+                            ok,
+                            pay_from,
+                            conversion,
+                            token_payment,
+                        } = prepared;
+                        self.prepared_pay_from = pay_from;
+                        self.prepared_conversion = conversion;
+                        self.prepared_token_payment = token_payment;
                         if let Some((ticket, outcome)) = recipient {
                             self.recipient_receipt = Some((ok.handle.clone(), ticket, outcome));
                         }
@@ -1147,9 +1441,11 @@ impl State for SparkSend {
                     // The picked target is a stablecoin, but the pasted string
                     // isn't a recognised cross-chain address. Say so rather than
                     // firing funds somewhere unrecoverable.
-                    self.phase = SparkSendPhase::Error(format!(
+                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                         "That doesn't look like a {} address. Paste the recipient's {} address \
                          on Ethereum, Tron, or Solana.",
+                        "Eso no parece una dirección de {}. Pega la dirección de {} del \
+                         destinatario en Ethereum, Tron o Solana.",
                         self.receive_target.label(),
                         self.receive_target.label(),
                     ));
@@ -1163,8 +1459,9 @@ impl State for SparkSend {
                     routes.retain(|r| r.asset.eq_ignore_ascii_case(symbol));
                 }
                 if routes.is_empty() {
-                    self.phase = SparkSendPhase::Error(format!(
+                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                         "No route can currently send {} to this {} address.",
+                        "Ahora mismo ninguna ruta puede enviar {} a esta dirección de {}.",
                         self.receive_target.label(),
                         address.family,
                     ));
@@ -1275,8 +1572,14 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::SendSucceeded(ok) => {
-                self.sent_amount_display =
-                    format!("{} sats", format_u64_as_string(ok.amount_sat, ","));
+                self.sent_amount_display = match self.prepared_token_payment {
+                    // The bridge reports a token payment's sats as zero.
+                    Some(payment) => crate::app::view::spark::send::usdb_amount_line(
+                        payment.amount.amount,
+                        self.usdb_decimals(),
+                    ),
+                    None => format!("{} sats", format_u64_as_string(ok.amount_sat, ",")),
+                };
                 self.phase = SparkSendPhase::Sent(ok);
                 // Clear the inputs so a follow-up send doesn't re-use them.
                 self.destination_input.clear();
@@ -1291,6 +1594,9 @@ impl State for SparkSend {
                 self.cross_chain_prepare = None;
                 self.quote_countdown = None;
                 self.cross_chain = None;
+                // Refresh the Last Transactions list so the new payment
+                // appears under the send form once the user returns.
+                let refresh = fetch_payments_task(self.backend.clone());
                 // Pick celebration image based on send method.
                 // `last_send_method` mirrors the
                 // `breez_sdk_spark::SendPaymentMethod` variant names
@@ -1310,7 +1616,7 @@ impl State for SparkSend {
                 self.sent_quote = coincube_ui::component::quote_display::random_quote(context);
                 self.sent_image_handle =
                     coincube_ui::component::quote_display::image_handle_for_context(context);
-                Task::none()
+                refresh
             }
             SparkSendMessage::SendFailed(err) => {
                 // A definite rejection: the bridge answered. The payment did
@@ -1336,6 +1642,7 @@ impl State for SparkSend {
                         request_id: Some(request_id),
                         dispatched_at: chrono::Utc::now().timestamp(),
                         amount_sat: 0,
+                        token_amount: None,
                         guard: RetryGuard::None,
                     });
                 }
@@ -1396,7 +1703,9 @@ impl State for SparkSend {
                         };
                     }
                 }
-                Task::none()
+                // Refresh the visible history either way — the user is being
+                // told to check it.
+                fetch_payments_task(self.backend.clone())
             }
             SparkSendMessage::ResendAfterUnknownRequested => {
                 // Only from a reconciliation that found no trace, and only on a
@@ -1426,6 +1735,15 @@ impl State for SparkSend {
                     SparkSendMessage::PrepareRequested,
                 )))
             }
+            SparkSendMessage::EditDetails => {
+                // Only a quote has details to go back to. The quote, its
+                // recipient lookup and its payment key go: Prepare asks again.
+                if matches!(self.phase, SparkSendPhase::Prepared(_)) {
+                    self.phase = SparkSendPhase::Idle;
+                    self.abandon_payment_intent();
+                }
+                Task::none()
+            }
             SparkSendMessage::Reset => {
                 self.invalidate_recipient_identity();
                 self.tampered_request = None;
@@ -1448,10 +1766,11 @@ impl State for SparkSend {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
                     self.btc_balance_sats = btc_sats;
+                    self.usdb_balance = stable.clone();
                     self.usdb_holding = stable.as_ref().filter(|sb| sb.balance > 0).map(|sb| {
                         format!(
                             "{} {}",
-                            crate::app::breez_spark::assets::format_token_display(
+                            crate::app::breez_spark::assets::format_token_display_u128(
                                 sb.balance,
                                 sb.decimals
                             ),
@@ -1460,6 +1779,27 @@ impl State for SparkSend {
                     });
                 }
                 Task::none()
+            }
+            SparkSendMessage::PaymentsLoaded(payments) => {
+                self.recent_transactions = super::recent_transactions_from(&payments, cache);
+                Task::none()
+            }
+            SparkSendMessage::PaymentsFailed(err) => {
+                tracing::warn!("spark send list_payments failed: {}", err);
+                self.recent_transactions.clear();
+                Task::none()
+            }
+            SparkSendMessage::SelectTransaction(idx) => {
+                if let Some(payment) = self.recent_transactions.get(idx).cloned() {
+                    Task::batch(vec![
+                        redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
+                        Task::done(Message::View(crate::app::view::Message::SparkTransactions(
+                            crate::app::view::SparkTransactionsMessage::Preselect(payment),
+                        ))),
+                    ])
+                } else {
+                    Task::none()
+                }
             }
             SparkSendMessage::History => redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
         }
@@ -1645,14 +1985,18 @@ fn usdb_conversion_hint(
     let balance = Amount::from_sat(btc_balance_sats).to_formatted_string_with_unit(unit);
     if amount <= btc_balance_sats {
         // Only the fee spills over: the amount itself is a plain bitcoin send.
-        return Some(format!(
+        return Some(coincube_ui::localized_format!(
             "Your bitcoin balance is {balance} {unit_label}, which covers the amount but not \
-             the fee; the fee is converted from your {usdb} at the time of sending."
+             the fee; the fee is converted from your {usdb} at the time of sending.",
+            "Tu saldo de bitcoin es {balance} {unit_label}, que cubre el importe pero no la \
+             comisión; la comisión se convierte desde tus {usdb} al momento del envío."
         ));
     }
-    Some(format!(
+    Some(coincube_ui::localized_format!(
         "Your bitcoin balance is {balance} {unit_label}; the rest is converted from your {usdb} \
-         at the time of sending."
+         at the time of sending.",
+        "Tu saldo de bitcoin es {balance} {unit_label}; el resto se convierte desde tus {usdb} \
+         al momento del envío."
     ))
 }
 
@@ -1733,45 +2077,70 @@ fn format_prepare_error(operation: &str, raw: &str) -> String {
 /// LNURL inputs validate the amount against the server's min/max
 /// range up front so the gui can surface a useful error before
 /// actually hitting the LNURL callback URL.
+/// A prepared send and the balance it pays from (S4). Paying from USDB
+/// carries the conversion that funds it, for Review to show before confirm.
+#[derive(Debug, Clone)]
+pub struct PreparedSend {
+    pub ok: PrepareSendOk,
+    pub pay_from: WalletAsset,
+    pub conversion: Option<Box<ConversionQuote>>,
+    /// A USDB invoice or Spark address paid from USDB: the USDB the send
+    /// moves.
+    pub token_payment: Option<TokenPayment>,
+}
+
+impl From<PrepareSendOk> for PreparedSend {
+    /// A bitcoin-funded preview from the plain prepare RPCs.
+    fn from(ok: PrepareSendOk) -> Self {
+        Self {
+            ok,
+            pay_from: WalletAsset::Bitcoin,
+            conversion: None,
+            token_payment: None,
+        }
+    }
+}
+
+impl From<PrepareSendFromOk> for PreparedSend {
+    fn from(from: PrepareSendFromOk) -> Self {
+        Self {
+            ok: from.prepare,
+            pay_from: from.pay_from,
+            conversion: from.conversion,
+            token_payment: from.token_payment,
+        }
+    }
+}
+
 trait PrepareBackend {
     async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError>;
-    async fn prepare_send(
-        &self,
-        input: String,
-        amount_sat: Option<u64>,
-    ) -> Result<PrepareSendOk, SparkClientError>;
-    async fn prepare_lnurl_pay(
-        &self,
-        input: String,
-        amount_sat: u64,
-        comment: Option<String>,
-    ) -> Result<PrepareSendOk, SparkClientError>;
     async fn get_cross_chain_routes(
         &self,
         input: String,
     ) -> Result<CrossChainRoutesOk, SparkClientError>;
+    async fn prepare_send_from(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError>;
+    async fn prepare_lnurl_pay_from(
+        &self,
+        input: String,
+        amount_sat: u64,
+        comment: Option<String>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError>;
+    async fn prepare_usdb_send(
+        &self,
+        input: String,
+        amount: u128,
+    ) -> Result<PrepareSendFromOk, SparkClientError>;
 }
 
 impl PrepareBackend for SparkBackend {
     async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError> {
         SparkBackend::parse_input(self, input).await
-    }
-
-    async fn prepare_send(
-        &self,
-        input: String,
-        amount_sat: Option<u64>,
-    ) -> Result<PrepareSendOk, SparkClientError> {
-        SparkBackend::prepare_send(self, input, amount_sat).await
-    }
-
-    async fn prepare_lnurl_pay(
-        &self,
-        input: String,
-        amount_sat: u64,
-        comment: Option<String>,
-    ) -> Result<PrepareSendOk, SparkClientError> {
-        SparkBackend::prepare_lnurl_pay(self, input, amount_sat, comment).await
     }
 
     async fn get_cross_chain_routes(
@@ -1780,14 +2149,47 @@ impl PrepareBackend for SparkBackend {
     ) -> Result<CrossChainRoutesOk, SparkClientError> {
         SparkBackend::get_cross_chain_routes(self, input).await
     }
+
+    async fn prepare_send_from(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        self.client()
+            .prepare_send_from(input, amount_sat, pay_from)
+            .await
+    }
+
+    async fn prepare_lnurl_pay_from(
+        &self,
+        input: String,
+        amount_sat: u64,
+        comment: Option<String>,
+        pay_from: WalletAsset,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        self.client()
+            .prepare_lnurl_pay_from(input, amount_sat, comment, pay_from)
+            .await
+    }
+
+    async fn prepare_usdb_send(
+        &self,
+        input: String,
+        amount: u128,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        self.client().prepare_usdb_send(input, amount).await
+    }
 }
 
 async fn resolve_and_prepare<B: PrepareBackend>(
     backend: Arc<B>,
     input: String,
     amount_sat: Option<u64>,
+    usd_amount: Option<u128>,
     target: SparkSendTarget,
-) -> Result<PrepareSendOk, String> {
+    pay_from: WalletAsset,
+) -> Result<PreparedSend, String> {
     let parsed = backend
         .parse_input(input.clone())
         .await
@@ -1833,6 +2235,34 @@ async fn resolve_and_prepare<B: PrepareBackend>(
         }
     }
 
+    // US Dollar over Spark moves the US Dollar balance itself, with no
+    // conversion: to a Spark address for the amount typed in US Dollars, or
+    // to a Spark invoice that asks for US Dollar and names its own amount.
+    if target == SparkSendTarget::SparkUsd {
+        return match parsed.kind {
+            ParseInputKind::SparkAddress => {
+                let amount = usd_amount.ok_or_else(|| {
+                    coincube_ui::locale::copy("Enter how many US Dollars to send.").to_string()
+                })?;
+                backend
+                    .prepare_usdb_send(input, amount)
+                    .await
+                    .map(PreparedSend::from)
+                    .map_err(|e| format_prepare_error("prepare_send", &e.to_string()))
+            }
+            ParseInputKind::SparkInvoice if parsed.usdb_invoice => backend
+                .prepare_send_from(input, None, WalletAsset::Usdb)
+                .await
+                .map(PreparedSend::from)
+                .map_err(|e| format_prepare_error("prepare_send", &e.to_string())),
+            _ => Err(coincube_ui::locale::copy(
+                "US Dollar can be sent to a Spark address or to a Spark invoice that asks for \
+                 US Dollar. To send bitcoin, pick Bitcoin for what they receive.",
+            )
+            .to_string()),
+        };
+    }
+
     match parsed.kind {
         ParseInputKind::LnurlPay | ParseInputKind::LightningAddress => {
             let amount = amount_sat.ok_or_else(|| {
@@ -1852,24 +2282,37 @@ async fn resolve_and_prepare<B: PrepareBackend>(
                 ));
             }
             backend
-                .prepare_lnurl_pay(input, amount, None)
+                .prepare_lnurl_pay_from(input, amount, None, pay_from)
                 .await
+                .map(PreparedSend::from)
                 .map_err(|e| format_prepare_error("prepare_lnurl_pay", &e.to_string()))
         }
-        ParseInputKind::Bolt11Invoice => backend
-            .prepare_send(
-                spark_prepare_input(ParseInputKind::Bolt11Invoice, input),
-                amount_sat,
-            )
+        // A Spark invoice that asks for USDB names its own amount in USDB
+        // and can only be paid from USDB: the bridge refuses it from bitcoin,
+        // and the typed amount is sats. So it is prepared from USDB with no
+        // amount, whichever balance is picked, and Review says "Paid from US
+        // Dollar" before anything moves.
+        ParseInputKind::SparkInvoice if parsed.usdb_invoice => backend
+            .prepare_send_from(input, None, WalletAsset::Usdb)
             .await
+            .map(PreparedSend::from)
             .map_err(|e| format_prepare_error("prepare_send", &e.to_string())),
-        ParseInputKind::BitcoinAddress
-        | ParseInputKind::SparkAddress
-        | ParseInputKind::SparkInvoice
-        | ParseInputKind::Other => backend
-            .prepare_send(input, amount_sat)
-            .await
-            .map_err(|e| format_prepare_error("prepare_send", &e.to_string())),
+        kind => {
+            let input = if matches!(kind, ParseInputKind::Bolt11Invoice) {
+                spark_prepare_input(ParseInputKind::Bolt11Invoice, input)
+            } else {
+                input
+            };
+            // Paying from USDB converts the full amount (S4b). Paying from
+            // bitcoin goes through the same RPC so a shortfall conversion
+            // from USDB comes back with its quote for Review; the client
+            // refuses any token leg without one.
+            backend
+                .prepare_send_from(input, amount_sat, pay_from)
+                .await
+                .map(PreparedSend::from)
+                .map_err(|e| format_prepare_error("prepare_send", &e.to_string()))
+        }
     }
 }
 
@@ -1882,6 +2325,25 @@ fn cross_chain_family_label(family: &str) -> &'static str {
         "evm" => "an EVM (Ethereum) address",
         _ => "a cross-chain address",
     }
+}
+
+/// Panel-local thin wrapper around the shared
+/// [`super::fetch_payments_task`] helper — only the message variants
+/// differ between the Send and Receive panels.
+fn fetch_payments_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
+    super::fetch_payments_task(
+        backend,
+        |payments| {
+            Message::View(crate::app::view::Message::SparkSend(
+                crate::app::view::SparkSendMessage::PaymentsLoaded(payments),
+            ))
+        },
+        |err| {
+            Message::View(crate::app::view::Message::SparkSend(
+                crate::app::view::SparkSendMessage::PaymentsFailed(err),
+            ))
+        },
+    )
 }
 
 /// Spark-Send-flavoured wrapper around [`super::fetch_balance_task`].
@@ -1904,11 +2366,48 @@ mod tests {
     struct RecordingPrepareBackend {
         parsed: Mutex<Vec<String>>,
         prepared: Mutex<Vec<String>>,
+        /// The amount each prepare was asked for.
+        amounts: Mutex<Vec<Option<u64>>>,
+        /// Bitcoin can't cover the send: the bridge funds the rest from USDB.
+        shortfall: Option<ConversionQuote>,
+        /// The input is a Spark invoice asking for USDB.
+        usdb_invoice: bool,
+        /// The input is a plain Spark address.
+        spark_address: bool,
+    }
+
+    fn usdb_amount(amount: u128) -> coincube_spark_protocol::AssetAmount {
+        coincube_spark_protocol::AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        }
     }
 
     impl PrepareBackend for RecordingPrepareBackend {
         async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError> {
             self.parsed.lock().unwrap().push(input.clone());
+            if self.spark_address {
+                return Ok(ParseInputOk {
+                    kind: ParseInputKind::SparkAddress,
+                    amount_sat: None,
+                    lnurl_min_sendable_sat: None,
+                    lnurl_max_sendable_sat: None,
+                    lnurl_comment_allowed: 0,
+                    lnurl_address: None,
+                    usdb_invoice: false,
+                });
+            }
+            if self.usdb_invoice {
+                return Ok(ParseInputOk {
+                    kind: ParseInputKind::SparkInvoice,
+                    amount_sat: None,
+                    lnurl_min_sendable_sat: None,
+                    lnurl_max_sendable_sat: None,
+                    lnurl_comment_allowed: 0,
+                    lnurl_address: None,
+                    usdb_invoice: true,
+                });
+            }
             if bolt11_amount_sat(&input).is_none() {
                 return Err(SparkClientError::BridgeError {
                     kind: ErrorKind::Sdk,
@@ -1922,25 +2421,8 @@ mod tests {
                 lnurl_max_sendable_sat: None,
                 lnurl_comment_allowed: 0,
                 lnurl_address: None,
+                usdb_invoice: false,
             })
-        }
-
-        async fn prepare_send(
-            &self,
-            input: String,
-            _amount_sat: Option<u64>,
-        ) -> Result<PrepareSendOk, SparkClientError> {
-            self.prepared.lock().unwrap().push(input);
-            Ok(plain_prepare("prepared-bolt11"))
-        }
-
-        async fn prepare_lnurl_pay(
-            &self,
-            _input: String,
-            _amount_sat: u64,
-            _comment: Option<String>,
-        ) -> Result<PrepareSendOk, SparkClientError> {
-            panic!("BOLT11 must not use LNURL preparation")
         }
 
         async fn get_cross_chain_routes(
@@ -1948,6 +2430,84 @@ mod tests {
             _input: String,
         ) -> Result<CrossChainRoutesOk, SparkClientError> {
             panic!("BOLT11 must not probe cross-chain routes")
+        }
+
+        async fn prepare_send_from(
+            &self,
+            input: String,
+            amount_sat: Option<u64>,
+            pay_from: WalletAsset,
+        ) -> Result<PrepareSendFromOk, SparkClientError> {
+            self.prepared
+                .lock()
+                .unwrap()
+                .push(format!("from:{:?}:{}", pay_from, input));
+            self.amounts.lock().unwrap().push(amount_sat);
+            let conversion = match pay_from {
+                WalletAsset::Usdb => None,
+                WalletAsset::Bitcoin => self.shortfall.clone().map(Box::new),
+            };
+            let mut prepare = plain_prepare(match pay_from {
+                WalletAsset::Usdb => "prepared-from-usdb",
+                WalletAsset::Bitcoin => "prepared-bolt11",
+            });
+            prepare.has_token_leg = Some(conversion.is_some());
+            let token_payment = self.usdb_invoice.then(|| {
+                prepare.amount_sat = 0;
+                prepare.fee_sat = 0;
+                prepare.has_token_leg = Some(true);
+                TokenPayment {
+                    amount: coincube_spark_protocol::AssetAmount {
+                        asset: WalletAsset::Usdb,
+                        amount: 2_500_000,
+                    },
+                    fee: coincube_spark_protocol::AssetAmount {
+                        asset: WalletAsset::Usdb,
+                        amount: 0,
+                    },
+                }
+            });
+            Ok(PrepareSendFromOk {
+                prepare,
+                pay_from,
+                conversion,
+                token_payment,
+            })
+        }
+
+        async fn prepare_lnurl_pay_from(
+            &self,
+            _input: String,
+            _amount_sat: u64,
+            _comment: Option<String>,
+            _pay_from: WalletAsset,
+        ) -> Result<PrepareSendFromOk, SparkClientError> {
+            panic!("BOLT11 must not use LNURL preparation")
+        }
+
+        async fn prepare_usdb_send(
+            &self,
+            input: String,
+            amount: u128,
+        ) -> Result<PrepareSendFromOk, SparkClientError> {
+            self.prepared
+                .lock()
+                .unwrap()
+                .push(format!("usdb:{amount}:{input}"));
+            let mut prepare = plain_prepare("prepared-usdb-to-address");
+            prepare.amount_sat = 0;
+            prepare.fee_sat = 0;
+            prepare.method = "SparkAddress".to_string();
+            prepare.has_token_leg = Some(true);
+            Ok(PrepareSendFromOk {
+                prepare,
+                pay_from: WalletAsset::Usdb,
+                conversion: None,
+                token_payment: Some(TokenPayment {
+                    amount: usdb_amount(amount),
+                    fee: usdb_amount(0),
+                }),
+            })
         }
     }
 
@@ -2058,6 +2618,7 @@ mod tests {
                 SparkSendTarget::Lightning,
                 SparkSendTarget::OnChain,
                 SparkSendTarget::Spark,
+                SparkSendTarget::SparkUsd,
                 SparkSendTarget::Usdt,
                 SparkSendTarget::Usdc,
             ]
@@ -2078,6 +2639,18 @@ mod tests {
         assert_eq!(SparkSendTarget::Usdc.stablecoin(), Some("USDC"));
         assert!(SparkSendTarget::Usdc.is_stablecoin());
         assert!(!SparkSendTarget::Spark.is_stablecoin());
+        assert_eq!(SparkSendTarget::SparkUsd.label(), "US Dollar");
+        assert_eq!(SparkSendTarget::SparkUsd.badge(), "Spark");
+        assert!(!SparkSendTarget::SparkUsd.is_stablecoin());
+        assert_eq!(
+            SparkSendTarget::SparkUsd.fixed_pay_from(),
+            Some(WalletAsset::Usdb)
+        );
+        assert_eq!(
+            SparkSendTarget::Usdt.fixed_pay_from(),
+            Some(WalletAsset::Bitcoin)
+        );
+        assert_eq!(SparkSendTarget::Spark.fixed_pay_from(), None);
     }
 
     #[test]
@@ -2332,6 +2905,10 @@ mod tests {
         assert!(SparkSendTarget::Spark.accepts_parsed(&K::SparkAddress));
         assert!(SparkSendTarget::Spark.accepts_parsed(&K::SparkInvoice));
         assert!(!SparkSendTarget::Spark.accepts_parsed(&K::BitcoinAddress));
+        assert!(SparkSendTarget::SparkUsd.accepts_parsed(&K::SparkAddress));
+        assert!(SparkSendTarget::SparkUsd.accepts_parsed(&K::SparkInvoice));
+        assert!(!SparkSendTarget::SparkUsd.accepts_parsed(&K::Bolt11Invoice));
+        assert!(!SparkSendTarget::SparkUsd.accepts_parsed(&K::BitcoinAddress));
 
         // `Other` (BOLT12 / silent payment) is ambiguous — never rejected.
         assert!(SparkSendTarget::Lightning.accepts_parsed(&K::Other));
@@ -2389,18 +2966,546 @@ mod tests {
                 Arc::clone(&backend),
                 input,
                 None,
+                None,
                 SparkSendTarget::Lightning,
+                WalletAsset::Bitcoin,
             )
             .await
             .unwrap();
 
-            assert_eq!(prepared.handle, "prepared-bolt11");
+            assert_eq!(prepared.ok.handle, "prepared-bolt11");
             assert_eq!(backend.parsed.lock().unwrap().as_slice(), &[original]);
             assert_eq!(
                 backend.prepared.lock().unwrap().as_slice(),
-                &[SPEC_VECTOR_25M.to_string()]
+                &[format!("from:Bitcoin:{SPEC_VECTOR_25M}")]
             );
         }
+    }
+
+    /// Both balances prepare through the pay-from RPC: USDB converts the full
+    /// amount (S4b), and bitcoin names itself so a shortfall comes back with
+    /// its conversion.
+    #[tokio::test]
+    async fn both_balances_prepare_through_pay_from() {
+        let backend = Arc::new(RecordingPrepareBackend::default());
+        let prepared = resolve_and_prepare(
+            Arc::clone(&backend),
+            SPEC_VECTOR_25M.to_string(),
+            None,
+            None,
+            SparkSendTarget::Lightning,
+            WalletAsset::Usdb,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.pay_from, WalletAsset::Usdb);
+        assert_eq!(prepared.ok.handle, "prepared-from-usdb");
+        assert_eq!(
+            backend.prepared.lock().unwrap().as_slice(),
+            &[format!("from:Usdb:{}", SPEC_VECTOR_25M)]
+        );
+        let prepared = resolve_and_prepare(
+            Arc::clone(&backend),
+            SPEC_VECTOR_25M.to_string(),
+            None,
+            None,
+            SparkSendTarget::Lightning,
+            WalletAsset::Bitcoin,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.pay_from, WalletAsset::Bitcoin);
+        assert!(prepared.conversion.is_none());
+        assert_eq!(
+            backend.prepared.lock().unwrap().last(),
+            Some(&format!("from:Bitcoin:{}", SPEC_VECTOR_25M))
+        );
+    }
+
+    /// A Spark invoice asking for USDB is prepared from USDB with no amount
+    /// (the invoice names its own, in USDB), whichever balance is picked.
+    /// Review gets its USDB figures, and the send is unguarded: the bridge
+    /// drops the idempotency key on a token leg.
+    #[tokio::test]
+    async fn a_usdb_invoice_is_prepared_from_usdb_and_is_unguarded() {
+        for picked in [WalletAsset::Bitcoin, WalletAsset::Usdb] {
+            let backend = Arc::new(RecordingPrepareBackend {
+                usdb_invoice: true,
+                ..RecordingPrepareBackend::default()
+            });
+            let prepared = resolve_and_prepare(
+                Arc::clone(&backend),
+                "spark1usdbinvoice".to_string(),
+                Some(30_000),
+                None,
+                SparkSendTarget::Spark,
+                picked,
+            )
+            .await
+            .unwrap();
+            assert_eq!(prepared.pay_from, WalletAsset::Usdb);
+            assert_eq!(
+                backend.prepared.lock().unwrap().as_slice(),
+                &["from:Usdb:spark1usdbinvoice".to_string()]
+            );
+            // The typed sats never reach the bridge as a token amount.
+            assert_eq!(backend.amounts.lock().unwrap().as_slice(), &[None]);
+            assert_eq!(
+                prepared.token_payment.map(|p| p.amount.amount),
+                Some(2_500_000)
+            );
+            assert_eq!(retry_guard_for(&prepared.ok), RetryGuard::None);
+        }
+    }
+
+    /// US Dollar to a Spark address goes to the bridge in USDB base units,
+    /// paid from US Dollar, and is unguarded like any token send. Without an
+    /// amount nothing is prepared.
+    #[tokio::test]
+    async fn us_dollar_to_a_spark_address_is_sent_in_usdb_base_units() {
+        let backend = Arc::new(RecordingPrepareBackend {
+            spark_address: true,
+            ..RecordingPrepareBackend::default()
+        });
+        let prepared = resolve_and_prepare(
+            Arc::clone(&backend),
+            "spark1address".to_string(),
+            None,
+            Some(12_500_000),
+            SparkSendTarget::SparkUsd,
+            WalletAsset::Usdb,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.pay_from, WalletAsset::Usdb);
+        assert_eq!(prepared.ok.method, "SparkAddress");
+        assert_eq!(
+            backend.prepared.lock().unwrap().as_slice(),
+            &["usdb:12500000:spark1address".to_string()]
+        );
+        assert_eq!(
+            prepared.token_payment.map(|p| p.amount.amount),
+            Some(12_500_000)
+        );
+        assert_eq!(retry_guard_for(&prepared.ok), RetryGuard::None);
+
+        let error = resolve_and_prepare(
+            Arc::clone(&backend),
+            "spark1address".to_string(),
+            None,
+            None,
+            SparkSendTarget::SparkUsd,
+            WalletAsset::Usdb,
+        )
+        .await
+        .expect_err("no amount");
+        assert!(error.contains("US Dollars"), "{}", error);
+        assert_eq!(backend.prepared.lock().unwrap().len(), 1);
+
+        // Picking Bitcoin for what they receive keeps the address a bitcoin
+        // send, in sats.
+        let _ = resolve_and_prepare(
+            Arc::clone(&backend),
+            "spark1address".to_string(),
+            Some(30_000),
+            None,
+            SparkSendTarget::Spark,
+            WalletAsset::Usdb,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            backend.prepared.lock().unwrap().last().map(String::as_str),
+            Some("from:Usdb:spark1address")
+        );
+    }
+
+    /// Under US Dollar, a US Dollar invoice still names its own amount, and a
+    /// Lightning invoice is refused before anything is prepared.
+    #[tokio::test]
+    async fn us_dollar_takes_a_usdb_invoice_and_refuses_bitcoin_destinations() {
+        let invoice = Arc::new(RecordingPrepareBackend {
+            usdb_invoice: true,
+            ..RecordingPrepareBackend::default()
+        });
+        let prepared = resolve_and_prepare(
+            Arc::clone(&invoice),
+            "spark1usdbinvoice".to_string(),
+            None,
+            Some(1_000_000),
+            SparkSendTarget::SparkUsd,
+            WalletAsset::Usdb,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            invoice.prepared.lock().unwrap().as_slice(),
+            &["from:Usdb:spark1usdbinvoice".to_string()]
+        );
+        assert_eq!(invoice.amounts.lock().unwrap().as_slice(), &[None]);
+        assert_eq!(
+            prepared.token_payment.map(|p| p.amount.amount),
+            Some(2_500_000)
+        );
+
+        let lightning = Arc::new(RecordingPrepareBackend::default());
+        let error = resolve_and_prepare(
+            Arc::clone(&lightning),
+            SPEC_VECTOR_25M.to_string(),
+            None,
+            Some(1_000_000),
+            SparkSendTarget::SparkUsd,
+            WalletAsset::Usdb,
+        )
+        .await
+        .expect_err("a Lightning invoice");
+        assert!(error.contains("Lightning invoice"), "{}", error);
+        assert!(lightning.prepared.lock().unwrap().is_empty());
+    }
+
+    /// Under US Dollar a pasted Lightning invoice neither fills its sats into
+    /// the dollar field nor locks it.
+    #[test]
+    fn a_lightning_invoice_does_not_fill_the_us_dollar_amount() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::SparkUsd),
+        );
+        panel.amount_input = "12.50".to_string();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged(SPEC_VECTOR_25M.to_string()),
+        );
+        assert_eq!(panel.invoice_amount_sat, None);
+        assert_eq!(panel.amount_input, "12.50");
+
+        // The same paste under Bitcoin still fills and locks the field.
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Lightning),
+        );
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged(SPEC_VECTOR_25M.to_string()),
+        );
+        assert!(panel.invoice_amount_sat.is_some());
+    }
+
+    /// US Dollar over Spark pays from US Dollar and offers no other balance;
+    /// leaving it goes back to Bitcoin. Its amount is typed in US Dollars.
+    #[test]
+    fn us_dollar_over_spark_fixes_the_balance_and_reads_dollars() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::SparkUsd),
+        );
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        let _ = send(&mut panel, SparkSendMessage::OpenPayFromPicker);
+        assert!(!panel.pay_from_picker_open);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SelectPayFrom(WalletAsset::Bitcoin),
+        );
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+
+        for (typed, units) in [
+            ("12.50", Some(12_500_000)),
+            ("$12.50", Some(12_500_000)),
+            (" 1,000 ", Some(1_000_000_000)),
+            ("0.000001", Some(1)),
+            ("0.0000001", None),
+            ("0", None),
+            ("abc", None),
+        ] {
+            panel.amount_input = typed.to_string();
+            assert_eq!(panel.usd_amount(), units, "{:?}", typed);
+        }
+
+        // The balance covers what's typed, and nothing needs a price.
+        panel.usdb_balance = Some(usdb_dollars(20));
+        panel.amount_input = "12.50".to_string();
+        assert_eq!(panel.usdb_covers(&Cache::default()), Ok(()));
+        panel.amount_input = "20.01".to_string();
+        assert!(panel.usdb_covers(&Cache::default()).is_err());
+
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Spark),
+        );
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+    }
+
+    /// After an unknown outcome, a USDB invoice payment is found in history
+    /// by its token amount (its sats are zero), and never resent blindly.
+    #[test]
+    fn a_usdb_invoice_payment_is_matched_by_its_token_amount() {
+        let now = chrono::Utc::now().timestamp();
+        let pending = PendingSend {
+            request_id: None,
+            dispatched_at: now,
+            amount_sat: 0,
+            token_amount: Some(2_500_000),
+            guard: RetryGuard::None,
+        };
+        let token = |token_amount| PaymentSummary {
+            token_amount: Some(token_amount),
+            method: "token".to_string(),
+            ..payment(0, (now + 2) as u64, "outgoing")
+        };
+        assert!(payment_matches_intent(&[token(2_500_000)], &pending));
+        assert!(!payment_matches_intent(&[token(1_000_000)], &pending));
+        // A zero-sats payment that moved no token is not this one.
+        assert!(!payment_matches_intent(
+            &[payment(0, (now + 2) as u64, "outgoing")],
+            &pending
+        ));
+        assert!(!ReconcileOutcome::NoTrace.may_resend(pending.guard));
+    }
+
+    /// A bitcoin send the bitcoin balance can't cover is topped up from USDB.
+    /// That conversion reaches Review with its quote, so Confirm never moves
+    /// USDB the user wasn't shown (Codex P2 on #1013).
+    #[tokio::test]
+    async fn a_bitcoin_shortfall_reaches_review_with_its_conversion() {
+        let shortfall = ConversionQuote {
+            amount_in: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 5_000_000,
+            },
+            amount_out: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Bitcoin,
+                amount: 6_000,
+            },
+            fee: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 5_000,
+            },
+            amount_adjustment: None,
+            max_slippage_bps: 50,
+        };
+        let backend = Arc::new(RecordingPrepareBackend {
+            shortfall: Some(shortfall.clone()),
+            ..RecordingPrepareBackend::default()
+        });
+        let prepared = resolve_and_prepare(
+            Arc::clone(&backend),
+            SPEC_VECTOR_25M.to_string(),
+            None,
+            None,
+            SparkSendTarget::Lightning,
+            WalletAsset::Bitcoin,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.pay_from, WalletAsset::Bitcoin);
+        assert_eq!(prepared.ok.has_token_leg, Some(true));
+        assert_eq!(prepared.conversion.as_deref(), Some(&shortfall));
+
+        let mut panel = SparkSend::new(None);
+        let generation = panel.begin_preparation();
+        drop(send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(prepared),
+                recipient: None,
+            },
+        ));
+        assert!(matches!(panel.phase, SparkSendPhase::Prepared(_)));
+        assert_eq!(panel.prepared_pay_from, WalletAsset::Bitcoin);
+        assert_eq!(panel.prepared_conversion.as_deref(), Some(&shortfall));
+    }
+
+    fn usdb_dollars(dollars: u128) -> coincube_spark_protocol::UsdbBalanceSnapshot {
+        coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
+            balance: dollars * 1_000_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        }
+    }
+
+    fn priced() -> Cache {
+        Cache {
+            btc_usd_price: Some(50_000.0),
+            ..Cache::default()
+        }
+    }
+
+    fn send_priced(panel: &mut SparkSend, msg: SparkSendMessage) -> Task<Message> {
+        panel.update(None, &priced(), Message::View(ViewMessage::SparkSend(msg)))
+    }
+
+    /// US Dollar pays only when its USDB covers the amount at the quote,
+    /// and never a stablecoin (cross-chain) send.
+    #[test]
+    fn us_dollar_is_offered_only_when_usdb_covers_the_send() {
+        let mut panel = SparkSend::new(None);
+        let cache = priced();
+        assert_eq!(panel.usdb_covers(&cache), Err("You have no USDB."));
+        panel.usdb_balance = Some(usdb_dollars(10));
+        assert_eq!(
+            panel.usdb_covers(&Cache::default()),
+            Err("Waiting for a BTC/USD price.")
+        );
+        assert_eq!(panel.usdb_covers(&cache), Err("Enter an amount first."));
+        // $10 is 20,000 sats at $50,000.
+        panel.amount_input = "30000".into();
+        assert_eq!(
+            panel.usdb_covers(&cache),
+            Err("Your USDB doesn't cover this amount.")
+        );
+        panel.amount_input = "20000".into();
+        assert_eq!(panel.usdb_covers(&cache), Ok(()));
+        panel.receive_target = SparkSendTarget::Usdt;
+        assert_eq!(
+            panel.usdb_covers(&cache),
+            Err("Stablecoin sends are paid from bitcoin.")
+        );
+    }
+
+    /// US Dollar can be picked whenever there is a USDB balance — before an
+    /// amount is typed, and even for one it won't cover: Prepare checks the
+    /// amount and says why. With no USDB it can't be picked.
+    #[test]
+    fn us_dollar_is_selectable_with_any_usdb_balance() {
+        let mut panel = SparkSend::new(None);
+        assert_eq!(panel.usdb_selectable(), Err("You have no USDB."));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SelectPayFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+
+        panel.usdb_balance = Some(usdb_dollars(10));
+        assert_eq!(panel.usdb_selectable(), Ok(()));
+        // No amount yet, and then one USDB doesn't cover: still selectable.
+        for amount in ["", "30000"] {
+            panel.amount_input = amount.into();
+            panel.pay_from = WalletAsset::Bitcoin;
+            drop(send_priced(
+                &mut panel,
+                SparkSendMessage::SelectPayFrom(WalletAsset::Usdb),
+            ));
+            assert_eq!(panel.pay_from, WalletAsset::Usdb, "amount {:?}", amount);
+        }
+        // Stablecoin sends stay bitcoin-funded.
+        panel.receive_target = SparkSendTarget::Usdt;
+        assert_eq!(
+            panel.usdb_selectable(),
+            Err("Stablecoin sends are paid from bitcoin.")
+        );
+    }
+
+    #[test]
+    fn choosing_the_pay_from_balance() {
+        let mut panel = SparkSend::new(None);
+        panel.usdb_balance = Some(usdb_dollars(10));
+        panel.amount_input = "10000".into();
+        drop(send_priced(&mut panel, SparkSendMessage::OpenPayFromPicker));
+        assert!(panel.pay_from_picker_open);
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("bitcoin-preview"));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SelectPayFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        assert!(!panel.pay_from_picker_open);
+        assert!(
+            matches!(panel.phase, SparkSendPhase::Idle),
+            "a preview from the other balance no longer applies"
+        );
+        // A stablecoin target is paid from bitcoin, and offers no picker.
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Usdc),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+        drop(send_priced(&mut panel, SparkSendMessage::OpenPayFromPicker));
+        assert!(!panel.pay_from_picker_open);
+    }
+
+    /// The Overview's US Dollar Send opens Send paying from US Dollar before
+    /// any amount is typed; Prepare checks coverage then.
+    #[test]
+    fn starting_send_from_a_balance() {
+        let mut panel = SparkSend::new(None);
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("bitcoin-preview"));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Bitcoin),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+        // A stablecoin target stays paid from bitcoin.
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Usdc),
+        ));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+        // A US Dollar target stays paid from US Dollar, keeping its preview.
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::SparkUsd),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("usd-preview"));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Bitcoin),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        assert!(matches!(panel.phase, SparkSendPhase::Prepared(_)));
+    }
+
+    /// Review shows what pays and the conversion funding it.
+    #[test]
+    fn a_pay_from_preview_keeps_its_balance_and_conversion() {
+        let mut panel = SparkSend::new(None);
+        let generation = panel.begin_preparation();
+        let conversion = coincube_spark_protocol::ConversionQuote {
+            amount_in: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 12_400_000,
+            },
+            amount_out: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Bitcoin,
+                amount: 15_003,
+            },
+            fee: coincube_spark_protocol::AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 12_400,
+            },
+            amount_adjustment: None,
+            max_slippage_bps: 50,
+        };
+        drop(send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(PreparedSend {
+                    ok: plain_prepare("usdb-preview"),
+                    pay_from: WalletAsset::Usdb,
+                    conversion: Some(Box::new(conversion.clone())),
+                    token_payment: None,
+                }),
+                recipient: None,
+            },
+        ));
+        assert!(matches!(panel.phase, SparkSendPhase::Prepared(_)));
+        assert_eq!(panel.prepared_pay_from, WalletAsset::Usdb);
+        assert_eq!(panel.prepared_conversion.as_deref(), Some(&conversion));
     }
 
     #[tokio::test]
@@ -2412,7 +3517,9 @@ mod tests {
             Arc::clone(&backend),
             invalid.clone(),
             None,
+            None,
             SparkSendTarget::Lightning,
+            WalletAsset::Bitcoin,
         )
         .await
         .unwrap_err();
@@ -2606,6 +3713,21 @@ mod tests {
     }
 
     #[test]
+    fn reselecting_current_bitcoin_target_keeps_typed_draft() {
+        let mut panel = SparkSend::new(None);
+        panel.receive_target = SparkSendTarget::Spark;
+        panel.destination_input = "sp1qtyped-destination".to_owned();
+        panel.amount_input = "12345".to_owned();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Spark),
+        );
+        assert_eq!(panel.receive_target, SparkSendTarget::Spark);
+        assert_eq!(panel.destination_input, "sp1qtyped-destination");
+        assert_eq!(panel.amount_input, "12345");
+    }
+
+    #[test]
     fn cross_chain_routes_loaded_filters_to_the_selected_stablecoin() {
         let mut panel = SparkSend::new(None);
         panel.receive_target = SparkSendTarget::Usdt;
@@ -2688,7 +3810,7 @@ mod tests {
             panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(ok),
+                result: Ok(PreparedSend::from(ok)),
                 recipient: None,
             },
         );
@@ -2700,6 +3822,27 @@ mod tests {
             panel,
             SparkSendMessage::CrossChainRoutesLoaded(generation, Ok(routes)),
         );
+    }
+
+    /// Review's Back returns to the form with what was typed, and drops the
+    /// quote and its payment key so Prepare quotes again.
+    #[test]
+    fn back_from_review_keeps_what_was_typed() {
+        let mut panel = SparkSend::new(None);
+        panel.destination_input = "lnbc15u1synthetic".to_owned();
+        panel.amount_input = "1500".to_owned();
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("review"));
+        panel.send_idempotency_key = Some("review-key".to_owned());
+        drop(send(&mut panel, SparkSendMessage::EditDetails));
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        assert_eq!(panel.destination_input, "lnbc15u1synthetic");
+        assert_eq!(panel.amount_input, "1500");
+        assert!(panel.send_idempotency_key.is_none());
+
+        // Outside Review there is nothing to go back to.
+        panel.phase = SparkSendPhase::Sending;
+        drop(send(&mut panel, SparkSendMessage::EditDetails));
+        assert!(matches!(panel.phase, SparkSendPhase::Sending));
     }
 
     fn plain_prepare(handle: &str) -> PrepareSendOk {
@@ -2728,7 +3871,7 @@ mod tests {
             &mut replacement,
             SparkSendMessage::PreparationFinished {
                 generation: old_generation,
-                result: Ok(plain_prepare("old-panel-handle")),
+                result: Ok(PreparedSend::from(plain_prepare("old-panel-handle"))),
                 recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
             },
         );
@@ -2738,7 +3881,7 @@ mod tests {
             &mut replacement,
             SparkSendMessage::PreparationFinished {
                 generation: current_generation,
-                result: Ok(plain_prepare("new-panel-handle")),
+                result: Ok(PreparedSend::from(plain_prepare("new-panel-handle"))),
                 recipient: None,
             },
         );
@@ -2756,7 +3899,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation: old,
-                result: Ok(plain_prepare("old")),
+                result: Ok(PreparedSend::from(plain_prepare("old"))),
                 recipient: None,
             },
         );
@@ -2765,7 +3908,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation: current,
-                result: Ok(plain_prepare("current")),
+                result: Ok(PreparedSend::from(plain_prepare("current"))),
                 recipient: None,
             },
         );
@@ -2794,7 +3937,7 @@ mod tests {
                 &mut panel,
                 SparkSendMessage::PreparationFinished {
                     generation,
-                    result: Ok(plain_prepare("old")),
+                    result: Ok(PreparedSend::from(plain_prepare("old"))),
                     recipient: None,
                 },
             );
@@ -2805,7 +3948,7 @@ mod tests {
                 &mut panel,
                 SparkSendMessage::PreparationFinished {
                     generation,
-                    result: Ok(plain_prepare("old")),
+                    result: Ok(PreparedSend::from(plain_prepare("old"))),
                     recipient: None,
                 },
             );
@@ -2822,7 +3965,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("late")),
+                result: Ok(PreparedSend::from(plain_prepare("late"))),
                 recipient: None,
             },
         );
@@ -2883,7 +4026,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("reviewed")),
+                result: Ok(PreparedSend::from(plain_prepare("reviewed"))),
                 recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
             },
         );
@@ -2906,7 +4049,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("reviewed")),
+                result: Ok(PreparedSend::from(plain_prepare("reviewed"))),
                 recipient: Some((ticket.clone(), LookupResult::Identified(vec![identity]))),
             },
         );
@@ -2929,7 +4072,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("reviewed")),
+                result: Ok(PreparedSend::from(plain_prepare("reviewed"))),
                 recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
             },
         );
@@ -2947,7 +4090,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("reviewed")),
+                result: Ok(PreparedSend::from(plain_prepare("reviewed"))),
                 recipient: Some((branta::test_ticket(true), LookupResult::Silent)),
             },
         );
@@ -2966,7 +4109,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation: stale,
-                result: Ok(plain_prepare("old")),
+                result: Ok(PreparedSend::from(plain_prepare("old"))),
                 recipient: Some((ticket.clone(), LookupResult::Tampered)),
             },
         );
@@ -2975,7 +4118,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::PreparationFinished {
                 generation,
-                result: Ok(plain_prepare("current")),
+                result: Ok(PreparedSend::from(plain_prepare("current"))),
                 recipient: Some((ticket.clone(), LookupResult::Tampered)),
             },
         );
@@ -3122,6 +4265,18 @@ mod tests {
         assert!(!panel.receive_picker_open);
         assert!(matches!(panel.phase, SparkSendPhase::Idle));
         assert_eq!(panel.receive_target, SparkSendTarget::Lightning);
+    }
+
+    /// The route menus are dropdowns, so the other tile stays reachable from
+    /// the keyboard while one is open: opening it closes the first.
+    #[test]
+    fn opening_one_route_menu_closes_the_other() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        let _ = send(&mut panel, SparkSendMessage::OpenPayFromPicker);
+        assert!(panel.pay_from_picker_open && !panel.receive_picker_open);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        assert!(panel.receive_picker_open && !panel.pay_from_picker_open);
     }
 
     #[test]
@@ -3273,6 +4428,7 @@ mod tests {
             direction: direction.to_string(),
             method: "lightning".to_string(),
             description: None,
+            details: Default::default(),
         }
     }
 
@@ -3287,6 +4443,7 @@ mod tests {
             request_id: Some(7),
             dispatched_at: chrono::Utc::now().timestamp(),
             amount_sat: 1_000,
+            token_amount: None,
             guard,
         });
         panel.phase = SparkSendPhase::OutcomeUnknown {
@@ -3309,6 +4466,7 @@ mod tests {
             request_id: None,
             dispatched_at: chrono::Utc::now().timestamp(),
             amount_sat: 1_000,
+            token_amount: None,
             guard: RetryGuard::IdempotencyKey,
         });
         panel.phase = SparkSendPhase::Sending;
@@ -3504,6 +4662,7 @@ mod tests {
             request_id: None,
             dispatched_at: now,
             amount_sat: 1_000,
+            token_amount: None,
             guard: RetryGuard::IdempotencyKey,
         };
 

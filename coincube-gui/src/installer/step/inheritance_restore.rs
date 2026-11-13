@@ -237,12 +237,10 @@ impl Step for InheritanceRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match &self.phase {
             Phase::Decrypting | Phase::Ready { .. } => view::install(
                 progress,
-                email,
                 true,
                 false,
                 None,
@@ -252,7 +250,7 @@ impl Step for InheritanceRestoreStep {
                 ),
             ),
             Phase::Error { message } => {
-                view::install(progress, email, false, false, Some(message), None)
+                view::install(progress, false, false, Some(message), None)
             }
         }
     }

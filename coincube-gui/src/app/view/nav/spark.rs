@@ -49,14 +49,17 @@ mod tests {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             cube_name: "test cube",
+            spark_alias: None,
+            vault_alias: None,
             lightning_address: None,
             avatar: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             connect_authenticated: false,
+            connect_email: None,
             connect_stream_status: status,
+            connect: Default::default(),
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
         }
     }
 

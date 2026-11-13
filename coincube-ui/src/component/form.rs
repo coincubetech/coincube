@@ -238,8 +238,9 @@ impl<'a, Message: 'a + Clone> Form<'a, Message> {
                     self.input
                 })
                 .push(if !self.valid {
-                    self.warning
-                        .map(|message| text::caption(message).color(color::RED))
+                    self.warning.map(|message| {
+                        text::caption(crate::locale::copy(message)).color(color::RED)
+                    })
                 } else {
                     None
                 })

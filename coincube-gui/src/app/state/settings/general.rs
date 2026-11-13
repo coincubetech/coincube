@@ -510,6 +510,52 @@ mod tests {
     }
 
     #[test]
+    fn backup_stale_seed_result_after_cancel_cannot_reopen_flow() {
+        let mut state = state();
+        let attempt = crate::app::cache::AppGeneration::next();
+        state.backup_state = BackupSeedState::PinEntry { error: None };
+        state.backup_pin_attempt = Some(attempt);
+        state.backup_pin.digits = ["9".into(), "9".into(), "9".into(), "9".into()];
+        let _ = state.update(
+            None,
+            &Cache::default(),
+            backup_msg(view::BackupWalletMessage::PreviousStep),
+        );
+        let _ = state.update(
+            None,
+            &Cache::default(),
+            backup_msg(view::BackupWalletMessage::PinVerifiedAttempt(
+                attempt,
+                Ok(Zeroizing::new(words())),
+            )),
+        );
+        assert_eq!(state.backup_state, BackupSeedState::None);
+        assert!(state.backup_pin_attempt.is_none());
+        assert!(state.backup_mnemonic.is_none());
+        assert_eq!(state.backup_pin.value().as_str(), "");
+    }
+
+    #[test]
+    fn backup_second_submit_cannot_start_another_pin_trial() {
+        let mut state = state();
+        let attempt = crate::app::cache::AppGeneration::next();
+        state.backup_state = BackupSeedState::PinEntry { error: None };
+        state.backup_pin_attempt = Some(attempt);
+        state.backup_pin.digits = ["1".into(), "2".into(), "3".into(), "4".into()];
+        assert_eq!(
+            state
+                .update(
+                    None,
+                    &Cache::default(),
+                    backup_msg(view::BackupWalletMessage::VerifyPin)
+                )
+                .units(),
+            0
+        );
+        assert_eq!(state.backup_pin_attempt, Some(attempt));
+    }
+
+    #[test]
     fn intro_and_previous_step_transitions_clear_sensitive_state() {
         let mut state = state();
         state.backup_mnemonic = Some(Zeroizing::new(words()));
@@ -952,6 +998,8 @@ async fn update_unit_setting(
 pub enum SettingsSection {
     /// App/display preferences (network, unit, display mode, badges, fiat).
     General,
+    PaymentChecks,
+    DataExports,
     /// Backup & recovery: local paper backup + Recovery Kit + Vault alerts.
     Recovery,
 }
@@ -964,6 +1012,12 @@ pub struct GeneralSettingsState {
     new_unit_setting: UnitSetting,
     currencies: Vec<Currency>,
     show_direction_badges: bool,
+    saved: bool,
+    /// The Cube name as typed on Display & appearance, until it is saved.
+    /// `None` shows the Cube's current name.
+    name_input: Option<String>,
+    /// Payment checks is asking before turning recipient checks off.
+    confirm_checks_off: bool,
     error: Option<Error>,
     /// Master seed backup flow state.
     pub backup_state: BackupSeedState,
@@ -971,6 +1025,9 @@ pub struct GeneralSettingsState {
     /// Held as a separate field because `PinInput` doesn't implement
     /// `Debug`/`Clone`/`PartialEq` (required by `BackupSeedState`).
     pub backup_pin: PinInput,
+    /// Exact in-flight PIN attempt. A cancelled prompt cannot activate a
+    /// later prompt if its blocking duress result arrives late.
+    backup_pin_attempt: Option<crate::app::cache::AppGeneration>,
     /// Transient 12-word mnemonic held only while the backup flow is
     /// active. Loaded from the datadir via PIN decryption, wiped on
     /// flow completion / cancellation. `Zeroizing` ensures the heap
@@ -1002,9 +1059,13 @@ impl GeneralSettingsState {
             new_unit_setting: unit_setting,
             currencies: Vec::new(),
             show_direction_badges,
+            saved: false,
+            name_input: None,
+            confirm_checks_off: false,
             error: None,
             backup_state: BackupSeedState::None,
             backup_pin: PinInput::new(),
+            backup_pin_attempt: None,
             backup_mnemonic: None,
         }
     }
@@ -1032,6 +1093,7 @@ impl GeneralSettingsState {
 
         match msg {
             BackupWalletMessage::Start => {
+                self.backup_pin_attempt = None;
                 // Passkey Cubes derive their mnemonic from the WebAuthn PRF
                 // output — there is no encrypted mnemonic on disk and no PIN.
                 // Re-derive it through an assertion, which is the passkey
@@ -1080,6 +1142,9 @@ impl GeneralSettingsState {
                 })
             }
             BackupWalletMessage::VerifyPin => {
+                if self.backup_pin_attempt.is_some() {
+                    return Task::none();
+                }
                 if !matches!(self.backup_state, BackupSeedState::PinEntry { .. }) {
                     return Task::none();
                 }
@@ -1116,18 +1181,9 @@ impl GeneralSettingsState {
                 // Share the unlock counter: it is the same PIN and the same
                 // Cube, so guesses should accumulate across both surfaces.
                 let throttle_root = datadir.clone();
-                let remaining = unlock::throttle::ThrottleState::load(&throttle_root)
-                    .remaining_lockout(&cube_id);
-                if !remaining.is_zero() {
-                    return Task::done(Message::View(view::Message::Settings(
-                        view::SettingsMessage::BackupMasterSeed(
-                            view::BackupWalletMessage::PinVerified(Err(
-                                unlock::throttle::lockout_message(remaining),
-                            )),
-                        ),
-                    )));
-                }
-
+                let attempt = crate::app::cache::AppGeneration::next();
+                self.backup_pin_attempt = Some(attempt);
+                let app_generation = cache.app_generation;
                 // Run Argon2id PIN verification + mnemonic decryption off
                 // the UI thread to avoid blocking the event loop.
                 Task::perform(
@@ -1140,47 +1196,66 @@ impl GeneralSettingsState {
                             // the cheap Argon2 oracle (m=19 MiB vs the seed
                             // file's 256 MiB) and is gone; see
                             // PLAN-cube-unlock-hardening I1.
-                            let mut throttle =
-                                unlock::throttle::ThrottleState::load(&throttle_root);
-                            match load_mnemonic_words(
-                                &datadir,
-                                network,
-                                fingerprint,
+                            unlock::throttle::classify_seed_export_cube(
+                                &throttle_root,
+                                &cube,
+                                app_generation,
                                 &pin,
-                                &cube_id,
-                            ) {
-                                Ok(words) => {
-                                    throttle.record_success(&throttle_root, &cube_id);
-                                    // Wrap here, not after delivery: from this
-                                    // point on every copy the message queue
-                                    // makes is scrubbed on drop.
-                                    Ok(Zeroizing::new(words))
-                                }
-                                // Only a wrong PIN is a guess. An operational
-                                // failure keeps its own message and costs the
-                                // user nothing against the throttle.
-                                Err(e) if !is_wrong_pin(&e) => Err(e.to_string()),
-                                Err(_) => {
-                                    let penalty = throttle.record_failure(&throttle_root, &cube_id);
-                                    Err(if penalty.is_zero() {
-                                        "Incorrect PIN. Please try again.".to_string()
-                                    } else {
-                                        unlock::throttle::lockout_message(penalty)
-                                    })
-                                }
-                            }
+                                || {
+                                    load_mnemonic_words(
+                                        &datadir,
+                                        network,
+                                        fingerprint,
+                                        &pin,
+                                        &cube_id,
+                                    )
+                                },
+                            )
                         })
                         .await
                         .map_err(|e| format!("PIN verification task failed: {}", e))?
                     },
-                    |res| {
+                    move |res| {
+                        let outcome = match res {
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Words(words)) => {
+                                BackupWalletMessage::PinVerifiedAttempt(attempt, Ok(words))
+                            }
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Duress(proof)) => {
+                                return Message::View(view::Message::DuressActivateLocal(proof));
+                            }
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Wrong(penalty)) => {
+                                BackupWalletMessage::PinVerifiedAttempt(
+                                    attempt,
+                                    Err(if penalty.is_zero() {
+                                        "Incorrect PIN. Please try again.".into()
+                                    } else {
+                                        unlock::throttle::lockout_message(penalty)
+                                    }),
+                                )
+                            }
+                            Ok(unlock::throttle::SeedExportCubeAttempt::Locked(remaining)) => {
+                                BackupWalletMessage::PinVerifiedAttempt(
+                                    attempt,
+                                    Err(unlock::throttle::lockout_message(remaining)),
+                                )
+                            }
+                            Err(error) => {
+                                BackupWalletMessage::PinVerifiedAttempt(attempt, Err(error))
+                            }
+                        };
                         Message::View(view::Message::Settings(
-                            view::SettingsMessage::BackupMasterSeed(
-                                view::BackupWalletMessage::PinVerified(res),
-                            ),
+                            view::SettingsMessage::BackupMasterSeed(outcome),
                         ))
                     },
                 )
+            }
+            BackupWalletMessage::PinVerifiedAttempt(attempt, result) => {
+                if self.backup_pin_attempt != Some(attempt)
+                    || !matches!(self.backup_state, BackupSeedState::PinEntry { .. })
+                {
+                    return Task::none();
+                }
+                self.handle_backup_message(cache, BackupWalletMessage::PinVerified(result))
             }
             BackupWalletMessage::PinVerified(result) => {
                 // Shared by both unlock shapes: a verified PIN and a completed
@@ -1203,6 +1278,7 @@ impl GeneralSettingsState {
                     BackupSeedState::PinEntry { .. } => false,
                     _ => return Task::none(),
                 };
+                self.backup_pin_attempt = None;
                 if from_passkey {
                     // The ceremony is over; drop the parked controller.
                     crate::services::passkey::reauth::cancel();
@@ -1257,6 +1333,7 @@ impl GeneralSettingsState {
                 Task::none()
             }
             BackupWalletMessage::PreviousStep => {
+                self.backup_pin_attempt = None;
                 self.backup_state = match &self.backup_state {
                     BackupSeedState::PinEntry { .. } => {
                         self.backup_pin.clear();
@@ -1441,28 +1518,22 @@ impl GeneralSettingsState {
 ///
 /// # Where the words come from
 ///
-/// Bitcoin uses the session cache first; BTCB2 always opens its chain-bound seed. The
-/// unlock that opened this Cube already paid the ~831 ms Argon2id pass and is
-/// holding the decrypted signer, so re-reading the seed file buys nothing.
-/// Reading from disk is the fallback for the entry points that have no session
-/// — a Cube the installer just restored lands in the app without one.
+/// Always the seed file for this chain. A Bitcoin Blake2b Cube opens its
+/// chain-bound seed. A Cube the installer just restored has no session, and an
+/// already-unlocked Cube still re-derives so the PIN check is not cheaper than
+/// unlock.
 ///
 /// # What checks the PIN
 ///
-/// Not the decryption, on the fast path: there is no decryption on it.
-/// `session::unlocked_signer_with_pin_verification` compares against the PIN the
-/// unlock authenticated, under the session lock, which proves the same thing —
-/// nothing is handed back without the PIN that opened this Cube. What it does
-/// *not* do is cost 831 ms a guess, so the escalating lockout in
-/// `services::unlock::throttle` is what rate-limits this surface. Every caller
-/// checks it before calling here and charges it on every wrong PIN; see
+/// The seed file. Every guess pays a full Argon2id trial decryption, including
+/// when this Cube is already unlocked. The session cache is deliberately not
+/// consulted: comparing the cached PIN is microseconds and would turn Backup
+/// and Recovery Kit into a cheap oracle for a short PIN. The escalating lockout
+/// in `services::unlock::throttle` still applies. Backup and Recovery Kit
+/// callers run this inside its serialized check/trial/update helper; see
 /// [`is_wrong_pin`].
 ///
-/// A wrong PIN short-circuits rather than falling through to disk. Falling
-/// through would pay a full Argon2id pass to re-derive an answer the session has
-/// already given, and would report `InvalidPassword` either way.
-///
-/// The disk fallback goes through `services::unlock`, **not**
+/// The disk read goes through `services::unlock`, **not**
 /// `MasterSigner::from_datadir_by_fingerprint`: `coincube-core` has no keystore
 /// access, so it answers `DeviceSecretRequired` for every `ENCRYPTED_V3` file —
 /// which, once the Tier 1 migration has run, is every Cube. Using it here is
@@ -1480,31 +1551,18 @@ pub(super) fn load_mnemonic_words(
     cube_id: &str,
 ) -> Result<Vec<String>, SignerError> {
     let network = network.into();
-    // The legacy session is keyed by Cube ID and fingerprint, not chain.
-    // A fork must authenticate its own seed file even if a Bitcoin twin is unlocked.
-    let signer = if network.is_blake2b() {
-        crate::services::unlock::open_seed_by_fingerprint(
-            datadir,
-            network,
-            fingerprint,
-            pin,
-            cube_id,
-        )?
-    } else {
-        crate::app::session::unlocked_signer_with_pin_verification(cube_id, fingerprint, pin)
-            .or_else(|e| {
-                if matches!(e, SignerError::InvalidPassword) {
-                    return Err(e);
-                }
-                crate::services::unlock::open_seed_by_fingerprint(
-                    datadir,
-                    network,
-                    fingerprint,
-                    pin,
-                    cube_id,
-                )
-            })?
-    };
+    // Seed reveal always trial-decrypts the seed file. The session cache can
+    // answer in microseconds, which would let someone at an unlocked Cube grind
+    // a short PIN against Backup and Recovery Kit. One Argon2id pass per guess
+    // is the same cost as unlock. Callers still charge `InvalidPassword` to the
+    // UI throttle.
+    let signer = crate::services::unlock::open_seed_by_fingerprint(
+        datadir,
+        network,
+        fingerprint,
+        pin,
+        cube_id,
+    )?;
 
     Ok(signer.words().iter().map(|w| (*w).to_string()).collect())
 }
@@ -1521,11 +1579,45 @@ pub(super) fn load_mnemonic_words(
 /// "Incorrect PIN" sends the user to retype a PIN that was right, and each
 /// retry spends a guess against the shared unlock throttle — so a fault
 /// entirely outside their control locks them out of their own Cube.
+#[cfg(test)]
 pub(super) fn is_wrong_pin(e: &SignerError) -> bool {
     matches!(e, SignerError::InvalidPassword)
 }
 
 impl GeneralSettingsState {
+    /// A typed Cube name that differs from the saved one, to save when the
+    /// field is left by moving to another Settings section.
+    pub fn pending_cube_name(&self, current: &str) -> Option<String> {
+        self.name_input
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != current)
+            .map(str::to_owned)
+    }
+
+    /// The Display & appearance content without the dashboard, so the App
+    /// can show the avatar flow inline beneath Cube identity.
+    pub fn display_content<'a>(
+        &'a self,
+        cache: &'a Cache,
+        avatar_flow: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        crate::app::view::settings::general::display_content(
+            cache,
+            &self.new_price_setting,
+            &self.new_unit_setting,
+            &self.currencies,
+            self.show_direction_badges,
+            self.saved,
+            self.name_input.as_deref(),
+            avatar_flow,
+        )
+    }
+
+    pub fn section(&self) -> SettingsSection {
+        self.section
+    }
+
     /// Variant of `view` that also threads the Cube Recovery Kit
     /// status through so the "Back up your Recovery Kit" card can
     /// render. `SettingsState::view` (the outer wrapper) calls this
@@ -1547,11 +1639,14 @@ impl GeneralSettingsState {
             &self.new_unit_setting,
             &self.currencies,
             self.show_direction_badges,
+            self.saved,
             &self.backup_state,
             &self.backup_pin,
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
             Some(rk),
             Some(ra),
+            self.name_input.as_deref(),
+            self.confirm_checks_off,
         )
     }
 }
@@ -1570,11 +1665,14 @@ impl State for GeneralSettingsState {
             &self.new_unit_setting,
             &self.currencies,
             self.show_direction_badges,
+            self.saved,
             &self.backup_state,
             &self.backup_pin,
             self.backup_mnemonic.as_deref().map(|v| v.as_slice()),
             None,
             None,
+            self.name_input.as_deref(),
+            self.confirm_checks_off,
         )
     }
 
@@ -1598,7 +1696,29 @@ impl State for GeneralSettingsState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        if matches!(
+            &message,
+            Message::Fiat(FiatMessage::SaveChanges)
+                | Message::View(view::Message::Settings(
+                    view::SettingsMessage::DisplayUnitChanged(_)
+                        | view::SettingsMessage::ToggleDirectionBadges(_)
+                        | view::SettingsMessage::ToggleRecipientIdentityChecks(_)
+                ))
+        ) {
+            self.saved = false;
+        }
         match message {
+            Message::View(view::Message::Settings(view::SettingsMessage::CubeNameEdited(name))) => {
+                self.saved = false;
+                self.name_input = Some(name);
+                Task::none()
+            }
+            // The App saved the name; show the Cube's name again.
+            Message::View(view::Message::Settings(view::SettingsMessage::CubeNameSubmitted(_))) => {
+                self.name_input = None;
+                self.saved = true;
+                Task::none()
+            }
             Message::Fiat(FiatMessage::SaveChanges) => {
                 self.error = None;
                 tracing::info!(
@@ -1620,6 +1740,7 @@ impl State for GeneralSettingsState {
                 )
             }
             Message::SettingsSaved => {
+                self.saved = true;
                 tracing::info!("GeneralSettingsState: SettingsSaved received");
                 self.error = None;
                 // Reload unit setting from disk to sync toggle state with what was saved
@@ -1663,6 +1784,7 @@ impl State for GeneralSettingsState {
                 Task::none()
             }
             Message::SettingsSaveFailed(e) => {
+                self.saved = false;
                 let err_msg = crate::user_error::report(&e);
                 self.error = Some(e);
                 // Show error in global toast
@@ -1803,8 +1925,21 @@ impl State for GeneralSettingsState {
                 );
             }
             Message::View(view::Message::Settings(
+                view::SettingsMessage::AskRecipientChecksOff,
+            )) => {
+                self.confirm_checks_off = true;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::CancelRecipientChecksOff,
+            )) => {
+                self.confirm_checks_off = false;
+                Task::none()
+            }
+            Message::View(view::Message::Settings(
                 view::SettingsMessage::ToggleRecipientIdentityChecks(enabled),
             )) => {
+                self.confirm_checks_off = false;
                 // Enforce privacy before touching disk. Keep writes ordered with
                 // user actions so rapid toggles cannot persist an older choice.
                 crate::services::branta::set_enabled(enabled);
@@ -1812,7 +1947,10 @@ impl State for GeneralSettingsState {
                 match GlobalSettings::update_recipient_identity_checks(
                     &GlobalSettings::path(&cache.datadir_path), enabled,
                 ) {
-                    Ok(()) => Task::none(),
+                    Ok(()) => {
+                        self.saved = true;
+                        Task::none()
+                    }
                     Err(_) => Task::done(Message::View(view::Message::ShowError(
                         "Couldn't save your privacy preference. Your choice applies for this session; please try again before restarting.".into(),
                     ))),

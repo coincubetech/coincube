@@ -15,49 +15,6 @@ use coincubed::{
     DaemonControl, DaemonHandle,
 };
 
-// Keep synchronous backend-lock waits and HTTP transport off the async executor.
-// Dropping this future does not stop a started blocking worker: the coordinator
-// must revoke its gate, and preserve uncertain intent after Started.
-async fn blocking_claim_submission(
-    txid: Txid,
-    wtxid: coincube_core::miniscript::bitcoin::Wtxid,
-    submit: impl FnOnce() -> Result<
-            coincubed::poison_broadcast::SubmissionOutcome,
-            coincubed::poison_broadcast::SubmissionError,
-        > + Send
-        + 'static,
-) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-    tokio::task::spawn_blocking(submit)
-        .await
-        .map_err(|_| {
-            DaemonError::PoisonSubmission(coincubed::poison_broadcast::SubmissionError::Uncertain {
-                txid,
-                wtxid,
-            })
-        })?
-        .map_err(DaemonError::PoisonSubmission)
-}
-
-// The blocking task, rather than its cancellable async waiter, owns the daemon
-// lifecycle lock until submission returns. Stop/reload cannot replace its handle.
-async fn blocking_bound_claim_submission(
-    handle: tokio::sync::OwnedMutexGuard<Option<DaemonHandle>>,
-    txid: Txid,
-    wtxid: coincube_core::miniscript::bitcoin::Wtxid,
-    submit: impl FnOnce() -> Result<
-            coincubed::poison_broadcast::SubmissionOutcome,
-            coincubed::poison_broadcast::SubmissionError,
-        > + Send
-        + 'static,
-) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-    blocking_claim_submission(txid, wtxid, move || {
-        let result = submit();
-        drop(handle);
-        result
-    })
-    .await
-}
-
 fn authenticated_startup_error(error: coincubed::StartupError) -> DaemonError {
     match error {
         coincubed::StartupError::ConnectAdmission(error) => {
@@ -85,7 +42,28 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
             coincubed::commands::TX_BROADCAST_ERROR as i32,
             error.to_string(),
         ),
+        CommandError::FeeCeilingExceeded => DaemonError::FeeCeilingExceeded,
+        CommandError::FeeRateExceeded => DaemonError::FeeRateExceeded,
         other => DaemonError::Unexpected(other.to_string()),
+    }
+}
+
+// A Cube locked moments ago may still be stopping its daemon in the
+// background, holding this directory. Refuse rather than start a second
+// daemon on it: Windows has no `daemon.lock` to stop that.
+fn wait_for_previous_daemon(config: &Config) -> Result<(), DaemonError> {
+    wait_for_previous_daemon_within(config, super::stopping::WAIT_LIMIT)
+}
+
+fn wait_for_previous_daemon_within(
+    config: &Config,
+    limit: std::time::Duration,
+) -> Result<(), DaemonError> {
+    match config.data_directory() {
+        Some(dir) if !super::stopping::wait_for_within(dir.path(), limit) => Err(
+            DaemonError::Unexpected(super::stopping::STILL_STOPPING.to_string()),
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -125,8 +103,8 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Only the disposable-node integration driver can supply this fixture handle.
-    #[cfg(all(test, feature = "regtest-harness"))]
+    /// Tests can supply a disposable daemon handle without a production backend.
+    #[cfg(test)]
     pub(crate) fn from_regtest_handle(config: Config, handle: DaemonHandle) -> Self {
         Self {
             config,
@@ -135,17 +113,8 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Swap actual disposable controllers while preserving the selected endpoint.
-    #[cfg(all(test, feature = "regtest-harness"))]
-    pub(crate) async fn replace_regtest_handle(&self, replacement: DaemonHandle) {
-        let mut handle = self.handle.lock().await;
-        if let Some(previous) = handle.take() {
-            previous.stop_for_cleanup().unwrap();
-        }
-        *handle = Some(replacement);
-    }
-
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
+        wait_for_previous_daemon(&config)?;
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -158,6 +127,7 @@ impl EmbeddedDaemon {
     /// Local fork startup trusts the selected consensus-validating node and
     /// requires its exact-chain RPC admission before wallet/database writes.
     pub fn start_local_fork(config: Config) -> Result<Self, DaemonError> {
+        wait_for_previous_daemon(&config)?;
         let handle =
             DaemonHandle::start_with_local_node(config.clone()).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -225,6 +195,14 @@ impl EmbeddedDaemon {
         // The GUI owns the syncing companion; the authenticated daemon retains
         // its narrow Connect-only capability and never starts a pending node.
         config.pending_bitcoind = None;
+        if let Some(dir) = config.data_directory() {
+            if !super::stopping::wait_for_async(dir.path().to_path_buf()).await {
+                session.invalidate();
+                return Err(DaemonError::Unexpected(
+                    super::stopping::STILL_STOPPING.to_string(),
+                ));
+            }
+        }
         let result = tokio::task::spawn_blocking(move || {
             DaemonHandle::start_with_connect(config, backend, false)
                 .map(|handle| PendingConnectDaemon(Some(handle)))
@@ -274,8 +252,8 @@ impl Drop for EmbeddedDaemon {
             if let Some(handle) = std::sync::Arc::get_mut(&mut self.handle) {
                 cleanup(handle.get_mut().take());
             } else {
-                // An abandoned send may still own the lifecycle guard. Its
-                // cleanup must wait off the async executor for that worker.
+                // Another holder may still own the lifecycle guard. Its
+                // cleanup must wait off the async executor for that holder.
                 let handle = self.handle.clone();
                 std::thread::spawn(move || {
                     let pending = handle.blocking_lock().take();
@@ -364,6 +342,13 @@ impl Daemon for EmbeddedDaemon {
 
     async fn get_info(&self) -> Result<GetInfoResult, DaemonError> {
         self.command(|daemon| Ok(daemon.get_info())).await
+    }
+
+    async fn chain_tip_hash(
+        &self,
+    ) -> Result<coincube_core::miniscript::bitcoin::BlockHash, DaemonError> {
+        self.command(|daemon| daemon.chain_tip_hash().ok_or(DaemonError::NotImplemented))
+            .await
     }
 
     async fn request_sync(&self) -> Result<(), DaemonError> {
@@ -459,6 +444,36 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn create_spend_tx_capped(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Option<Address<address::NetworkUnchecked>>,
+        max_fee_sats: u64,
+    ) -> Result<CreateSpendResult, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .create_spend_within_limits(
+                    destinations,
+                    coins_outpoints,
+                    feerate_vb,
+                    change_address,
+                    Some(max_fee_sats),
+                )
+                .map_err(|error| match error {
+                    coincubed::commands::CommandError::FeeCeilingExceeded => {
+                        DaemonError::FeeCeilingExceeded
+                    }
+                    coincubed::commands::CommandError::FeeRateExceeded => {
+                        DaemonError::FeeRateExceeded
+                    }
+                    other => DaemonError::Unexpected(other.to_string()),
+                })
+        })
+        .await
+    }
+
     async fn rbf_psbt(
         &self,
         txid: &Txid,
@@ -495,277 +510,6 @@ impl Daemon for EmbeddedDaemon {
             daemon
                 .broadcast_spend(txid)
                 .map_err(map_spend_command_error)
-        })
-        .await
-    }
-
-    async fn reserve_change(
-        &self,
-    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
-        self.command(|daemon| {
-            daemon
-                .reserve_change()
-                .map(|reservation| reservation.index())
-                .map_err(|e| DaemonError::Unexpected(e.to_string()))
-        })
-        .await
-    }
-
-    async fn reserve_claim_change(
-        &self,
-        chain: coincube_core::chain::ChainId,
-        descriptor: &coincube_core::descriptors::CoincubeDescriptor,
-    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
-        if self.config.bitcoin_config.chain != chain
-            || self.config.main_descriptor.as_vault() != Some(descriptor)
-        {
-            return Err(DaemonError::Unexpected(
-                "Claim wallet identity does not match this daemon".into(),
-            ));
-        }
-        self.reserve_change().await
-    }
-
-    async fn claim_backend_binding(
-        &self,
-    ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
-        match self.handle.lock().await.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => Ok(control.claim_backend_binding()),
-            Some(_) => Err(DaemonError::ClientNotSupported),
-            None => Err(DaemonError::DaemonStopped),
-        }
-    }
-
-    async fn submit_verified_poison_to_connect(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        origin: String,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // Move the owned lifecycle guard into the blocking worker: abandoning
-        // the async caller must not release it while a send is still running.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_poison_to_connect(&verified, &binding, &gate, &origin)
-        })
-        .await
-    }
-
-    async fn submit_verified_ancestry_to_connect(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        origin: String,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // Move the owned lifecycle guard into the blocking worker: abandoning
-        // the async caller must not release it while a send is still running.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_ancestry_to_connect(&verified, &binding, &gate, &origin)
-        })
-        .await
-    }
-
-    async fn submit_verified_poison_to_node(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // Move the owned lifecycle guard into the blocking worker: abandoning
-        // the async caller must not release it while a send is still running.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_poison_to_node(&verified, &binding, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_ancestry_to_node(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // Move the owned lifecycle guard into the blocking worker: abandoning
-        // the async caller must not release it while a send is still running.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_ancestry_to_node(&verified, &binding, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_poison(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        let control = match self.handle.lock().await.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_claim_submission(txid, wtxid, move || {
-            control.submit_verified_poison(&verified, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_ancestry(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        let control = match self.handle.lock().await.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_claim_submission(txid, wtxid, move || {
-            control.submit_verified_ancestry(&verified, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_claim_fork(
-        &self,
-        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        let control = match self.handle.lock().await.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_claim_submission(txid, wtxid, move || {
-            control.submit_verified_claim_fork(&verified, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_split_step2(
-        &self,
-        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
-        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // The blocking worker owns the lifecycle guard until the one send
-        // returns, so a stop or reload cannot replace the handle mid-send.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_split_step2(&verified, target_index, &binding, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_split_step2_to_node(
-        &self,
-        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
-        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // As for Claim's node route: the blocking worker owns the lifecycle
-        // guard until the one send returns.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_split_step2_to_node(&verified, target_index, &binding, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_unified_sweep(
-        &self,
-        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
-        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        // As for step 2: the blocking worker owns the lifecycle guard until
-        // the one send returns.
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_unified_sweep(&verified, target_index, &binding, &gate)
-        })
-        .await
-    }
-
-    async fn submit_verified_unified_sweep_to_node(
-        &self,
-        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
-        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
-        binding: coincubed::poison_broadcast::ClaimBackendBinding,
-        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
-    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        let handle = self.handle.clone().lock_owned().await;
-        let control = match handle.as_ref() {
-            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
-            Some(_) => return Err(DaemonError::ClientNotSupported),
-            None => return Err(DaemonError::DaemonStopped),
-        };
-        let txid = verified.transaction().compute_txid();
-        let wtxid = verified.transaction().compute_wtxid();
-        blocking_bound_claim_submission(handle, txid, wtxid, move || {
-            control.submit_verified_unified_sweep_to_node(&verified, target_index, &binding, &gate)
         })
         .await
     }
@@ -852,6 +596,29 @@ mod anchor_startup_tests {
     const DESCRIPTOR: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
     fn config(endpoint: &str, dir: &std::path::Path) -> Config {
         toml::from_str(&format!("main_descriptor = \"{}\"\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin-blake2b'\n[esplora_config]\naddr = '{}'\n", DESCRIPTOR, dir.display(), endpoint)).unwrap()
+    }
+
+    /// A start on a directory whose daemon is still stopping after a lock is
+    /// refused, not started beside it: Windows has no `daemon.lock` to stop a
+    /// second daemon.
+    #[test]
+    fn a_start_refuses_while_the_previous_daemon_is_still_stopping() {
+        let dir = std::env::temp_dir().join(format!("start-refuse-{}", uuid::Uuid::new_v4()));
+        let config = config("http://127.0.0.1:9", &dir);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(dir.clone()), move || {
+            released.recv().unwrap();
+        });
+        match wait_for_previous_daemon_within(&config, std::time::Duration::from_millis(50)) {
+            Err(DaemonError::Unexpected(message)) => {
+                assert_eq!(message, crate::daemon::stopping::STILL_STOPPING)
+            }
+            other => panic!("{}", format!("expected a refusal, got {:?}", other.err())),
+        }
+        release.send(()).unwrap();
+        assert!(
+            wait_for_previous_daemon_within(&config, std::time::Duration::from_secs(5)).is_ok()
+        );
     }
     fn client(server: &MockServer) -> CoincubeClient {
         let mut client = CoincubeClient::new();
@@ -1000,7 +767,7 @@ mod anchor_startup_tests {
         assert!(!dir.exists());
     }
     #[tokio::test]
-    async fn owner_drop_revokes_authority_while_abandoned_worker_keeps_lifecycle_lock() {
+    async fn owner_drop_revokes_authority_while_a_worker_keeps_lifecycle_lock() {
         use coincubed::connect::ConnectAnchorAuthority;
         use std::time::{SystemTime, UNIX_EPOCH};
         let server = MockServer::start_async().await;
@@ -1032,38 +799,30 @@ mod anchor_startup_tests {
             handle: std::sync::Arc::new(Mutex::new(None)),
             connect_session: Some(session.clone()),
         };
-        use coincube_core::miniscript::bitcoin::{hashes::Hash, Wtxid};
         let handle = daemon.handle.clone();
         let guard = handle.clone().lock_owned().await;
         let (entered, started) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let worker = tokio::spawn(blocking_bound_claim_submission(
-            guard,
-            Txid::all_zeros(),
-            Wtxid::all_zeros(),
-            move || {
-                entered.send(()).unwrap();
-                released
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-                Err(coincubed::poison_broadcast::SubmissionError::Uncertain {
-                    txid: Txid::all_zeros(),
-                    wtxid: Wtxid::all_zeros(),
-                })
-            },
-        ));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // A blocking worker that owns the lifecycle guard, as any holder of
+        // a clone of the handle may.
+        let worker = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        });
         tokio::time::timeout(std::time::Duration::from_secs(2), started)
             .await
             .unwrap()
             .unwrap();
-        worker.abort();
-        assert!(worker.await.unwrap_err().is_cancelled());
         // Exercise the actual owner Drop, not only the blocking helper. It must
         // revoke authentication immediately without waiting on its held lock.
         drop(daemon);
         assert_eq!(session.fresh_anchor(), Err(AdmissionError::Unavailable));
         assert!(handle.try_lock().is_err());
         release.send(()).unwrap();
+        worker.await.unwrap();
         // The cleanup thread and worker must both release their ownership after
         // the guarded operation finishes. No poller is installed in this test.
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1099,110 +858,6 @@ mod anchor_startup_tests {
 }
 
 #[cfg(test)]
-mod poison_submission_scheduling_tests {
-    use super::*;
-    use coincube_core::miniscript::bitcoin::{hashes::Hash, Wtxid};
-    use coincubed::poison_broadcast::SubmissionError;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex as BlockingMutex,
-    };
-
-    // A single-thread executor must remain free to run revocation while the
-    // production blocking adapter waits on a synchronous backend lock. The
-    // daemon test separately exercises the real gate under its actual lock.
-    #[tokio::test(flavor = "current_thread")]
-    async fn revocation_runs_while_submission_waits_on_a_backend_lock() {
-        let backend = Arc::new(BlockingMutex::new(()));
-        let held_backend = backend.clone();
-        let (locked, lock_ready) = tokio::sync::oneshot::channel();
-        let (release, release_wait) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _guard = held_backend.lock().unwrap();
-            let _ = locked.send(());
-            // Hang guard also makes an accidental inline implementation fail
-            // instead of deadlocking the single-thread runtime indefinitely.
-            let _ = release_wait.recv_timeout(std::time::Duration::from_secs(5));
-        });
-        lock_ready.await.unwrap();
-        let worker_backend = backend.clone();
-        let revoked = Arc::new(AtomicBool::new(false));
-        let worker_revoked = revoked.clone();
-        let (started, received) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(blocking_claim_submission(
-            Txid::all_zeros(),
-            Wtxid::all_zeros(),
-            move || {
-                let _ = started.send(());
-                let _guard = worker_backend.lock().unwrap();
-                assert!(worker_revoked.load(Ordering::SeqCst));
-                Err(SubmissionError::Revoked)
-            },
-        ));
-        tokio::time::timeout(std::time::Duration::from_secs(5), received)
-            .await
-            .unwrap()
-            .unwrap();
-        revoked.store(true, Ordering::SeqCst); // executor must reach this while lock is held
-        let _ = release.send(());
-        holder.join().unwrap();
-        assert!(matches!(
-            task.await.unwrap(),
-            Err(DaemonError::PoisonSubmission(SubmissionError::Revoked))
-        ));
-    }
-    #[tokio::test(flavor = "current_thread")]
-    async fn abandoned_async_waiter_keeps_lifecycle_locked_until_worker_finishes() {
-        let handle = Arc::new(Mutex::new(None));
-        let guard = handle.clone().lock_owned().await;
-        let (entered, started) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let task = tokio::spawn(blocking_bound_claim_submission(
-            guard,
-            Txid::all_zeros(),
-            Wtxid::all_zeros(),
-            move || {
-                entered.send(()).unwrap();
-                released
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-                Err(SubmissionError::Uncertain {
-                    txid: Txid::all_zeros(),
-                    wtxid: Wtxid::all_zeros(),
-                })
-            },
-        ));
-        tokio::time::timeout(std::time::Duration::from_secs(2), started)
-            .await
-            .unwrap()
-            .unwrap();
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert!(
-            handle.try_lock().is_err(),
-            "abandoning a send must not permit handle replacement"
-        );
-        release.send(()).unwrap();
-        let _guard = tokio::time::timeout(std::time::Duration::from_secs(2), handle.lock())
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn blocking_worker_failure_is_uncertain_not_success() {
-        assert!(matches!(
-            blocking_claim_submission(Txid::all_zeros(), Wtxid::all_zeros(), || panic!(
-                "synthetic worker failure"
-            ))
-            .await,
-            Err(DaemonError::PoisonSubmission(
-                SubmissionError::Uncertain { .. }
-            ))
-        ));
-    }
-}
-
-#[cfg(test)]
 mod local_drop_tests {
     use super::*;
     #[test]
@@ -1233,6 +888,7 @@ mod local_drop_tests {
                 rpcserver_shutdown: shutdown.clone(),
                 rpcserver_handle: std::thread::spawn(|| Ok(())),
                 scan_abort: abort.clone(),
+                datadir_lock: None,
             }))),
         };
         drop(daemon);

@@ -535,6 +535,13 @@ impl Wallet {
         self
     }
 
+    /// The Vault records which of its keys came from the COINCUBE Keychain,
+    /// and none did. An unrecorded Vault may still hold one, so it is not
+    /// counted here.
+    pub fn lacks_keychain_key(&self) -> bool {
+        self.keychain_keys_recorded && self.keychain_key_ids.is_empty()
+    }
+
     /// Record which keys came from the COINCUBE Keychain, and whether that
     /// record is complete for this Vault.
     pub fn with_keychain_keys(
@@ -953,8 +960,7 @@ pub fn sync_status(
         // being performed.
         // For external daemon or if we otherwise don't know the node type,
         // treat it the same as bitcoind to be sure we don't mislead the user.
-        if daemon_backend == DaemonBackend::RemoteBackend
-            || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
+        if daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
             || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
         {
             return SyncStatus::WalletFullScan { progress: None };
@@ -962,7 +968,6 @@ pub fn sync_status(
     }
     // For an existing wallet with any local node type, if the first poll has
     // not completed, then the wallet has not yet caught up with the tip.
-    // An existing wallet with remote backend remains synced so we can ignore it.
     // If external daemon, we cannot be sure it will return last poll as it
     // depends on the version, so assume it won't unless the last poll at
     // startup is set.

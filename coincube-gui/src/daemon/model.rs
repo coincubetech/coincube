@@ -26,6 +26,16 @@ pub fn remaining_sequence(coin: &Coin, blockheight: u32, timelock: u16) -> u32 {
     }
 }
 
+/// Earliest recovery timing among confirmed, unspent coins. A sequence of at
+/// most one is spendable in the next block, as the recovery spend selector uses.
+pub fn next_recovery_sequence(coins: &[Coin], blockheight: u32, timelock: u16) -> Option<u32> {
+    coins
+        .iter()
+        .filter(|coin| coin.block_height.is_some() && coin.spend_info.is_none())
+        .map(|coin| remaining_sequence(coin, blockheight, timelock))
+        .min()
+}
+
 /// Whether the coin is owned by this wallet.
 /// This comprises all confirmed coins together with those
 /// unconfirmed coins from self.

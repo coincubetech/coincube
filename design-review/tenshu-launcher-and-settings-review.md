@@ -582,15 +582,15 @@ Closed the audit's residuals: Activity gained a `sparkHistory` lever with the ap
 
 Vault Split (audit row 80) stays as redesigned: its source strings ("Split: step 1 on Bitcoin", "Build step 2", "Reserve address") are the step jargon Robert asked to remove, so their absence is deliberate, not a gap.
 
-## Branta recipient verification in the new designs (2026-10-23, canvas version 45)
+## Branta recipient identity in the new designs (2026-10-23, canvas version 45)
 
-Robert asked that the designs factor in the Branta verification the app already ships (https://branta.pro, "Pay With Certainty": a verified recipient shows as a name and logo with a "Verified" badge; Branta never holds funds). What the app has (baseline 8495c3c0): a Cube Settings toggle "Recipient identity checks" with strict-mode copy and a "Branta privacy information" link (`settings/general.rs`); a shared card "Recipient identified" with logo, platform name, description and "View with Branta" (`shared/recipient_identity.rs`) that renders only for a current identification; `LookupResult { Silent, Identified, Tampered }` with the mismatch message "This payment request’s address does not match its verification data. Do not send." replacing the Spark send review and disabling Confirm, with a "Replace payment request" button; and, for Vault PSBTs, an identity review per identified output (address, amount, card) before broadcast, capped at 280px.
+Robert asked that the designs factor in the Branta recipient identity check the app already ships (https://branta.pro, "Pay With Certainty": a verified recipient shows as a name and logo with a "Verified" badge; Branta never holds funds). What the app has (baseline 8495c3c0): a Cube Settings toggle "Recipient identity checks" with strict-mode copy and a "Branta privacy information" link (`settings/general.rs`); a shared card "Recipient identified" with logo, platform name, description and "View with Branta" (`shared/recipient_identity.rs`) that renders only for a current identification; `LookupResult { Silent, Identified, Tampered }` with the mismatch message "This payment request’s address does not match its verification data. Do not send." replacing the Spark send review and disabling Confirm, with a "Replace payment request" button; and, for Vault PSBTs, an identity review per identified output (address, amount, card) before broadcast, capped at 280px.
 
-Already drawn before this pass: the Settings toggle and strict-mode copy (P-Settings → Payment checks, Cube-Workspace), the identity card as a Signing-board section, and a "Recipient identity (Branta) · Not identified" row in the Send review. Added now: Send (P-Send / V3-Wallet-Send) gained a `recipientIdentity` lever (notIdentified, identified, tampered, checksOff). Identified shows "Verified · Example Coffee Co." in the checks and the identity card under the recipient line; tampered replaces the review with the app's exact mismatch message and a primary "Replace payment request" that returns to compose, with no Confirm; checksOff shows "Checks off" with a "Turn on in Settings" link. Vault Advanced → PSBT detail (P-Advanced / V3-Vault-Advanced) gained a `psbtIdentity` lever that, for a ready, unbroadcast proposal, shows a "Recipient identity" block (first recipient's masked address and amount, then the card) above the Sign/Export/Broadcast row. Both pairs syntax-checked and smoke-tested by script across every lever value; the default Send review (Not identified) was re-walked in the live runtime. The lever states themselves were not viewed in a browser (they are set from the canvas lever panel, not reachable from prototype links).
+Already drawn before this pass: the Settings toggle and strict-mode copy (P-Settings → Payment checks, Cube-Workspace), the identity card as a Signing-board section, and a "Recipient identity (Branta) · Not identified" row in the Send review. Added now: Send (P-Send / V3-Wallet-Send) gained a `recipientIdentity` lever (notIdentified, identified, tampered, checksOff). Identified shows "Identified · Example Coffee Co." in the checks and the identity card under the recipient line; tampered replaces the review with the app's exact mismatch message and a primary "Replace payment request" that returns to compose, with no Confirm; checksOff shows "Checks off" with a "Turn on in Settings" link. Vault Advanced → PSBT detail (P-Advanced / V3-Vault-Advanced) gained a `psbtIdentity` lever that, for a ready, unbroadcast proposal, shows a "Recipient identity" block (first recipient's masked address and amount, then the card) above the Sign/Export/Broadcast row. Both pairs syntax-checked and smoke-tested by script across every lever value; the default Send review (Not identified) was re-walked in the live runtime. The lever states themselves were not viewed in a browser (they are set from the canvas lever panel, not reachable from prototype links).
 
 Open design point for Robert: the Liquid and cross-Cube Transfer flows have no Branta row because the app only looks up bolt11 invoices and on-chain bitcoin: requests, and the P2P and Buy/Sell flows are counterparties of a different kind; if Branta should appear there too, that is new product scope, not a gap against the current app.
 
-Prototype pickers for lever-only states (2026-10-23, canvas versions 46–47): the Branta result (Send compose: Not identified / Identified / Tampered / Checks off), the PSBT recipient identity (Vault Advanced → PSBT detail) and the Spark history state (Activity filters row) now have small dashed prototype buttons in the clickable prototype, so every state is reachable by clicking rather than from the canvas lever panel. Viewed in the live runtime: Send → Identified shows the "Recipient identified" card under the recipient line and "Verified · Example Coffee Co." in the checks; Send → Tampered replaces the review with the app's mismatch message and "Replace payment request", which returns to compose. A duplicated picker in the prototype Send copy from the first edit pass was removed in version 47.
+Prototype pickers for lever-only states (2026-10-23, canvas versions 46–47): the Branta result (Send compose: Not identified / Identified / Tampered / Checks off), the PSBT recipient identity (Vault Advanced → PSBT detail) and the Spark history state (Activity filters row) now have small dashed prototype buttons in the clickable prototype, so every state is reachable by clicking rather than from the canvas lever panel. Viewed in the live runtime: Send → Identified shows the "Recipient identified" card under the recipient line and "Identified · Example Coffee Co." in the checks; Send → Tampered replaces the review with the app's mismatch message and "Replace payment request", which returns to compose. A duplicated picker in the prototype Send copy from the first edit pass was removed in version 47.
 
 ## Opening Cube: no Continue step (2026-10-23, canvas version 51)
 
@@ -787,3 +787,43 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** the text under Strict mode in Payment checks needs cleanup.
 
 **Cause and fix:** four Settings rows that align to the top used the class `top`, which is also the top bar's class, so those rows were forced to the top bar's 56 px height and panel background and their descriptions spilled over the next text. The modifier is now `atop`. Strict mode and the other three rows now grow with their text. For Codex: nothing to carry over beyond rows that size to their content.
+
+## Square buttons everywhere (2026-10-26, canvas v122)
+
+**Robert:** the new design still has some rounded buttons; make every button match the newer, more square design (the "Confirm seed phrase" button).
+
+**Applied:**
+- **Radius rule.** Every button now uses the square corner of `.btn`: 8 px, or 6 px for controls under about 30 px tall, like `.tbtn`. This covers:
+  - the Send and Receive pills;
+  - the top-bar account, service and App preferences chips, and the Launcher's Network chip;
+  - filter, scope and choice chips;
+  - Buy/Sell modes and recipient rows;
+  - small inline actions (Sign in, Reconnect, advisories);
+  - the Launcher page arrows, the swap and info icon buttons, and step buttons.
+- **Unchanged, because they are not buttons:** toggles and switches, inputs, avatars, coin marks, step and page dots, status badges, cards, menus and dialogs.
+
+**For Codex:** in `coincube-ui`, `radius::PILL` and `radius::CHIP` are now 8. A new `radius::TOGGLE` (16) keeps the labelled pill toggle's shape. The remaining hand-rolled round buttons in the GUI are squared too.
+
+## One page layout for every Cube screen (2026-10-27, canvas v123)
+
+**Robert:** some screens have left and right margins that grow and shrink with the window, for example Overview and the Spark and Vault pages. Activity and Settings start closer to the side menu and run wider. This needs to be uniform.
+
+**Cause:** each board sized its own column. There were eight different maximum widths, from 820 to 1112 px. Overview, Advanced, P2P, Split and Transfer centered the column; Send, Receive and Buy/Sell centered their grid; Settings, Members, Liquid and others were left-aligned; Activity used its own 24 px padding at full width. Changing pages moved the title and content sideways.
+
+**Decision (Robert agreed):** anchor every page to the left with one gutter, and allow two widths. Centering every page was rejected: Activity's table and detail panel need the full width, and centering leaves an empty band next to the side menu on wide windows.
+
+**Applied:** all 20 Cube-shell boards now use a shared page-shell block:
+- gutter `clamp(24px, 3vw, 48px)`;
+- 28 px top padding;
+- reading width up to 1120 px;
+- Activity at full width, with its title, filters and table on the same gutter.
+
+Inner grids (Send, Receive, Buy/Sell) start at the left edge. The rule is written up in HANDOFF §4, "Page layout". Launcher, Opening, sign-in, Create, Restore and full-screen overlays (Connect, App preferences, Duress, Delete, Border Wallet) are not Cube pages and are unchanged.
+
+**For Codex:** add one page container in `coincube-ui` that implements the rule, with a reading variant and a wide variant. Replace each Cube screen's own padding and `max_width`/centering with it.
+
+## Connect benefits match what is enabled (2026-10-27, canvas v124)
+
+**Robert:** Duress mode is not enabled yet; it could say "Coming soon". Buy/Sell and P2P marketplace access is not enabled yet; remove it.
+
+**Applied:** "What Connect provides" now lists seven benefits on Connect › Account and on the sign-in screen, in both their signed-in and signed-out forms. The Duress row keeps its copy and gains a muted "Coming soon" badge, as the Pro plan tagline already says. The Buy/Sell and P2P row is removed. In the app this is `connect_benefit_rows` in `coincube-gui/src/app/view/connect/mod.rs`, using the Tenshu `status_badge` with the muted tone.

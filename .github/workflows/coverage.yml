@@ -32,11 +32,11 @@ jobs:
   rust-coverage:
     if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
-    # Instrumented workspace tests now take 36-46 minutes on hosted runners;
-    # 45 minutes left no margin and timed out mid-suite on #545, #557 and #559
-    # (cold builds plus doctests). Preserve the complete test/report passes
-    # and coverage threshold.
-    timeout-minutes: 75
+    # The full instrumented workspace run reached 75 minutes on #1157:
+    # tests and doctests passed, but the job timed out during the final report.
+    # Allow report-generation headroom after cold builds and the complete
+    # test suite; keep the coverage threshold and every test/report pass.
+    timeout-minutes: 90
     env:
       BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
       # Coverage (including the doctest pass) needs a single nightly toolchain:

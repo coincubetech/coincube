@@ -77,14 +77,12 @@
 //!
 //! # What this still does not hide
 //!
-//! Armed-ness remains readable from `duress-state.json` (`enrolled: true`) and
-//! from the presence of `duress.key`, both plaintext at the **datadir root**.
-//! An attacker who images the whole datadir learns that duress is enrolled
-//! regardless of what `mnemonics/` looks like, and the decoy does not change
-//! that. What the decoy buys is a `mnemonics/` folder that is uniform on its
-//! own — the case where an attacker sees the Cube's files without the root, or
-//! is timing a running process rather than reading a disk. Closing the root
-//! files is a separate change and is not in this plan.
+//! `duress-state.json` is sealed under `duress.key` once enrollment is written,
+//! so `enrolled: true` is not plaintext. The presence of `duress.key` at the
+//! datadir root still says a device key was minted. What the decoy buys is a
+//! `mnemonics/` folder that is uniform on its own — the case where an attacker
+//! sees the Cube's files without the root, or is timing a running process
+//! rather than reading a disk.
 
 use std::path::{Path, PathBuf};
 

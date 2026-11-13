@@ -14,9 +14,10 @@
 //!   `COINCUBE_SPARK_STORAGE_DIR`), fetch info + list payments, print to
 //!   stdout, and exit. Intended as the Phase 2 standalone harness.
 
+mod auto_convert;
 mod sdk_adapter;
 mod server;
-mod stable_balance_watch;
+mod swap;
 
 use clap::Parser;
 use tracing_subscriber::prelude::*;
@@ -36,34 +37,28 @@ struct Cli {
     /// `COINCUBE_SPARK_STORAGE_DIR`.
     #[arg(long)]
     smoke_test: bool,
+    /// Serve only the address lookups needed by a temporary destination unlock.
+    #[arg(long, conflicts_with = "smoke_test")]
+    receive_only: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Send all tracing output to stderr so the stdout channel stays clean
     // for JSON frames.
-    //
-    // The env filter sits on the `fmt` layer only. The failure watch has
-    // to see the SDK's `stable_balance` WARN regardless of what
-    // `RUST_LOG` says, so it is a sibling layer with no filter of its
-    // own — it does its own cheap level/target check.
-    let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel();
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,breez_sdk_spark=warn")),
         );
-    tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(stable_balance_watch::FailureWatchLayer::new(failure_tx))
-        .init();
+    tracing_subscriber::registry().with(fmt_layer).init();
 
     let cli = Cli::parse();
     if cli.smoke_test {
         smoke_test::run().await
     } else {
-        server::run(failure_rx).await
+        server::run(cli.receive_only).await
     }
 }
 
@@ -91,6 +86,7 @@ mod smoke_test {
             mnemonic,
             None, // passphrase
             storage_dir,
+            false,
         )
         .await?;
 

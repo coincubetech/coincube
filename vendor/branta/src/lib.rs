@@ -1,19 +1,17 @@
 //! Rust SDK for the Branta V2 API.
 //!
-//! See the crate README for an integration guide and quick-start examples.
+//! Use [`BrantaService::verify`] on send and [`BrantaService::add_payment`] on receive.
+//! Status handling and parent platforms are in the [developer docs](https://developer.branta.pro).
 
-pub mod enums;
-pub mod error;
-pub mod extensions;
-pub mod models;
-pub mod options;
-pub mod v2;
+mod enums;
+mod error;
+mod extensions;
+mod models;
+mod options;
+mod v2;
 
-pub use enums::{BrantaServerBaseUrl, DestinationType, PrivacyMode};
+pub use enums::{BrantaEnvironment, DestinationType, VerifyStatus};
 pub use error::BrantaError;
-pub use models::{AddPaymentResult, Destination, Payment, PaymentsResult, Platform};
-pub use options::BrantaClientOptions;
-pub use v2::{
-    AesEncryptionTrait, BrantaClient, BrantaClientTrait, BrantaService, GuidSecretGenerator,
-    PaymentBuilder, QrDestination, QrParser, SecretGeneratorTrait,
-};
+pub use models::{AddPaymentResult, Destination, Payment, Platform, VerifyResult};
+pub use options::BrantaApiOptions;
+pub use v2::{BrantaService, PaymentBuilder};

@@ -1,19 +1,31 @@
 # BTCB2 Cube creation and reopening
 
-Fork Cube creation uses the Connect-backed Vault installer. A fresh Cube receives
-an independent identifier, a PIN, and its own master seed even when its Vault is
-watch-only. The seed is displayed for offline backup and advancing requires an
-explicit written-backup confirmation. Encrypted persistence follows successful
-backend admission; Cube settings retain the exact ChainId and master fingerprint.
-The post-create continuation reopens the Cube through PIN verification. A Cube
-restored from its Connect backup (see BTCB2_HOME_ENTRY.md) is written in the
-same shape, under the PIN chosen during the restore, and reopens the same way.
+A fork Cube is created by Home's Create Cube journey, as a Bitcoin Cube is
+(Robert, 2026-11-03): a name with a PIN or passkey, then the master seed backup.
+Cube settings retain the exact ChainId and master fingerprint. The new Cube
+opens through its own unlock. With no Vault yet it opens the Vault-less App
+(`App::new_fork_without_wallet`): the Bitcoin Cube's screens with Create Vault
+next, and no Breez client, Liquid or Spark. That unlock needs no Connect session;
+it runs under the local feature check.
+
+Create Vault inside a fork Cube runs the Vault installer with the open Cube's
+session. It does not ask for the PIN again. Like a fresh fork Cube, the Vault
+may run on a managed local node without Connect
+(`Context::in_cube_fork_vault`). When it is saved, the Cube reopens through the
+fork Loader from the session's signer. If that signer is gone, the Cube's unlock
+screen opens instead. Going back from the installer returns to the Vault-less
+App.
+
+The earlier route, in which the Vault installer created a fresh fork Cube with
+its own PIN step and saved the Vault signer as the Cube seed, is still in the
+installer for Cubes it creates itself; Home no longer starts it.
 
 Successful fork PIN verification keeps the decrypted signer in a private,
 one-use slot owned by that unlock screen. It does not put the seed in cloned UI
 messages or the legacy shared signer cache. The slot derives the Cube encryption
-key directly. No Liquid or Spark SDK is constructed. Passkey and remote legacy
-wallet routes remain unavailable for the fork.
+key directly. No Liquid or Spark SDK is constructed. A passkey fork Cube derives
+the same key from the session signer its assertion opened. Remote legacy wallet
+routes remain unavailable for the fork.
 
 A pending fork PIN screen receives a candidate from the exact current completed
 Connect login after its account safety gates, scoped to its data root and API

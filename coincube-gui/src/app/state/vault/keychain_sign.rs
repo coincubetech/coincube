@@ -29,6 +29,7 @@ use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt};
 use iced::{Subscription, Task};
 use tokio::sync::RwLock;
 
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{
         button, modal as modal_const,
@@ -380,7 +381,7 @@ pub struct KeychainSignModal {
     /// calls (vault members, cube keys) don't share lifecycle with the
     /// session gRPC connection.
     coincube_client: CoincubeClient,
-    /// Shared with the REST `BackendClient` so token refreshes flow
+    /// The shared Connect session tokens, so token refreshes flow
     /// through automatically. Used to construct `GrpcSessionClient`
     /// instances on demand (`make_session_client`).
     tokens: Arc<RwLock<AccessTokenResponse>>,
@@ -499,6 +500,13 @@ impl KeychainSignModal {
         }
     }
 
+    /// Start from the stream's current health. Events only report changes,
+    /// so a modal opened after a rejection would otherwise read `Connected`.
+    pub fn with_stream_health(mut self, status: crate::app::ConnectionStatus) -> Self {
+        self.stream_health = status;
+        self
+    }
+
     pub fn pending(&self) -> &[PendingSession] {
         &self.pending
     }
@@ -540,18 +548,34 @@ impl KeychainSignModal {
         if !has_pending_nonterminal {
             return None;
         }
-        match &self.stream_health {
-            crate::app::ConnectionStatus::Connecting => Some(
-                "Connection lost — reconnecting. Your signing requests are still active \
-                 server-side; updates will catch up once the connection comes back."
-                    .to_string(),
-            ),
-            crate::app::ConnectionStatus::Error(e) => Some(format!(
-                "Connection error ({}). Your signing requests are still active server-side; \
-                 reconnect to see updates.",
-                e,
+        // Built while the picker renders, so the templates follow the
+        // window's language.
+        match self.stream_health {
+            crate::app::ConnectionStatus::Connecting
+            | crate::app::ConnectionStatus::Reconnecting
+            | crate::app::ConnectionStatus::Renewing => Some(coincube_ui::localized_format!(
+                "Reconnecting to Connect. Requests already sent stay on Connect; signatures \
+                 reach Tenshu once live updates are back.",
+                "Reconectando con Connect. Las solicitudes ya enviadas siguen en Connect; las \
+                 firmas llegarán a Tenshu cuando vuelvan las actualizaciones en vivo."
             )),
-            _ => None,
+            crate::app::ConnectionStatus::Offline => Some(coincube_ui::localized_format!(
+                "No internet connection. Requests already sent stay on Connect; signatures \
+                 reach Tenshu once you’re back online.",
+                "Sin conexión a internet. Las solicitudes ya enviadas siguen en Connect; las \
+                 firmas llegarán a Tenshu cuando vuelvas a estar en línea."
+            )),
+            crate::app::ConnectionStatus::RenewFailed => Some(coincube_ui::localized_format!(
+                "{}. Requests already sent stay on Connect; signatures reach Tenshu once it \
+                 reconnects. Try again from the Connect control in the top bar.",
+                "{}. Las solicitudes ya enviadas siguen en Connect; las firmas llegarán a \
+                 Tenshu cuando se vuelva a conectar. Inténtalo de nuevo desde el control de \
+                 Connect en la barra superior.",
+                coincube_ui::locale::copy(crate::app::RENEW_FAILED_TITLE),
+            )),
+            crate::app::ConnectionStatus::Inactive | crate::app::ConnectionStatus::Connected => {
+                None
+            }
         }
     }
 
@@ -619,6 +643,13 @@ impl KeychainSignModal {
     /// cancels until `close_if_dismissed_and_drained` tears it down.
     pub fn mark_dismissed(&mut self) {
         self.dismissed = true;
+    }
+
+    /// Whether [`Self::mark_dismissed`] ran: the modal is hidden and its
+    /// sessions were cancelled, unlike a picker merely hidden while a local
+    /// signer works.
+    pub fn is_dismissed(&self) -> bool {
+        self.dismissed
     }
 
     /// When the modal was dismissed mid-flight, close it once every
@@ -873,7 +904,25 @@ impl KeychainSignModal {
         self.unresolved = resp
             .unresolved
             .iter()
-            .map(|u| unresolved_signer_entry(u, classified))
+            .map(|u| {
+                let label = if u.reason == "signer_app_outdated" {
+                    classified
+                        .required
+                        .iter()
+                        .find_map(|r| match r {
+                            RequiredSigner::Keychain {
+                                fingerprint, name, ..
+                            } if fingerprint.to_string() == u.key_fingerprint => {
+                                Some(name.as_str())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(&u.key_fingerprint)
+                } else {
+                    &u.key_fingerprint
+                };
+                format!("{} ({})", label, u.reason)
+            })
             .collect();
 
         for target in &resp.targets {
@@ -1013,10 +1062,26 @@ impl KeychainSignModal {
         //   * this desktop has no transport key of its own, so the signature
         //     couldn't be sealed back to us anyway.
         if self.transport_key.is_none() {
-            return refuse_missing_desktop_transport(&mut self.pending, index);
+            if let Some(entry) = self.pending.get_mut(index) {
+                entry.status = PendingSessionStatus::Failed;
+                entry.error = Some(
+                    "This device can't set up encrypted signing yet. Restart Tenshu and try \
+                     again."
+                        .to_string(),
+                );
+            }
+            return Task::none();
         }
         if transport_pubkey.is_empty() {
-            return refuse_missing_signer_transport(&mut self.pending, index);
+            if let Some(entry) = self.pending.get_mut(index) {
+                entry.status = PendingSessionStatus::Failed;
+                entry.error = Some(format!(
+                    "{} needs to update their Keychain app before they can sign — their app \
+                     doesn't support encrypted signing requests yet.",
+                    entry.label
+                ));
+            }
+            return Task::none();
         }
         // Reset state to creating; clear any previous error and stale
         // cancel intent (an explicit request overrides a prior cancel-all
@@ -1215,8 +1280,25 @@ impl KeychainSignModal {
         // Auth failures should close the modal — retrying won't help
         // until the user signs back in. We surface a single top-level
         // banner rather than mark just this entry as Failed.
-        if self.refuse_created_auth(fingerprint, &result) {
-            return Task::none();
+        if let Err(e) = &result {
+            if e.auth {
+                self.error = Some(e.message.clone());
+                self.phase = Phase::AllDone;
+                // Mark this signer's row terminal so the drain logic
+                // (`has_undrained_sessions` / `close_if_dismissed_and_drained`)
+                // doesn't treat it as still in flight — otherwise a
+                // dismissed modal would stay mounted forever. The
+                // single top-level banner above is the user-facing
+                // error; we deliberately leave the per-row message unset.
+                if let Some(entry) = self
+                    .pending
+                    .iter_mut()
+                    .find(|p| p.fingerprint == fingerprint)
+                {
+                    entry.status = PendingSessionStatus::Failed;
+                }
+                return Task::none();
+            }
         }
         // Decide inside a scoped borrow whether the just-created
         // session needs an immediate cancel (user hit "Cancel all"
@@ -1486,13 +1568,32 @@ impl KeychainSignModal {
         // discards partial signatures, so a result that raced in before
         // the cancel RPC's reply must not be merged/persisted. Clear the
         // in-flight flag so nothing else waits on this fetch.
-        if self.discard_cancelled_fetch(&session_id) {
-            return Task::none();
+        if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
+            if entry.cancel_requested || matches!(entry.status, PendingSessionStatus::Cancelled) {
+                entry.signed_psbt_fetching = false;
+                return Task::none();
+            }
         }
         let resp = match result {
             Ok(r) => r,
             Err(e) => {
-                self.record_fetch_failure(&session_id, e, is_poll);
+                if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
+                    // Always clear the in-flight flag — otherwise the poll/
+                    // event fetch guards keep skipping this row and it can
+                    // never be retried. (Auth errors are no exception: a stale
+                    // token clears on the next attempt via the interceptor, and
+                    // one row's failure must not force-close the whole modal.)
+                    entry.signed_psbt_fetching = false;
+                    // A transient failure on a background *poll* must not
+                    // fail the session — the realtime event or the next
+                    // tick can still deliver the signature. Only the
+                    // event-driven fetch (where a signature was just
+                    // announced) treats a fetch error as terminal.
+                    if !is_poll {
+                        entry.status = PendingSessionStatus::Failed;
+                        entry.error = Some(e.message);
+                    }
+                }
                 return Task::none();
             }
         };
@@ -1524,7 +1625,21 @@ impl KeychainSignModal {
                 PendingSessionStatus::from_proto(session_status_from_i32(session.status));
             entry.error = None;
         }
-        if self.refuse_empty_submissions(&session_id, &session, is_poll) {
+        if session.submitted_signatures.is_empty() {
+            if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
+                // A *poll* that arrives before the signer has submitted is
+                // normal — keep the freshly-updated status and wait for the
+                // next tick/event. Only treat "no signature" as a failure
+                // for the event-driven path, or when the API itself reports
+                // the session terminally succeeded yet returned nothing.
+                if !is_poll || entry.status.is_terminal_success() {
+                    entry.status = PendingSessionStatus::Failed;
+                    entry.error = Some(
+                        "API session completed without returning a submitted signed PSBT"
+                            .to_string(),
+                    );
+                }
+            }
             return Task::none();
         }
         // Decode the submitted signed PSBT(s) and merge into the local SpendTx via
@@ -1535,11 +1650,110 @@ impl KeychainSignModal {
         // transport key (PR D4); the plaintext `signed_psbt` field is empty.
         // Open it here, then merge exactly as before — the merge, the daemon
         // update, and everything downstream are unchanged by blinding.
-        let Some(signed_psbt) =
-            self.capture_submitted_signatures(&session_id, &tx.psbt, session.submitted_signatures)
-        else {
-            return Task::none();
+        let request_id = self
+            .pending
+            .iter()
+            .find(|p| p.session_id == session_id)
+            .map(|p| p.request_id.clone())
+            .unwrap_or_default();
+        let transport_key = self.transport_key.clone();
+        let open_signature = |sig: &crate::services::connect::grpc::connect_v1::SubmittedSignature| -> Result<Vec<u8>, String> {
+            let Some(env) = sig.signature_envelope.as_ref() else {
+                // No plaintext fallback. This branch used to return
+                // `sig.signed_psbt` verbatim, which meant a session this
+                // desktop created as ECIES_V1 could still complete in
+                // plaintext if the peer or server returned no envelope —
+                // decided by envelope *shape*, never by `payload_scheme`. That
+                // is a silent downgrade, and `merge_signatures` below performs
+                // no validation and overwrites `tap_key_sig`, so the merged
+                // result would be trusted unconditionally.
+                //
+                // Connect now refuses to advance a plaintext session at all
+                // (`SubmitPartialSignature` returns `FailedPrecondition`), so
+                // an envelope-less signature on a live session no longer has a
+                // legitimate origin. Fail closed.
+                return Err(
+                    "This Keychain returned an unencrypted signature for an encrypted \
+                     request. Update the Keychain app, then start the signature again."
+                        .to_string(),
+                );
+            };
+            let key = transport_key
+                .as_ref()
+                .ok_or_else(|| "no transport key on this device".to_string())?;
+            key.open(
+                &env.ephemeral_pubkey,
+                &env.nonce,
+                &env.ciphertext,
+                &request_id,
+            )
+            .map(|pt| pt.to_vec())
+            .map_err(|e| e.to_string())
         };
+
+        // Every returned blob is merged into a clone of the local PSBT — the
+        // one this desktop already holds and authenticated — never into a
+        // remote blob, and never into `tx.psbt` mid-loop. On Bitcoin Blake2b
+        // the merge verifies each merged candidate against the prevouts and
+        // witness scripts the local copy carries, so a sparse return (a
+        // signer answering with signatures only) verifies against local
+        // metadata, and a refusal on any blob — wrong transaction, conflict,
+        // a signature that does not verify — leaves `tx.psbt` untouched with
+        // nothing scheduled for persistence. On the Bitcoin family this is
+        // the historical copy applied in submission order, which resolves
+        // to the same result as the former blob-seeded accumulator (last
+        // write wins on a key either way).
+        let mut signed_psbt = tx.psbt.clone();
+        for sig in session.submitted_signatures {
+            let bytes = match open_signature(&sig) {
+                Ok(b) => b,
+                Err(e) => {
+                    if let Some(entry) =
+                        self.pending.iter_mut().find(|p| p.session_id == session_id)
+                    {
+                        entry.status = PendingSessionStatus::Failed;
+                        entry.error =
+                            Some(format!("Couldn't decrypt the returned signature: {}", e));
+                    }
+                    return Task::none();
+                }
+            };
+            match returned_wire_psbt(self.wallet.chain, &bytes) {
+                Ok(psbt) => {
+                    if let Err(e) = super::psbt::merge_signatures_pub(
+                        self.wallet.chain,
+                        &mut signed_psbt,
+                        &psbt,
+                    ) {
+                        // Nothing merged, nothing persisted: the row fails
+                        // with the adapter's reason instead of the daemon
+                        // refusing later.
+                        if let Some(entry) =
+                            self.pending.iter_mut().find(|p| p.session_id == session_id)
+                        {
+                            entry.status = PendingSessionStatus::Failed;
+                            entry.error = Some(
+                                super::replay::unsafe_legacy_policy_copy(&e)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| {
+                                        format!("Couldn't merge the returned signatures: {}", e)
+                                    }),
+                            );
+                        }
+                        return Task::none();
+                    }
+                }
+                Err(e) => {
+                    if let Some(entry) =
+                        self.pending.iter_mut().find(|p| p.session_id == session_id)
+                    {
+                        entry.status = PendingSessionStatus::Failed;
+                        entry.error = Some(format!("Malformed signed PSBT from API: {}", e));
+                    }
+                    return Task::none();
+                }
+            }
+        }
         tracing::info!(
             target: "coincube_gui::signing",
             vault_id = self.vault_id.unwrap_or(0),
@@ -1787,7 +2001,46 @@ impl KeychainSignModal {
                 self.on_session_cancelled(sid, res);
             }
             Message::KeychainSign(KeychainSignMessage::Persisted { session_id, result }) => {
-                return self.on_persisted(session_id, result);
+                match result {
+                    Ok(()) => {
+                        // The signed PSBT for this session is now merged
+                        // and durably saved — mark the row so
+                        // `check_all_done` can count it. This (not the
+                        // API `Completed` event) is the authoritative
+                        // "this signature is captured" signal.
+                        if let Some(entry) =
+                            self.pending.iter_mut().find(|p| p.session_id == session_id)
+                        {
+                            entry.signed_psbt_persisted = true;
+                            entry.signed_psbt_persisting = false;
+                        }
+                        if self.check_all_done() {
+                            self.phase = Phase::AllDone;
+                        }
+                        // Re-emit the message the panel expects so its
+                        // existing post-save flow (saved flag, sigs
+                        // recompute, keychain modal close) runs exactly
+                        // as before this message carried session identity.
+                        // When this was the last outstanding persist the
+                        // phase is now `AllDone`, so the panel closes the
+                        // modal against a fully-merged PSBT.
+                        return Task::done(Message::Updated(Ok(())));
+                    }
+                    Err(e) => {
+                        if let Some(entry) =
+                            self.pending.iter_mut().find(|p| p.session_id == session_id)
+                        {
+                            entry.status = PendingSessionStatus::Failed;
+                            entry.signed_psbt_fetching = false;
+                            // Persist callback returned — no longer in flight.
+                            // `signed_psbt_merged` stays set so threshold close
+                            // remains blocked (row is Failed, awaiting retry),
+                            // but dismissal need not wait on it any longer.
+                            entry.signed_psbt_persisting = false;
+                            entry.error = Some(format!("Failed to persist signed PSBT: {}", e));
+                        }
+                    }
+                }
             }
             Message::KeychainSign(KeychainSignMessage::StreamEvent(event)) => {
                 return self.on_session_event(event);
@@ -1866,25 +2119,8 @@ impl Modal for KeychainSignModal {
         // pending and the realtime stream is unhealthy. We don't
         // pre-cancel anything on disconnect because sessions live
         // server-side; reconnecting catches up via `last_seen_seq`.
-        let has_pending_nonterminal = self.pending.iter().any(|p| !p.status.is_terminal());
-        if has_pending_nonterminal {
-            match &self.stream_health {
-                crate::app::ConnectionStatus::Connecting => {
-                    col = col.push(p1_regular(
-                        "Connection lost — reconnecting. Your signing requests are \
-                         still active server-side; updates will catch up once the \
-                         connection comes back.",
-                    ));
-                }
-                crate::app::ConnectionStatus::Error(e) => {
-                    col = col.push(p1_regular(format!(
-                        "Connection error ({}). Your signing requests are still \
-                         active server-side; reconnect to see updates.",
-                        e,
-                    )));
-                }
-                _ => {}
-            }
+        if let Some(banner) = self.stream_health_banner() {
+            col = col.push(p1_regular(banner));
         }
 
         if let Some(err) = &self.error {
@@ -1908,7 +2144,60 @@ impl Modal for KeychainSignModal {
             Phase::Loading => col = col.push(p1_regular("Loading vault members…")),
             Phase::Resolving => col = col.push(p1_regular("Looking up signer devices…")),
             Phase::Sessions => {
-                col = self.session_rows(col);
+                col = col.push(p1_regular(format!(
+                    "Waiting on {} signer(s)…",
+                    self.pending.len(),
+                )));
+                for (i, p) in self.pending.iter().enumerate() {
+                    let mut row = Row::new()
+                        .spacing(modal_const::V_SPACING)
+                        .push(p1_regular(p.label.clone()))
+                        .push(iced::widget::Space::new().width(iced::Length::Fill))
+                        .push(p1_regular(p.status.label()));
+                    if matches!(
+                        p.status,
+                        PendingSessionStatus::Rejected
+                            | PendingSessionStatus::Expired
+                            | PendingSessionStatus::Failed
+                    ) {
+                        row = row.push(
+                            button::secondary(Some(icon::reload_icon()), "Retry").on_press(
+                                view::Message::Spend(SpendTxMessage::RetryKeychainSigner(i)),
+                            ),
+                        );
+                    }
+                    col = col.push(row);
+                    // Per-row error / explanation. We choose the copy
+                    // based on the status so the user sees actionable
+                    // text rather than the raw `entry.error` string
+                    // (which is occasionally a tonic Status). The raw
+                    // error is still surfaced below as a fallback /
+                    // forward-compat when an unknown error shape
+                    // arrives.
+                    let row_hint: Option<String> = match p.status {
+                        PendingSessionStatus::Rejected => Some(format!(
+                            "  {} declined the request. Tap Retry to ask again, or \
+                             Cancel all to abandon.",
+                            p.label,
+                        )),
+                        PendingSessionStatus::Expired => Some(format!(
+                            "  {} didn't respond within 24h. Tap Retry to send a \
+                             fresh request.",
+                            p.label,
+                        )),
+                        PendingSessionStatus::Failed => Some(format!(
+                            "  Couldn't reach {}'s device. Tap Retry to try again.",
+                            p.label,
+                        )),
+                        _ => None,
+                    };
+                    if let Some(hint) = row_hint {
+                        col = col.push(p1_regular(hint));
+                    }
+                    if let Some(err) = &p.error {
+                        col = col.push(p1_regular(format!("  {}", err)));
+                    }
+                }
             }
             Phase::AllDone => {
                 col = col.push(p1_regular("All Keychain signers have completed. Closing…"));
@@ -1933,339 +2222,6 @@ impl Modal for KeychainSignModal {
             .on_blur(Some(view::Message::Spend(SpendTxMessage::Cancel)))
             .into()
     }
-}
-
-impl KeychainSignModal {
-    fn refuse_created_auth(
-        &mut self,
-        fingerprint: Fingerprint,
-        result: &Result<SigningSession, OpError>,
-    ) -> bool {
-        if let Err(e) = result {
-            if e.auth {
-                self.error = Some(e.message.clone());
-                self.phase = Phase::AllDone;
-                // Mark this signer's row terminal so the drain logic
-                // (`has_undrained_sessions` / `close_if_dismissed_and_drained`)
-                // doesn't treat it as still in flight — otherwise a
-                // dismissed modal would stay mounted forever. The
-                // single top-level banner above is the user-facing
-                // error; we deliberately leave the per-row message unset.
-                if let Some(entry) = self
-                    .pending
-                    .iter_mut()
-                    .find(|p| p.fingerprint == fingerprint)
-                {
-                    entry.status = PendingSessionStatus::Failed;
-                }
-                return true;
-            }
-        }
-        false
-    }
-    fn discard_cancelled_fetch(&mut self, session_id: &str) -> bool {
-        if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-            if entry.cancel_requested || matches!(entry.status, PendingSessionStatus::Cancelled) {
-                entry.signed_psbt_fetching = false;
-                return true;
-            }
-        }
-        false
-    }
-    fn record_fetch_failure(&mut self, session_id: &str, e: OpError, is_poll: bool) {
-        if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-            // Always clear the in-flight flag — otherwise the poll/
-            // event fetch guards keep skipping this row and it can
-            // never be retried. (Auth errors are no exception: a stale
-            // token clears on the next attempt via the interceptor, and
-            // one row's failure must not force-close the whole modal.)
-            entry.signed_psbt_fetching = false;
-            // A transient failure on a background *poll* must not
-            // fail the session — the realtime event or the next
-            // tick can still deliver the signature. Only the
-            // event-driven fetch (where a signature was just
-            // announced) treats a fetch error as terminal.
-            if !is_poll {
-                entry.status = PendingSessionStatus::Failed;
-                entry.error = Some(e.message);
-            }
-        }
-    }
-    fn refuse_empty_submissions(
-        &mut self,
-        session_id: &str,
-        session: &SigningSession,
-        is_poll: bool,
-    ) -> bool {
-        if session.submitted_signatures.is_empty() {
-            if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-                // A *poll* that arrives before the signer has submitted is
-                // normal — keep the freshly-updated status and wait for the
-                // next tick/event. Only treat "no signature" as a failure
-                // for the event-driven path, or when the API itself reports
-                // the session terminally succeeded yet returned nothing.
-                if !is_poll || entry.status.is_terminal_success() {
-                    entry.status = PendingSessionStatus::Failed;
-                    entry.error = Some(
-                        "API session completed without returning a submitted signed PSBT"
-                            .to_string(),
-                    );
-                }
-            }
-            return true;
-        }
-        false
-    }
-    fn fail_signature_session(&mut self, session_id: &str, message: String) {
-        if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-            entry.status = PendingSessionStatus::Failed;
-            entry.error = Some(message);
-        }
-    }
-    fn capture_submitted_signatures(
-        &mut self,
-        session_id: &str,
-        local: &Psbt,
-        submitted_signatures: Vec<crate::services::connect::grpc::connect_v1::SubmittedSignature>,
-    ) -> Option<Psbt> {
-        let request_id = self
-            .pending
-            .iter()
-            .find(|p| p.session_id == session_id)
-            .map(|p| p.request_id.clone())
-            .unwrap_or_default();
-        let transport_key = self.transport_key.clone();
-        let open_signature = |sig: &crate::services::connect::grpc::connect_v1::SubmittedSignature| -> Result<Vec<u8>, String> {
-            let Some(env) = sig.signature_envelope.as_ref() else {
-                // No plaintext fallback. This branch used to return
-                // `sig.signed_psbt` verbatim, which meant a session this
-                // desktop created as ECIES_V1 could still complete in
-                // plaintext if the peer or server returned no envelope —
-                // decided by envelope *shape*, never by `payload_scheme`. That
-                // is a silent downgrade, and `merge_signatures` below performs
-                // no validation and overwrites `tap_key_sig`, so the merged
-                // result would be trusted unconditionally.
-                //
-                // Connect now refuses to advance a plaintext session at all
-                // (`SubmitPartialSignature` returns `FailedPrecondition`), so
-                // an envelope-less signature on a live session no longer has a
-                // legitimate origin. Fail closed.
-                return Err(
-                    "This Keychain returned an unencrypted signature for an encrypted \
-                     request. Update the Keychain app, then start the signature again."
-                        .to_string(),
-                );
-            };
-            let key = transport_key
-                .as_ref()
-                .ok_or_else(|| "no transport key on this device".to_string())?;
-            key.open(
-                &env.ephemeral_pubkey,
-                &env.nonce,
-                &env.ciphertext,
-                &request_id,
-            )
-            .map(|pt| pt.to_vec())
-            .map_err(|e| e.to_string())
-        };
-
-        // Every returned blob is merged into a clone of the local PSBT — the
-        // one this desktop already holds and authenticated — never into a
-        // remote blob, and never into `tx.psbt` mid-loop. On Bitcoin Blake2b
-        // the merge verifies each merged candidate against the prevouts and
-        // witness scripts the local copy carries, so a sparse return (a
-        // signer answering with signatures only) verifies against local
-        // metadata, and a refusal on any blob — wrong transaction, conflict,
-        // a signature that does not verify — leaves `tx.psbt` untouched with
-        // nothing scheduled for persistence. On the Bitcoin family this is
-        // the historical copy applied in submission order, which resolves
-        // to the same result as the former blob-seeded accumulator (last
-        // write wins on a key either way).
-        let mut signed_psbt = local.clone();
-        for sig in submitted_signatures {
-            let bytes = match open_signature(&sig) {
-                Ok(b) => b,
-                Err(e) => {
-                    self.fail_signature_session(
-                        session_id,
-                        format!("Couldn't decrypt the returned signature: {}", e),
-                    );
-                    return None;
-                }
-            };
-            match returned_wire_psbt(self.wallet.chain, &bytes) {
-                Ok(psbt) => {
-                    if let Err(e) = super::psbt::merge_signatures_pub(
-                        self.wallet.chain,
-                        &mut signed_psbt,
-                        &psbt,
-                    ) {
-                        // Nothing merged, nothing persisted: the row fails
-                        // with the adapter's reason instead of the daemon
-                        // refusing later.
-                        self.fail_signature_session(
-                            session_id,
-                            super::replay::unsafe_legacy_policy_copy(&e)
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| {
-                                    format!("Couldn't merge the returned signatures: {}", e)
-                                }),
-                        );
-                        return None;
-                    }
-                }
-                Err(e) => {
-                    self.fail_signature_session(
-                        session_id,
-                        format!("Malformed signed PSBT from API: {}", e),
-                    );
-                    return None;
-                }
-            }
-        }
-
-        Some(signed_psbt)
-    }
-    fn on_persisted(&mut self, session_id: String, result: Result<(), String>) -> Task<Message> {
-        match result {
-            Ok(()) => {
-                // The signed PSBT for this session is now merged
-                // and durably saved — mark the row so
-                // `check_all_done` can count it. This (not the
-                // API `Completed` event) is the authoritative
-                // "this signature is captured" signal.
-                if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-                    entry.signed_psbt_persisted = true;
-                    entry.signed_psbt_persisting = false;
-                }
-                if self.check_all_done() {
-                    self.phase = Phase::AllDone;
-                }
-                // Re-emit the message the panel expects so its
-                // existing post-save flow (saved flag, sigs
-                // recompute, keychain modal close) runs exactly
-                // as before this message carried session identity.
-                // When this was the last outstanding persist the
-                // phase is now `AllDone`, so the panel closes the
-                // modal against a fully-merged PSBT.
-                return Task::done(Message::Updated(Ok(())));
-            }
-            Err(e) => {
-                if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-                    entry.status = PendingSessionStatus::Failed;
-                    entry.signed_psbt_fetching = false;
-                    // Persist callback returned — no longer in flight.
-                    // `signed_psbt_merged` stays set so threshold close
-                    // remains blocked (row is Failed, awaiting retry),
-                    // but dismissal need not wait on it any longer.
-                    entry.signed_psbt_persisting = false;
-                    entry.error = Some(format!("Failed to persist signed PSBT: {}", e));
-                }
-            }
-        }
-
-        Task::none()
-    }
-    fn session_rows<'a>(&'a self, mut col: Column<'a, view::Message>) -> Column<'a, view::Message> {
-        col = col.push(p1_regular(format!(
-            "Waiting on {} signer(s)…",
-            self.pending.len(),
-        )));
-        for (i, p) in self.pending.iter().enumerate() {
-            let mut row = Row::new()
-                .spacing(modal_const::V_SPACING)
-                .push(p1_regular(p.label.clone()))
-                .push(iced::widget::Space::new().width(iced::Length::Fill))
-                .push(p1_regular(p.status.label()));
-            if matches!(
-                p.status,
-                PendingSessionStatus::Rejected
-                    | PendingSessionStatus::Expired
-                    | PendingSessionStatus::Failed
-            ) {
-                row = row.push(
-                    button::secondary(Some(icon::reload_icon()), "Retry")
-                        .on_press(view::Message::Spend(SpendTxMessage::RetryKeychainSigner(i))),
-                );
-            }
-            col = col.push(row);
-            // Per-row error / explanation. We choose the copy
-            // based on the status so the user sees actionable
-            // text rather than the raw `entry.error` string
-            // (which is occasionally a tonic Status). The raw
-            // error is still surfaced below as a fallback /
-            // forward-compat when an unknown error shape
-            // arrives.
-            let row_hint: Option<String> = match p.status {
-                PendingSessionStatus::Rejected => Some(format!(
-                    "  {} declined the request. Tap Retry to ask again, or \
-                             Cancel all to abandon.",
-                    p.label,
-                )),
-                PendingSessionStatus::Expired => Some(format!(
-                    "  {} didn't respond within 24h. Tap Retry to send a \
-                             fresh request.",
-                    p.label,
-                )),
-                PendingSessionStatus::Failed => Some(format!(
-                    "  Couldn't reach {}'s device. Tap Retry to try again.",
-                    p.label,
-                )),
-                _ => None,
-            };
-            if let Some(hint) = row_hint {
-                col = col.push(p1_regular(hint));
-            }
-            if let Some(err) = &p.error {
-                col = col.push(p1_regular(format!("  {}", err)));
-            }
-        }
-
-        col
-    }
-}
-
-fn unresolved_signer_entry(
-    u: &crate::services::connect::grpc::connect_v1::UnresolvedSigner,
-    classified: &ClassifiedSigners,
-) -> String {
-    let label = if u.reason == "signer_app_outdated" {
-        classified
-            .required
-            .iter()
-            .find_map(|r| match r {
-                RequiredSigner::Keychain {
-                    fingerprint, name, ..
-                } if fingerprint.to_string() == u.key_fingerprint => Some(name.as_str()),
-                _ => None,
-            })
-            .unwrap_or(&u.key_fingerprint)
-    } else {
-        &u.key_fingerprint
-    };
-    format!("{} ({})", label, u.reason)
-}
-fn refuse_missing_desktop_transport(pending: &mut [PendingSession], index: usize) -> Task<Message> {
-    if let Some(entry) = pending.get_mut(index) {
-        entry.status = PendingSessionStatus::Failed;
-        entry.error = Some(
-            "This device can't set up encrypted signing yet. Restart Tenshu and try \
-                     again."
-                .to_string(),
-        );
-    }
-    Task::none()
-}
-fn refuse_missing_signer_transport(pending: &mut [PendingSession], index: usize) -> Task<Message> {
-    if let Some(entry) = pending.get_mut(index) {
-        entry.status = PendingSessionStatus::Failed;
-        entry.error = Some(format!(
-            "{} needs to update their Keychain app before they can sign — their app \
-                     doesn't support encrypted signing requests yet.",
-            entry.label
-        ));
-    }
-    Task::none()
 }
 
 // ───── small helpers ──────────────────────────────────────────────────
@@ -2393,49 +2349,62 @@ fn unresolved_signer_reason(entry: &str) -> Option<&str> {
 /// device that they had none, while the real fix was one screen away.
 pub(crate) fn friendly_unresolved_signer(entry: &str) -> String {
     match unresolved_signer_reason(entry) {
-        Some("signer_app_outdated") => format!(
+        Some("signer_app_outdated") => localized_format!(
             "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
+            "El Keychain de {} necesita actualizarse antes de poder firmar en Bitcoin Blake2b.",
             entry.trim_end_matches(" (signer_app_outdated)"),
         ),
-        Some("no_device_registered") => format!(
+        Some("no_device_registered") => localized_format!(
             "{} hasn't set up the Keychain app yet. Ask them to install it \
              and sign in, then retry.",
+            "{} aún no configuró la app Keychain. Pídele que la instale e \
+             inicie sesión, y vuelve a intentarlo.",
             entry,
         ),
-        Some("all_devices_revoked") => format!(
+        Some("all_devices_revoked") => localized_format!(
             "{} has revoked every device on their account. They need to \
              register a new device before this transaction can be signed.",
+            "{} revocó todos los dispositivos de su cuenta. Necesita registrar \
+             un dispositivo nuevo antes de poder firmar esta transacción.",
             entry,
         ),
         // The target device's transport key is past its confirmation TTL.
         // Opening Keychain re-registers the device; nothing about the
         // account's registration state is wrong, so say nothing about it.
-        Some("transport_key_stale") => format!(
+        Some("transport_key_stale") => localized_format!(
             "{} — this signer's Keychain hasn't checked in with Connect \
              recently. Ask them to open Keychain on their phone, then retry.",
+            "{} — el Keychain de este firmante no se ha comunicado con Connect \
+             recientemente. Pídele que abra Keychain en su teléfono y vuelve a intentarlo.",
             entry,
         ),
         // The key is bound to a device Connect can no longer target (revoked,
         // deleted, or owned by another account). Connect does not guess a
         // replacement; Keychain re-claims the key on launch on the handset
         // that holds it (keychain-app#145).
-        Some("enrolled_device_unavailable") => format!(
+        Some("enrolled_device_unavailable") => localized_format!(
             "{} is bound to a Keychain that can no longer be reached. Ask them \
              to open Keychain on the phone that holds this key, then retry.",
+            "{} está vinculado a un Keychain al que ya no se puede llegar. Pídele \
+             que abra Keychain en el teléfono que tiene esta clave y vuelve a intentarlo.",
             entry,
         ),
         // Kept for compatibility, but no server code path emits this token
         // today; the Go constants above are the source of truth. Do not read
         // "three matching arms" as "the list is complete" — that is how the
         // stale-transport-key case was missed.
-        Some("owner_unknown") => format!(
+        Some("owner_unknown") => localized_format!(
             "{} — this signer's owner isn't known to the backend. \
              Contact support if this persists.",
+            "{} — el servidor no conoce al propietario de este firmante. \
+             Contacta con soporte si esto continúa.",
             entry,
         ),
-        _ => format!(
+        _ => localized_format!(
             "Cannot sign with {}: COINCUBE doesn't recognise this reason. Update \
              COINCUBE, or contact support at coincube.io/support.",
+            "No se puede firmar con {}: COINCUBE no reconoce este motivo. Actualiza \
+             COINCUBE o contacta con soporte en coincube.io/support.",
             entry,
         ),
     }
@@ -2575,7 +2544,7 @@ impl KeychainSignModal {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::app::state::vault::test_support::{empty_psbt, tokens};
     use coincube_core::descriptors::CoincubeDescriptor;
@@ -2906,6 +2875,19 @@ mod tests {
             ],
             self_user_id: 7,
         }
+    }
+
+    /// A Keychain flow with one session in flight on the server, for tests
+    /// outside this module.
+    pub(crate) fn modal_with_live_session() -> KeychainSignModal {
+        let mut modal = modal();
+        modal.pending.push(pending(PendingSessionStatus::Creating));
+        modal
+    }
+
+    /// Whether every session of `modal` has had its cancellation requested.
+    pub(crate) fn all_cancel_requested(modal: &KeychainSignModal) -> bool {
+        modal.pending.iter().all(|p| p.cancel_requested)
     }
 
     fn modal() -> KeychainSignModal {
@@ -3480,15 +3462,20 @@ mod tests {
         modal.pending.push(pending(PendingSessionStatus::Pending));
         assert!(modal.stream_health_banner().is_none());
 
-        modal.stream_health = crate::app::ConnectionStatus::Connecting;
+        modal.stream_health = crate::app::ConnectionStatus::Reconnecting;
         assert!(modal
             .stream_health_banner()
-            .is_some_and(|b| b.contains("reconnecting")));
+            .is_some_and(|b| b.starts_with("Reconnecting to Connect")));
 
-        modal.stream_health = crate::app::ConnectionStatus::Error("socket closed".to_string());
+        modal.stream_health = crate::app::ConnectionStatus::Offline;
         assert!(modal
             .stream_health_banner()
-            .is_some_and(|b| b.contains("socket closed")));
+            .is_some_and(|b| b.contains("back online")));
+
+        modal.stream_health = crate::app::ConnectionStatus::RenewFailed;
+        assert!(modal
+            .stream_health_banner()
+            .is_some_and(|b| b.contains("Try again")));
 
         modal.pending[0].status = PendingSessionStatus::Completed;
         assert!(modal.stream_health_banner().is_none());
@@ -3988,29 +3975,6 @@ mod tests {
             assert!(returned_wire_psbt(ChainId::Bitcoin, &wire).is_err());
         }
 
-        fn invalid_standard_return(
-            f: &crate::app::state::vault::test_support::unified::Fixture,
-            case: &str,
-        ) -> (Vec<u8>, &'static str) {
-            let signer = if case == "conflict" {
-                &f.signers[0]
-            } else {
-                &f.signers[1]
-            };
-            let mut invalid = sparse(&f.psbt);
-            invalid.inputs[0].proprietary = unified(&other_transaction(f), signer).inputs[0]
-                .proprietary
-                .clone();
-            (
-                signing_wire_psbt(ChainId::BitcoinBlake2b, invalid).unwrap(),
-                if case == "conflict" {
-                    "conflicting signature"
-                } else {
-                    "cryptographically invalid"
-                },
-            )
-        }
-
         #[tokio::test]
         async fn standard_returns_refuse_invalid_conflicting_and_wrong_chain_inputs_atomically() {
             let f = fixture();
@@ -4033,7 +3997,26 @@ mod tests {
                 let mut tx = spend_tx(&f, &local);
                 let before = tx.psbt.serialize();
                 let (wire, needle) = match case {
-                    "invalid-signature" | "conflict" => invalid_standard_return(&f, case),
+                    "invalid-signature" | "conflict" => {
+                        let signer = if case == "conflict" {
+                            &f.signers[0]
+                        } else {
+                            &f.signers[1]
+                        };
+                        let mut invalid = sparse(&f.psbt);
+                        invalid.inputs[0].proprietary = unified(&other_transaction(&f), signer)
+                            .inputs[0]
+                            .proprietary
+                            .clone();
+                        (
+                            signing_wire_psbt(ChainId::BitcoinBlake2b, invalid).unwrap(),
+                            if case == "conflict" {
+                                "conflicting signature"
+                            } else {
+                                "cryptographically invalid"
+                            },
+                        )
+                    }
                     "ambiguous-namespace" => {
                         let mut ambiguous = legacy(&f.psbt, &f.signers[0]);
                         ambiguous.inputs[0].proprietary = valid.inputs[0].proprietary.clone();

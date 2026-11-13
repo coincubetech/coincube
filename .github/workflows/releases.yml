@@ -3,6 +3,10 @@ name: Coincube Release Workflow
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:
@@ -36,8 +40,10 @@ env:
 
 jobs:
   release:
-    name: Build & Release
-    if: github.repository == 'coincubetech/coincube'
+    name: Build & Stage
+    # Manual dispatch is allowed for a tag, but a branch build must never
+    # publish assets without the tag-bound verification jobs below.
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     # LTO release build + codesign/notarize; a healthy leg is well under this.
     timeout-minutes: 150
@@ -61,8 +67,8 @@ jobs:
             platform: macos
             arch: arm64
 
-          # macOS Intel
-          - os: macos-latest
+          # macOS Intel: run the signed artifacts natively before publishing.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: macos
             arch: x64
@@ -99,9 +105,16 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | jaq -r '.packages[] | select(.name=="coincube-gui") | .version')
           echo "COINCUBE_VERSION=$version" >> $GITHUB_ENV
 
+      - name: Require release tag to match app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = "v$COINCUBE_VERSION" \
+            || { echo "release tag $GITHUB_REF_NAME does not match Cargo version $COINCUBE_VERSION"; exit 1; }
+
       # The Spark bridge is a separate workspace with a separate lock and a
-      # separate target dir, and its dep graph (breez-sdk-spark, boltz-client,
-      # alloy) is expensive to build from scratch. Cache it alongside the root
+      # separate target dir, and its dep graph (breez-sdk-spark, alloy) is
+      # expensive to build from scratch. Cache it alongside the root
       # one, and key on both locks so a change to either invalidates.
       - name: Cache Cargo
         uses: actions/cache@v5
@@ -111,14 +124,6 @@ jobs:
           path: |
             target
             coincube-spark-bridge/target
-
-      - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          makeLatest: true
-          name: Coincube v${{ env.COINCUBE_VERSION }}
-          body: Installers for Windows, macOS and Linux
-          allowUpdates: true
 
       - name: Generate Icons for Installers
         if: matrix.platform != 'linux'
@@ -144,6 +149,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           cargo build --package coincube-gui --bin coincube --profile minimal --target ${{ matrix.target }} --locked
+          cargo build --package coincube-mcp --features adapter --profile minimal --target ${{ matrix.target }} --locked
           # The bridge is excluded from the root workspace, so the line above
           # cannot build it — this is the second half of `make build`.
           cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --target ${{ matrix.target }} --locked
@@ -158,6 +164,7 @@ jobs:
           stage=tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}
           mkdir -p "$stage"
           cp target/${{ matrix.target }}/minimal/coincube "$stage/"
+          cp target/${{ matrix.target }}/minimal/tenshu-mcp "$stage/"
           cp coincube-spark-bridge/target/${{ matrix.target }}/minimal/coincube-spark-bridge "$stage/"
           cp LICENCE README.md "$stage/"
           tar czf "$stage.tar.gz" "$stage"
@@ -175,14 +182,14 @@ jobs:
             || { echo "bridge did not answer the shutdown handshake"; cat bridge-stderr.txt; exit 1; }
           rm -f bridge-stderr.txt
 
-      - name: Upload Linux archive
+      - name: Stage Linux archive
         if: matrix.platform == 'linux'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
 
       # --------------------------------------------------
       # Windows
@@ -196,6 +203,8 @@ jobs:
         if: matrix.platform == 'windows'
         run: |
           cargo build --package coincube-gui --profile minimal --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --package coincube-mcp --features adapter --profile minimal --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python contrib/check_windows_binary.py target/minimal/coincube.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -231,7 +240,16 @@ jobs:
             Write-Host "bridge installs to $($bridge.DirectoryName) but the gui installs to $($gui.DirectoryName) — they must be siblings"
             exit 1
           }
-          Write-Host "both binaries install to $($gui.DirectoryName)"
+          $mcp = Get-ChildItem -Path $dest -Recurse -Filter tenshu-mcp.exe | Select-Object -First 1
+          if (-not $mcp -or $mcp.DirectoryName -ne $gui.DirectoryName) {
+            Write-Host "tenshu-mcp.exe must install beside coincube.exe"; exit 1
+          }
+          # Run the actual extracted companion against the tested named-pipe fixture.
+          $env:TENSHU_MCP_TEST_ADAPTER = $mcp.FullName
+          cargo test -p coincube-mcp --features adapter --locked extracted_adapter_stdio -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TENSHU_MCP_TEST_ADAPTER
+          Write-Host "all companion binaries install to $($gui.DirectoryName)"
 
           # It execs and speaks the protocol. No API key, no mnemonic, no
           # network: stdin EOF ends the run on its own.
@@ -240,14 +258,14 @@ jobs:
           Write-Host $out
           if ($out -notmatch '"kind":"shutdown"') { Write-Host "bridge did not answer the shutdown handshake"; exit 1 }
 
-      - name: Upload Windows MSI
+      - name: Stage Windows MSI
         if: matrix.platform == 'windows'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/wix/tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.msi
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: target/wix/tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.msi
+          if-no-files-found: error
+          compression-level: 0
 
       # --------------------------------------------------
       # macOS (arm64 + x64)
@@ -268,11 +286,11 @@ jobs:
 
       - name: Build Coincube (macOS ${{ matrix.arch }})
         if: matrix.platform == 'macos'
-        env:
-          PROTOC: /opt/homebrew/bin/protoc
         run: |
           rustup target add ${{ matrix.target }}
+          export PROTOC="$(brew --prefix)/bin/protoc"
           cargo build --package coincube-gui --profile minimal --target ${{ matrix.target }} --locked
+          cargo build --package coincube-mcp --features adapter --profile minimal --target ${{ matrix.target }} --locked
           # The bridge is deliberately excluded from the root workspace, so the
           # line above cannot build it — this is the second half of the
           # Makefile's `build: bridge gui`. Omit it and the bundle ships with no
@@ -300,6 +318,7 @@ jobs:
             || { echo "_coincube-signer._tcp missing from NSBonjourServices"; exit 1; }
 
           mv target/${{ matrix.target }}/minimal/coincube Tenshu.app/Contents/MacOS/Coincube
+          mv target/${{ matrix.target }}/minimal/tenshu-mcp Tenshu.app/Contents/MacOS/tenshu-mcp
           mv contrib/release/macos/Coincube.icns Tenshu.app/Contents/Resources/Coincube.icns
 
           # The gui resolves the Spark bridge as a sibling of its own
@@ -439,6 +458,9 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           bridge=Tenshu.app/Contents/MacOS/coincube-spark-bridge
+          test -x Tenshu.app/Contents/MacOS/tenshu-mcp
+          codesign --verify --strict Tenshu.app/Contents/MacOS/tenshu-mcp
+          python3 contrib/check_mcp_binary.py Tenshu.app/Contents/MacOS/tenshu-mcp
 
           # (1) Present at all — the failure this exists to catch.
           test -f "$bridge" \
@@ -471,7 +493,7 @@ jobs:
           #     tokio runtime and the JSON-RPC loop, and needs no API key, no
           #     mnemonic and no network — unlike --smoke-test, which requires
           #     COINCUBE_SPARK_MNEMONIC and transacts against Spark mainnet.
-          #     Native arch only: the x64 leg cross-compiles on an arm64 runner.
+          #     Both release legs run on their native architecture.
           if [ "$want" = "$(uname -m)" ]; then
             out=$(echo '{"type":"request","id":1,"method":"shutdown"}' \
               | "$bridge" 2> bridge-stderr.txt) \
@@ -503,14 +525,14 @@ jobs:
             "tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg" \
             Tenshu.app
 
-      - name: Upload macOS DMG
+      - name: Stage macOS DMG
         if: matrix.platform == 'macos'
-        uses: svenstaro/upload-release-action@v2
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: release-${{ matrix.target }}
+          path: tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.dmg
+          if-no-files-found: error
+          compression-level: 0
 
       - name: Cleanup secrets
         if: matrix.platform == 'macos' && always()
@@ -522,7 +544,9 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.repository == 'coincubetech/coincube'
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -532,23 +556,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set Coincube version from Cargo
+        id: version
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="coincube-gui") | .version')
           echo "COINCUBE_VERSION=$version" >> $GITHUB_ENV
+          echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: Download release artifacts
-        uses: robinraju/release-downloader@v1
+      - name: Download staged platform artifacts
+        uses: actions/download-artifact@v6
         with:
-          tag: ${{ github.ref_name }}
-          fileName: "*"
-          out-file-path: "artifacts"
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
 
       - name: Generate checksums file
         run: |
           cd artifacts
-          # Exclude checksum and signature files from being checksummed
-          find . -type f ! -name '*SHA256SUMS*' ! -name '*.asc' ! -name '*.sig' -exec sha256sum {} \; | sed 's|\./||' > ../SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
+          find . -maxdepth 1 -type f -name 'tenshu-*' -printf '%f\0' | sort -z | xargs -0 -r sha256sum > SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
           cd ..
 
       - name: Import GPG signing key
@@ -567,15 +592,107 @@ jobs:
             --pinentry-mode loopback \
             --passphrase "${GPG_PASSPHRASE}" \
             --detach-sign --armor \
-            SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
+            artifacts/SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
-      - name: Upload checksums and signature
-        uses: svenstaro/upload-release-action@v2
+      - name: Verify complete staged bundle
+        run: python3 contrib/release/verify-release-assets.py artifacts "$COINCUBE_VERSION"
+
+      - name: Stage signed release bundle
+        uses: actions/upload-artifact@v6
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: SHA256SUMS-${{ env.COINCUBE_VERSION }}.txt*
-          file_glob: true
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: signed-release-bundle
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish_release:
+    name: Verify draft and publish complete release
+    needs: checksums
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Download signed release bundle
+        uses: actions/download-artifact@v6
+        with:
+          name: signed-release-bundle
+          path: artifacts
+      - name: Verify signature and complete bundle before upload
+        env:
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION"
+          expected_fingerprint=ED4D0D710103D6252854681367F9701BF0D2DAF4
+          actual_fingerprint=$(gpg --batch --show-keys --with-colons docs/security/coincube-release-public.asc \
+            | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$actual_fingerprint" = "$expected_fingerprint"
+          export GNUPGHOME="$RUNNER_TEMP/coincube-release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import docs/security/coincube-release-public.asc
+          gpg --batch --verify "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt.asc" "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py artifacts "$RELEASE_VERSION"
+      - name: Create draft release with complete bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --title "Coincube v$RELEASE_VERSION" \
+            --notes "Installers for Windows, macOS and Linux"
+      - name: Verify assets downloaded from draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir draft-assets
+          gpg --batch --homedir "$RUNNER_TEMP/coincube-release-gnupg" --verify \
+            "draft-assets/SHA256SUMS-${RELEASE_VERSION}.txt.asc" \
+            "draft-assets/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py draft-assets "$RELEASE_VERSION"
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+  verify_release:
+    name: Verify published release signature and assets
+    needs: [checksums, publish_release]
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Download published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir artifacts
+      - name: Verify GPG signature and every artifact checksum
+        env:
+          RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION" \
+            || { echo "release tag $GITHUB_REF_NAME does not match Cargo version $RELEASE_VERSION"; exit 1; }
+          expected_fingerprint=ED4D0D710103D6252854681367F9701BF0D2DAF4
+          actual_fingerprint=$(gpg --batch --show-keys --with-colons docs/security/coincube-release-public.asc \
+            | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$actual_fingerprint" = "$expected_fingerprint"
+          export GNUPGHOME="$RUNNER_TEMP/coincube-release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import docs/security/coincube-release-public.asc
+          gpg --batch --verify \
+            "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt.asc" \
+            "artifacts/SHA256SUMS-${RELEASE_VERSION}.txt"
+          python3 contrib/release/verify-release-assets.py artifacts "$RELEASE_VERSION"

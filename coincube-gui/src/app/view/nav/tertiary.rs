@@ -69,6 +69,17 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Option<Element<'a, Message
 fn cube_settings_items() -> Vec<SubItem> {
     let mut items = vec![
         SubItem::new(
+            "AI access",
+            settings_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
+                )
+            },
+        ),
+        SubItem::new(
             "General",
             wrench_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
@@ -87,6 +98,28 @@ fn cube_settings_items() -> Vec<SubItem> {
                 matches!(
                     m,
                     Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery))
+                )
+            },
+        ),
+        SubItem::new(
+            "Payment checks",
+            wallet_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::PaymentChecks)),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::PaymentChecks))
+                )
+            },
+        ),
+        SubItem::new(
+            "Connections",
+            settings_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections)),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections))
                 )
             },
         ),
@@ -241,7 +274,19 @@ fn p2p_items() -> Vec<SubItem> {
 }
 
 fn vault_settings_items(imported: bool) -> Vec<SubItem> {
-    let mut items = vec![
+    vec![
+        SubItem::new(
+            "Wallet & signers",
+            wallet_icon,
+            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet)))
+                        | Menu::Vault(VaultSubMenu::Settings(None))
+                )
+            },
+        ),
         SubItem::new(
             "Node",
             bitcoin_icon,
@@ -250,23 +295,26 @@ fn vault_settings_items(imported: bool) -> Vec<SubItem> {
                 matches!(
                     m,
                     Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)))
-                        | Menu::Vault(VaultSubMenu::Settings(None))
                 )
             },
         ),
         SubItem::new(
-            "Wallet",
-            wallet_icon,
-            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
+            "Keychain",
+            phone_icon,
+            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))),
             |m| {
                 matches!(
                     m,
-                    Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet)))
+                    Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)))
                 )
             },
-        ),
+        )
+        .disabled(imported.then(|| {
+            "Pairing is unavailable for imported wallets: this wallet has no Keychain-eligible key in Tenshu."
+                .to_string()
+        })),
         SubItem::new(
-            "Import/Export",
+            "Data & exports",
             wallet_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::ImportExport))),
             |m| {
@@ -276,19 +324,5 @@ fn vault_settings_items(imported: bool) -> Vec<SubItem> {
                 )
             },
         ),
-    ];
-    if !imported {
-        items.push(SubItem::new(
-            "Pair",
-            phone_icon,
-            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))),
-            |m| {
-                matches!(
-                    m,
-                    Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)))
-                )
-            },
-        ));
-    }
-    items
+    ]
 }

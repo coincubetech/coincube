@@ -133,6 +133,52 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     result
 }
 
+/// Runs local-filesystem work on Tokio's blocking pool so a slow disk never
+/// stalls the async executor that drives the UI.
+pub(super) async fn blocking_fs<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("Filesystem task failed: {e}"))?
+}
+
+/// Discards the staging directory left by an earlier attempt of this exact
+/// operation. Staged data owned by anything else is refused unless empty.
+fn discard_owned_stage(stage: &Path, journal: &Journal) -> Result<(), String> {
+    if !stage.exists() {
+        return Ok(());
+    }
+    if owns_directory(stage, journal)? {
+        // Only unpublished storage owned by this exact prepared operation
+        // can be discarded and recreated. Never touch a final wallet.
+        fs::remove_dir_all(stage).map_err(|e| e.to_string())?;
+    } else if fs::read_dir(stage)
+        .map_err(|e| e.to_string())?
+        .next()
+        .is_some()
+    {
+        return Err(
+            "The staging directory is not owned by this import; no files were changed.".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Removes this operation's staged data before its pending setup is abandoned.
+fn remove_abandoned_stage(stage: &Path, journal: &Journal) -> Result<(), String> {
+    if !stage.exists() {
+        return Ok(());
+    }
+    if !owns_directory(stage, journal)? {
+        return Err("The staged data is not owned by this import; no files were removed.".into());
+    }
+    fs::remove_dir_all(stage).map_err(|e| e.to_string())?;
+    sync_directory(stage.parent().ok_or("Missing staging parent")?)
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     fs::File::open(path)
@@ -542,7 +588,43 @@ async fn install_inner(
         },
     )
     .await?;
-    initialize_import_storage(directory, &journal, &config)?;
+    let stage = journal.stage_path(directory);
+    {
+        let (stage, journal) = (stage.clone(), journal.clone());
+        blocking_fs(move || discard_owned_stage(&stage, &journal)).await?;
+    }
+    crate::dir::create_directory(&stage).map_err(|e| e.to_string())?;
+    write_json(&stage.join(OWNER_FILE), &journal)?;
+    coincubed::create_imported_storage(
+        &config,
+        &DataDirectory::new(stage.clone()),
+        journal.wallet.birthday,
+        journal.wallet.initial_lookahead,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(state) = journal.restored_address_state {
+        // The initializer writes scan fields into the saved configuration.
+        let saved_config =
+            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
+        coincubed::restore_imported_address_state(
+            &saved_config,
+            &DataDirectory::new(stage.clone()),
+            state.receive_index,
+            state.change_index,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(target) = journal.restored_discovery_target {
+        let saved_config =
+            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
+        coincubed::restore_imported_discovery_target(
+            &saved_config,
+            &DataDirectory::new(stage.clone()),
+            target,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    sync_directory(&stage)?;
     journal.phase = Phase::StorageReady;
     journal.persist(directory)?;
     finish(directory, &mut journal).await
@@ -552,6 +634,9 @@ async fn install_inner(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoredKitSource {
     Password,
+    /// Password-v3 public restore leaves key-backup completion unset; local
+    /// signer admission is handled by the restore coordinator.
+    PasswordV3,
     OwnerKeychain,
 }
 
@@ -578,8 +663,103 @@ pub async fn restore_from_kit(
         blob.wallet.birthday,
         blob.wallet.initial_lookahead,
     )?;
-    settings::update_settings_file_checked(directory, |settings| {
-        prepare_restored_kit_cube(settings, cube_id, blob, &wallet, chain)
+    settings::update_settings_file_checked(directory, |mut settings| {
+        if settings
+            .cubes
+            .iter()
+            .filter(|cube| cube.id == cube_id)
+            .count()
+            != 1
+        {
+            return Err(SettingsError::WritingFile(
+                "Duplicate or missing restore Cube identity.".into(),
+            ));
+        }
+        if let Some(metadata) = &blob.signer_metadata {
+            let matches = settings
+                .wallets
+                .iter()
+                .filter(|w| w.wallet_id() == wallet.wallet_id)
+                .collect::<Vec<_>>();
+            if matches.len() > 1 {
+                return Err(SettingsError::WritingFile(
+                    "Duplicate restored wallet identity.".into(),
+                ));
+            }
+            if let Some(prior) = matches.first() {
+                let prior_signers = serde_json::to_value((
+                    &prior.keys,
+                    &prior.hardware_wallets,
+                    prior.keychain_keys_recorded,
+                ))
+                .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+                let restored_signers = serde_json::to_value((
+                    &metadata.keys,
+                    &metadata.hardware_wallets,
+                    metadata.keychain_keys_recorded,
+                ))
+                .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+                if (!prior.keys.is_empty()
+                    || !prior.hardware_wallets.is_empty()
+                    || prior.keychain_keys_recorded)
+                    && prior_signers != restored_signers
+                {
+                    return Err(SettingsError::WritingFile(
+                        "Existing imported signer metadata conflicts with this Recovery Kit."
+                            .into(),
+                    ));
+                }
+            }
+        }
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == cube_id)
+            .ok_or_else(|| {
+                SettingsError::WritingFile("The Cube to restore no longer exists.".into())
+            })?;
+        if cube.network != chain || cube.vault_wallet_id.is_some() {
+            return Err(SettingsError::WritingFile(
+                "This Cube already has a Vault or belongs to another chain.".into(),
+            ));
+        }
+        if cube.imported_claim_source.is_some()
+            && cube.imported_claim_source != blob.imported_claim_source
+        {
+            return Err(SettingsError::WritingFile(
+                "This Cube already has another imported Claim source.".into(),
+            ));
+        }
+        cube.imported_claim_source = blob.imported_claim_source.clone();
+        match &cube.bitcoin_import {
+            Some(intent)
+                if blob
+                    .import_operation_id
+                    .is_some_and(|id| id != intent.operation_id) =>
+            {
+                return Err(SettingsError::WritingFile(
+                    "This Cube already belongs to another import operation.".into(),
+                ));
+            }
+            Some(intent)
+                if intent
+                    .attachment()
+                    .is_some_and(|present| present != &wallet) =>
+            {
+                return Err(SettingsError::WritingFile(
+                    "This Cube is already importing another Bitcoin wallet.".into(),
+                ));
+            }
+            None => {
+                let mut intent = settings::BitcoinImport::pending();
+                if let Some(operation_id) = blob.import_operation_id {
+                    intent.operation_id = operation_id;
+                }
+                cube.bitcoin_import = Some(Box::new(intent));
+            }
+            _ => (),
+        }
+        Ok(Some(settings))
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -671,6 +851,10 @@ pub async fn restore_from_kit(
             RestoredKitSource::Password => {
                 cube.recovery_kit_password_backed_up = true;
                 cube.recovery_kit_last_backed_up_descriptor_fingerprint = Some(fingerprint.clone());
+            }
+            RestoredKitSource::PasswordV3 => {
+                cube.recovery_kit_password_backed_up = false;
+                cube.recovery_kit_last_backed_up_descriptor_fingerprint = None;
             }
             RestoredKitSource::OwnerKeychain => {
                 cube.recovery_kit_last_backed_up_keychain_descriptor_fingerprint =
@@ -768,7 +952,18 @@ pub async fn abandon_pending(
     }
     let path = journal_path(directory, operation_id);
     if let Some(journal) = read_journal(&path)? {
-        remove_unpublished_storage(directory, &current, &journal, cube_id, operation_id)?;
+        check_cube(directory, &current, &journal, false)?;
+        if journal.cube_id != cube_id
+            || journal.operation_id != operation_id
+            || journal.final_path(directory).exists()
+        {
+            return Err(
+                "This wallet has already been installed. Resume it before changing its attachment."
+                    .into(),
+            );
+        }
+        let stage = journal.stage_path(directory);
+        blocking_fs(move || remove_abandoned_stage(&stage, &journal)).await?;
     }
     settings::update_settings_file_checked(directory, |mut settings| {
         let cube = settings
@@ -897,201 +1092,6 @@ pub async fn reconcile_sync(
     })
     .await
     .map_err(|e| e.to_string())
-}
-
-fn initialize_import_storage(
-    directory: &NetworkDirectory,
-    journal: &Journal,
-    config: &Config,
-) -> Result<(), String> {
-    let stage = journal.stage_path(directory);
-    if stage.exists() {
-        if owns_directory(&stage, journal)? {
-            // Only unpublished storage owned by this exact prepared operation
-            // can be discarded and recreated. Never touch a final wallet.
-            fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
-        } else if fs::read_dir(&stage)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_some()
-        {
-            return Err(
-                "The staging directory is not owned by this import; no files were changed.".into(),
-            );
-        }
-    }
-    crate::dir::create_directory(&stage).map_err(|e| e.to_string())?;
-    write_json(&stage.join(OWNER_FILE), &journal)?;
-    coincubed::create_imported_storage(
-        config,
-        &DataDirectory::new(stage.clone()),
-        journal.wallet.birthday,
-        journal.wallet.initial_lookahead,
-    )
-    .map_err(|e| e.to_string())?;
-    if let Some(state) = journal.restored_address_state {
-        // The initializer writes scan fields into the saved configuration.
-        let saved_config =
-            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
-        coincubed::restore_imported_address_state(
-            &saved_config,
-            &DataDirectory::new(stage.clone()),
-            state.receive_index,
-            state.change_index,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if let Some(target) = journal.restored_discovery_target {
-        let saved_config =
-            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
-        coincubed::restore_imported_discovery_target(
-            &saved_config,
-            &DataDirectory::new(stage.clone()),
-            target,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    sync_directory(&stage)?;
-    Ok(())
-}
-
-fn prepare_restored_kit_cube(
-    mut settings: Settings,
-    cube_id: &str,
-    blob: &crate::services::recovery::ImportedDescriptorBlob,
-    wallet: &ImportedWalletAttachment,
-    chain: crate::chain::ChainId,
-) -> Result<Option<Settings>, SettingsError> {
-    if settings
-        .cubes
-        .iter()
-        .filter(|cube| cube.id == cube_id)
-        .count()
-        != 1
-    {
-        return Err(SettingsError::WritingFile(
-            "Duplicate or missing restore Cube identity.".into(),
-        ));
-    }
-    check_restored_signer_metadata(&settings, blob, wallet)?;
-    let cube = settings
-        .cubes
-        .iter_mut()
-        .find(|cube| cube.id == cube_id)
-        .ok_or_else(|| {
-            SettingsError::WritingFile("The Cube to restore no longer exists.".into())
-        })?;
-    if cube.network != chain || cube.vault_wallet_id.is_some() {
-        return Err(SettingsError::WritingFile(
-            "This Cube already has a Vault or belongs to another chain.".into(),
-        ));
-    }
-    if cube.imported_claim_source.is_some()
-        && cube.imported_claim_source != blob.imported_claim_source
-    {
-        return Err(SettingsError::WritingFile(
-            "This Cube already has another imported Claim source.".into(),
-        ));
-    }
-    cube.imported_claim_source = blob.imported_claim_source.clone();
-    match &cube.bitcoin_import {
-        Some(intent)
-            if blob
-                .import_operation_id
-                .is_some_and(|id| id != intent.operation_id) =>
-        {
-            return Err(SettingsError::WritingFile(
-                "This Cube already belongs to another import operation.".into(),
-            ));
-        }
-        Some(intent) if intent.attachment().is_some_and(|present| present != wallet) => {
-            return Err(SettingsError::WritingFile(
-                "This Cube is already importing another Bitcoin wallet.".into(),
-            ));
-        }
-        None => {
-            let mut intent = settings::BitcoinImport::pending();
-            if let Some(operation_id) = blob.import_operation_id {
-                intent.operation_id = operation_id;
-            }
-            cube.bitcoin_import = Some(Box::new(intent));
-        }
-        _ => (),
-    }
-    Ok(Some(settings))
-}
-
-fn check_restored_signer_metadata(
-    settings: &Settings,
-    blob: &crate::services::recovery::ImportedDescriptorBlob,
-    wallet: &ImportedWalletAttachment,
-) -> Result<(), SettingsError> {
-    if let Some(metadata) = &blob.signer_metadata {
-        let matches = settings
-            .wallets
-            .iter()
-            .filter(|w| w.wallet_id() == wallet.wallet_id)
-            .collect::<Vec<_>>();
-        if matches.len() > 1 {
-            return Err(SettingsError::WritingFile(
-                "Duplicate restored wallet identity.".into(),
-            ));
-        }
-        if let Some(prior) = matches.first() {
-            let prior_signers = serde_json::to_value((
-                &prior.keys,
-                &prior.hardware_wallets,
-                prior.keychain_keys_recorded,
-            ))
-            .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
-            let restored_signers = serde_json::to_value((
-                &metadata.keys,
-                &metadata.hardware_wallets,
-                metadata.keychain_keys_recorded,
-            ))
-            .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
-            if (!prior.keys.is_empty()
-                || !prior.hardware_wallets.is_empty()
-                || prior.keychain_keys_recorded)
-                && prior_signers != restored_signers
-            {
-                return Err(SettingsError::WritingFile(
-                    "Existing imported signer metadata conflicts with this Recovery Kit.".into(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn remove_unpublished_storage(
-    directory: &NetworkDirectory,
-    current: &Settings,
-    journal: &Journal,
-    cube_id: &str,
-    operation_id: Uuid,
-) -> Result<(), String> {
-    check_cube(directory, current, journal, false)?;
-    if journal.cube_id != cube_id
-        || journal.operation_id != operation_id
-        || journal.final_path(directory).exists()
-    {
-        return Err(
-            "This wallet has already been installed. Resume it before changing its attachment."
-                .into(),
-        );
-    }
-    let stage = journal.stage_path(directory);
-    if stage.exists() {
-        if !owns_directory(&stage, journal)? {
-            return Err(
-                "The staged data is not owned by this import; no files were removed.".into(),
-            );
-        }
-        fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
-        sync_directory(stage.parent().ok_or("Missing staging parent")?)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1236,10 +1236,11 @@ mod recovery_pair_tests {
                 t_cost: 1,
                 p_cost: 1,
             },
+            "42",
         )
         .unwrap();
         let RecoveredWalletBlob::Imported(restored) =
-            decrypt_wallet_descriptor_blob(&ciphertext, &password).unwrap()
+            decrypt_wallet_descriptor_blob(&ciphertext, &password, "42").unwrap()
         else {
             panic!("Expected an imported wallet Kit");
         };
@@ -1269,6 +1270,33 @@ mod recovery_pair_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn password_v3_public_restore_does_not_claim_key_backup_complete() {
+        let (blob, _) = kits();
+        let root = RestoreRoot::new();
+        seed_only_cube(&root.0, &blob).await;
+        let directory = root.0.network_directory(ChainId::Bitcoin);
+        let cube = restore_from_kit(
+            &directory,
+            &blob.cube.uuid,
+            &blob,
+            backend(),
+            RestoredKitSource::PasswordV3,
+        )
+        .await
+        .unwrap();
+        assert!(cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .is_some());
+        assert!(!cube.recovery_kit_password_backed_up);
+        assert!(cube
+            .recovery_kit_last_backed_up_descriptor_fingerprint
+            .is_none());
     }
 
     #[tokio::test]

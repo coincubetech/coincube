@@ -188,6 +188,14 @@ impl LiquidReceive {
     }
 }
 
+fn passive_received_amount<'a>(amount: &'a str, cache: &Cache) -> &'a str {
+    if cache.balance_amounts_masked() {
+        "••••••"
+    } else {
+        amount
+    }
+}
+
 impl State for LiquidReceive {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         // Delegate to SideShift flow when active
@@ -199,7 +207,7 @@ impl State for LiquidReceive {
         if self.show_received_celebration {
             let celebration = view::liquid::received_celebration_page(
                 &self.received_celebration_context,
-                &self.received_amount_display,
+                passive_received_amount(&self.received_amount_display, cache),
                 &self.received_quote,
                 &self.received_image_handle,
             )
@@ -208,6 +216,8 @@ impl State for LiquidReceive {
         }
 
         let receive_view = view::liquid::liquid_receive_view(
+            &cache.cube_name,
+            cache.network,
             &self.receive_method,
             self.current_address(),
             self.current_qr_data(),
@@ -221,14 +231,17 @@ impl State for LiquidReceive {
             self.onchain_receive_limits,
             self.receive_asset,
             self.sender_network,
+            usdt_asset_id(self.breez_client.network()).is_some(),
             &self.recent_transaction,
             self.btc_balance,
             self.usdt_balance,
             cache.show_direction_badges,
+            cache.balance_amounts_masked(),
         )
         .map(view::Message::LiquidReceive);
 
-        let content = view::dashboard(menu, cache, receive_view);
+        // Liquid is hidden (plan L2); its pages keep their in-body titles.
+        let content = view::dashboard_payment(menu, cache, None, receive_view);
 
         // Show picker modals if open
         if self.receive_picker_open {
@@ -327,6 +340,12 @@ impl State for LiquidReceive {
 
         if let Message::View(view::Message::LiquidReceive(msg)) = message {
             match msg {
+                LiquidReceiveMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
+                LiquidReceiveMessage::BackToOverview => {
+                    return redirect(Menu::Liquid(LiquidSubMenu::Overview));
+                }
                 LiquidReceiveMessage::ToggleMethod(method) => {
                     if self.receive_method != method {
                         self.receive_method = method.clone();
@@ -599,6 +618,11 @@ impl State for LiquidReceive {
                 }
                 LiquidReceiveMessage::SetReceiveAsset(asset) => {
                     self.receive_picker_open = false;
+                    if asset == SendAsset::Usdt
+                        && usdt_asset_id(self.breez_client.network()).is_none()
+                    {
+                        return Task::none();
+                    }
                     if self.receive_asset != asset {
                         self.receive_asset = asset;
                         self.sideshift_flow = None;
@@ -625,6 +649,20 @@ impl State for LiquidReceive {
                 }
                 LiquidReceiveMessage::SetSenderNetwork(network) => {
                     self.sender_picker_open = false;
+                    if !SenderNetwork::options_for_receive_asset(self.receive_asset)
+                        .contains(&network)
+                    {
+                        return Task::none();
+                    }
+                    if network.is_sideshift()
+                        && self.breez_client.network()
+                            != breez_sdk_liquid::bitcoin::Network::Bitcoin
+                    {
+                        return Task::none();
+                    }
+                    if self.sender_network == network {
+                        return Task::none();
+                    }
                     self.sender_network = network;
                     self.sideshift_flow = None;
                     self.error = None;
@@ -759,7 +797,10 @@ impl State for LiquidReceive {
 
                             let (desc, usdt_display) = if let Some(minor) = usdt_amount {
                                 (
-                                    "USDt Transfer".to_owned(),
+                                    coincube_ui::localized_format!(
+                                        "USDt Transfer",
+                                        "Transferencia de USDt"
+                                    ),
                                     Some(format!("{} USDt", format_usdt_display(minor))),
                                 )
                             } else {
@@ -920,16 +961,18 @@ impl LiquidReceive {
                     if amount < min_amount {
                         self.loading = false;
                         return Task::done(Message::View(view::Message::LiquidReceive(
-                            LiquidReceiveMessage::Error(format!(
+                            LiquidReceiveMessage::Error(coincube_ui::localized_format!(
                                 "Amount below minimum limit of {}",
+                                "El importe es inferior al mínimo de {}",
                                 min_amount
                             )),
                         )));
                     } else if amount > max_amount {
                         self.loading = false;
                         return Task::done(Message::View(view::Message::LiquidReceive(
-                            LiquidReceiveMessage::Error(format!(
+                            LiquidReceiveMessage::Error(coincube_ui::localized_format!(
                                 "Amount above maximum limit of {}",
+                                "El importe supera el máximo de {}",
                                 max_amount
                             )),
                         )));
@@ -1162,6 +1205,52 @@ impl LiquidReceive {
             Task::none()
         } else {
             Task::batch(tasks)
+        }
+    }
+}
+
+#[cfg(test)]
+mod receive_privacy_tests {
+    use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+
+    #[test]
+    fn mounted_celebration_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let amount = "76,543,219 USDt";
+        let quote = coincube_ui::component::quote_display::random_quote("note-receive");
+        let image = coincube_ui::component::quote_display::image_handle_for_context("note-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "liquid-receive-celebration-privacy",
+                view::liquid::received_celebration_page(
+                    "note-receive",
+                    passive_received_amount(amount, &cache),
+                    &quote,
+                    &image,
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains(amount));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains(amount));
+            }
         }
     }
 }

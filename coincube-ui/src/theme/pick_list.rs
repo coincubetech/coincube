@@ -24,7 +24,7 @@ pub fn primary(theme: &Theme, _status: Status) -> Style {
         background: theme.colors.buttons.secondary.active.background.into(),
         border: if let Some(color) = theme.colors.buttons.secondary.active.border {
             Border {
-                radius: 25.0.into(),
+                radius: super::tenshu::radius::CONTROL.into(),
                 width: 1.0,
                 color,
             }

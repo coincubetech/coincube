@@ -9,20 +9,11 @@ use crate::app::message::Message;
 use crate::app::state::State;
 use crate::app::view;
 use crate::app::wallet::Wallet;
-use crate::daemon::{Daemon, DaemonBackend};
+use crate::daemon::Daemon;
 
 #[derive(Default)]
 pub struct AboutSettingsState {
     daemon_version: Option<String>,
-    /// Status of the most recent "Re-register this device" click.
-    /// Drives the inline banner under the Connect device card. `None`
-    /// means "no recent attempt"; `Ok(_)` shows a green confirmation
-    /// with the new device id; `Err(_)` shows the API error so the
-    /// user can decide whether to retry.
-    pub reregister_status: Option<Result<String, String>>,
-    /// True while a re-register RPC is in flight. Disables the button
-    /// to prevent double-clicks.
-    pub reregistering: bool,
 }
 
 impl State for AboutSettingsState {
@@ -30,139 +21,27 @@ impl State for AboutSettingsState {
         crate::app::view::settings::about::about_section(
             menu,
             cache,
-            self.daemon_version.as_ref(),
-            self,
+            self.daemon_version.as_deref(),
         )
     }
 
     fn update(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
-        cache: &Cache,
+        _cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        match message {
-            Message::Info(res) => match res {
+        if let Message::Info(res) = message {
+            match res {
                 Ok(info) => {
-                    if let Some(daemon) = daemon {
-                        if daemon.backend() == DaemonBackend::RemoteBackend {
-                            self.daemon_version = None;
-                        } else {
-                            self.daemon_version = Some(info.version)
-                        }
-                    } else {
-                        self.daemon_version = None;
-                    }
+                    self.daemon_version = daemon.map(|_| info.version);
                 }
                 Err(e) => {
                     return Task::done(Message::View(view::Message::ShowError(
                         crate::user_error::report(&e),
                     )));
                 }
-            },
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::ReregisterConnectDevice,
-            )) => {
-                // Read the bits we need to spawn the RPC. Without
-                // grpc_url and tokens there's nothing we can do —
-                // surface a clear error rather than silently swallow
-                // the click.
-                let (Some(grpc_url), Some(tokens), Some(email)) = (
-                    cache.connect_grpc_url.clone(),
-                    cache.connect_tokens.clone(),
-                    cache.connect_email.clone(),
-                ) else {
-                    self.reregister_status = Some(Err(
-                        "Connect isn't ready yet. Wait a moment, then try again.".to_string(),
-                    ));
-                    return Task::none();
-                };
-                let network_dir = cache.datadir_path.network_directory(cache.chain());
-                self.reregistering = true;
-                self.reregister_status = None;
-                let app_version = env!("CARGO_PKG_VERSION").to_string();
-                let os_version = std::env::consts::OS.to_string();
-                // Match the device label used at first launch (see
-                // `services/connect/login.rs::device_name_for_this_host`) so
-                // re-register produces a consistent name. Both now call the
-                // same helper rather than each keeping their own copy.
-                let device_name = crate::utils::device::device_label();
-                return Task::perform(
-                    async move {
-                        // Remember the currently-registered id so a failed
-                        // re-register can roll back instead of permanently
-                        // discarding a working device_id.
-                        let previous_device_id =
-                            crate::services::connect::client::cache::Account::from_cache(
-                                &network_dir,
-                                &email,
-                            )
-                            .ok()
-                            .flatten()
-                            .and_then(|a| a.device_id);
-                        // Clear the cached id so `ensure_device_registered`
-                        // takes the register path instead of short-circuiting
-                        // on the existing entry.
-                        if let Err(e) =
-                            crate::services::connect::client::cache::set_device_id_for_email(
-                                &network_dir,
-                                &email,
-                                None,
-                            )
-                            .await
-                        {
-                            // Best-effort: a cache write failure here
-                            // just means the next launch may still
-                            // hit the existing id. Don't block the
-                            // RPC on it.
-                            tracing::warn!("Re-register: failed to clear cached device_id: {}", e,);
-                        }
-                        let result =
-                            crate::services::connect::grpc::bootstrap::ensure_device_registered(
-                                &grpc_url,
-                                tokens,
-                                &network_dir,
-                                &email,
-                                device_name,
-                                app_version,
-                                os_version,
-                            )
-                            .await
-                            .map_err(|e| e.to_string());
-                        // On failure the cache was left cleared — restore
-                        // the prior id (best-effort) so a transient RPC
-                        // error doesn't strand the user as unregistered.
-                        if result.is_err() {
-                            if let Err(e) =
-                                crate::services::connect::client::cache::set_device_id_for_email(
-                                    &network_dir,
-                                    &email,
-                                    previous_device_id.as_deref(),
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Re-register: failed to restore previous device_id: {}",
-                                    e,
-                                );
-                            }
-                        }
-                        result
-                    },
-                    |r| {
-                        Message::View(view::Message::Settings(
-                            view::SettingsMessage::ConnectDeviceReregistered(r),
-                        ))
-                    },
-                );
             }
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::ConnectDeviceReregistered(res),
-            )) => {
-                self.reregistering = false;
-                self.reregister_status = Some(res);
-            }
-            _ => {}
         }
 
         Task::none()

@@ -53,6 +53,7 @@ use zeroize::Zeroizing;
 use crate::app::settings::CubeSettings;
 
 struct Session {
+    generation: u64,
     /// The Cube this PIN belongs to. Checked on read so a stale session from a
     /// previously-open Cube can never hand its PIN to a different one.
     cube_id: String,
@@ -124,6 +125,7 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
         .filter(|s| s.cube_id == cube_id)
         .and_then(|s| s.signer);
     *guard = Some(Session {
+        generation: next_generation(),
         cube_id,
         pin,
         signer,
@@ -133,9 +135,10 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
 
 /// Hand the session the signer that verifying the PIN just produced.
 ///
-/// Called from the unlock's blocking task. It goes here rather than through an
-/// iced message because messages must be `Clone` and are cloned freely — every
-/// copy would be another master seed on the heap.
+/// Called when the live PIN screen accepts its matching unlock result. The
+/// blocking classifier keeps the signer in a private slot until then. It
+/// cannot travel through an iced message: messages are cloned freely and
+/// every copy would be another master seed on the heap.
 pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: MasterSigner) {
     let mut guard = lock_session();
     match guard.as_mut() {
@@ -145,6 +148,7 @@ pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: Ma
         // holding just the signer. `open` will fill in the PIN and preserve it.
         _ => {
             *guard = Some(Session {
+                generation: next_generation(),
                 cube_id: cube_id.to_string(),
                 // No PIN yet, and possibly never — a passkey Cube stores its
                 // signer here and never calls `open`. `None`, not `""`.
@@ -304,6 +308,48 @@ pub fn current_pin() -> Option<Zeroizing<String>> {
     lock_session().as_ref().and_then(|s| s.pin.clone())
 }
 
+fn next_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Non-secret lifetime identity for scoped read grants. Never returns PIN/key data.
+/// Closing or reopening even the same Cube invalidates the previous identity.
+pub fn generation_for(cube_id: &str) -> Option<u64> {
+    lock_session()
+        .as_ref()
+        .filter(|s| s.cube_id == cube_id)
+        .map(|s| s.generation)
+}
+
+/// Serialize native authorization persistence with lock/close/reopen.
+/// The callback must be short and synchronous and must not call session APIs.
+pub(crate) fn admit_generation<T>(
+    cube_id: &str,
+    generation: u64,
+    admit: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let session = lock_session();
+    let current = session.as_ref()?;
+    if current.cube_id != cube_id || current.generation != generation {
+        return None;
+    }
+    admit()
+}
+
+/// Close only the captured experimental setup session, never a newer unlock.
+#[cfg(feature = "mcp-proposals")]
+pub(crate) fn close_generation(cube_id: &str, generation: u64) {
+    let mut current = lock_session();
+    if current
+        .as_ref()
+        .is_some_and(|s| s.cube_id == cube_id && s.generation == generation)
+    {
+        *current = None;
+    }
+}
+
 /// Id of the currently open Cube, if any.
 pub fn current_cube_id() -> Option<String> {
     lock_session().as_ref().map(|s| s.cube_id.clone())
@@ -330,29 +376,25 @@ pub fn is_open() -> bool {
 ///
 /// Called on lock, on returning to the launcher, and on duress activation.
 pub fn close() {
-    // An unstarted Home claim intent is session state too: it must not
-    // survive a lock, an idle auto-lock or a duress activation.
-    super::claim_intent::clear();
-    super::split_intent::clear();
     *lock_session() = None;
 }
 
 /// Revoke one Cube without clearing a newer or unrelated Cube's session.
 pub(crate) fn close_cube(cube_id: &str) {
-    // Defensive, not a demonstrated defect: arming requires Home and any Cube
-    // open consumes, so no sequence I could construct leaves an intent armed
-    // here. But this is a *revocation* path — `invalidate_fork_session` calls
-    // it when a fork session stops being trustworthy — and an intent surviving
-    // a revocation is the one shape that would be wrong, so it goes with the
-    // session it was armed alongside.
-    super::claim_intent::clear();
-    super::split_intent::clear();
     let mut session = lock_session();
     if session
         .as_ref()
         .is_some_and(|session| session.cube_id == cube_id)
     {
         *session = None;
+    }
+}
+
+/// Advance only the synthetic test session's idle clock without a wall-clock wait.
+#[cfg(all(test, feature = "mcp-proposals"))]
+pub(crate) fn age_for_proposal_test(duration: Duration) {
+    if let Some(session) = lock_session().as_mut() {
+        session.last_activity = Instant::now() - duration;
     }
 }
 
@@ -379,6 +421,36 @@ mod tests {
         assert!(pin_for("other-synthetic-cube").is_some());
         close_cube("other-synthetic-cube");
         assert!(!is_open());
+    }
+
+    #[test]
+    fn stale_generation_cannot_admit_after_lock_or_same_cube_reopen() {
+        let _guard = test_guard();
+        close();
+        open_without_pin("mcp-synthetic-cube");
+        let first = generation_for("mcp-synthetic-cube").unwrap();
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            Some(7)
+        );
+        close_cube("mcp-synthetic-cube");
+        assert_eq!(generation_for("mcp-synthetic-cube"), None);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        open_without_pin("mcp-synthetic-cube");
+        let second = generation_for("mcp-synthetic-cube").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", first, || Some(7)),
+            None
+        );
+        assert_eq!(
+            admit_generation("mcp-synthetic-cube", second, || Some(9)),
+            Some(9)
+        );
+        close();
     }
 
     // These share one process-global, so they run under a mutex of their own

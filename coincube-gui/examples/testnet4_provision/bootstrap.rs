@@ -126,12 +126,7 @@ fn load_bootstrap_cache(
         expected_id = Some(login.user.id);
         ConnectCache {
             active_email: Some(email.to_owned()),
-            accounts: vec![Account {
-                email: email.to_owned(),
-                tokens: tokens(login)?,
-                device_id: None,
-                last_seen_event_seq: None,
-            }],
+            accounts: vec![Account::new_for_integration(email.to_owned(), tokens(login)?)],
         }
     };
     Ok((cache, expected_id))

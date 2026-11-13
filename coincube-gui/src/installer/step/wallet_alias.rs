@@ -3,10 +3,10 @@ use iced::Task;
 use coincube_ui::{component::form, widget::*};
 
 use crate::{
+    app::settings::WALLET_ALIAS_MAXIMUM_LENGTH,
     chain::ChainIdExt,
     hw::HardwareWallets,
     installer::{context::Context, message::Message, step::Step, view},
-    services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH,
 };
 
 #[derive(Default)]
@@ -15,6 +15,9 @@ pub struct WalletAlias {
 }
 
 impl Step for WalletAlias {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Name)
+    }
     /// The alias names the *Vault wallet* ("My Vault Bitcoin wallet"), and
     /// `ctx.wallet_alias` is only ever read by the wallet-creating install
     /// paths. A seed-only restore has no wallet to name, so asking is a prompt
@@ -56,9 +59,8 @@ impl Step for WalletAlias {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
-        view::wallet_alias(progress, email, &self.wallet_alias)
+        view::wallet_alias(progress, &self.wallet_alias)
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
@@ -80,7 +82,7 @@ impl From<WalletAlias> for Box<dyn Step> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn default_alias_uses_chain_and_preserves_explicit_alias() {
@@ -93,7 +95,6 @@ mod tests {
             let mut ctx = Context::new(
                 chain.bitcoin_network(),
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );

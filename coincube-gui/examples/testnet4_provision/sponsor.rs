@@ -8,7 +8,7 @@ const ENDPOINTS: [&str; 2] = [
     "https://blockstream.info/testnet4/api",
 ];
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BoundRun {
     directory: PathBuf,
@@ -17,7 +17,7 @@ struct BoundRun {
     descriptor_sha256: String,
     checkpoint_sha256: String,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
@@ -35,6 +35,15 @@ struct Intent {
     amount_sats: u64,
     fee_sats: u64,
     change_sats: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prior_sponsor: Option<PriorSponsor>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PriorSponsor {
+    intent_json: String,
+    receipt_json: String,
+    target: BoundRun,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,7 +158,8 @@ fn evidence_transaction(intent: &Intent, evidence: &[Evidence], now: u64) -> Res
 }
 fn check_intent(intent: &Intent) -> Result<()> {
     check(
-        intent.version == 1
+        ((intent.version == 1 && intent.prior_sponsor.is_none())
+            || (intent.version == 2 && intent.prior_sponsor.is_some()))
             && intent.network == "testnet4"
             && intent.authorization_ref == "coincube#1137:testnet4-sponsor"
             && intent.source.run_id != intent.target.run_id
@@ -189,10 +199,12 @@ fn unsigned_psbt(
         input.witness.clear();
     }
     check(
-        saved.txid == intent.previous_txid
-            && saved.change_sats == intent.previous_value_sats
-            && saved.unsigned_hex == hex::encode(consensus::serialize(&original))
-            && saved.change_address == change.address(NETWORK).to_string(),
+        saved.change_address == change.address(NETWORK).to_string()
+            && previous.compute_txid().to_string() == intent.previous_txid
+            && (intent.version == 2
+                || (saved.txid == intent.previous_txid
+                    && saved.change_sats == intent.previous_value_sats
+                    && saved.unsigned_hex == hex::encode(consensus::serialize(&original)))),
         "sponsor_source_spend",
     )?;
     let prevout = previous
@@ -236,6 +248,66 @@ fn unsigned_psbt(
     psbt.inputs[0].witness_utxo = Some(prevout);
     psbt.inputs[0].sighash_type = Some(bitcoin::sighash::EcdsaSighashType::All.into());
     Ok(psbt)
+}
+
+// Version 2 supports exactly one recorded sponsor hop. An old receipt is not
+// authority: recreate its Master + Border witness and compare the exact public
+// transaction currently observed by both explorers before signing anything new.
+fn recorded_prior_sponsor(intent: &Intent, observed: &Transaction) -> Result<Intent> {
+    check_intent(intent)?;
+    let recorded = intent.prior_sponsor.as_ref().ok_or("sponsor_parent_required")?;
+    let prior: Intent = serde_json::from_str(&recorded.intent_json)
+        .map_err(|_| "sponsor_parent_intent")?;
+    check(
+        prior.version == 1 && prior.prior_sponsor.is_none(),
+        "sponsor_parent_depth",
+    )?;
+    check_intent(&prior)?;
+    let receipt: Value = serde_json::from_str(&recorded.receipt_json)
+        .map_err(|_| "sponsor_parent_receipt")?;
+    let prior_hash = sha256::Hash::hash(recorded.intent_json.as_bytes()).to_string();
+    check_replay(&receipt, observed, &prior_hash)?;
+    check(
+        prior.source == intent.source
+            && prior.source_script == intent.source_script
+            && prior.change_sats == intent.previous_value_sats
+            && recorded.target.directory == prior.target.directory
+            && recorded.target.run_id == prior.target.run_id
+            && recorded.target.descriptor_sha256 == prior.target.descriptor_sha256
+            && receipt["ok"] == true
+            && receipt["action"] == "sponsor"
+            && receipt["network"] == "testnet4"
+            && receipt["txid"] == observed.compute_txid().to_string()
+            && receipt["amount_sats"] == prior.amount_sats
+            && receipt["fee_sats"] == prior.fee_sats
+            && receipt["change_sats"] == prior.change_sats,
+        "sponsor_parent_binding",
+    )?;
+    Ok(prior)
+}
+
+fn verify_prior_sponsor(
+    intent: &Intent,
+    source: &State,
+    source_desc: &CoincubeDescriptor,
+    prior_target_desc: &CoincubeDescriptor,
+    observed: &Transaction,
+    secrets: &Secrets,
+) -> Result<()> {
+    check_intent(intent)?;
+    let prior = recorded_prior_sponsor(intent, observed)?;
+    let saved = source.spend.as_ref().ok_or("sponsor_source_incomplete")?;
+    let original: Transaction = consensus::deserialize(
+        &hex::decode(&saved.unsigned_hex).map_err(|_| "sponsor_source_spend")?,
+    )
+    .map_err(|_| "sponsor_source_spend")?;
+    let prior_psbt = unsigned_psbt(&prior, source, source_desc, prior_target_desc, original)?;
+    let expected = sign(prior_psbt, secrets)?;
+    check(
+        expected == *observed
+            && expected.compute_txid().to_string() == intent.previous_txid,
+        "sponsor_parent_witness_unsupported",
+    )
 }
 
 fn sign(mut psbt: Psbt, secrets: &Secrets) -> Result<Transaction> {
@@ -352,13 +424,30 @@ pub(super) fn execute(input: &Input, store: &dyn secret_store::Backend) -> Resul
             && source.vault_id != target.vault_id
             && checkpoint_identity(&source, &source_checkpoint)?
                 == checkpoint_identity(&target, &target_checkpoint)?
-            && source_checkpoint["artifacts"]["public_acceptance"]["txid"] == intent.previous_txid
-            && source_checkpoint["artifacts"]["broadcast_txid"] == intent.previous_txid
+            && source_checkpoint["artifacts"]["public_acceptance"]["txid"]
+                == source.spend.as_ref().ok_or("sponsor_source_incomplete")?.txid
+            && source_checkpoint["artifacts"]["broadcast_txid"]
+                == source.spend.as_ref().ok_or("sponsor_source_incomplete")?.txid
             && target_checkpoint["artifacts"]["receive_address"] == intent.target_address,
         "sponsor_run_binding",
     )?;
-    let psbt = unsigned_psbt(&intent, &source, &source_desc, &target_desc, previous)?;
-    let unsigned = psbt.unsigned_tx.clone();
+    let prior_target_desc = if let Some(recorded) = &intent.prior_sponsor {
+        // The historical target may have progressed since it was funded.
+        // Freeze its current full snapshot separately; its descriptor and
+        // identity must still equal the historical intent, never rewrite it.
+        let _ = recorded_prior_sponsor(&intent, &previous)?;
+        let (prior_target, descriptor, checkpoint) = bound_run(&recorded.target)?;
+        check(
+            source.owner_user_id == prior_target.owner_user_id
+                && source.vault_id != prior_target.vault_id
+                && checkpoint_identity(&source, &source_checkpoint)?
+                    == checkpoint_identity(&prior_target, &checkpoint)?,
+            "sponsor_parent_account",
+        )?;
+        Some(descriptor)
+    } else {
+        None
+    };
     // Read only on both initial signing and replay. Deterministic reconstruction
     // binds an existing receipt to Master + Border, not just any valid primary pair.
     let locator = secret_store::locator(&source.profile_dir, &source.run_id, "provision_backup")?;
@@ -379,6 +468,18 @@ pub(super) fn execute(input: &Input, store: &dyn secret_store::Backend) -> Resul
         )? == source_desc,
         "saved_descriptor_mismatch",
     )?;
+    if let Some(prior_target_desc) = prior_target_desc {
+        verify_prior_sponsor(
+            &intent,
+            &source,
+            &source_desc,
+            &prior_target_desc,
+            &previous,
+            &secrets,
+        )?;
+    }
+    let psbt = unsigned_psbt(&intent, &source, &source_desc, &target_desc, previous)?;
+    let unsigned = psbt.unsigned_tx.clone();
     let tx = sign(psbt, &secrets)?;
     if let Some(path) = &input.sponsor_receipt_file {
         let receipt: Value =
@@ -492,6 +593,7 @@ mod tests {
             amount_sats: 500_000,
             fee_sats: 1000,
             change_sats: 488_000,
+            prior_sponsor: None,
         };
         (
             secrets,
@@ -526,6 +628,88 @@ mod tests {
         assert!(forged
             .extract(&secp256k1::Secp256k1::verification_only())
             .is_err());
+    }
+
+    fn child_intent(prior: &Intent, parent: &Transaction) -> Intent {
+        let mut child = prior.clone();
+        child.version = 2;
+        child.previous_txid = parent.compute_txid().to_string();
+        child.previous_value_sats = parent.output[1].value.to_sat();
+        child.previous_raw_sha256 =
+            sha256::Hash::hash(hex::encode(consensus::serialize(parent)).as_bytes()).to_string();
+        child.amount_sats = 100_000;
+        child.change_sats = child.previous_value_sats - child.amount_sats - child.fee_sats;
+        let intent_json = serde_json::to_string(prior).unwrap();
+        child.prior_sponsor = Some(PriorSponsor {
+            receipt_json: json!({"ok":true,"action":"sponsor","network":"testnet4",
+                "intent_sha256":sha256::Hash::hash(intent_json.as_bytes()).to_string(),
+                "raw_tx":hex::encode(consensus::serialize(parent)),"txid":child.previous_txid,
+                "amount_sats":prior.amount_sats,"fee_sats":prior.fee_sats,"change_sats":prior.change_sats}).to_string(),
+            intent_json,
+            target: prior.target.clone(),
+        });
+        child
+    }
+
+    #[test]
+    fn one_recorded_sponsor_hop_reconstructs_parent_and_signs_only_its_change() {
+        let (secrets, state, source, target, previous, prior, _) = fixture();
+        assert!(serde_json::to_value(&prior).unwrap().get("prior_sponsor").is_none());
+        let parent = sign(unsigned_psbt(&prior, &state, &source, &target, previous).unwrap(), &secrets).unwrap();
+        let child = child_intent(&prior, &parent);
+        verify_prior_sponsor(&child, &state, &source, &target, &parent, &secrets).unwrap();
+        let tx = sign(unsigned_psbt(&child, &state, &source, &target, parent.clone()).unwrap(), &secrets).unwrap();
+        assert_eq!(tx.input[0].previous_output, OutPoint::new(parent.compute_txid(), 1));
+        assert_eq!(tx.output[0].value.to_sat(), 100_000);
+        assert_eq!(tx.output[1].value.to_sat(), 387_000);
+        assert_eq!(tx.output[1].script_pubkey, parent.output[1].script_pubkey);
+    }
+
+    #[test]
+    fn one_hop_rejects_valid_alternative_parent_signers_even_with_matching_txid() {
+        let (secrets, state, source, target, previous, prior, phone) = fixture();
+        let psbt = unsigned_psbt(&prior, &state, &source, &target, previous).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let master_signed = master(&secrets).unwrap().sign_psbt(psbt.clone(), &secp).unwrap();
+        let mut alternate = phone.sign_psbt(master_signed, &secp).unwrap();
+        alternate.finalize_mut(&secp).unwrap();
+        let alternate = alternate.extract(&secp).unwrap();
+        let expected = sign(psbt, &secrets).unwrap();
+        assert_eq!(alternate.compute_txid(), expected.compute_txid());
+        assert_ne!(alternate, expected);
+        let child = child_intent(&prior, &alternate);
+        assert!(recorded_prior_sponsor(&child, &alternate).is_ok());
+        assert_eq!(verify_prior_sponsor(&child, &state, &source, &target, &alternate, &secrets), Err("sponsor_parent_witness_unsupported"));
+    }
+
+    #[test]
+    fn parent_receipt_source_depth_and_saved_spend_cannot_be_substituted() {
+        let (secrets, mut state, source, target, previous, prior, _) = fixture();
+        let parent = sign(unsigned_psbt(&prior, &state, &source, &target, previous).unwrap(), &secrets).unwrap();
+        let child = child_intent(&prior, &parent);
+        let mut missing = child.clone();
+        missing.prior_sponsor = None;
+        assert!(check_intent(&missing).is_err());
+        let mut version_one = child.clone();
+        version_one.version = 1;
+        assert!(check_intent(&version_one).is_err());
+        let mut wrong_source = child.clone();
+        wrong_source.source.checkpoint_sha256 = "changed".into();
+        assert!(recorded_prior_sponsor(&wrong_source, &parent).is_err());
+        let mut nested = child.clone();
+        nested.prior_sponsor.as_mut().unwrap().intent_json = serde_json::to_string(&child).unwrap();
+        assert_eq!(recorded_prior_sponsor(&nested, &parent).err(), Some("sponsor_parent_depth"));
+        let mut changed_receipt = child.clone();
+        let recorded = changed_receipt.prior_sponsor.as_mut().unwrap();
+        let mut receipt: Value = serde_json::from_str(&recorded.receipt_json).unwrap();
+        receipt["raw_tx"] = json!("00");
+        recorded.receipt_json = receipt.to_string();
+        assert_eq!(recorded_prior_sponsor(&changed_receipt, &parent).err(), Some("sponsor_receipt_changed"));
+        let mut changed_descriptor = child.clone();
+        changed_descriptor.prior_sponsor.as_mut().unwrap().target.descriptor_sha256 = "other".into();
+        assert!(recorded_prior_sponsor(&changed_descriptor, &parent).is_err());
+        state.spend.as_mut().unwrap().unsigned_hex.push_str("00");
+        assert!(verify_prior_sponsor(&child, &state, &source, &target, &parent, &secrets).is_err());
     }
 
     #[test]

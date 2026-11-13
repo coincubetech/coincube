@@ -1,3 +1,4 @@
+use crate::locale::copy as localized_copy;
 use iced::{widget::tooltip, Length};
 
 use crate::widget::Container;
@@ -61,44 +62,50 @@ pub fn bitcoin_logo<T>() -> Container<'static, T> {
 }
 
 pub fn recovery<'a, T: 'a>() -> Container<'a, T> {
-    badge_pill("  Recovery  ", "This transaction is using a recovery path")
+    badge_pill(
+        localized_copy("  Recovery  "),
+        "This transaction is using a recovery path",
+    )
 }
 
 pub fn unconfirmed<'a, T: 'a>() -> Container<'a, T> {
     badge_pill(
-        "  Unconfirmed  ",
+        localized_copy("  Unconfirmed  "),
         "Do not treat this as a payment until it is confirmed",
     )
 }
 
 pub fn self_transfer<'a, T: 'a>() -> Container<'a, T> {
     badge_pill(
-        "  Self-transfer  ",
+        localized_copy("  Self-transfer  "),
         "This transaction sends the coins back to this wallet",
     )
 }
 
 pub fn batch<'a, T: 'a>() -> Container<'a, T> {
-    badge_pill("  Batch  ", "This transaction contains multiple payments")
+    badge_pill(
+        localized_copy("  Batch  "),
+        "This transaction contains multiple payments",
+    )
 }
 
 pub fn deprecated<'a, T: 'a>() -> Container<'a, T> {
     badge_pill(
-        "  Deprecated  ",
+        localized_copy("  Deprecated  "),
         "This transaction cannot be included in the blockchain anymore.",
     )
 }
 
 pub fn spent<'a, T: 'a>() -> Container<'a, T> {
     badge_pill(
-        "  Spent  ",
+        localized_copy("  Spent  "),
         "The transaction was included in the blockchain.",
     )
 }
 
 pub fn beta<'a, T: 'a>() -> Container<'a, T> {
     badge_pill(
-        "  Beta  ",
+        localized_copy("  Beta  "),
         "This feature is in beta — review carefully and expect changes.",
     )
 }

@@ -23,12 +23,16 @@ pub struct ConnectCubeMembersState {
     pub members: Vec<CubeMember>,
     pub pending_invites: Vec<CubeInviteSummary>,
     pub invite_email: String,
+    pub invite_email_invalid: bool,
     pub loading: bool,
     pub invite_sending: bool,
-    /// User-action errors (invite validation, submit failure, revoke,
-    /// remove). Cleared by `InviteEmailChanged`, `DismissError`, or a
+    /// User-action errors (submit failure, revoke, remove).
+    /// Invalid invite email uses `invite_email_invalid` instead.
+    /// Cleared by `InviteEmailChanged`, `DismissError`, or a
     /// successful follow-up action.
     pub error: Option<String>,
+    /// Action that opened the visible error banner, for focus return.
+    error_return_id: Option<iced::advanced::widget::Id>,
     /// Fetch-specific errors from `GET /connect/cubes/{id}`. Kept
     /// separate from `error` so:
     ///   * `Enter`'s auto-retry only fires on a prior load failure, not
@@ -40,6 +44,8 @@ pub struct ConnectCubeMembersState {
     /// The payload is the raw server message — W4's structured conflict body
     /// is parsed in PR 3, for now we surface the text verbatim.
     pub remove_conflict: Option<String>,
+    /// Row to restore focus to after dismissing a remove conflict.
+    remove_conflict_member_id: Option<u64>,
     /// `created_at` of the cube's attached Vault, when one exists. Drives
     /// the W16-desktop "Joined after Vault" badge on each member row:
     /// members whose `joined_at` strictly exceeds this landed after the
@@ -135,7 +141,9 @@ pub fn update(
 
         ConnectCubeMembersMessage::InviteEmailChanged(email) => {
             state.invite_email = email;
+            state.invite_email_invalid = false;
             state.error = None;
+            state.error_return_id = None;
             iced::Task::none()
         }
 
@@ -150,9 +158,10 @@ pub fn update(
             )
             .is_ok();
             if !valid {
-                state.error = Some("Please enter a valid email address".to_string());
+                state.invite_email_invalid = true;
                 return iced::Task::none();
             }
+            state.invite_email_invalid = false;
             let (Some(client), Some(cube_id)) = (client, cube_id) else {
                 // Precondition failure on the load path (cube not yet
                 // registered) — route to `load_error` so the next
@@ -179,6 +188,7 @@ pub fn update(
                 Ok(CubeInviteOrAddResult::Added(member)) => {
                     state.invite_email.clear();
                     state.error = None;
+                    state.error_return_id = None;
                     if !state.members.iter().any(|m| m.id == member.id) {
                         state.members.push(member);
                     }
@@ -187,6 +197,7 @@ pub fn update(
                 Ok(CubeInviteOrAddResult::Invited(invite)) => {
                     state.invite_email.clear();
                     state.error = None;
+                    state.error_return_id = None;
                     if !state.pending_invites.iter().any(|i| i.id == invite.id) {
                         state.pending_invites.push(invite);
                     }
@@ -194,7 +205,11 @@ pub fn update(
                 }
                 Err(e) => {
                     state.error = Some(e);
-                    iced::Task::none()
+                    state.error_return_id =
+                        Some(super::super::view::connect::cube_members::add_action_id());
+                    iced::widget::operation::focus(
+                        super::super::view::connect::cube_members::ERROR_DISMISS_ID,
+                    )
                 }
             }
         }
@@ -221,8 +236,17 @@ pub fn update(
                 Ok(()) => {
                     state.pending_invites.retain(|i| i.id != invite_id);
                     state.error = None;
+                    state.error_return_id = None;
                 }
-                Err(e) => state.error = Some(e),
+                Err(e) => {
+                    state.error = Some(e);
+                    state.error_return_id = Some(
+                        super::super::view::connect::cube_members::revoke_action_id(invite_id),
+                    );
+                    return iced::widget::operation::focus(
+                        super::super::view::connect::cube_members::ERROR_DISMISS_ID,
+                    );
+                }
             }
             iced::Task::none()
         }
@@ -249,7 +273,9 @@ pub fn update(
                 Ok(()) => {
                     state.members.retain(|m| m.id != member_id);
                     state.error = None;
+                    state.error_return_id = None;
                     state.remove_conflict = None;
+                    state.remove_conflict_member_id = None;
                 }
                 Err(e) => {
                     // W4: stranded-vault 409 — surface it on the dedicated
@@ -259,8 +285,18 @@ pub fn update(
                     // lands in a follow-up once W4 stabilises.
                     if is_stranded_vault_conflict(&e) {
                         state.remove_conflict = Some(e);
+                        state.remove_conflict_member_id = Some(member_id);
+                        return iced::widget::operation::focus(
+                            super::super::view::connect::cube_members::REMOVE_CONFLICT_DISMISS_ID,
+                        );
                     } else {
                         state.error = Some(e);
+                        state.error_return_id = Some(
+                            super::super::view::connect::cube_members::remove_action_id(member_id),
+                        );
+                        return iced::widget::operation::focus(
+                            super::super::view::connect::cube_members::ERROR_DISMISS_ID,
+                        );
                     }
                 }
             }
@@ -272,14 +308,27 @@ pub fn update(
             // will simply come back on the next `Enter` / `Reload` if
             // the underlying cause (network, auth, etc.) hasn't been
             // resolved.
+            let action_return_id = state.error_return_id.take();
+            let return_id = if state.load_error.is_some() {
+                Some(super::super::view::connect::cube_members::refresh_action_id())
+            } else {
+                action_return_id
+            };
             state.error = None;
             state.load_error = None;
-            iced::Task::none()
+            return_id.map_or_else(iced::Task::none, iced::widget::operation::focus)
         }
 
         ConnectCubeMembersMessage::DismissRemoveConflict => {
             state.remove_conflict = None;
-            iced::Task::none()
+            state
+                .remove_conflict_member_id
+                .take()
+                .map_or_else(iced::Task::none, |id| {
+                    iced::widget::operation::focus(
+                        super::super::view::connect::cube_members::remove_action_id(id),
+                    )
+                })
         }
     }
 }
@@ -708,6 +757,22 @@ mod tests {
             state.error.as_deref(),
             Some("Please enter a valid email address")
         );
+    }
+
+    #[test]
+    fn invalid_invite_email_is_inline_and_clears_on_edit() {
+        let mut state = ConnectCubeMembersState::new();
+        state.invite_email = "jordan@example".to_string();
+        run(&mut state, ConnectCubeMembersMessage::SubmitInvite);
+        assert!(state.invite_email_invalid);
+        assert!(state.error.is_none());
+        assert!(!state.invite_sending);
+
+        run(
+            &mut state,
+            ConnectCubeMembersMessage::InviteEmailChanged("jordan@example.test".to_string()),
+        );
+        assert!(!state.invite_email_invalid);
     }
 
     #[test]

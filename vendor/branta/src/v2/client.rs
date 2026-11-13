@@ -1,9 +1,11 @@
-//! Raw HTTP layer. Consumers should never call this directly -- go through [`crate::v2::BrantaService`].
+//! Raw HTTP layer. Consumers should never call this directly -- go through [`crate::BrantaService`].
 //!
-//! Transcribed from `Branta/V2/Services/BrantaClient.cs`, with one deliberate, documented
-//! deviation: the upstream logo-domain-check loop uses an early `return` instead of `continue`,
-//! which means only the first payment in a GET response list is actually domain-checked. This
-//! port uses `continue` so every payment is checked -- see `CLAUDE.md`.
+//! Transcribed from `Branta/V2/Services/BrantaClient.cs`. Historical note: dotnet/js/dart/python
+//! previously had a bug in the logo-domain-check loop where an early `return` (instead of
+//! `continue`) meant only the first payment in a GET response list was actually domain-checked;
+//! this port never had that bug (it always used `continue`). All six SDKs were fixed to check
+//! every payment, and every logo-bearing field, as of the 2026-09 logo-URL validation hardening
+//! -- see `CLAUDE.md`.
 
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
@@ -12,9 +14,12 @@ use sha2::Sha256;
 
 use crate::error::BrantaError;
 use crate::models::Payment;
-use crate::options::BrantaClientOptions;
+use crate::options::BrantaApiOptions;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Tenshu patch: upper bound on a payment-lookup response body (see TENSHU_PROVENANCE.md).
+pub(crate) const MAX_LOOKUP_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// Matches .NET's `Uri.EscapeDataString`: percent-encode everything except unreserved characters
 /// (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Crucially this encodes `+`, `/`, and `=`, which
@@ -32,25 +37,28 @@ pub trait BrantaClientTrait: Send + Sync {
     async fn get_payments<'a>(
         &'a self,
         destination_value: &'a str,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<Vec<Payment>, BrantaError>;
 
     async fn post_payment<'a>(
         &'a self,
         payment: Payment,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<Option<Payment>, BrantaError>;
 
     async fn is_api_key_valid<'a>(
         &'a self,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<bool, BrantaError>;
 }
 
 pub struct BrantaClient {
     http: reqwest::Client,
-    default_options: BrantaClientOptions,
-    /// Test-only escape hatch: `BrantaClientOptions::base_url` is a fixed enum of real Branta
+    default_options: BrantaApiOptions,
+    /// Sent on payment lookups when set. Live integration tests pass
+    /// `BRANTA_INTEGRATION_METRICS_TOKEN` so Guardrail can leave that traffic out of GET metrics.
+    integration_metrics_token: Option<String>,
+    /// Test-only escape hatch: `BrantaApiOptions::environment` is a fixed enum of real Branta
     /// servers, so integration tests against an ephemeral `wiremock` port need a way to point
     /// this client elsewhere without touching the enum or any production code path.
     #[cfg(test)]
@@ -58,13 +66,26 @@ pub struct BrantaClient {
 }
 
 impl BrantaClient {
-    pub fn new(default_options: BrantaClientOptions) -> Self {
+    pub fn new(default_options: BrantaApiOptions) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Tenshu patch: never follow redirects, so a redirect target cannot receive the
+            // lookup token. Same panic-on-TLS-init-failure behavior as `reqwest::Client::new()`.
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client"),
             default_options,
+            integration_metrics_token: None,
             #[cfg(test)]
             base_url_override: None,
         }
+    }
+
+    /// Attach the secret live integration tests send so Guardrail can omit those lookups
+    /// from GET metrics. An empty token sends no header.
+    pub fn with_integration_metrics_token(mut self, token: impl Into<String>) -> Self {
+        self.integration_metrics_token = Some(token.into());
+        self
     }
 
     #[cfg(test)]
@@ -73,7 +94,7 @@ impl BrantaClient {
         self
     }
 
-    fn base_url(&self, options: Option<&BrantaClientOptions>) -> String {
+    fn base_url(&self, options: Option<&BrantaApiOptions>) -> String {
         #[cfg(test)]
         if let Some(ref override_url) = self.base_url_override {
             return override_url.clone();
@@ -83,7 +104,7 @@ impl BrantaClient {
 
     fn resolve_api_key<'a>(
         &'a self,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<&'a str, BrantaError> {
         self.default_options
             .get_api_key(options)
@@ -94,7 +115,7 @@ impl BrantaClient {
         &self,
         base_url: &str,
         json: &str,
-        options: Option<&BrantaClientOptions>,
+        options: Option<&BrantaApiOptions>,
     ) -> Option<(String, String)> {
         let hmac_secret = self.default_options.get_hmac_secret(options)?;
 
@@ -121,20 +142,54 @@ impl BrantaClient {
         };
         let base_origin = base.origin();
 
-        for payment in payments {
-            let Some(logo_url) = payment
-                .platform_logo_url
-                .as_deref()
-                .filter(|s| !s.is_empty())
-            else {
-                continue;
+        let check = |url: Option<&str>, field: &'static str| -> Result<(), BrantaError> {
+            let Some(logo_url) = url.filter(|s| !s.is_empty()) else {
+                return Ok(());
             };
             let matches = url::Url::parse(logo_url)
                 .map(|u| u.origin() == base_origin)
                 .unwrap_or(false);
-            if !matches {
-                return Err(BrantaError::LogoUrlDomainMismatch);
+            if matches {
+                Ok(())
+            } else {
+                Err(BrantaError::LogoUrlDomainMismatch(field.to_string()))
             }
+        };
+
+        for payment in payments {
+            check(payment.platform_logo_url.as_deref(), "platform_logo_url")?;
+            check(
+                payment.platform_logo_light_url.as_deref(),
+                "platform_logo_light_url",
+            )?;
+            check(
+                payment
+                    .parent_platform
+                    .as_ref()
+                    .and_then(|p| p.logo_url.as_deref()),
+                "parent_platform.logo_url",
+            )?;
+            check(
+                payment
+                    .parent_platform
+                    .as_ref()
+                    .and_then(|p| p.logo_light_url.as_deref()),
+                "parent_platform.logo_light_url",
+            )?;
+            check(
+                payment
+                    .child_platform
+                    .as_ref()
+                    .and_then(|p| p.logo_url.as_deref()),
+                "child_platform.logo_url",
+            )?;
+            check(
+                payment
+                    .child_platform
+                    .as_ref()
+                    .and_then(|p| p.logo_light_url.as_deref()),
+                "child_platform.logo_light_url",
+            )?;
         }
         Ok(())
     }
@@ -145,37 +200,56 @@ impl BrantaClientTrait for BrantaClient {
     async fn get_payments<'a>(
         &'a self,
         destination_value: &'a str,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<Vec<Payment>, BrantaError> {
         let base_url = self.base_url(options);
         let encoded = utf8_percent_encode(destination_value, PATH_SEGMENT).to_string();
 
-        let response = match self
-            .http
-            .get(format!("{base_url}/v2/payments/{encoded}"))
-            .send()
-            .await
+        let mut request = self.http.get(format!("{base_url}/v2/payments/{encoded}"));
+        if let Some(token) = self
+            .integration_metrics_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
         {
+            request = request.header("X-Branta-Integration-Token", token);
+        }
+        let mut response = match request.send().await {
             Ok(response) => response,
-            Err(_) => return Ok(Vec::new()), // never surface lookup failures
+            Err(_) => return Err(BrantaError::Incomplete),
         };
 
-        if !response.status().is_success() {
+        if response.status().as_u16() == 404 {
             return Ok(Vec::new());
         }
+        if !response.status().is_success() {
+            return Err(BrantaError::Incomplete);
+        }
 
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(Vec::new()),
-        };
+        // Tenshu patch: read at most MAX_LOOKUP_RESPONSE_BYTES; anything larger is incomplete.
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_LOOKUP_RESPONSE_BYTES as u64)
+        {
+            return Err(BrantaError::Incomplete);
+        }
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if bytes.len() + chunk.len() > MAX_LOOKUP_RESPONSE_BYTES {
+                        return Err(BrantaError::Incomplete);
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(_) => return Err(BrantaError::Incomplete),
+            }
+        }
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
 
-        let payments: Vec<Payment> = match serde_json::from_slice(&bytes) {
-            Ok(payments) => payments,
-            Err(_) => return Ok(Vec::new()),
-        };
+        let payments: Vec<Payment> = serde_json::from_slice(&bytes)?;
 
         self.verify_logo_urls(&base_url, &payments)?;
 
@@ -185,7 +259,7 @@ impl BrantaClientTrait for BrantaClient {
     async fn post_payment<'a>(
         &'a self,
         payment: Payment,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<Option<Payment>, BrantaError> {
         let base_url = self.base_url(options);
         let api_key = self.resolve_api_key(options)?;
@@ -221,7 +295,7 @@ impl BrantaClientTrait for BrantaClient {
 
     async fn is_api_key_valid<'a>(
         &'a self,
-        options: Option<&'a BrantaClientOptions>,
+        options: Option<&'a BrantaApiOptions>,
     ) -> Result<bool, BrantaError> {
         let base_url = self.base_url(options);
         let api_key = self.resolve_api_key(options)?;
@@ -240,12 +314,13 @@ impl BrantaClientTrait for BrantaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enums::BrantaServerBaseUrl;
+    use crate::enums::BrantaEnvironment;
+    use crate::models::Platform;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn options() -> BrantaClientOptions {
-        BrantaClientOptions::new(BrantaServerBaseUrl::Localhost)
+    fn options() -> BrantaApiOptions {
+        BrantaApiOptions::new(BrantaEnvironment::Localhost)
     }
 
     fn client_for(server: &MockServer) -> BrantaClient {
@@ -279,10 +354,107 @@ mod tests {
             .await;
 
         let client = client_for(&server);
-        assert_eq!(
-            client.get_payments("value", None).await.unwrap(),
-            Vec::new()
-        );
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_does_not_follow_redirects() {
+        // Tenshu patch test.
+        let server = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/v2/payments/value", target.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<Payment>::new()))
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_rejects_oversized_body() {
+        // Tenshu patch test.
+        let server = MockServer::start().await;
+        let body = vec![b' '; MAX_LOOKUP_RESPONSE_BYTES + 1];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_rejects_oversized_chunked_body_without_content_length() {
+        // Tenshu patch test: no Content-Length, so only the chunked read loop can stop it.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            let chunk = vec![b' '; 64 * 1024];
+            for _ in 0..(MAX_LOOKUP_RESPONSE_BYTES / chunk.len() + 2) {
+                if stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .is_err()
+                    || stream.write_all(&chunk).is_err()
+                    || stream.write_all(b"\r\n").is_err()
+                {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+
+        let client = BrantaClient::new(options()).with_base_url_override(format!("http://{addr}"));
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_payments_accepts_body_at_the_cap() {
+        // Tenshu patch test: JSON `[]` padded with whitespace to exactly the cap.
+        let server = MockServer::start().await;
+        let mut body = b"[]".to_vec();
+        body.resize(MAX_LOOKUP_RESPONSE_BYTES, b' ');
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        assert!(client.get_payments("value", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_payments_returns_empty_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        assert!(client.get_payments("value", None).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -309,10 +481,8 @@ mod tests {
             .await;
 
         let client = client_for(&server);
-        assert_eq!(
-            client.get_payments("value", None).await.unwrap(),
-            Vec::new()
-        );
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Json(_)));
     }
 
     #[tokio::test]
@@ -332,27 +502,156 @@ mod tests {
 
         let client = client_for(&server);
         let result = client.get_payments("value", None).await;
-        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch)));
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
     }
 
     #[tokio::test]
-    async fn get_payments_passes_when_logos_match_or_are_absent() {
+    async fn get_payments_catches_mismatched_platform_logo_light_url() {
         let server = MockServer::start().await;
-        let matching_logo = format!("{}/logo.png", server.uri());
-        let payments = vec![
-            Payment::default(),
-            Payment {
-                platform_logo_url: Some(matching_logo),
-                ..Default::default()
-            },
-        ];
+        let payments = vec![Payment {
+            platform_logo_light_url: Some("https://evil.example.com/logo-light.png".to_string()),
+            ..Default::default()
+        }];
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(payments))
             .mount(&server)
             .await;
 
         let client = client_for(&server);
+        let result = client.get_payments("value", None).await;
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn get_payments_catches_mismatched_parent_platform_logo_url() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!([
+            { "parent_platform": { "logo_url": "https://evil.example.com/logo.png" } }
+        ]);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let result = client.get_payments("value", None).await;
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn get_payments_catches_mismatched_parent_platform_logo_light_url() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!([
+            { "parent_platform": { "logo_light_url": "https://evil.example.com/logo-light.png" } }
+        ]);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let result = client.get_payments("value", None).await;
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn get_payments_catches_mismatched_child_platform_logo_url() {
+        let server = MockServer::start().await;
+        let payments = vec![Payment {
+            child_platform: Some(Platform {
+                logo_url: Some("https://evil.example.com/logo.png".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(payments))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let result = client.get_payments("value", None).await;
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn get_payments_catches_mismatched_child_platform_logo_light_url() {
+        let server = MockServer::start().await;
+        let payments = vec![Payment {
+            child_platform: Some(Platform {
+                logo_light_url: Some("https://evil.example.com/logo-light.png".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(payments))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let result = client.get_payments("value", None).await;
+        assert!(matches!(result, Err(BrantaError::LogoUrlDomainMismatch(_))));
+    }
+
+    #[tokio::test]
+    async fn get_payments_passes_when_logos_match_or_are_absent() {
+        let server = MockServer::start().await;
+        let matching_logo = format!("{}/logo.png", server.uri());
+        let matching_logo_light = format!("{}/logo-light.png", server.uri());
+        let body = serde_json::json!([
+            {},
+            {
+                "platform_logo_url": matching_logo,
+                "platform_logo_light_url": matching_logo_light,
+                "parent_platform": { "logo_url": matching_logo, "logo_light_url": matching_logo_light },
+                "child_platform": { "logo_url": matching_logo, "logo_light_url": matching_logo_light },
+            },
+        ]);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
         assert_eq!(client.get_payments("value", None).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_payments_sends_integration_metrics_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(move |req: &wiremock::Request| {
+                assert_eq!(
+                    req.headers
+                        .get("X-Branta-Integration-Token")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("secret")
+                );
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server).with_integration_metrics_token("secret");
+        assert!(client.get_payments("value", None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_payments_omits_integration_metrics_token_when_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(move |req: &wiremock::Request| {
+                assert!(!req.headers.contains_key("X-Branta-Integration-Token"));
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([]))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server).with_integration_metrics_token("");
+        assert!(client.get_payments("value", None).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -369,7 +668,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         client.post_payment(Payment::default(), None).await.unwrap();
     }
@@ -405,7 +704,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         opts.hmac_secret = Some("shared-secret".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         client.post_payment(Payment::default(), None).await.unwrap();
@@ -425,7 +724,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         client.post_payment(Payment::default(), None).await.unwrap();
     }
@@ -439,7 +738,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         let result = client.post_payment(Payment::default(), None).await;
         assert!(matches!(
@@ -458,7 +757,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         assert!(client.is_api_key_valid(None).await.unwrap());
     }
@@ -473,7 +772,7 @@ mod tests {
             .await;
 
         let mut opts = options();
-        opts.default_api_key = Some("test-key".to_string());
+        opts.api_key = Some("test-key".to_string());
         let client = BrantaClient::new(opts).with_base_url_override(server.uri());
         assert!(!client.is_api_key_valid(None).await.unwrap());
     }

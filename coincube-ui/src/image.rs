@@ -144,6 +144,8 @@ const BTC_LOGO: &[u8] = include_bytes!("../static/logos/btc.svg");
 const LBTC_LOGO: &[u8] = include_bytes!("../static/logos/lbtc.svg");
 const USDT_LOGO: &[u8] = include_bytes!("../static/logos/usdt.svg");
 const USDC_LOGO: &[u8] = include_bytes!("../static/logos/usdc.svg");
+/// USDB's token icon, from https://usdb.flashnet.xyz/icons/icon-usdb-token.svg.
+const USDB_LOGO: &[u8] = include_bytes!("../static/logos/usdb.svg");
 const ETH_LOGO: &[u8] = include_bytes!("../static/logos/eth.svg");
 const TRX_LOGO: &[u8] = include_bytes!("../static/logos/trx.svg");
 const BNB_LOGO: &[u8] = include_bytes!("../static/logos/bnb.svg");
@@ -223,11 +225,17 @@ pub fn network_logo<'a>(network: &str) -> Svg<'a, Theme> {
 
 /// Returns the asset logo SVG for a given asset slug.
 pub fn asset_logo<'a>(asset: &str) -> Svg<'a, Theme> {
+    Svg::new(svg::Handle::from_memory(asset_logo_bytes(asset)))
+}
+
+/// The logo file for an asset slug ("btc", "lbtc", "usdt", "usdc", "usdb");
+/// anything else is bitcoin's.
+fn asset_logo_bytes(asset: &str) -> &'static [u8] {
     match asset {
-        "btc" | "lbtc" => btc_logo(),
-        "usdt" => usdt_logo(),
-        "usdc" => usdc_logo(),
-        _ => btc_logo(),
+        "usdt" => USDT_LOGO,
+        "usdc" => USDC_LOGO,
+        "usdb" => USDB_LOGO,
+        _ => BTC_LOGO,
     }
 }
 
@@ -323,4 +331,58 @@ pub fn asset_network_logo<'a, M: 'a>(
     .width(Length::Fixed(total))
     .height(Length::Fixed(total))
     .into()
+}
+
+const KAGE_CUBE_SEALED: &[u8] = include_bytes!("../static/images/kage/kage-cube-sealed.png");
+static KAGE_CUBE_SEALED_HANDLE: LazyLock<iced::widget::image::Handle> =
+    LazyLock::new(|| iced::widget::image::Handle::from_bytes(KAGE_CUBE_SEALED));
+
+/// Kage holding the sealed Cube (Sumi-e), on a transparent background:
+/// the wizards' Done art. 320×480, drawn at 240×360.
+pub fn kage_cube_sealed() -> iced::widget::image::Handle {
+    KAGE_CUBE_SEALED_HANDLE.clone()
+}
+
+// Small sumi-e object studies for Recovery Kit flows. Decode once per app.
+static RECOVERY_KIT_PROTECTED: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/kit-protected.png").as_slice(),
+    )
+});
+static RECOVERY_KIT_WITHDRAWN: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/kit-withdrawn.png").as_slice(),
+    )
+});
+
+static PIN_UNLOCK_LOCK: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/pin-lock.png").as_slice(),
+    )
+});
+
+pub fn pin_unlock_lock() -> iced::widget::image::Handle {
+    PIN_UNLOCK_LOCK.clone()
+}
+
+pub fn recovery_kit_protected() -> iced::widget::image::Handle {
+    RECOVERY_KIT_PROTECTED.clone()
+}
+
+pub fn recovery_kit_withdrawn() -> iced::widget::image::Handle {
+    RECOVERY_KIT_WITHDRAWN.clone()
+}
+
+#[cfg(test)]
+mod asset_logo_tests {
+    use super::*;
+
+    #[test]
+    fn usdb_has_its_own_logo() {
+        assert_eq!(asset_logo_bytes("usdb"), USDB_LOGO);
+        assert_ne!(USDB_LOGO, BTC_LOGO);
+        assert_eq!(asset_logo_bytes("btc"), BTC_LOGO);
+        assert_eq!(asset_logo_bytes("usdt"), USDT_LOGO);
+        assert_eq!(asset_logo_bytes("unknown"), BTC_LOGO);
+    }
 }

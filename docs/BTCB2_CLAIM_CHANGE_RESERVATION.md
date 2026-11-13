@@ -1,5 +1,12 @@
 # Durable change reservation for owned Claim preparation
 
+> **Status (S7b):** the Claim flow this was written for, its GUI daemon
+> methods (`reserve_change`, `reserve_claim_change`) and the
+> `reserveclaimchange` JSON-RPC method have been removed. The daemon
+> primitive `DaemonControl::reserve_change()` and the database reservation
+> below remain, sharing the change-index table and writer lock with ordinary
+> spends, but have no production caller. No schema changed.
+
 `DaemonControl::reserve_change()` returns a non-deserializable
 `ChangeReservation` with exact `ChainId`, full public descriptor and normal BIP32
 change index. It is a committed allocation, not spend permission, a UTXO lock,

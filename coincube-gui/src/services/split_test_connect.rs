@@ -88,25 +88,6 @@ fn refused_fresh(request: &HttpMockRequest) -> bool {
     fresh_header(request) && relative(request).is_none_or(|path| !fresh_path_allowed(path))
 }
 
-fn anonymous(request: &HttpMockRequest) -> bool {
-    request.headers.as_ref().is_none_or(|headers| {
-        headers.iter().all(|(name, _)| {
-            ![
-                "authorization",
-                "cookie",
-                "x-device-fingerprint",
-                "x-device-name",
-            ]
-            .iter()
-            .any(|bad| name.eq_ignore_ascii_case(bad))
-        })
-    })
-}
-
-fn not_fresh(request: &HttpMockRequest) -> bool {
-    !fresh_header(request)
-}
-
 /// Install Connect's refusal: every fresh request for a path off the
 /// allowlist gets 400. Returns the mock so a test can assert it was never hit.
 pub fn strict(server: &MockServer) -> httpmock::Mock<'_> {
@@ -114,45 +95,6 @@ pub fn strict(server: &MockServer) -> httpmock::Mock<'_> {
         when.matches(refused_fresh);
         then.status(400)
             .body("Unsupported Esplora observation path");
-    })
-}
-
-/// Serve a fresh observation of `path` (network-relative) on `network`
-/// (`bitcoin` or `bitcoin-blake2b`). Panics if Connect would refuse the path,
-/// so a test cannot serve what production cannot.
-pub fn serve_fresh<'a>(
-    server: &'a MockServer,
-    network: &str,
-    path: &str,
-    body: &str,
-) -> httpmock::Mock<'a> {
-    assert!(fresh_path_allowed(path), "Connect refuses fresh {}", path);
-    server.mock(|when, then| {
-        when.method(GET)
-            .path(format!("/api/v1/esplora/{network}/mainnet{path}"))
-            .header("x-coincube-observation", "fresh")
-            .matches(anonymous);
-        then.status(200)
-            .header("X-Coincube-Observation", "fresh")
-            .header("X-Cache", "BYPASS")
-            .header("Cache-Control", "no-store")
-            .body(body);
-    })
-}
-
-/// Serve an ordinary (cacheable, not fresh) read.
-pub fn serve_cached<'a>(
-    server: &'a MockServer,
-    network: &str,
-    path: &str,
-    body: &str,
-) -> httpmock::Mock<'a> {
-    server.mock(|when, then| {
-        when.method(GET)
-            .path(format!("/api/v1/esplora/{network}/mainnet{path}"))
-            .matches(not_fresh)
-            .matches(anonymous);
-        then.status(200).body(body);
     })
 }
 

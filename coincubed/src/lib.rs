@@ -5,8 +5,10 @@ pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
-pub mod poison_broadcast;
-#[cfg(test)]
+#[cfg(feature = "test-utils")]
+pub mod mcp_test_fixture;
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(dead_code)]
 mod testutils;
 
 pub use bdk_electrum::electrum_client;
@@ -395,6 +397,8 @@ pub enum StartupError {
     MissingBitcoinBackendConfig,
     DbMigrateBitcoinTxs(&'static str),
     Database(SqliteDbError),
+    /// Another process already holds this data directory's lock.
+    AlreadyRunning,
     Bitcoind(BitcoindError),
     Electrum(ElectrumError),
     Esplora(EsploraError),
@@ -453,6 +457,10 @@ impl fmt::Display for StartupError {
                 "Error when migrating Bitcoin transaction from Bitcoin backend to database: {}.", msg
             ),
             Self::Database(e) => write!(f, "Error initializing database: '{}'.", e),
+            Self::AlreadyRunning => write!(
+                f,
+                "Another coincubed is already using this data directory."
+            ),
             Self::Bitcoind(e) => write!(f, "Error setting up bitcoind interface: '{}'.", e),
             Self::Electrum(e) => write!(f, "Error setting up Electrum interface: '{}'.", e),
             Self::Esplora(e) => write!(f, "Error setting up Esplora interface: '{}'.", e),
@@ -1171,6 +1179,9 @@ pub enum DaemonHandle {
         /// blocking the poller join on requests to dead/throttled providers.
         /// Unused (but harmless) for the bitcoind/electrum backends.
         scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+        /// Held until this handle stops, so a second process cannot serve the
+        /// same wallet. `None` only for synthetic handles built in tests.
+        datadir_lock: Option<datadir::DaemonLock>,
     },
     Server {
         poller_sender: mpsc::SyncSender<poller::PollerMessage>,
@@ -1179,6 +1190,8 @@ pub enum DaemonHandle {
         rpcserver_handle: thread::JoinHandle<Result<(), io::Error>>,
         /// See [`DaemonHandle::Controller::scan_abort`].
         scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+        /// See [`DaemonHandle::Controller::datadir_lock`].
+        datadir_lock: Option<datadir::DaemonLock>,
     },
 }
 
@@ -1283,11 +1296,20 @@ impl DaemonHandle {
         )
     }
 
-    fn validate_startup_config(
-        config: &Config,
-        has_bitcoin: bool,
-        connect: Option<&connect::ConnectBackend>,
-    ) -> Result<(), StartupError> {
+    #[allow(clippy::too_many_arguments)]
+    fn start_inner(
+        config: Config,
+        bitcoin: Option<impl BitcoinInterface + 'static>,
+        db: Option<impl DatabaseInterface + 'static>,
+        with_rpc_server: bool,
+        connect: Option<connect::ConnectBackend>,
+        local_fork: bool,
+        // Generic startup refuses forks. Authenticated embedded startup has its
+        // own narrow capability checks before entering this shared sequence.
+        runtime_gate: fn(ChainId) -> Result<(), StartupError>,
+    ) -> Result<Self, StartupError> {
+        let secp = secp256k1::Secp256k1::verification_only();
+
         // Before touching anything: the configuration must be self-consistent, and this build
         // must be able to run the chain it names. Neither check does any I/O.
         config
@@ -1309,7 +1331,7 @@ impl DaemonHandle {
         }
         if let Some(backend) = connect.as_ref() {
             if backend.chain() != config.bitcoin_config.chain
-                || has_bitcoin
+                || bitcoin.is_some()
                 || !matches!(
                     config.bitcoin_backend.as_ref(),
                     Some(config::BitcoinBackend::Esplora(selection)) if backend.matches_selection(selection)
@@ -1320,68 +1342,6 @@ impl DaemonHandle {
                 ));
             }
         }
-        Ok(())
-    }
-
-    fn prepare_startup_directory(
-        config: &Config,
-        data_dir: &DataDirectory,
-    ) -> Result<bool, StartupError> {
-        let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
-        if !fresh_data_dir {
-            preflight_existing_database(config, &data_dir.sqlite_db_file_path())?;
-        } else if data_dir.exists() {
-            // A directory without a database is only "fresh" if nothing of a database is left
-            // in it: a stray rollback journal or WAL sidecar means one was here.
-            preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
-                .map_err(StartupError::DbPreflight)?;
-        }
-        // Retain the historical Vault refusal order (chain admission and
-        // existing-database identity first), while still validating every
-        // caller-built configuration before any startup writes.
-        if config.main_descriptor.as_vault().is_some() {
-            config.check().map_err(StartupError::Config)?;
-        }
-        if !data_dir.exists() {
-            data_dir
-                .init()
-                .map_err(|e| StartupError::DatadirCreation(data_dir.path().to_path_buf(), e))?;
-            log::info!(
-                "Created a new data directory at '{}'",
-                data_dir.path().to_string_lossy()
-            );
-        }
-
-        Ok(fresh_data_dir)
-    }
-
-    fn heal_startup_scan_window(
-        bitcoind: &mut Option<BitcoinD>,
-        db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-        config: &Config,
-    ) {
-        if let Some(bitcoind) = bitcoind.as_mut() {
-            if let Some(vault) = config.main_descriptor.as_vault() {
-                heal_scan_window(bitcoind, db, vault);
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn start_inner(
-        config: Config,
-        bitcoin: Option<impl BitcoinInterface + 'static>,
-        db: Option<impl DatabaseInterface + 'static>,
-        with_rpc_server: bool,
-        connect: Option<connect::ConnectBackend>,
-        local_fork: bool,
-        // Generic startup refuses forks. Authenticated embedded startup has its
-        // own narrow capability checks before entering this shared sequence.
-        runtime_gate: fn(ChainId) -> Result<(), StartupError>,
-    ) -> Result<Self, StartupError> {
-        let secp = secp256k1::Secp256k1::verification_only();
-
-        Self::validate_startup_config(&config, bitcoin.is_some(), connect.as_ref())?;
         runtime_gate(config.bitcoin_config.chain)?;
         // Authenticated admission precedes every filesystem/database/node write.
         let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
@@ -1416,7 +1376,40 @@ impl DaemonHandle {
         } else {
             None
         };
-        let fresh_data_dir = Self::prepare_startup_directory(&config, &data_dir)?;
+        let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
+        if !fresh_data_dir {
+            preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
+        } else if data_dir.exists() {
+            // A directory without a database is only "fresh" if nothing of a database is left
+            // in it: a stray rollback journal or WAL sidecar means one was here.
+            preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
+                .map_err(StartupError::DbPreflight)?;
+        }
+        // Retain the historical Vault refusal order (chain admission and
+        // existing-database identity first), while still validating every
+        // caller-built configuration before any startup writes.
+        if config.main_descriptor.as_vault().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
+        if !data_dir.exists() {
+            data_dir
+                .init()
+                .map_err(|e| StartupError::DatadirCreation(data_dir.path().to_path_buf(), e))?;
+            log::info!(
+                "Created a new data directory at '{}'",
+                data_dir.path().to_string_lossy()
+            );
+        }
+        // The RPC socket name is random, so two processes would otherwise both
+        // bind and the second would overwrite `rpc.socket`. Hold the datadir
+        // before any database or socket setup, and keep it until stop.
+        let datadir_lock = match data_dir.try_lock() {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(StartupError::AlreadyRunning);
+            }
+            Err(e) => return Err(StartupError::Io(e)),
+        };
 
         // Set up the connection to bitcoind (if using it) first as we may need it for the database
         // migration when setting up SQLite below.
@@ -1449,7 +1442,11 @@ impl DaemonHandle {
 
         // A wallet whose scan window starts after the coins we already know about
         // cannot track them, and nothing else notices — see `heal_scan_window`.
-        Self::heal_startup_scan_window(&mut bitcoind, &db, &config);
+        if let Some(bitcoind) = bitcoind.as_mut() {
+            if let Some(vault) = config.main_descriptor.as_vault() {
+                heal_scan_window(bitcoind, &db, vault);
+            }
+        }
 
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops
         // walking the provider chain and returns promptly, instead of the poller
@@ -1533,8 +1530,10 @@ impl DaemonHandle {
                 .spawn({
                     let shutdown = rpcserver_shutdown.clone();
                     move || {
-                        server::run(&data_dir.coincubed_rpc_socket_path(), control, shutdown)?;
-                        Ok(())
+                        let socket_path = data_dir.publish_rpc_socket()?;
+                        let result = server::run(&socket_path, control, shutdown);
+                        data_dir.retire_published_socket(&socket_path);
+                        result
                     }
                 })
                 .expect("Spawning the RPC server thread should never fail.");
@@ -1545,6 +1544,7 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock: Some(datadir_lock),
             });
         }
 
@@ -1553,6 +1553,7 @@ impl DaemonHandle {
             poller_handle,
             control,
             scan_abort,
+            datadir_lock: Some(datadir_lock),
         })
     }
 
@@ -1616,6 +1617,7 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock,
             } => {
                 scan_abort.store(true, sync::atomic::Ordering::Relaxed);
                 rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
@@ -1625,11 +1627,13 @@ impl DaemonHandle {
                     .map_err(|_| failure())
                     .and_then(|result| result);
                 let poller_result = poller_handle.join().map_err(|_| failure());
-                rpc_result.and(poller_result).and(if disconnected {
+                let result = rpc_result.and(poller_result).and(if disconnected {
                     Err(failure())
                 } else {
                     Ok(())
-                })
+                });
+                drop(datadir_lock);
+                result
             }
         }
     }
@@ -1658,16 +1662,19 @@ impl DaemonHandle {
                 rpcserver_shutdown,
                 rpcserver_handle,
                 scan_abort,
+                datadir_lock,
             } => {
                 scan_abort.store(true, sync::atomic::Ordering::Relaxed);
                 poller_sender
                     .send(poller::PollerMessage::Shutdown)
                     .expect("The other end should never have hung up before this.");
                 rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
-                rpcserver_handle
+                let rpc_result = rpcserver_handle
                     .join()
-                    .expect("Poller thread must not panic")?;
+                    .expect("Poller thread must not panic");
                 poller_handle.join().expect("Poller thread must not panic");
+                drop(datadir_lock);
+                rpc_result?;
                 Ok(())
             }
         }
@@ -1698,6 +1705,7 @@ mod cleanup_tests {
                 rpcserver_shutdown: shutdown.clone(),
                 rpcserver_handle: rpc,
                 scan_abort: abort.clone(),
+                datadir_lock: None,
             };
             assert!(handle.stop_for_cleanup().is_err());
             assert!(abort.load(sync::atomic::Ordering::Relaxed));
@@ -1720,6 +1728,7 @@ mod cleanup_tests {
             rpcserver_shutdown: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
             rpcserver_handle: rpc,
             scan_abort: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+            datadir_lock: None,
         };
         assert!(handle.stop_for_cleanup().is_ok());
     }
@@ -2806,32 +2815,9 @@ mod tests {
             fs::remove_dir_all(tmp).unwrap();
         }
 
-        fn read_synthetic_request_head(stream: &mut net::TcpStream) -> Vec<u8> {
-            use std::io::Read;
-            let deadline = time::Instant::now() + time::Duration::from_secs(1);
-            let mut head = Vec::new();
-            while head.len() < 8192
-                && time::Instant::now() < deadline
-                && !head.windows(4).any(|x| x == b"\r\n\r\n")
-            {
-                let mut chunk = [0; 1024];
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => head.extend_from_slice(&chunk[..n]),
-                    // A read slice elapsed with nothing new: keep
-                    // waiting until the deadline, do not give up.
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::TimedOut => {}
-                    Err(_) => break,
-                }
-            }
-            head
-        }
-
         #[test]
         fn authenticated_fork_creates_and_reopens_a_synthetic_wallet() {
-            use std::io::Write;
+            use std::io::{Read, Write};
             use std::sync::atomic::{AtomicBool, Ordering};
             struct Authority(connect::TrustedChainAnchor);
             impl connect::ConnectAnchorAuthority for Authority {
@@ -2881,7 +2867,24 @@ mod tests {
                     stream
                         .set_write_timeout(Some(time::Duration::from_secs(1)))
                         .unwrap();
-                    let head = read_synthetic_request_head(&mut stream);
+                    let deadline = time::Instant::now() + time::Duration::from_secs(1);
+                    let mut head = Vec::new();
+                    while head.len() < 8192
+                        && time::Instant::now() < deadline
+                        && !head.windows(4).any(|x| x == b"\r\n\r\n")
+                    {
+                        let mut chunk = [0; 1024];
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                            // A read slice elapsed with nothing new: keep
+                            // waiting until the deadline, do not give up.
+                            Err(e)
+                                if e.kind() == io::ErrorKind::WouldBlock
+                                    || e.kind() == io::ErrorKind::TimedOut => {}
+                            Err(_) => break,
+                        }
+                    }
                     let head = String::from_utf8_lossy(&head);
                     if !head.ends_with("\r\n\r\n") {
                         continue;

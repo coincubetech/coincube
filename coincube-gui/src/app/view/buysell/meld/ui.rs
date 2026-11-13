@@ -1,13 +1,20 @@
 use std::iter::FromIterator;
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{color, component::*, icon, theme};
 use iced::widget;
 
 use crate::{app::view, services::meld::api::*};
 
 pub(crate) fn not_supported_ux<'a>(
-    msg: &'a str,
+    country: &'static crate::services::coincube::Country,
 ) -> coincube_ui::widget::Element<'a, view::Message> {
+    let msg = localized_format!(
+        "Your country: {} currently isn't supported for BuySell",
+        "Tu país, {}, todavía no es compatible con Comprar/Vender",
+        country
+    );
     widget::column![
         widget::Space::new().height(25),
         widget::container(
@@ -43,9 +50,11 @@ pub(crate) fn region_checks_ux() -> coincube_ui::widget::Element<'static, view::
                     .align_y(iced::Alignment::Center)
                     .padding(35),
                 widget::container(
-                    text::p2_bold("Checking for regional support and transactional limits...")
-                        .size(15)
-                        .style(theme::text::primary)
+                    text::p2_bold(localized_copy(
+                        "Checking for regional support and transactional limits..."
+                    ))
+                    .size(15)
+                    .style(theme::text::primary)
                 )
                 .align_x(iced::Alignment::Center)
                 .align_y(iced::Alignment::Center)
@@ -81,15 +90,17 @@ pub(crate) fn input_form_ux<'a>(
     let mut validation_messages: Vec<std::borrow::Cow<'static, str>> = vec![];
 
     match amount.parse::<f64>() {
-        Err(_) => validation_messages.push("Improper number input".into()),
+        Err(_) => validation_messages.push(localized_copy("Improper number input").into()),
         Ok(ca) if ca.is_finite() => {
             amount_parsed = ca;
 
             if ca > limits.maximum_amount {
                 validation_messages.push(
-                    format!(
+                    localized_format!(
                         "Maximum Transaction of {} is {}",
-                        limits.currency_code, limits.maximum_amount
+                        "El importe máximo por transacción en {} es {}",
+                        limits.currency_code,
+                        limits.maximum_amount
                     )
                     .into(),
                 )
@@ -97,9 +108,11 @@ pub(crate) fn input_form_ux<'a>(
 
             if ca < limits.minimum_amount {
                 validation_messages.push(
-                    format!(
+                    localized_format!(
                         "Minimum Transaction of {} is {}",
-                        limits.currency_code, limits.minimum_amount
+                        "El importe mínimo por transacción en {} es {}",
+                        limits.currency_code,
+                        limits.minimum_amount
                     )
                     .into(),
                 )
@@ -107,8 +120,9 @@ pub(crate) fn input_form_ux<'a>(
 
             if ca > btc_balance.to_btc() && !cfg!(debug_assertions) && amount_is_crypto {
                 validation_messages.push(
-                    format!(
+                    localized_format!(
                         "Input Amount of {} is greater than your BTC balance of {}",
+                        "El importe ingresado de {} es mayor que tu saldo en BTC de {}",
                         amount,
                         btc_balance.to_btc()
                     )
@@ -116,7 +130,9 @@ pub(crate) fn input_form_ux<'a>(
                 )
             }
         }
-        Ok(_) => validation_messages.push("Now how did you manage to input that?".into()),
+        Ok(_) => {
+            validation_messages.push(localized_copy("Now how did you manage to input that?").into())
+        }
     }
 
     let amount_input = widget::text_input(&limits.currency_code, amount)
@@ -160,14 +176,18 @@ pub(crate) fn input_form_ux<'a>(
 
     widget::column![
         widget::Space::new().height(25),
-        text::p2_medium(format!("Input {} amount", limits.currency_code))
-            .align_x(iced::Alignment::Start)
-            .align_y(iced::Alignment::Center)
-            .width(iced::Length::Fill)
-            .style(theme::text::primary),
+        text::p2_medium(localized_format!(
+            "Input {} amount",
+            "Ingresa el importe en {}",
+            limits.currency_code
+        ))
+        .align_x(iced::Alignment::Start)
+        .align_y(iced::Alignment::Center)
+        .width(iced::Length::Fill)
+        .style(theme::text::primary),
         widget::row![
             amount_input,
-            amount_is_crypto.then(|| widget::button("MAX")
+            amount_is_crypto.then(|| widget::button(localized_copy("MAX"))
                 .on_press(view::Message::BuySell(view::BuySellMessage::Meld(
                     view::buysell::meld::MeldMessage::SetMaxAmount,
                 )))
@@ -189,13 +209,13 @@ pub(crate) fn input_form_ux<'a>(
         validation_messages_is_empty.then_some(
             button::primary(
                 Some(icon::enter_box_icon()),
-                match amount_is_crypto {
+                localized_copy(match amount_is_crypto {
                     true => match processing_request {
                         true => "Getting Quotes...",
                         false => "Get Quotes",
                     },
                     false => "Select/Generate an Address for Deposit",
-                }
+                })
             )
             .on_press_maybe((!*processing_request).then_some(view::Message::BuySell(
                 view::BuySellMessage::Meld(view::buysell::meld::MeldMessage::SubmitInputAmount(
@@ -217,7 +237,7 @@ pub(crate) fn input_form_ux<'a>(
         )
         .style(|_| widget::container::background(color::GREY_3)),
         widget::Space::new().height(15),
-        button::secondary(Some(icon::arrow_back()), "Reset Widget")
+        button::secondary(Some(icon::arrow_back()), localized_copy("Reset Widget"))
             .on_press(view::Message::BuySell(view::BuySellMessage::ResetWidget))
             .style(|th, st| {
                 let mut base = theme::button::secondary(th, st);
@@ -252,7 +272,7 @@ pub(crate) fn address_selection_ux<'a>(
             // simple loading spinner
             None => card::simple(
                 widget::row![
-                    text::p1_regular("Loading addresses"),
+                    text::p1_regular(localized_copy("Loading addresses")),
                     widget::container(spinner::typing_text_carousel(
                         "...",
                         true,
@@ -271,7 +291,8 @@ pub(crate) fn address_selection_ux<'a>(
                         })
                         .height(iced::Length::Fixed(1.0))
                         .width(iced::Length::Fill),
-                    text::p1_regular("Generating a new address for deposit..").color(color::GREY_3),
+                    text::p1_regular(localized_copy("Generating a new address for deposit.."))
+                        .color(color::GREY_3),
                     widget::container(widget::Space::new())
                         .style(|_| {
                             widget::container::background(iced::Background::Color(color::GREY_3))
@@ -286,7 +307,7 @@ pub(crate) fn address_selection_ux<'a>(
                 // dropdown header button
                 let dropdown_header = widget::Button::new(
                     widget::row![
-                        text::p2_regular("Pick an existing address")
+                        text::p2_regular(localized_copy("Pick an existing address"))
                             .width(iced::Length::Fill)
                             .color(color::GREY_3),
                         if *address_picker_open {
@@ -334,7 +355,8 @@ pub(crate) fn address_selection_ux<'a>(
                         widget::Button::new(
                             widget::container(
                                 widget::row![
-                                    text::p2_regular("Load more").color(color::ORANGE),
+                                    text::p2_regular(localized_copy("Load more"))
+                                        .color(color::ORANGE),
                                     icon::down_icon().size(12).style(|_| widget::text::Style {
                                         color: Some(color::ORANGE),
                                     })
@@ -371,7 +393,7 @@ pub(crate) fn address_selection_ux<'a>(
 
                 card::simple(
                     widget::column![
-                        text::h3("Select a Deposit Address")
+                        text::h3(localized_copy("Select a Deposit Address"))
                             .width(iced::Length::Fill)
                             .align_x(iced::Alignment::Center)
                             .align_y(iced::Alignment::Center),
@@ -388,7 +410,7 @@ pub(crate) fn address_selection_ux<'a>(
                                 })
                                 .height(iced::Length::Fixed(1.0))
                                 .width(iced::Length::Fill),
-                            text::p2_regular("or").color(color::GREY_3),
+                            text::p2_regular(localized_copy("or")).color(color::GREY_3),
                             widget::container(widget::Space::new())
                                 .style(|_| {
                                     widget::container::background(iced::Background::Color(
@@ -401,11 +423,14 @@ pub(crate) fn address_selection_ux<'a>(
                         .spacing(10)
                         .align_y(iced::Alignment::Center),
                         // generates a new address
-                        button::secondary(Some(icon::plus_icon()), "Generate New Address")
-                            .on_press(view::Message::BuySell(view::BuySellMessage::Meld(
-                                view::buysell::meld::MeldMessage::CreateNewAddress,
-                            )))
-                            .width(iced::Length::Fill),
+                        button::secondary(
+                            Some(icon::plus_icon()),
+                            localized_copy("Generate New Address"),
+                        )
+                        .on_press(view::Message::BuySell(view::BuySellMessage::Meld(
+                            view::buysell::meld::MeldMessage::CreateNewAddress,
+                        )))
+                        .width(iced::Length::Fill),
                     ]
                     .spacing(10),
                 )
@@ -420,10 +445,10 @@ pub(crate) fn address_selection_ux<'a>(
         Some((address, qr_code_data)) => widget::container(
             widget::column![
                 widget::column![
-                    text::caption(match was_picked_from_existing_addresses {
+                    text::caption(localized_copy(match was_picked_from_existing_addresses {
                         true => "YOUR SELECTED ADDRESS: ",
                         false => "GENERATED ADDRESS: ",
-                    })
+                    }))
                     .width(iced::Length::Fill)
                     .align_y(iced::Alignment::Center),
                     widget::container(
@@ -487,7 +512,7 @@ pub(crate) fn address_selection_ux<'a>(
                 }),
                 // dash
                 widget::row![
-                    button::secondary_compact(Some(icon::arrow_back()), "Go Back")
+                    button::secondary_compact(Some(icon::arrow_back()), localized_copy("Go Back"))
                         .on_press(view::Message::BuySell(view::BuySellMessage::Meld(
                             view::buysell::meld::MeldMessage::NavigateBack
                         )))
@@ -500,13 +525,21 @@ pub(crate) fn address_selection_ux<'a>(
                     // submit
                     match processing_request {
                         true => {
-                            button::primary_compact(Some(icon::clock_icon()), "Fetching Quotes")
+                            button::primary_compact(
+                                Some(icon::clock_icon()),
+                                localized_copy("Fetching Quotes"),
+                            )
                         }
                         false => {
-                            button::primary_compact(Some(icon::arrow_return_right()), "Proceed")
-                                .on_press(view::Message::BuySell(view::BuySellMessage::Meld(
+                            button::primary_compact(
+                                Some(icon::arrow_return_right()),
+                                localized_copy("Proceed"),
+                            )
+                            .on_press(view::Message::BuySell(
+                                view::BuySellMessage::Meld(
                                     view::buysell::meld::MeldMessage::GetQuotes,
-                                )))
+                                ),
+                            ))
                         }
                     }
                     .style(|th, st| {
@@ -548,7 +581,7 @@ pub(crate) fn quote_selection_ux<'a>(
                 // transactions display
                 widget::row![
                     widget::column![
-                        text::caption("YOU SEND").color(color::ORANGE),
+                        text::caption(localized_copy("YOU SEND")).color(color::ORANGE),
                         text::h3_bold(format!(
                             "{} {}",
                             quote.source_amount, quote.source_currency_code
@@ -556,7 +589,7 @@ pub(crate) fn quote_selection_ux<'a>(
                     ]
                     .align_x(iced::Alignment::Start),
                     widget::column![
-                        text::caption("YOU RECEIVE").color(color::GREEN),
+                        text::caption(localized_copy("YOU RECEIVE")).color(color::GREEN),
                         text::h3_bold(format!(
                             "{} {}",
                             quote.destination_amount, quote.destination_currency_code
@@ -572,10 +605,10 @@ pub(crate) fn quote_selection_ux<'a>(
                 widget::Space::new().width(25),
                 // payment details
                 widget::column![
-                    text::caption("Provider").style(theme::text::secondary),
+                    text::caption(localized_copy("Provider")).style(theme::text::secondary),
                     text::p2_medium(quote.service_provider.as_str()),
                     widget::Space::new().height(5),
-                    text::caption("Total Fee").style(theme::text::secondary),
+                    text::caption(localized_copy("Total Fee")).style(theme::text::secondary),
                     text::p2_medium(format!(
                         "{} {}",
                         quote.total_fee,
@@ -586,10 +619,10 @@ pub(crate) fn quote_selection_ux<'a>(
                     )),
                     widget::Space::new().height(5),
                     // exchange rate display
-                    quote
-                        .exchange_rate
-                        .is_some()
-                        .then_some(text::caption("Exchange Rate").style(theme::text::secondary)),
+                    quote.exchange_rate.is_some().then_some(
+                        text::caption(localized_copy("Exchange Rate"))
+                            .style(theme::text::secondary),
+                    ),
                     quote.exchange_rate.map(|rate| text::p2_medium(format!(
                         "1 {} = {} {}",
                         quote.source_currency_code,
@@ -646,14 +679,16 @@ pub(crate) fn quote_selection_ux<'a>(
         // driver buttons
         selected.map(|s| {
             match webview_pending {
-                true => button::primary(Some(icon::reload_icon()), "Loading Webview...").style(
-                    |th, st| {
-                        let mut base = theme::button::primary(th, st);
-                        base.border = iced::Border::default().rounded(3);
-                        base
-                    },
-                ),
-                false => button::primary(Some(icon::globe_icon()), "Start Session")
+                true => button::primary(
+                    Some(icon::reload_icon()),
+                    localized_copy("Loading Webview..."),
+                )
+                .style(|th, st| {
+                    let mut base = theme::button::primary(th, st);
+                    base.border = iced::Border::default().rounded(3);
+                    base
+                }),
+                false => button::primary(Some(icon::globe_icon()), localized_copy("Start Session"))
                     .on_press(view::buysell::meld::MeldMessage::ConfirmSelectedQuote(s))
                     .style(|th, st| {
                         let mut base = theme::button::primary(th, st);
@@ -664,15 +699,18 @@ pub(crate) fn quote_selection_ux<'a>(
         }),
         selected.is_none().then(|| {
             widget::row![
-                text::h4_bold("Select a preferred provider"),
+                text::h4_bold(localized_copy("Select a preferred provider")),
                 widget::Space::new().width(iced::Length::Fill),
-                button::secondary_compact(Some(icon::arrow_back()), "Navigate Back")
-                    .on_press(view::buysell::meld::MeldMessage::NavigateBack)
-                    .style(|th, st| {
-                        let mut base = theme::button::secondary(th, st);
-                        base.border = iced::Border::default().rounded(0);
-                        base
-                    })
+                button::secondary_compact(
+                    Some(icon::arrow_back()),
+                    localized_copy("Navigate Back"),
+                )
+                .on_press(view::buysell::meld::MeldMessage::NavigateBack)
+                .style(|th, st| {
+                    let mut base = theme::button::secondary(th, st);
+                    base.border = iced::Border::default().rounded(0);
+                    base
+                })
             ]
             .align_y(iced::Alignment::Center)
         })
@@ -738,7 +776,7 @@ pub(crate) fn region_selection_ux<'a>(
         })
         .collect();
 
-    let search_input = widget::text_input("Search regions...", filter)
+    let search_input = widget::text_input(localized_copy("Search regions..."), filter)
         .on_input(view::buysell::meld::MeldMessage::SetRegionFilter)
         .size(14)
         .padding([8, 12])
@@ -756,7 +794,8 @@ pub(crate) fn region_selection_ux<'a>(
     let region_list = if filtered_regions.is_empty() {
         widget::column![
             widget::Space::new().height(20),
-            text::p2_medium("No regions match your search").style(theme::text::primary),
+            text::p2_medium(localized_copy("No regions match your search"))
+                .style(theme::text::primary),
             widget::Space::new().height(20),
         ]
         .align_x(iced::Alignment::Center)
@@ -784,7 +823,7 @@ pub(crate) fn region_selection_ux<'a>(
         widget::Space::new().height(10),
         match selected {
             Some(_) => {
-                button::primary(Some(icon::globe_icon()), "Continue")
+                button::primary(Some(icon::globe_icon()), localized_copy("Continue"))
                     .on_press(view::buysell::meld::MeldMessage::ConfirmRegion)
                     .style(|th, st| {
                         let mut base = theme::button::primary(th, st);
@@ -793,7 +832,11 @@ pub(crate) fn region_selection_ux<'a>(
                     })
             }
             None => {
-                button::primary(Some(icon::cross_icon()), "Select Your Region").style(|th, st| {
+                button::primary(
+                    Some(icon::cross_icon()),
+                    localized_copy("Select Your Region"),
+                )
+                .style(|th, st| {
                     let mut base = theme::button::secondary(th, st);
                     base.border = iced::Border::default().rounded(2);
                     base
@@ -819,7 +862,7 @@ pub(super) fn webview_ux<'a>(
                 match wallet_address {
                     Some(addr) => {
                         widget::column![
-                            text::caption("Your Recipient Address (Copy+Paste)"),
+                            text::caption(localized_copy("Your Recipient Address (Copy+Paste)")),
                             widget::text_input("", addr)
                                 .size(14)
                                 .padding([6, 10])
@@ -835,10 +878,10 @@ pub(super) fn webview_ux<'a>(
                         ]
                     }
                     None => {
-                        widget::column![text::p1_regular("Complete Sale flow: ")]
+                        widget::column![text::p1_regular(localized_copy("Complete Sale flow: "))]
                     }
                 },
-                button::primary_compact(Some(icon::arrow_back()), "Start Over")
+                button::primary_compact(Some(icon::arrow_back()), localized_copy("Start Over"))
                     .on_press(view::Message::BuySell(view::BuySellMessage::ResetWidget))
                     .style(|th, st| {
                         let mut base = theme::button::primary(th, st);
@@ -851,7 +894,7 @@ pub(super) fn webview_ux<'a>(
             ].spacing(10).align_y(iced::Alignment::Center),
             cfg!(target_os = "macos").then(|| {
                 widget::container(
-                    text::caption("Keyboard shortcuts are problematic in the webview for macOS. Right-click the input field to paste.")
+                    text::caption(localized_copy("Keyboard shortcuts are problematic in the webview for macOS. Right-click the input field to paste."))
                         .style(theme::text::secondary)
                 )
                 .width(iced::Length::Fixed(640.0))

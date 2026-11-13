@@ -3,6 +3,7 @@ use crate::widget::Text;
 use iced::{alignment, Font, Length};
 
 const BOOTSTRAP_ICONS: Font = Font::with_name("bootstrap-icons");
+const COINCUBE_ICONS: Font = Font::with_name("coincube-icons");
 
 fn bootstrap_icon<'a>(unicode: char) -> Text<'a> {
     Text::new(unicode)
@@ -267,6 +268,11 @@ pub fn vault_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F53F}')
 }
 
+/// Spark's asterisk (`static/logos/spark_badge.svg`): the Spark wallet's mark.
+pub fn spark_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{E000}').font(COINCUBE_ICONS)
+}
+
 pub fn lightning_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F46E}')
 }
@@ -320,6 +326,10 @@ pub fn receipt_icon<'a>() -> Text<'a> {
 
 pub fn arrow_down_up_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F127}')
+}
+
+pub fn arrow_left_right_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F12B}')
 }
 
 pub fn cash_icon<'a>() -> Text<'a> {
@@ -416,4 +426,115 @@ pub fn grid_icon<'a>() -> Text<'a> {
 
 pub fn shuffle_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F544}')
+}
+
+pub fn search_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F52A}')
+}
+
+pub fn display_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F302}')
+}
+
+pub fn exclamation_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F333}')
+}
+
+pub fn person_outline_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F4E1}')
+}
+
+pub fn people_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F4D0}')
+}
+
+pub fn laptop_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F456}')
+}
+
+pub fn shield_check_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F52F}')
+}
+
+pub fn bell_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F18A}')
+}
+
+pub fn credit_card_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2DC}')
+}
+
+pub fn dash_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2E6}')
+}
+
+pub fn question_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F505}')
+}
+
+pub fn x_circle_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F623}')
+}
+
+pub fn circle_half_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F288}')
+}
+
+pub fn code_slash_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F2C6}')
+}
+
+pub fn activity_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F66B}')
+}
+
+pub fn folder_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F3D7}')
+}
+
+pub fn copy_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F759}')
+}
+
+/// Share (`box-arrow-up`): an arrow leaving a tray.
+pub fn share_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F1C6}')
+}
+
+pub fn list_ul_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F478}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coincube_icons_is_loaded_under_the_name_spark_icon_asks_for() {
+        // iced falls back to another font, without an error, when its font
+        // database skips a font or no face has the family name a
+        // `Font::with_name` asks for. Load the bytes into that database.
+        use iced::advanced::graphics::text::cosmic_text::{self, fontdb};
+        let bytes = crate::font::COINCUBE_ICONS_BYTES;
+        assert!(crate::font::load()
+            .iter()
+            .any(|font| font.as_ref() == bytes));
+        let mut db = fontdb::Database::new();
+        db.load_font_data(bytes.to_vec());
+        let face = db
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("coincube-icons")],
+                ..fontdb::Query::default()
+            })
+            .and_then(|id| db.face(id))
+            .expect("coincube-icons.ttf loads as the coincube-icons family");
+        assert_eq!(COINCUBE_ICONS, Font::with_name("coincube-icons"));
+        let font = cosmic_text::Font::new(&db, face.id, face.weight).expect("shapeable font");
+        assert_ne!(
+            font.as_swash().charmap().map('\u{E000}'),
+            0,
+            "{}",
+            "U+E000 maps to the Spark glyph"
+        );
+    }
 }

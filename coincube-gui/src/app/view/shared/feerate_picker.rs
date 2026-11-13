@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{button, form, text::*},
     widget::*,
@@ -36,8 +37,9 @@ where
     let form = if disabled {
         form::Form::new_disabled("42 (in sats/vbyte)", feerate)
     } else {
-        form::Form::new_trimmed("42 (in sats/vbyte)", feerate, on_change)
-            .warning("Feerate must be an integer between 1 and 1000 sats/vbyte")
+        form::Form::new_trimmed(localized_copy("42 (in sats/vbyte)"), feerate, on_change).warning(
+            localized_copy("Feerate must be an integer between 1 and 1000 sats/vbyte"),
+        )
     };
     form.size(P1_SIZE).padding(10).into()
 }

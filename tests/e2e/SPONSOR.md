@@ -73,6 +73,30 @@ let the normal fresh runner independently discover and validate target funding.
 If the sponsor has already been broadcast, this helper stops on the spent source;
 resume funding discovery in the target runner rather than create a new sponsor.
 
+## Change from one previous sponsor
+
+Use `--source-sponsor-dir /absolute/previous-sponsor` to spend the source vault's
+change from one recorded **version-1** sponsor transaction. Keep `--source-run`
+pointing to the original completed QA vault. This creates a version-2 intent;
+the default version-1 format and limits remain unchanged. Nested sponsor hops,
+arbitrary wallet outputs and changing either run's evidence are unsupported.
+
+The new intent freezes the exact previous intent/receipt bytes. It also records
+a fresh full snapshot of the previous target, which may have progressed since
+funding; its run identity, descriptor, account and distinct vault must still
+match. Historical snapshots and receipts are never rewritten. Both explorers
+must freshly agree on the previous sponsor's exact signed transaction and its
+unspent source-change output. Historical evidence is not fresh funding proof.
+
+Before signing the new spend, the native helper reconstructs the original
+version-1 transaction from the completed source's saved spend, unchanged
+descriptors and existing Master-plus-Border signing path. Its full signed bytes
+must equal the receipt and both explorers' transaction, including the witness.
+A valid alternative signer pair is unsupported and fails closed. New outputs,
+origin checks, amounts, signature verification and replay guards are unchanged.
+Use a separate output directory, then compare the frozen intent and pass its
+hash exactly as above. The utility still never broadcasts.
+
 Offline checks:
 
 ```sh

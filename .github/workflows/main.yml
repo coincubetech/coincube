@@ -13,12 +13,18 @@ on:
       - edited
       - converted_to_draft
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Optional full commit SHA to test (blank uses the selected branch)'
+        required: false
+        type: string
 
 # A newer push to the same branch/PR supersedes the run in flight. Without
 # this a burst of pushes queues one full matrix — macOS and Windows legs
 # included — per commit, and only the last result is ever looked at.
+# Manual validation runs are independent and must not be superseded by pushes.
 concurrency:
-  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  group: batch-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Build-time passkey flags, same repo-level Actions variables the release
@@ -41,8 +47,17 @@ jobs:
     env:
       BREEZ_API_KEY: ${{ github.event_name == 'push' && secrets.BREEZ_API_KEY || 'DUMMY_BREEZ_API_KEY' }}
     steps:
+      # Manual runs may test a pinned integrated tree using this workflow.
+      # PR runs retain checkout's default synthetic merge ref.
+      - name: Validate manual source SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,6 +70,36 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
           cargo clippy --all-targets -- -D warnings
+          cargo clippy -p coincube-gui --no-default-features --all-targets --locked -- -D warnings
+
+  mcp_tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # This matrix runs independently of linter, so validate before checkout too.
+      - name: Validate manual source SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - run: cargo test -p coincube-mcp --features adapter --locked
+      - run: cargo test -p coincube-mcp --no-default-features --features adapter --locked
+      - run: cargo test -p coincube-mcp --no-default-features --features adapter,native-proposals --locked
+      - run: cargo test -p coincube-mcp --no-default-features --features adapter,native-transactions --locked
+      - run: cargo clippy -p coincube-mcp --features adapter --all-targets --locked -- -D warnings
 
   # coincube-spark-bridge is excluded from the root workspace (see the root
   # Cargo.toml), so the bare `cargo test` in unit_tests does not reach it and
@@ -71,6 +116,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -88,6 +134,34 @@ jobs:
         run: cargo clippy --manifest-path coincube-spark-bridge/Cargo.toml --all-targets -- -D warnings
       - name: Test
         run: cargo test --manifest-path coincube-spark-bridge/Cargo.toml
+
+  # vendor/branta is also excluded from the root workspace, so the bare
+  # `cargo test` never runs the vendored Branta SDK's own suite or the Tenshu
+  # client.rs patch tests. The wallet relies on that suite for decrypt-and-bind
+  # behavior. All of it is offline (local mock servers); the SDK's live
+  # integration tests are under tests/, which is not vendored, and --lib keeps
+  # examples out. The crate has no lockfile of its own: seed it from the root
+  # Cargo.lock so shared dependencies resolve to the reviewed versions. Its
+  # test-only dependencies the root lock lacks (wiremock, tokio-test) still
+  # resolve to the newest compatible release; they never ship in the wallet.
+  branta_vendor_tests:
+    needs: linter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+      - name: Test
+        run: |
+          cp Cargo.lock vendor/branta/Cargo.lock
+          cargo test --manifest-path vendor/branta/Cargo.toml --lib
 
   # Run Linux, macOS and Windows on every PR and push so platform-specific
   # failures are caught before merge (#475). Linux also runs advisory canaries.
@@ -149,7 +223,7 @@ jobs:
     # ignore a red tick. Their failures are still visible in the run.
     continue-on-error: ${{ matrix.toolchain != 'pinned' }}
     env:
-      BREEZ_API_KEY: ${{ secrets.BREEZ_API_KEY }}
+      BREEZ_API_KEY: ${{ github.event_name == 'workflow_dispatch' && 'DUMMY_BREEZ_API_KEY' || secrets.BREEZ_API_KEY }}
       # Empty for the pinned legs, which leaves rust-toolchain.toml in charge —
       # rustup ignores an empty RUSTUP_TOOLCHAIN rather than erroring on it.
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain != 'pinned' && matrix.toolchain || '' }}
@@ -157,6 +231,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       # Nothing to install for the pinned legs: rustup provisions the toolchain
       # named by rust-toolchain.toml on first use. The canaries pin no such file
@@ -186,6 +261,7 @@ jobs:
         run: choco install protoc --yes --no-progress
       - name: Test on Rust ${{ matrix.toolchain }} (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         # Cap test parallelism: the filesystem-heavy tests create files under
         # %TEMP% and immediately read them back, and running many at once
         # multiplies the odds that Defender is mid-scan on one of them. Test
@@ -193,6 +269,16 @@ jobs:
         # concurrency costs little and, with the in-code retries, removes the
         # remaining Windows flakiness.
         run: |
+          # Exercise Windows MCP early, including the separately built STDIO
+          # companion, before the longer full workspace suite.
+          cargo build -p coincube-mcp --features adapter --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TENSHU_MCP_TEST_ADAPTER = Join-Path $PWD 'target/debug/tenshu-mcp.exe'
+          cargo test -p coincube-gui --lib app::local_mcp::tests --no-default-features --locked -- --include-ignored --test-threads=2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p coincube-gui --lib stdio_acceptance_tests --no-default-features --features mcp-proposals,mcp-transactions --locked -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TENSHU_MCP_TEST_ADAPTER
           cargo test --no-default-features -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python contrib/check_windows_binary.py target/debug/coincube.exe
@@ -248,6 +334,24 @@ jobs:
           python3 contrib/test_keyring_supervision.py
           python3 contrib/test_keyring_supervision.py --live-kill
           dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
+      - name: Real wallet through installed STDIO companion
+        if: matrix.toolchain == 'pinned' && runner.os != 'Windows'
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          cargo build -p coincube-mcp --features adapter --locked
+          adapter="$PWD/target/debug/tenshu-mcp"
+          TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+          TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_acceptance_tests --locked -- --ignored --test-threads=1
+      - name: Wallet proposals, transactions and native lock boundaries
+        if: matrix.toolchain == 'pinned'
+        env:
+          BREEZ_API_KEY: DUMMY_REGTEST_ONLY
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          cargo test -p coincube-gui --lib --features mcp-proposals,mcp-transactions --locked proposal -- --test-threads=2
+          cargo test -p coincube-gui --lib --features mcp-proposals,mcp-transactions --locked mcp_transaction -- --test-threads=2
       # The Testnet4 seed-resume gate is compiled only with `integration-tests`
       # (it is the native test runner's resume path), so the bare `cargo test`
       # above never reaches its unit tests. They are offline — no API, no

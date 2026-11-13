@@ -14,7 +14,7 @@ use coincube_ui::{
     widget::{modal::Modal, Element},
 };
 use coincubed::commands::CoinStatus;
-use iced::Task;
+use iced::{advanced::widget::Id, Task};
 
 /// Bump to a larger value (e.g. 50) once Prev/Next pagination is verified
 /// end-to-end on real wallets. Kept low during rollout so QA can exercise
@@ -168,7 +168,7 @@ impl State for VaultTransactionsPanel {
                 self.wallet.supports_inheritance(),
             );
             match &self.modal {
-                VaultTransactionsModal::CreateRbf(rbf) => rbf.view(content),
+                VaultTransactionsModal::CreateRbf(rbf) => rbf.view(content, self.wallet.chain),
                 _ => content,
             }
         } else {
@@ -198,12 +198,96 @@ impl State for VaultTransactionsPanel {
             return Task::none();
         };
         match message {
-            Message::HistoryTransactions(token, res) => {
-                return self.apply_history_transactions(token, res);
-            }
-            Message::HistoryTransactionsExtension(res) => {
-                return self.apply_history_extension(res);
-            }
+            Message::HistoryTransactions(token, res) => match res {
+                // Stale-response guard: a `reload` fired after this fetch was
+                // dispatched bumps `reload_token`, so a late response from a
+                // superseded reload is dropped without touching any state
+                // (otherwise it could overwrite fresher page-0 data or flip
+                // `processing` while the newer reload is still loading).
+                _ if token != self.reload_token => return Task::none(),
+                Err(e) => {
+                    // Must clear `processing` here: `reload` sets it true, so
+                    // a failed initial fetch would otherwise leave the panel
+                    // stuck on the loading indicator with Prev/Next disabled.
+                    self.processing = false;
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                Ok((pending_txs, page_txs)) => {
+                    self.warning = None;
+                    self.pending_txs = pending_txs;
+                    // Page 0 is fetched with a flat limit and no dedup, so a
+                    // short response here genuinely means end-of-history.
+                    if (page_txs.len() as u64) < HISTORY_EVENT_PAGE_SIZE {
+                        self.last_page_index = Some(0);
+                    } else {
+                        self.last_page_index = None;
+                    }
+                    self.page_cache = vec![page_txs];
+                    self.current_page = 0;
+                    self.processing = false;
+                    self.refresh_displayed();
+                }
+            },
+            Message::HistoryTransactionsExtension(res) => match res {
+                Err(e) => {
+                    // Stale-response guard (see the Ok arm): if `pending_page`
+                    // is already cleared a `reload` superseded this fetch —
+                    // discard the late error without touching `processing`,
+                    // which the reload's own fetch now owns.
+                    if self.pending_page.take().is_none() {
+                        return Task::none();
+                    }
+                    self.processing = false;
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                Ok((mut txs, server_exhausted)) => {
+                    // Stale-response guard: this extension result is only
+                    // valid if `pending_page` still records the NextPage
+                    // fetch that produced it. A `reload` between dispatch and
+                    // arrival clears `pending_page`, so a late response is
+                    // discarded rather than advancing `current_page` and
+                    // injecting stale rows into `page_cache`.
+                    let Some(target) = self.pending_page.take() else {
+                        return Task::none();
+                    };
+                    self.processing = false;
+                    self.warning = None;
+                    // The cursor we used (last tx's blocktime) is inclusive,
+                    // so the response can repeat txs that already appeared on
+                    // the current page. Drop those by txid before storing the
+                    // next page. NOTE: `server_exhausted` is derived in the
+                    // fetch task from the *raw* response length vs. the
+                    // request limit — it must not be re-derived from the
+                    // post-dedup `txs.len()`, which can be short even when
+                    // more history exists.
+                    if let Some(prev_page) = self.page_cache.get(self.current_page as usize) {
+                        let prev_ids: std::collections::HashSet<_> =
+                            prev_page.iter().map(|t| t.tx.compute_txid()).collect();
+                        txs.retain(|t| !prev_ids.contains(&t.tx.compute_txid()));
+                    }
+                    if txs.is_empty() {
+                        // Every row overlapped the current page — there is
+                        // nothing new beyond it, so the current page is the
+                        // last. Don't advance onto an empty page.
+                        self.last_page_index = Some(self.current_page);
+                    } else {
+                        self.current_page = target;
+                        if server_exhausted {
+                            self.last_page_index = Some(self.current_page);
+                        }
+                        if (target as usize) < self.page_cache.len() {
+                            self.page_cache[target as usize] = txs;
+                        } else {
+                            self.page_cache.push(txs);
+                        }
+                    }
+                    self.refresh_displayed();
+                }
+            },
             Message::RbfModal(_, _, _) if !self.wallet.supports_inheritance() => {
                 return Task::none();
             }
@@ -220,25 +304,181 @@ impl State for VaultTransactionsPanel {
                 }
             },
             Message::Tick => {
-                return self.background_refresh(daemon);
+                // Background refresh so a new mempool deposit shows up without
+                // the user navigating away and back. Gated to avoid disturbing
+                // an active drill-down: only fire when sitting on page 0, no
+                // tx selected, no fetch in flight, and the previous reload was
+                // long enough ago to be worth re-asking the daemon.
+                //
+                // Critically, this path does NOT clear `page_cache`,
+                // `pending_txs`, `displayed_txs`, or set `processing = true` —
+                // the existing rows stay rendered until the response replaces
+                // them atomically via `BackgroundHistoryTransactions`. That
+                // avoids the periodic "list disappears, loading flashes"
+                // glitch that would happen if we routed Tick through the
+                // user-initiated `reload()` every 10 s.
+                if self.current_page == 0
+                    && self.selected_tx.is_none()
+                    && self.pending_page.is_none()
+                    && !self.processing
+                    && Instant::now() > self.last_reload + TRANSACTIONS_RELOAD_MAX_TTL
+                {
+                    self.reload_token = self.reload_token.wrapping_add(1);
+                    let token = self.reload_token;
+                    self.last_reload = Instant::now();
+                    let daemon = daemon.clone();
+                    let now: u32 = now().as_secs().try_into().unwrap();
+                    return Task::perform(
+                        async move {
+                            let mut txs = daemon
+                                .list_history_txs(0, now, HISTORY_EVENT_PAGE_SIZE)
+                                .await?;
+                            txs.sort_by(|a, b| a.compare(b));
+                            let pending_txs = daemon.list_pending_txs().await?;
+                            Ok((pending_txs, txs))
+                        },
+                        move |result| Message::BackgroundHistoryTransactions(token, result),
+                    );
+                }
             }
             Message::BackgroundHistoryTransactions(token, res) => {
-                return self.apply_background_history(token, res);
+                // Drop responses superseded by a newer reload (user-driven or
+                // background) — same staleness guard as `HistoryTransactions`.
+                if token != self.reload_token {
+                    return Task::none();
+                }
+                match res {
+                    Err(e) => {
+                        // Silently log: a periodic background refresh that
+                        // fails shouldn't pop an error modal over a working
+                        // view. The next Tick will retry.
+                        tracing::warn!(
+                            target: "coincube_gui::vault::transactions",
+                            "background tx refresh failed: {}",
+                            e
+                        );
+                    }
+                    Ok((pending_txs, page_txs)) => {
+                        self.warning = None;
+                        self.pending_txs = pending_txs;
+                        // Only replace the page-0 cache when the user is
+                        // actually still viewing page 0 and isn't mid-NextPage.
+                        // If they've paginated forward (current_page > 0) or a
+                        // NextPage fetch is in flight (`pending_page.is_some()`),
+                        // overwriting page_cache or last_page_index here would
+                        // yank them back to page 0 or contradict the NextPage
+                        // response that's about to arrive.
+                        if self.current_page == 0 && self.pending_page.is_none() {
+                            if (page_txs.len() as u64) < HISTORY_EVENT_PAGE_SIZE {
+                                self.last_page_index = Some(0);
+                            } else {
+                                self.last_page_index = None;
+                            }
+                            self.page_cache = vec![page_txs];
+                        }
+                        self.refresh_displayed();
+                    }
+                }
             }
             Message::View(view::Message::Reload) | Message::View(view::Message::Close) => {
                 return self.reload(Some(daemon), Some(self.wallet.clone()));
             }
             Message::View(view::Message::Select(i)) => {
-                self.select_history_transaction(i);
+                self.selected_tx = self.displayed_txs.get(i).cloned();
+                // Clear modal if it's for a different tx.
+                if let VaultTransactionsModal::CreateRbf(modal) = &self.modal {
+                    if Some(modal.tx.tx.compute_txid())
+                        != self
+                            .selected_tx
+                            .as_ref()
+                            .map(|selected| selected.tx.compute_txid())
+                    {
+                        self.modal = VaultTransactionsModal::None;
+                    }
+                }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)) => {
-                self.modal = VaultTransactionsModal::None;
+                // A Back event queued before the pending view was rebuilt must not
+                // hide the result of an in-flight replacement PSBT.
+                if !matches!(&self.modal, VaultTransactionsModal::CreateRbf(modal) if modal.processing)
+                {
+                    let trigger = match &self.modal {
+                        VaultTransactionsModal::CreateRbf(modal) if modal.is_cancel => {
+                            view::vault::transactions::RBF_CANCEL_TRIGGER_ID
+                        }
+                        VaultTransactionsModal::CreateRbf(_) => {
+                            view::vault::transactions::RBF_BUMP_TRIGGER_ID
+                        }
+                        _ => return Task::none(),
+                    };
+                    self.modal = VaultTransactionsModal::None;
+                    return iced::widget::operation::focus(Id::new(trigger));
+                }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::New(is_cancel))) => {
-                return self.request_rbf_modal(daemon, is_cancel);
+                if !self.wallet.supports_inheritance() {
+                    return Task::none();
+                }
+                if let Some(tx) = &self.selected_tx {
+                    if tx.fee_amount.is_some() {
+                        let tx = tx.clone();
+                        let outpoints: Vec<_> = (0..tx.tx.output.len())
+                            .map(|vout| {
+                                OutPoint::new(
+                                    tx.tx.compute_txid(),
+                                    vout.try_into()
+                                        .expect("number of transaction outputs must fit in u32"),
+                                )
+                            })
+                            .collect();
+                        return Task::perform(
+                            async move {
+                                let res = daemon
+                                    .list_coins(&[CoinStatus::Spending], &outpoints)
+                                    .await
+                                    .map(|res| {
+                                        res.coins
+                                            .iter()
+                                            .filter_map(|c| c.spend_info.map(|info| info.txid))
+                                            .collect()
+                                    })
+                                    .map_err(|e| e.into());
+                                (Box::new(tx), is_cancel, res)
+                            },
+                            |(tx, is_cancel, res)| Message::RbfModal(tx, is_cancel, res),
+                        );
+                    }
+                }
             }
             Message::View(view::Message::Label(_, _)) | Message::LabelsUpdated(_) => {
-                return self.update_history_labels(daemon, message);
+                match self.labels_edited.update(
+                    daemon,
+                    message,
+                    self.pending_txs
+                        .iter_mut()
+                        .chain(self.page_cache.iter_mut().flat_map(|p| p.iter_mut()))
+                        .map(|tx| tx as &mut dyn LabelsLoader)
+                        .chain(
+                            self.selected_tx
+                                .iter_mut()
+                                .map(|tx| tx as &mut dyn LabelsLoader),
+                        ),
+                ) {
+                    Ok(cmd) => {
+                        // `labels_edited.update` mutates labels in-place on
+                        // `pending_txs` / `page_cache`, but the view renders
+                        // the `displayed_txs` clone — rematerialise it so the
+                        // edited label is visible immediately rather than only
+                        // after a page change or reload.
+                        self.refresh_displayed();
+                        return cmd;
+                    }
+                    Err(e) => {
+                        let err_msg = crate::user_error::report(&e);
+                        self.warning = Some(e);
+                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                    }
+                };
             }
             Message::View(view::Message::VaultPrevPage) => {
                 if self.current_page > 0 && !self.processing {
@@ -247,10 +487,94 @@ impl State for VaultTransactionsPanel {
                 }
             }
             Message::View(view::Message::VaultNextPage) => {
-                return self.next_page(daemon);
+                if self.is_last_page() || self.processing {
+                    return Task::none();
+                }
+                let next_page = (self.current_page as usize) + 1;
+                // Already cached — jump straight there. Avoids a redundant
+                // round-trip when the user pages back and forth.
+                if next_page < self.page_cache.len() {
+                    self.current_page += 1;
+                    self.refresh_displayed();
+                    return Task::none();
+                }
+                // Need to fetch. Cursor is the blocktime of the last
+                // confirmed tx on the current page (mirrors the original
+                // "See more" forward-scan logic, including the
+                // duplicate-blocktime overflow handling — see comment in
+                // the async block).
+                let current_page_txs = self
+                    .page_cache
+                    .get(self.current_page as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let Some(last) = current_page_txs.last() else {
+                    return Task::none();
+                };
+                let Some(last_tx_date) = last.time else {
+                    return Task::none();
+                };
+                // The cursor is inclusive of `last_tx_date`, so the fetch
+                // re-returns every current-page row sharing that blocktime
+                // and the handler dedups them out. Over-fetch by exactly
+                // that count so the post-dedup page is still a full
+                // HISTORY_EVENT_PAGE_SIZE rows — without it, every page
+                // after page 0 renders underfilled.
+                let overlap = current_page_txs
+                    .iter()
+                    .filter(|t| t.time == Some(last_tx_date))
+                    .count() as u64;
+                let daemon = daemon.clone();
+                self.pending_page = Some(self.current_page + 1);
+                self.processing = true;
+                return Task::perform(
+                    async move {
+                        let mut limit = HISTORY_EVENT_PAGE_SIZE + overlap;
+                        let mut txs = daemon.list_history_txs(0_u32, last_tx_date, limit).await?;
+
+                        // because gethistory cursor is inclusive and use blocktime
+                        // multiple txs can occur in the same block.
+                        // If there is more tx in the same block that the
+                        // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
+                        // the cursor value (blocktime) but by increasing the limit.
+                        //
+                        // 1. Check if the txs retrieved have all the same blocktime
+                        let blocktime = if let Some(tx) = txs.first() {
+                            tx.time
+                        } else {
+                            return Ok((txs, true));
+                        };
+
+                        // 2. Retrieve a larger batch of tx with the same cursor but
+                        //    a larger limit.
+                        while !txs.iter().any(|evt| evt.time != blocktime)
+                            && txs.len() as u64 == limit
+                        {
+                            // increments of the equivalent of one page more.
+                            limit += HISTORY_EVENT_PAGE_SIZE;
+                            txs = daemon.list_history_txs(0, last_tx_date, limit).await?;
+                        }
+                        // The server is exhausted when it returned fewer rows
+                        // than the (possibly bumped) limit we asked for. This
+                        // is measured on the raw response — the caller must
+                        // not re-derive it from the post-dedup length.
+                        let server_exhausted = (txs.len() as u64) < limit;
+                        txs.sort_by(|a, b| a.compare(b));
+                        Ok((txs, server_exhausted))
+                    },
+                    Message::HistoryTransactionsExtension,
+                );
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Open)) => {
-                return self.open_transaction_export(daemon);
+                if let VaultTransactionsModal::None = &self.modal {
+                    self.modal = VaultTransactionsModal::Export(VaultExportModal::new(
+                        Some(daemon),
+                        ImportExportType::Transactions,
+                    ));
+                    if let VaultTransactionsModal::Export(m) = &self.modal {
+                        return m.launch(true);
+                    }
+                }
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 if let VaultTransactionsModal::Export(_) = &self.modal {
@@ -334,386 +658,6 @@ impl State for VaultTransactionsPanel {
             }
         }
         iced::Subscription::none()
-    }
-}
-
-impl VaultTransactionsPanel {
-    fn select_history_transaction(&mut self, i: usize) {
-        self.selected_tx = self.displayed_txs.get(i).cloned();
-        // Clear modal if it's for a different tx.
-        if let VaultTransactionsModal::CreateRbf(modal) = &self.modal {
-            if Some(modal.tx.tx.compute_txid())
-                != self
-                    .selected_tx
-                    .as_ref()
-                    .map(|selected| selected.tx.compute_txid())
-            {
-                self.modal = VaultTransactionsModal::None;
-            }
-        }
-    }
-
-    fn open_transaction_export(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
-        if let VaultTransactionsModal::None = &self.modal {
-            self.modal = VaultTransactionsModal::Export(VaultExportModal::new(
-                Some(daemon),
-                ImportExportType::Transactions,
-            ));
-            if let VaultTransactionsModal::Export(m) = &self.modal {
-                return m.launch(true);
-            }
-        }
-        Task::none()
-    }
-
-    fn update_history_labels(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        message: Message,
-    ) -> Task<Message> {
-        match self.labels_edited.update(
-            daemon,
-            message,
-            self.pending_txs
-                .iter_mut()
-                .chain(self.page_cache.iter_mut().flat_map(|p| p.iter_mut()))
-                .map(|tx| tx as &mut dyn LabelsLoader)
-                .chain(
-                    self.selected_tx
-                        .iter_mut()
-                        .map(|tx| tx as &mut dyn LabelsLoader),
-                ),
-        ) {
-            Ok(cmd) => {
-                // `labels_edited.update` mutates labels in-place on
-                // `pending_txs` / `page_cache`, but the view renders
-                // the `displayed_txs` clone — rematerialise it so the
-                // edited label is visible immediately rather than only
-                // after a page change or reload.
-                self.refresh_displayed();
-                cmd
-            }
-            Err(e) => {
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                Task::done(Message::View(view::Message::ShowError(err_msg)))
-            }
-        }
-    }
-
-    fn apply_history_transactions(
-        &mut self,
-        token: u64,
-        res: Result<(Vec<HistoryTransaction>, Vec<HistoryTransaction>), Error>,
-    ) -> Task<Message> {
-        match res {
-            // Stale-response guard: a `reload` fired after this fetch was
-            // dispatched bumps `reload_token`, so a late response from a
-            // superseded reload is dropped without touching any state
-            // (otherwise it could overwrite fresher page-0 data or flip
-            // `processing` while the newer reload is still loading).
-            _ if token != self.reload_token => return Task::none(),
-            Err(e) => {
-                // Must clear `processing` here: `reload` sets it true, so
-                // a failed initial fetch would otherwise leave the panel
-                // stuck on the loading indicator with Prev/Next disabled.
-                self.processing = false;
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-            }
-            Ok((pending_txs, page_txs)) => {
-                self.warning = None;
-                self.pending_txs = pending_txs;
-                // Page 0 is fetched with a flat limit and no dedup, so a
-                // short response here genuinely means end-of-history.
-                if (page_txs.len() as u64) < HISTORY_EVENT_PAGE_SIZE {
-                    self.last_page_index = Some(0);
-                } else {
-                    self.last_page_index = None;
-                }
-                self.page_cache = vec![page_txs];
-                self.current_page = 0;
-                self.processing = false;
-                self.refresh_displayed();
-            }
-        };
-        Task::none()
-    }
-    fn apply_history_extension(
-        &mut self,
-        res: Result<(Vec<HistoryTransaction>, bool), Error>,
-    ) -> Task<Message> {
-        match res {
-            Err(e) => {
-                // Stale-response guard (see the Ok arm): if `pending_page`
-                // is already cleared a `reload` superseded this fetch —
-                // discard the late error without touching `processing`,
-                // which the reload's own fetch now owns.
-                if self.pending_page.take().is_none() {
-                    return Task::none();
-                }
-                self.processing = false;
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-            }
-            Ok((txs, server_exhausted)) => {
-                // Stale-response guard: this extension result is only
-                // valid if `pending_page` still records the NextPage
-                // fetch that produced it. A `reload` between dispatch and
-                // arrival clears `pending_page`, so a late response is
-                // discarded rather than advancing `current_page` and
-                // injecting stale rows into `page_cache`.
-                let Some(target) = self.pending_page.take() else {
-                    return Task::none();
-                };
-                self.install_extended_page(txs, server_exhausted, target);
-            }
-        };
-        Task::none()
-    }
-    fn install_extended_page(
-        &mut self,
-        mut txs: Vec<HistoryTransaction>,
-        server_exhausted: bool,
-        target: u32,
-    ) {
-        self.processing = false;
-        self.warning = None;
-        // The cursor we used (last tx's blocktime) is inclusive,
-        // so the response can repeat txs that already appeared on
-        // the current page. Drop those by txid before storing the
-        // next page. NOTE: `server_exhausted` is derived in the
-        // fetch task from the *raw* response length vs. the
-        // request limit — it must not be re-derived from the
-        // post-dedup `txs.len()`, which can be short even when
-        // more history exists.
-        if let Some(prev_page) = self.page_cache.get(self.current_page as usize) {
-            let prev_ids: std::collections::HashSet<_> =
-                prev_page.iter().map(|t| t.tx.compute_txid()).collect();
-            txs.retain(|t| !prev_ids.contains(&t.tx.compute_txid()));
-        }
-        if txs.is_empty() {
-            // Every row overlapped the current page — there is
-            // nothing new beyond it, so the current page is the
-            // last. Don't advance onto an empty page.
-            self.last_page_index = Some(self.current_page);
-        } else {
-            self.current_page = target;
-            if server_exhausted {
-                self.last_page_index = Some(self.current_page);
-            }
-            if (target as usize) < self.page_cache.len() {
-                self.page_cache[target as usize] = txs;
-            } else {
-                self.page_cache.push(txs);
-            }
-        }
-        self.refresh_displayed();
-    }
-    fn background_refresh(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
-        // Background refresh so a new mempool deposit shows up without
-        // the user navigating away and back. Gated to avoid disturbing
-        // an active drill-down: only fire when sitting on page 0, no
-        // tx selected, no fetch in flight, and the previous reload was
-        // long enough ago to be worth re-asking the daemon.
-        //
-        // Critically, this path does NOT clear `page_cache`,
-        // `pending_txs`, `displayed_txs`, or set `processing = true` —
-        // the existing rows stay rendered until the response replaces
-        // them atomically via `BackgroundHistoryTransactions`. That
-        // avoids the periodic "list disappears, loading flashes"
-        // glitch that would happen if we routed Tick through the
-        // user-initiated `reload()` every 10 s.
-        if self.current_page == 0
-            && self.selected_tx.is_none()
-            && self.pending_page.is_none()
-            && !self.processing
-            && Instant::now() > self.last_reload + TRANSACTIONS_RELOAD_MAX_TTL
-        {
-            self.reload_token = self.reload_token.wrapping_add(1);
-            let token = self.reload_token;
-            self.last_reload = Instant::now();
-            let daemon = daemon.clone();
-            let now: u32 = now().as_secs().try_into().unwrap();
-            return Task::perform(
-                async move {
-                    let mut txs = daemon
-                        .list_history_txs(0, now, HISTORY_EVENT_PAGE_SIZE)
-                        .await?;
-                    txs.sort_by(|a, b| a.compare(b));
-                    let pending_txs = daemon.list_pending_txs().await?;
-                    Ok((pending_txs, txs))
-                },
-                move |result| Message::BackgroundHistoryTransactions(token, result),
-            );
-        }
-
-        Task::none()
-    }
-    fn apply_background_history(
-        &mut self,
-        token: u64,
-        res: Result<(Vec<HistoryTransaction>, Vec<HistoryTransaction>), Error>,
-    ) -> Task<Message> {
-        // Drop responses superseded by a newer reload (user-driven or
-        // background) — same staleness guard as `HistoryTransactions`.
-        if token != self.reload_token {
-            return Task::none();
-        }
-        match res {
-            Err(e) => {
-                // Silently log: a periodic background refresh that
-                // fails shouldn't pop an error modal over a working
-                // view. The next Tick will retry.
-                tracing::warn!(
-                    target: "coincube_gui::vault::transactions",
-                    "background tx refresh failed: {}",
-                    e
-                );
-            }
-            Ok((pending_txs, page_txs)) => {
-                self.warning = None;
-                self.pending_txs = pending_txs;
-                // Only replace the page-0 cache when the user is
-                // actually still viewing page 0 and isn't mid-NextPage.
-                // If they've paginated forward (current_page > 0) or a
-                // NextPage fetch is in flight (`pending_page.is_some()`),
-                // overwriting page_cache or last_page_index here would
-                // yank them back to page 0 or contradict the NextPage
-                // response that's about to arrive.
-                if self.current_page == 0 && self.pending_page.is_none() {
-                    if (page_txs.len() as u64) < HISTORY_EVENT_PAGE_SIZE {
-                        self.last_page_index = Some(0);
-                    } else {
-                        self.last_page_index = None;
-                    }
-                    self.page_cache = vec![page_txs];
-                }
-                self.refresh_displayed();
-            }
-        }
-
-        Task::none()
-    }
-    fn request_rbf_modal(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        is_cancel: bool,
-    ) -> Task<Message> {
-        if !self.wallet.supports_inheritance() {
-            return Task::none();
-        }
-        if let Some(tx) = &self.selected_tx {
-            if tx.fee_amount.is_some() {
-                let tx = tx.clone();
-                let outpoints: Vec<_> = (0..tx.tx.output.len())
-                    .map(|vout| {
-                        OutPoint::new(
-                            tx.tx.compute_txid(),
-                            vout.try_into()
-                                .expect("number of transaction outputs must fit in u32"),
-                        )
-                    })
-                    .collect();
-                return Task::perform(
-                    async move {
-                        let res = daemon
-                            .list_coins(&[CoinStatus::Spending], &outpoints)
-                            .await
-                            .map(|res| {
-                                res.coins
-                                    .iter()
-                                    .filter_map(|c| c.spend_info.map(|info| info.txid))
-                                    .collect()
-                            })
-                            .map_err(|e| e.into());
-                        (Box::new(tx), is_cancel, res)
-                    },
-                    |(tx, is_cancel, res)| Message::RbfModal(tx, is_cancel, res),
-                );
-            }
-        }
-
-        Task::none()
-    }
-    fn next_page(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
-        if self.is_last_page() || self.processing {
-            return Task::none();
-        }
-        let next_page = (self.current_page as usize) + 1;
-        // Already cached — jump straight there. Avoids a redundant
-        // round-trip when the user pages back and forth.
-        if next_page < self.page_cache.len() {
-            self.current_page += 1;
-            self.refresh_displayed();
-            return Task::none();
-        }
-        // Need to fetch. Cursor is the blocktime of the last
-        // confirmed tx on the current page (mirrors the original
-        // "See more" forward-scan logic, including the
-        // duplicate-blocktime overflow handling — see comment in
-        // the async block).
-        let current_page_txs = self
-            .page_cache
-            .get(self.current_page as usize)
-            .cloned()
-            .unwrap_or_default();
-        let Some(last) = current_page_txs.last() else {
-            return Task::none();
-        };
-        let Some(last_tx_date) = last.time else {
-            return Task::none();
-        };
-        // The cursor is inclusive of `last_tx_date`, so the fetch
-        // re-returns every current-page row sharing that blocktime
-        // and the handler dedups them out. Over-fetch by exactly
-        // that count so the post-dedup page is still a full
-        // HISTORY_EVENT_PAGE_SIZE rows — without it, every page
-        // after page 0 renders underfilled.
-        let overlap = current_page_txs
-            .iter()
-            .filter(|t| t.time == Some(last_tx_date))
-            .count() as u64;
-        let daemon = daemon.clone();
-        self.pending_page = Some(self.current_page + 1);
-        self.processing = true;
-        Task::perform(
-            async move {
-                let mut limit = HISTORY_EVENT_PAGE_SIZE + overlap;
-                let mut txs = daemon.list_history_txs(0_u32, last_tx_date, limit).await?;
-
-                // because gethistory cursor is inclusive and use blocktime
-                // multiple txs can occur in the same block.
-                // If there is more tx in the same block that the
-                // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
-                // the cursor value (blocktime) but by increasing the limit.
-                //
-                // 1. Check if the txs retrieved have all the same blocktime
-                let blocktime = if let Some(tx) = txs.first() {
-                    tx.time
-                } else {
-                    return Ok((txs, true));
-                };
-
-                // 2. Retrieve a larger batch of tx with the same cursor but
-                //    a larger limit.
-                while !txs.iter().any(|evt| evt.time != blocktime) && txs.len() as u64 == limit {
-                    // increments of the equivalent of one page more.
-                    limit += HISTORY_EVENT_PAGE_SIZE;
-                    txs = daemon.list_history_txs(0, last_tx_date, limit).await?;
-                }
-                // The server is exhausted when it returned fewer rows
-                // than the (possibly bumped) limit we asked for. This
-                // is measured on the raw response — the caller must
-                // not re-derive it from the post-dedup length.
-                let server_exhausted = (txs.len() as u64) < limit;
-                txs.sort_by(|a, b| a.compare(b));
-                Ok((txs, server_exhausted))
-            },
-            Message::HistoryTransactionsExtension,
-        )
     }
 }
 
@@ -816,6 +760,11 @@ impl CreateRbfModal {
                 }
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)) => {
+                // Confirm can already be queued when the first request switches
+                // the modal to its disabled, processing view.
+                if self.processing || self.replacement_txid.is_some() {
+                    return Task::none();
+                }
                 self.warning = None;
                 self.processing = true;
                 return Task::perform(
@@ -827,14 +776,20 @@ impl CreateRbfModal {
         }
         Task::none()
     }
-    fn view<'a>(&'a self, content: Element<'a, view::Message>) -> Element<'a, view::Message> {
+    fn view<'a>(
+        &'a self,
+        content: Element<'a, view::Message>,
+        chain: crate::chain::ChainId,
+    ) -> Element<'a, view::Message> {
         let modal = Modal::new(
             content,
             view::vault::transactions::create_rbf_modal(
+                chain,
                 self.is_cancel,
                 &self.descendant_txids,
                 &self.feerate_val,
                 self.replacement_txid,
+                self.processing,
             ),
         );
         if self.processing {
@@ -878,14 +833,19 @@ async fn rbf(
                         labels.insert(new_txid.into(), Some(label.to_string()));
                     }
                     LabelItem::OutPoint(o) => {
-                        copy_replacement_output_labels(
-                            &mut labels,
-                            &previous_tx,
-                            &psbt,
-                            o,
-                            label,
-                            new_txid,
-                        );
+                        if let Some(previous_output) = previous_tx.tx.output.get(o.vout as usize) {
+                            for (vout, output) in psbt.unsigned_tx.output.iter().enumerate() {
+                                if output.script_pubkey == previous_output.script_pubkey {
+                                    labels.insert(
+                                        LabelItem::OutPoint(OutPoint {
+                                            txid: new_txid,
+                                            vout: vout as u32,
+                                        }),
+                                        Some(label.to_string()),
+                                    );
+                                }
+                            }
+                        }
                     }
                     // Address label is already in database
                     LabelItem::Address(_) => {}
@@ -900,25 +860,88 @@ async fn rbf(
     Ok(psbt.unsigned_tx.compute_txid())
 }
 
-fn copy_replacement_output_labels(
-    labels: &mut HashMap<LabelItem, Option<String>>,
-    previous_tx: &model::HistoryTransaction,
-    psbt: &coincube_core::miniscript::bitcoin::Psbt,
-    o: OutPoint,
-    label: &str,
-    new_txid: Txid,
-) {
-    if let Some(previous_output) = previous_tx.tx.output.get(o.vout as usize) {
-        for (vout, output) in psbt.unsigned_tx.output.iter().enumerate() {
-            if output.script_pubkey == previous_output.script_pubkey {
-                labels.insert(
-                    LabelItem::OutPoint(OutPoint {
-                        txid: new_txid,
-                        vout: vout as u32,
-                    }),
-                    Some(label.to_string()),
-                );
+#[cfg(test)]
+mod rbf_state_tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
+
+    fn test_daemon() -> Arc<dyn Daemon + Sync + Send> {
+        Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ))
+    }
+
+    fn test_tx() -> HistoryTransaction {
+        HistoryTransaction::new(
+            crate::app::state::vault::test_support::empty_psbt().unsigned_tx,
+            None,
+            None,
+            vec![],
+            vec![],
+            Network::Signet,
+        )
+    }
+
+    #[test]
+    fn queued_cancel_and_confirm_cannot_discard_or_duplicate_an_in_flight_rbf() {
+        let cache = Cache::default();
+        let daemon = test_daemon();
+        let tx = test_tx();
+        let wallet = Arc::new(Wallet::new(
+            crate::app::state::vault::test_support::unified::fixture()
+                .descriptor
+                .clone(),
+        ));
+
+        for is_cancel in [false, true] {
+            let mut modal = CreateRbfModal::new(tx.clone(), is_cancel, HashSet::new());
+            modal.processing = true;
+            let duplicate = modal.update(
+                daemon.clone(),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)),
+            );
+            assert_eq!(
+                duplicate.units(),
+                0,
+                "stale Confirm must not schedule another rbf"
+            );
+            assert!(modal.processing);
+            assert!(modal.replacement_txid.is_none());
+
+            let mut panel = VaultTransactionsPanel::new(wallet.clone());
+            panel.preselect(tx.clone());
+            panel.modal = VaultTransactionsModal::CreateRbf(modal);
+            let dismissed = panel.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)),
+            );
+            assert_eq!(dismissed.units(), 0);
+            assert!(matches!(&panel.modal, VaultTransactionsModal::CreateRbf(_)));
+
+            if let VaultTransactionsModal::CreateRbf(modal) = &mut panel.modal {
+                modal.processing = false;
             }
+            let _ = panel.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)),
+            );
+            assert!(matches!(&panel.modal, VaultTransactionsModal::None));
         }
+
+        let mut completed = CreateRbfModal::new(tx.clone(), false, HashSet::new());
+        completed.replacement_txid = Some(tx.txid);
+        let duplicate = completed.update(
+            daemon,
+            &cache,
+            Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Confirm)),
+        );
+        assert_eq!(
+            duplicate.units(),
+            0,
+            "created PSBT must not be replaced twice"
+        );
     }
 }

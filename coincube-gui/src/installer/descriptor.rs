@@ -6,18 +6,7 @@ use coincube_core::miniscript::{
     descriptor::DescriptorPublicKey,
 };
 
-use crate::{
-    app::settings::ProviderKey, hw::is_compatible_with_tapminiscript, services::keys::api::KeyKind,
-};
-
-/// Whether to enable cosigner keys on all paths (excluding safety net paths).
-const ENABLE_COSIGNER_KEYS: bool = false;
-
-/// Whether to enable Safety Net keys. The "Safety Net token" key source was
-/// backed by a Liana third-party service we don't operate, so it is disabled.
-/// Extra recovery paths are added via "Add recovery option" instead. Flip to
-/// `true` to restore the Safety Net path + token source if the service returns.
-pub(crate) const ENABLE_SAFETY_NET_KEYS: bool = false;
+use crate::hw::is_compatible_with_tapminiscript;
 
 /// Identifies the owner of a Keychain key — either the current user
 /// or one of their contacts.  Carries `primary_owner_id` on every
@@ -55,8 +44,6 @@ pub enum KeySource {
     MasterSigner,
     /// A manually inserted xpub.
     Manual,
-    /// A token for a key with the given kind.
-    Token(KeyKind, ProviderKey),
     /// A Border Wallet key (derived transiently from grid pattern).
     ///
     /// `grid_seed_source` records where the Entropy Grid seed came from, naming
@@ -85,8 +72,7 @@ impl KeySource {
     /// the standard Bitcoin way, so its signatures stay replayable
     /// ([`Self::replay_capable`] is false and the path advice says so); a
     /// Border Wallet key signs in-process with the unified signer. Keychain
-    /// keys and provider tokens stay gated until their own fork signing
-    /// contract is verified.
+    /// keys stay gated until their own fork signing contract is verified.
     pub fn available_for_creation(&self, chain: crate::chain::ChainId) -> bool {
         !chain.is_blake2b()
             || matches!(
@@ -99,7 +85,7 @@ impl KeySource {
     /// signature at creation time: only what signs in-process from a seed
     /// (the Cube key, a Border Wallet key). Devices are unmarked until the
     /// user says otherwise after enrolment, Keychain keys are legacy until
-    /// Lane B3, and a pasted xpub or provider token cannot sign here at all.
+    /// Lane B3, and a pasted xpub cannot sign here at all.
     /// Mirrors `app::state::vault::signers::ReplayProtection` for the
     /// signer index a loaded Vault builds.
     pub fn replay_capable(&self) -> bool {
@@ -137,26 +123,13 @@ impl KeySource {
         matches!(self, KeySource::Manual)
     }
 
-    pub fn is_token(&self) -> bool {
-        matches!(self, KeySource::Token(_, _))
-    }
-
     pub fn kind(&self) -> KeySourceKind {
         match self {
             Self::Device(_, _) => KeySourceKind::Device,
             Self::MasterSigner => KeySourceKind::MasterSigner,
             Self::Manual => KeySourceKind::Manual,
-            Self::Token(kind, _) => KeySourceKind::Token(*kind),
             Self::BorderWallet { .. } => KeySourceKind::BorderWallet,
             Self::KeychainKey { .. } => KeySourceKind::KeychainKey,
-        }
-    }
-
-    pub fn token(&self) -> Option<&String> {
-        if let KeySource::Token(_, ProviderKey { token, .. }) = self {
-            Some(token)
-        } else {
-            None
         }
     }
 
@@ -177,22 +150,6 @@ impl KeySource {
             _ => None,
         }
     }
-
-    pub fn provider_key(&self) -> Option<ProviderKey> {
-        if let KeySource::Token(_, provider_key) = self {
-            Some(provider_key.clone())
-        } else {
-            None
-        }
-    }
-
-    pub fn provider_key_kind(&self) -> Option<KeyKind> {
-        if let KeySource::Token(key_kind, _) = self {
-            Some(*key_kind)
-        } else {
-            None
-        }
-    }
 }
 
 /// The kind of `KeySource`.
@@ -204,8 +161,6 @@ pub enum KeySourceKind {
     MasterSigner,
     /// A manually inserted xpub.
     Manual,
-    /// A token for a key with the given kind.
-    Token(KeyKind),
     /// A Border Wallet key.
     BorderWallet,
     /// A key from the COINCUBE Keychain.
@@ -249,10 +204,6 @@ impl Path {
 
     pub fn new_recovery_path() -> Self {
         Self::new(PathKind::Recovery)
-    }
-
-    pub fn new_safety_net_path() -> Self {
-        Self::new(PathKind::SafetyNet)
     }
 
     pub fn with_n_keys(mut self, n: usize) -> Self {
@@ -305,16 +256,9 @@ impl PathKind {
     /// Whether a key with the given `KeySourceKind` can be chosen for this `PathKind`.
     pub fn can_choose_key_source_kind(&self, source_kind: &KeySourceKind) -> bool {
         match (self, source_kind) {
-            // Safety net path allows safety net token keys and Border Wallet keys.
-            (Self::SafetyNet, KeySourceKind::Token(KeyKind::SafetyNet)) => ENABLE_SAFETY_NET_KEYS,
+            // Safety net path only allows Border Wallet keys.
             (Self::SafetyNet, KeySourceKind::BorderWallet) => true,
             (Self::SafetyNet, _) => false,
-            // Safety net token keys cannot be used in non-safety-net paths.
-            (_, KeySourceKind::Token(KeyKind::SafetyNet)) => false,
-            // Border Wallet keys can be used on any path.
-            (_, KeySourceKind::BorderWallet) => true,
-            // Enable/disable cosigner keys.
-            (_, KeySourceKind::Token(KeyKind::Cosigner)) => ENABLE_COSIGNER_KEYS,
             _ => true,
         }
     }
@@ -352,13 +296,12 @@ impl From<PathSequence> for PathKind {
     }
 }
 
-/// A path warning. The first three block the descriptor
+/// A path warning. The first two block the descriptor
 /// ([`PathWarning::blocks`]); [`PathWarning::NoReplayCapableSigner`] is a
 /// notice only — the path stays valid and devices stay selectable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathWarning {
     DuplicateSequence,
-    OnlyCosignerKeys,
     KeySourceKindDisallowed,
     /// Bitcoin Blake2b only: no key on the path can make a unified
     /// signature, so a spend through it is replayable onto Bitcoin unless
@@ -372,7 +315,6 @@ impl PathWarning {
             Self::DuplicateSequence => {
                 "No two recovery options may become available at the very same date."
             }
-            Self::OnlyCosignerKeys => "A path cannot contain only cosigner keys.",
             Self::KeySourceKindDisallowed => {
                 "Path contains a key that is disallowed for this kind of path."
             }

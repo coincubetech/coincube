@@ -34,17 +34,18 @@
 //! names the build, and deliberately does not mention the Apple ID or iCloud
 //! Keychain — see that variant for why.
 
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::locale::{copy as localized_copy, notice as localized_notice};
 use iced::widget::{image, Space};
 use iced::{Alignment, Length, Task};
 
 use coincube_ui::{
     component::{
-        button,
         quote_display::{self, Quote, QuoteDisplayProps},
-        text::{h3, p1_regular, text},
+        text::{p1_regular, text},
     },
-    icon, theme,
-    widget::{Column, Container, Element, Row},
+    theme,
+    widget::{action::Action, Column, Container, Element},
 };
 
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
@@ -73,11 +74,14 @@ use crate::services::passkey::PasskeyError;
 #[cfg(target_os = "macos")]
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+pub(crate) fn begin_button_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("tenshu.unlock.passkey:begin")
+}
+
 pub struct PasskeyUnlock {
     cube: CubeSettings,
-    /// Data root. Unused by the assertion itself — carried so this screen has
-    /// the same shape as `PinEntry` and so the caller has it in hand on success.
-    #[allow(dead_code)]
+    /// Data root. Also supplies the saved appearance if the GUI shell has not
+    /// passed its live resolved theme into this view.
     datadir_root: std::path::PathBuf,
     phase: Phase,
     /// What to do after a successful unlock. Shared with `PinEntry` so both
@@ -119,7 +123,9 @@ fn derived_fingerprint_opens_this_cube(
 /// be able to tell "we're waiting on the system Touch ID sheet" from "we have
 /// your key and are opening your wallets".
 enum Phase {
-    /// Nothing running; the user taps Unlock to raise the system prompt.
+    /// Nothing running. Opening from the Launcher leaves this at once for
+    /// `Authenticating`; the screen comes back here after a failed or
+    /// cancelled prompt or a re-lock, and Unlock raises the prompt again.
     Idle { error: Option<String> },
     /// The ceremony is up; the system sheet is in front of the user.
     ///
@@ -145,6 +151,8 @@ enum Phase {
 pub enum Message {
     /// Raise the system passkey prompt.
     Begin,
+    /// Focus the visible passkey action after pointer or Launcher handoff.
+    Focus(iced::advanced::widget::Id),
     /// Poll the ceremony channel. Driven by [`PasskeyUnlock::subscription`].
     Tick,
     /// Abandon the unlock and return to Home.
@@ -194,6 +202,7 @@ impl PasskeyUnlock {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Begin => self.begin(),
+            Message::Focus(id) => iced::widget::operation::focus(id),
             Message::Tick => self.poll(),
             // Both are terminal for this screen and handled by the parent.
             // `Back` still needs the in-flight ceremony torn down here, because
@@ -214,10 +223,7 @@ impl PasskeyUnlock {
 
         let (rp_id, credential_id) = match self.credential() {
             Ok(pair) => pair,
-            Err(e) => {
-                self.fail(e);
-                return Task::none();
-            }
+            Err(e) => return self.fail(e),
         };
 
         match NativePasskeyCeremony::authenticate(&rp_id, &credential_id) {
@@ -226,10 +232,7 @@ impl PasskeyUnlock {
                 self.phase = Phase::Authenticating;
                 Task::none()
             }
-            Err(e) => {
-                self.fail(e);
-                Task::none()
-            }
+            Err(e) => self.fail(e),
         }
     }
 
@@ -313,8 +316,7 @@ impl PasskeyUnlock {
                             error = %e,
                             "passkey assertion succeeded but the seed would not derive"
                         );
-                        self.fail(PasskeyError::InvalidPrfOutput);
-                        return Task::none();
+                        return self.fail(PasskeyError::InvalidPrfOutput);
                     }
                 };
 
@@ -333,10 +335,9 @@ impl PasskeyUnlock {
                         derived = %fingerprint,
                         "passkey assertion derived a seed that is not this Cube's"
                     );
-                    self.fail(PasskeyError::CredentialNotFound(
+                    return self.fail(PasskeyError::CredentialNotFound(
                         "the passkey that answered belongs to a different Cube".to_string(),
                     ));
-                    return Task::none();
                 }
 
                 crate::app::session::store_unlocked_signer(&self.cube.id, fingerprint, signer);
@@ -350,13 +351,9 @@ impl PasskeyUnlock {
                 // somehow does, the response is not one we can derive from.
                 self.fail(PasskeyError::InvalidResponse(
                     "the authenticator answered an unlock with a registration".to_string(),
-                ));
-                Task::none()
+                ))
             }
-            NativeOutcome::Failed(e) => {
-                self.fail(e);
-                Task::none()
-            }
+            NativeOutcome::Failed(e) => self.fail(e),
         }
     }
 
@@ -388,22 +385,95 @@ impl PasskeyUnlock {
         };
     }
 
+    /// Stop opening with a plain reason the tab knows and the unlock does not,
+    /// such as a Bitcoin Blake2b Cube that needs Connect first. None of the
+    /// reasons say the Cube is lost (**I12**).
+    /// A Bitcoin Blake2b copy that opens through Connect, as
+    /// [`crate::pin_entry::PinEntry::requires_connect`].
+    pub(crate) fn requires_connect(&self) -> bool {
+        let PinEntrySuccess::LoadApp {
+            datadir,
+            wallet_settings,
+            connect_client,
+            ..
+        } = &self.on_success;
+        // As the PIN screen: a Cube with no Vault is Connect-backed only
+        // while it holds a signed-in client. Signed out, an unrelated sign-in
+        // or sign-out must not fail its unlock screen.
+        self.cube.network.is_blake2b()
+            && (wallet_settings.is_some()
+                || connect_client
+                    .as_ref()
+                    .is_some_and(|client| client.token().is_some()))
+            && !crate::chain::has_managed_local_fork(
+                datadir,
+                self.cube.network,
+                wallet_settings.as_ref(),
+            )
+    }
+
+    /// The reason shown on the idle screen, if any.
+    #[cfg(test)]
+    pub(crate) fn error_for_test(&self) -> Option<&str> {
+        match &self.phase {
+            Phase::Idle { error } => error.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn fail_open(&mut self, reason: String) {
+        self.phase = Phase::Idle {
+            error: Some(reason),
+        };
+    }
+
     /// Land a classified failure on the screen. **I12**: the copy comes from
     /// [`PasskeyError::user_message`], and none of it says the Cube is lost.
+    ///
+    /// Returns focus to the Unlock button, which the prompt's `Authenticating`
+    /// view replaced, so a cancelled prompt the Launcher raised unasked is one
+    /// key press from trying again.
     ///
     /// macOS-only, like the `MasterSigner` import and `POLL_INTERVAL` above:
     /// every caller is inside `begin` or `poll`'s `#[cfg(target_os = "macos")]`
     /// arm. The non-macOS arms set `Phase::Idle` directly, because the one
     /// thing they have to say is fixed and needs no `PasskeyError` to classify.
     #[cfg(target_os = "macos")]
-    fn fail(&mut self, error: PasskeyError) {
+    fn fail(&mut self, error: PasskeyError) -> Task<Message> {
         tracing::warn!(cube_id = %self.cube.id, error = %error, "passkey unlock did not complete");
         self.phase = Phase::Idle {
             error: Some(error.user_message()),
         };
+        iced::widget::operation::focus(begin_button_id())
     }
 
     pub fn view(&self) -> Element<Message> {
+        self.view_with_theme(crate::home::launcher_presenter::saved_unlock_theme(
+            &self.datadir_root,
+        ))
+    }
+
+    pub(crate) fn is_opening(&self) -> bool {
+        matches!(self.phase, Phase::Opening)
+    }
+
+    /// The quote this screen's opening view shows.
+    pub(crate) fn loading_quote(&self) -> &Quote {
+        &self.loading_quote
+    }
+
+    pub fn view_with_theme(
+        &self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+    ) -> Element<Message> {
+        self.view_with_theme_and_floor(mode, None)
+    }
+
+    pub(crate) fn view_with_theme_and_floor<'a>(
+        &'a self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+        floor: Option<&'a crate::home::LauncherSceneContext>,
+    ) -> Element<'a, Message> {
         if matches!(self.phase, Phase::Opening) {
             // Same full-screen loading treatment the PIN path uses once its
             // seed is in hand, so the two unlock paths look identical from the
@@ -420,7 +490,7 @@ impl PasskeyUnlock {
                         &self.loading_image_handle,
                     )))
                     .push(crate::loading::loading_indicator(None))
-                    .push(text("Loading your Cube...").style(theme::text::secondary))
+                    .push(text(CopyText::LoadingYourCube.get()).style(theme::text::secondary))
                     .push(Space::new().height(Length::Fill)),
             )
             .width(Length::Fill)
@@ -429,29 +499,35 @@ impl PasskeyUnlock {
             .into();
         }
 
-        let back_button = button::secondary(Some(icon::previous_icon()), "Back")
-            .width(Length::Fixed(150.0))
-            .on_press(Message::Back);
+        if let Some(floor) = floor {
+            crate::home::launcher_presenter::unlock_face_on_floor(
+                &self.cube,
+                mode,
+                floor,
+                move || self.unlock_controls(),
+            )
+        } else {
+            crate::home::launcher_presenter::unlock_face(&self.cube, mode, move || {
+                self.unlock_controls()
+            })
+        }
+    }
 
-        let header = Row::new()
-            .align_y(Alignment::Center)
-            .push(Container::new(back_button).center_x(Length::FillPortion(2)))
-            .push(Space::new().width(Length::FillPortion(8)))
-            .push(Space::new().width(Length::FillPortion(2)));
-
-        let mut content = Column::new()
-            .spacing(30)
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .push(h3(format!("Unlock {}", self.cube.name)));
-
+    /// The prototype's unlock `.fc` below its heading, with the passkey
+    /// as this Cube's only way in.
+    fn unlock_controls(&self) -> Element<Message> {
+        use crate::home::launcher_presenter as face;
+        let mut fields = Column::new().push(Space::new().height(Length::Fixed(24.0)));
         match &self.phase {
             Phase::Authenticating => {
-                content = content
-                    .push(
-                        p1_regular("Confirm with Touch ID to unlock this Cube.")
-                            .style(theme::text::secondary),
-                    )
+                fields = fields
+                    .push(face::face_words(
+                        localized_copy("Confirm with Touch ID to unlock this Cube."),
+                        13.0,
+                        coincube_ui::font::REGULAR,
+                        true,
+                    ))
+                    .push(Space::new().height(Length::Fixed(12.0)))
                     .push(crate::loading::loading_indicator(None));
             }
             Phase::Idle { error } => {
@@ -469,29 +545,33 @@ impl PasskeyUnlock {
                 // all, where macOS confirms with the login password or a nearby
                 // iPhone instead.
                 if let Some(error) = error {
-                    content = content.push(p1_regular(error.as_str()).style(theme::text::error));
+                    fields = fields
+                        .push(
+                            p1_regular(localized_notice(error.clone()))
+                                .size(12)
+                                .style(theme::text::error),
+                        )
+                        .push(Space::new().height(Length::Fixed(12.0)));
                 }
-                content = content.push(
-                    button::primary(None, "Unlock with passkey")
-                        .width(Length::Fixed(280.0))
-                        .on_press(Message::Begin),
+                fields = fields.push(
+                    Action::new(
+                        begin_button_id(),
+                        face::face_button_label(localized_copy("Unlock with passkey")),
+                        Message::Focus,
+                    )
+                    .height(Length::Fixed(36.0))
+                    .padding([0.0, 16.0])
+                    .style(face::face_primary_style)
+                    .on_press(Message::Begin),
                 );
             }
             Phase::Opening => unreachable!("handled above"),
         }
-
-        Container::new(
-            Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(header)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(Container::new(content).center_x(Length::Fill)),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .into()
+        let cancel = iced::widget::button(face::face_link_label(CopyText::Cancel.get()))
+            .padding([2.0, 4.0])
+            .style(face::face_link_style)
+            .on_press(Message::Back);
+        face::unlock_face_body(fields.into(), cancel.into())
     }
 }
 
@@ -518,6 +598,25 @@ mod tests {
                 connect_client: None,
             },
         )
+    }
+
+    #[test]
+    fn spanish_passkey_unlock_renders_action_and_error() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::locale::{render_in, Language};
+
+        let mut passkey = screen();
+        passkey.fail_open(PasskeyError::Cancelled.user_message());
+        let view = render_in(Language::Spanish, || passkey.unlock_controls());
+        let shown = capture::inspect(
+            "passkey-error-es",
+            view,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("Desbloquear con llave de acceso"));
+        assert!(shown.contains("Se canceló la comprobación con Touch ID"));
     }
 
     /// Losing the session between a successful assertion and the wallet load

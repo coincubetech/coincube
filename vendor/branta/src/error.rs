@@ -1,28 +1,13 @@
-//! Error type returned by fallible SDK operations.
+//! Errors returned by fallible SDK operations.
 //!
-//! Note what is deliberately absent: a `QrParseException`-style variant. No sibling SDK ever
-//! raises one — `QrParser` degrades gracefully (returns `None`/empty fields) rather than
-//! erroring, and this port preserves that: `QrParser::new` is infallible.
-//!
-//! Also note the behavioral contract enforced by `v2::service`: decryption failures during a
-//! lookup (wrong key, mismatched destination) are always swallowed internally and never surface
-//! as a `BrantaError` — only `add_payment`'s HTTP call and the logo-URL domain check are allowed
-//! to bubble an error out of `BrantaService`.
+//! A tampered destination and an unfinished lookup are [`crate::VerifyStatus`] values.
+//! `verify` does not return them as errors. A logo URL on the wrong origin still
+//! returns [`BrantaError::LogoUrlDomainMismatch`].
 
 use thiserror::Error;
 
-use crate::enums::DestinationType;
-
 #[derive(Debug, Error)]
 pub enum BrantaError {
-    #[error("PrivacyMode::Strict does not permit plain-text lookups for this destination type")]
-    PrivacyModeViolation,
-
-    #[error(
-        "PrivacyMode::Strict requires all destinations to be ZK; one or more destinations have is_zk = false"
-    )]
-    NonZkDestinationInStrictMode,
-
     #[error("Unauthorized")]
     Unauthorized,
 
@@ -32,11 +17,11 @@ pub enum BrantaError {
     #[error("No payment returned from server")]
     NoPaymentReturned,
 
-    #[error("destination type {0:?} does not support ZK")]
-    UnsupportedZkDestinationType(Option<DestinationType>),
+    #[error("destination type {0} cannot be encrypted")]
+    UnsupportedDestinationType(String),
 
-    #[error("platform_logo_url domain does not match the configured base_url domain")]
-    LogoUrlDomainMismatch,
+    #[error("{0} domain does not match the configured base URL")]
+    LogoUrlDomainMismatch(String),
 
     #[error("invalid encrypted data: too short")]
     EncryptedDataTooShort,
@@ -47,13 +32,9 @@ pub enum BrantaError {
     #[error("decryption failed: {0}")]
     DecryptionFailed(String),
 
-    #[error("Payment has no destinations")]
-    NoDestinations,
-
-    #[error(
-        "The Bitcoin address in the QR code does not match the address verified by Branta. The QR code may have been tampered with."
-    )]
-    Tampered,
+    /// A lookup did not finish. `verify` turns this into [`crate::VerifyStatus::Incomplete`].
+    #[error("lookup did not finish")]
+    Incomplete,
 
     #[error("HTTP transport error: {0}")]
     Transport(#[from] reqwest::Error),

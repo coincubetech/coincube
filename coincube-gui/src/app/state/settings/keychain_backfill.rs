@@ -119,9 +119,8 @@ pub fn apply_to_wallet(wallet: &Wallet, found: &HashMap<Fingerprint, FoundKeycha
 /// Ask Connect for the Cube's Keychain keys and record which of the Vault's
 /// keys they are.
 ///
-/// `persist` is `false` for a remote-backend Vault, whose keys live on the
-/// backend rather than in the local settings file; the answer then holds for
-/// this session only. A failure anywhere records nothing, so the Vault stays
+/// `persist` is `false` when there is no Vault daemon; the answer then holds
+/// for this session only. A failure anywhere records nothing, so the Vault stays
 /// unrecorded and is asked about again next time rather than being marked as
 /// having no Keychain keys.
 pub async fn lookup(

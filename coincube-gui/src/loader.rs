@@ -1,3 +1,4 @@
+use coincube_ui::locale::Text as CopyText;
 use std::convert::From;
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Seek, SeekFrom};
@@ -21,7 +22,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -631,8 +632,16 @@ impl Loader {
 
     fn on_start(&mut self, res: StartedResult) -> Task<Message> {
         if self.cube_settings.network.is_blake2b() && self.fork_session_revoked {
-            if let Ok((daemon, _, _)) = res {
+            if let Ok((daemon, mut bitcoind, _)) = res {
                 daemon.invalidate_connect_session();
+                if daemon.backend().is_embedded() {
+                    if let Err(error) = Handle::current().block_on(daemon.stop()) {
+                        warn!("Revoked fork daemon failed to stop: {error}");
+                    }
+                }
+                if let Some(node) = bitcoind.node.take() {
+                    node.stop();
+                }
             }
             return Task::none();
         }
@@ -719,12 +728,33 @@ impl Loader {
     }
 
     pub fn stop(&mut self) {
+        self.stop_with(false);
+    }
+
+    /// [`Self::stop`] for locking a Cube: the daemon, then any managed node,
+    /// stops on its own thread (see [`crate::app::App::stop_in_background`]).
+    pub fn stop_in_background(&mut self) {
+        self.stop_with(true);
+    }
+
+    fn stop_with(&mut self, in_background: bool) {
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
         info!("Close requested");
+        // NOTE: we take() the internal_bitcoind here to make sure the debug.log reader
+        // subscription is dropped.
+        let bitcoind = self.internal_bitcoind.take();
         if let Step::Syncing { daemon, .. } = &mut self.step {
             if daemon.backend().is_embedded() {
+                if in_background {
+                    crate::daemon::stopping::stop_in_background(daemon.clone(), move || {
+                        if let Some(bitcoind) = bitcoind {
+                            bitcoind.stop();
+                        }
+                    });
+                    return;
+                }
                 info!("Stopping internal daemon...");
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
                     warn!("Internal daemon failed to stop: {}", e);
@@ -733,15 +763,8 @@ impl Loader {
                 }
             }
         }
-
-        // NOTE: we take() the internal_bitcoind here to make sure the debug.log reader
-        // subscription is dropped.
-        if let Some(bitcoind) = self.internal_bitcoind.take() {
+        if let Some(bitcoind) = bitcoind {
             bitcoind.stop();
-        }
-        // Stop the managed Tor daemon (if inbound-over-Tor was running).
-        if !self.cube_settings.network.is_blake2b() {
-            crate::node::tor::stop_managed_tor();
         }
     }
 
@@ -841,7 +864,36 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view(&self.step, &self.current_quote, &self.current_image_handle).map(Message::View)
+        let scene = crate::home::launcher_presenter::project_opening(
+            &self.cube_settings.name,
+            self.cube_settings.network,
+        );
+        crate::home::launcher_presenter::opening_body(
+            scene,
+            &self.step,
+            &self.current_quote,
+            &self.current_image_handle,
+            !self.can_retry(),
+        )
+        .map(Message::View)
+    }
+
+    /// The stage line the opening Cube shows for this step, quoted from
+    /// [`view_with_retry`]. An error has none: its page owns Back and Retry.
+    pub(crate) fn opening_stage(&self) -> Option<crate::home::launcher_opening::Stage> {
+        use crate::home::launcher_opening::Stage;
+        Some(match &self.step {
+            Step::Connecting => Stage::Connecting,
+            Step::StartingDaemon { .. } => Stage::StartingDaemon,
+            Step::FullScan { .. } => Stage::Scanning,
+            Step::Syncing { progress, .. } if *progress > 0.98 => Stage::AlmostThere,
+            Step::Syncing { .. } => Stage::Syncing,
+            Step::Error(_) => return None,
+        })
+    }
+
+    fn can_retry(&self) -> bool {
+        !self.fork_session_revoked
     }
 }
 
@@ -999,9 +1051,13 @@ pub async fn load_application(
         unswept_notice: None,
         node_history: crate::app::node_history::Status::default(),
         node_history_switch_requested: false,
+        local_node_transfer_visible: false,
         background_node_install: Default::default(),
         connect_transport_key: None,
         cube_encryption_key: None,
+        cube_switcher_open: false,
+        connect_panel_open: false,
+        cube_lock_confirmation: false,
         datadir_path: config.datadir_path,
         network: config.info.network,
         fiat_chain: config.cube_settings.network,
@@ -1015,13 +1071,16 @@ pub async fn load_application(
         btcb2_server_enabled: false,
         // Resolved from disk in `App::new_inner`.
         btcb2_already_claimed: false,
-        btcb2_claim_resume: false,
         // Liquid sunset gate. Both halves are filled in later: the local half
         // in `App::new` (from whether the Liquid SDK actually connected), the
         // server half when `/connect/features` loads.
         liquid_gate: crate::app::features::LiquidGate::HIDDEN,
         entangled: std::collections::HashMap::new(),
-        split_deposit: None,
+        chain_proofs: std::collections::HashMap::new(),
+        split_records: Vec::new(),
+        splitting: std::collections::HashMap::new(),
+        split_unconfirmed: std::collections::HashSet::new(),
+        separated: std::collections::HashMap::new(),
         last_poll_at_startup: config.info.last_poll_timestamp,
         daemon_cache: DaemonCache {
             blockheight: config.info.block_height,
@@ -1048,20 +1107,27 @@ pub async fn load_application(
         // Local-daemon launch has no Connect session until the user signs in
         // via the Connect tab; `App::new` flips this on if it restores one.
         has_connect_session: false,
+        restorable_connect_session: false,
         has_vault: !wallet.is_imported(),
         has_imported_bitcoin: wallet.is_imported(),
+        vault_lacks_keychain_key: wallet.lacks_keychain_key(),
         cube_name: config.cube_settings.name.clone(),
+        wallet_names: Default::default(),
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,
         current_cube_backed_up: config.cube_settings.backed_up,
-        backup_warning_dismissed: false,
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+        reduce_motion: false,
+        connect_light_dim: false,
+        lightning_address_setup: crate::app::cache::LightningAddressSetup::Idle,
+        balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
         lightning_address: None,
         avatar_handle: None,
+        avatar_regenerations_remaining: None,
         cube_id: config.cube_settings.id.clone(),
         current_cube_server_id: None,
         current_descriptor_fingerprint: None,
@@ -1079,6 +1145,9 @@ pub async fn load_application(
         connect_grpc_url: None,
         connect_tokens: None,
         connect_stream_status: crate::app::ConnectionStatus::default(),
+        connect_signed_out_by: None,
+        vault_alert: None,
+        vault_via_connect: false,
         connect_device_id: None,
         connect_email: None,
     };
@@ -1105,6 +1174,15 @@ pub fn view<'a>(
     quote: &'a Quote,
     image_handle: &'a image::Handle,
 ) -> Element<'a, ViewMessage> {
+    view_with_retry(step, quote, image_handle, true)
+}
+
+pub(crate) fn view_with_retry<'a>(
+    step: &'a Step,
+    quote: &'a Quote,
+    image_handle: &'a image::Handle,
+    allow_retry: bool,
+) -> Element<'a, ViewMessage> {
     match &step {
         Step::StartingDaemon { .. } => cover(
             None,
@@ -1118,7 +1196,7 @@ pub fn view<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Starting daemon...").style(theme::text::secondary)),
+                .push(text(CopyText::StartingDaemon.get()).style(theme::text::secondary)),
         ),
         Step::FullScan { .. } => cover(
             None,
@@ -1132,14 +1210,13 @@ pub fn view<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Scanning the blockchain...").style(theme::text::secondary))
-                .push(
-                    p2_regular(
-                        "Performing an initial scan of the Bitcoin blockchain via Esplora. \
-                        This typically takes 1–2 minutes on the first run.",
-                    )
-                    .style(theme::text::secondary),
-                ),
+                .push(text(CopyText::ScanningTheBlockchain.get()).style(theme::text::secondary))
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
+                )
+                .push(p2_regular(CopyText::InitialEsploraScan.get()).style(theme::text::secondary)),
         ),
         Step::Connecting => cover(
             None,
@@ -1153,7 +1230,7 @@ pub fn view<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Connecting to daemon...").style(theme::text::secondary)),
+                .push(text(CopyText::ConnectingToDaemon.get()).style(theme::text::secondary)),
         ),
         Step::Syncing {
             progress,
@@ -1173,29 +1250,34 @@ pub fn view<'a>(
                 .push(crate::loading::loading_indicator(None))
                 .push(
                     text(if *progress > 0.98 {
-                        "Almost there..."
+                        CopyText::AlmostThere.get()
                     } else {
-                        "Syncing blockchain..."
+                        CopyText::SyncingBlockchain.get()
                     })
                     .style(theme::text::secondary),
+                )
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
                 )
                 .push(p2_regular(bitcoind_logs).style(theme::text::secondary)),
         ),
         Step::Error(error) => {
             let headline = match error.as_ref() {
                 Error::Daemon(DaemonError::Start(StartupError::Bitcoind(_))) => {
-                    "Tenshu failed to start, please check if bitcoind is running"
+                    CopyText::TenshuFailedToStartPleaseCheckIfBitcoindIs.get()
                 }
                 Error::Daemon(DaemonError::Start(StartupError::Esplora(_))) => {
-                    "Tenshu failed to start: the Esplora chain backend is unreachable"
+                    CopyText::StartupEsploraUnreachable.get()
                 }
                 Error::Daemon(DaemonError::Start(StartupError::Electrum(_))) => {
-                    "Tenshu failed to start: the Electrum chain backend is unreachable"
+                    CopyText::StartupElectrumUnreachable.get()
                 }
-                _ => "Tenshu failed to start",
+                _ => CopyText::TenshuFailedToStart.get(),
             };
             cover(
-                Some(("Error while starting Tenshu", error)),
+                Some((CopyText::ErrorWhileStartingTenshu.get(), error)),
                 Column::new()
                     .spacing(20)
                     .width(Length::Fill)
@@ -1206,20 +1288,22 @@ pub fn view<'a>(
                         image_handle,
                     )))
                     .push(text(headline))
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .push(
-                                button::secondary(None, "Back")
-                                    .width(Length::Fixed(200.0))
-                                    .on_press(ViewMessage::SwitchNetwork),
-                            )
-                            .push(
-                                button::secondary(None, "Retry")
+                    .push({
+                        let actions = Row::new().spacing(10).push(
+                            button::secondary(None, CopyText::Back.get())
+                                .width(Length::Fixed(200.0))
+                                .on_press(ViewMessage::SwitchNetwork),
+                        );
+                        if allow_retry {
+                            actions.push(
+                                button::secondary(None, CopyText::Retry.get())
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::Retry),
-                            ),
-                    ),
+                            )
+                        } else {
+                            actions
+                        }
+                    }),
             )
         }
     }
@@ -1381,12 +1465,21 @@ async fn start_fork_daemon(
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             Bitcoind::preflight_for_chain(chain, &root)?;
-            crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
-                crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
-            })?;
-            Bitcoind::maybe_start_for_chain(chain, node, &root).map(|node| PendingForkNode {
-                node: Some(node),
-                cleanup: true,
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )?;
+            crate::node::tor::prepare_inbound_tor_for_chain_locked(&root, chain, &lifecycle)
+                .map_err(|e| {
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    )
+                })?;
+            Bitcoind::maybe_start_for_chain_locked(chain, node, &root, &lifecycle).map(|node| {
+                PendingForkNode {
+                    node: Some(node),
+                    cleanup: true,
+                }
             })
         })
         .await
@@ -1529,6 +1622,15 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             config: found.bitcoin_config.chain,
         });
     }
+    // Reopening a Cube right after locking it: let the previous daemon finish
+    // stopping before anything here touches its directory or node.
+    if let Some(dir) = found.data_directory() {
+        if !crate::daemon::stopping::wait_for_async(dir.path().to_path_buf()).await {
+            return Err(Error::Daemon(DaemonError::Unexpected(
+                crate::daemon::stopping::STILL_STOPPING.to_string(),
+            )));
+        }
+    }
     // Promote pre-fallback vaults: rewrite `daemon.toml` so the
     // Connect URL moves to `fallback_addr` and `mempool.space`
     // becomes the primary `addr`. Idempotent (skips when
@@ -1587,15 +1689,23 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             // replaced it may still name a Tor that is not running, so the
             // start is refused — retryably — rather than made from stale
             // privacy configuration.
-            let inbound_up =
-                crate::node::tor::prepare_inbound_tor_for_chain(&coincube_datadir_path, chain)
-                    .map_err(|e| {
-                        Error::Bitcoind(
-                            crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                                e.to_string(),
-                            ),
-                        )
-                    })?;
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &coincube_datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )
+            .map_err(Error::Bitcoind)?;
+            let inbound_up = crate::node::tor::prepare_inbound_tor_for_chain_locked(
+                &coincube_datadir_path,
+                chain,
+                &lifecycle,
+            )
+            .map_err(|e| {
+                Error::Bitcoind(
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    ),
+                )
+            })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1608,10 +1718,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
                 crate::node::bitcoind::stop_and_wait_managed_bitcoind(bitcoind_config);
             }
             Some(
-                Bitcoind::maybe_start_for_chain(
+                Bitcoind::maybe_start_for_chain_locked(
                     chain,
                     bitcoind_config.clone(),
                     &coincube_datadir_path,
+                    &lifecycle,
                 )
                 .map_err(Error::Bitcoind)?,
             )
@@ -2148,6 +2259,31 @@ mod tests {
     }
 
     #[test]
+    fn the_opening_cube_quotes_the_loader_stage_and_leaves_errors_to_its_page() {
+        use crate::home::launcher_opening::Stage;
+        let mut loader = loader_without_wallet(true);
+        for (step, stage) in [
+            (Step::Connecting, Some(Stage::Connecting)),
+            (
+                Step::StartingDaemon { progress: 0.4 },
+                Some(Stage::StartingDaemon),
+            ),
+            (Step::FullScan { progress: 0.4 }, Some(Stage::Scanning)),
+            (
+                Step::Error(Box::new(Error::Unexpected("refused".into()))),
+                None,
+            ),
+        ] {
+            loader.step = step;
+            assert_eq!(loader.opening_stage(), stage);
+        }
+        // The stage line reads exactly as the loader page's own status.
+        assert_eq!(Stage::Connecting.text(), "Connecting to daemon...");
+        assert_eq!(Stage::StartingDaemon.text(), "Starting daemon...");
+        assert_eq!(Stage::Scanning.text(), "Scanning the blockchain...");
+    }
+
+    #[test]
     fn loader_without_wallet_uses_config_for_bitcoind_and_none_subscriptions() {
         let mut loader = loader_without_wallet(true);
         assert!(loader.start_bitcoind());
@@ -2205,6 +2341,29 @@ mod tests {
             text("body"),
         );
         let _ = cover::<ViewMessage, _>(None, text("body"));
+    }
+
+    #[test]
+    fn worldview_voice_sits_alongside_fallback_scan_guidance() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image = quote_display::image_handle_for_context("loading");
+        let step = Step::FullScan { progress: 0.5 };
+        let rendered =
+            worldview_copy::render_in(WorldviewMode::Luke, || view(&step, &quote, &image));
+        let shown = capture::inspect(
+            "worldview-voice-fallback-scan",
+            rendered,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark().with_worldview(WorldviewMode::Luke),
+        );
+        assert!(shown.contains(CopyText::ScanningTheBlockchain.get()));
+        assert!(shown.contains("Consulting the ancient rules…"));
+        assert!(shown.contains(CopyText::InitialEsploraScan.get()));
     }
 
     #[test]
@@ -2764,7 +2923,8 @@ mod chain_identity_tests {
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
-            NodeFlavor, StartInternalBitcoindError, PRUNE_DEFAULT,
+            ManagedNodeLifecycle, NodeChainFamily, NodeFlavor, StartInternalBitcoindError,
+            PRUNE_DEFAULT,
         };
         use crate::node::managed_conf::ManagedConfLock;
         use crate::node::revalidate::ManagedNodeState;
@@ -2823,7 +2983,10 @@ mod chain_identity_tests {
             ),
         )
         .unwrap();
-        // The lock file is created by the holder below, so snapshot after it.
+        // Prime the stable lifecycle lock before the byte-for-byte snapshot;
+        // acquiring it is allowed even when the later conf lock is busy.
+        drop(ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap());
+        // The conf lock file is created by the holder below, so snapshot after it.
         let held = ManagedConfLock::acquire(&root).unwrap();
         let before = tree(root.path());
         // The start is polled on this thread (current-thread runtime), so the
@@ -2942,8 +3105,9 @@ mod bootstrap_backend_selection_tests {
     }
 
     /// Every directory and file under `root`, including exact file bytes.
-    /// Refusal tests use this as a mutation oracle, so traversal and reads must
-    /// fail the test rather than silently weakening the snapshot.
+    /// The active managed-node owner lock is empty but cannot be read while
+    /// locked on Windows; its path and length are checked instead. All other
+    /// files retain byte-for-byte comparison, including config and ledger data.
     fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
             for entry in std::fs::read_dir(p).unwrap() {
@@ -2954,7 +3118,22 @@ mod bootstrap_backend_selection_tests {
                     out.push((path.clone(), None));
                     walk(&path, out);
                 } else if kind.is_file() {
-                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                    #[cfg(windows)]
+                    let bytes = if path.extension() == Some(std::ffi::OsStr::new("lock"))
+                        && path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            == Some(std::ffi::OsStr::new("locks"))
+                    {
+                        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "{:?}", path);
+                        Vec::new()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    #[cfg(not(windows))]
+                    let bytes = std::fs::read(&path).unwrap();
+                    out.push((path.clone(), Some(bytes)));
                 } else {
                     panic!("unsupported filesystem entry in test snapshot: {:?}", path);
                 }
@@ -3697,6 +3876,9 @@ mod local_start_cancel_tests {
             info,
         )));
         drop(completed);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();
@@ -3732,6 +3914,9 @@ mod local_start_cancel_tests {
         received.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();

@@ -11,9 +11,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+use coincube_core::miniscript::bitcoin::bip32::{DerivationPath, Fingerprint};
 
-use crate::dir::CoincubeDirectory;
+use crate::{
+    app::settings::WalletId,
+    chain::ChainId,
+    dir::CoincubeDirectory,
+    phone_signer::policy::{PhonePolicy, PhonePolicyKind},
+};
 
 /// On-disk record for a single paired phone. We persist the phone's
 /// stable Ed25519 identity pubkey (captured during the pairing
@@ -55,16 +60,11 @@ pub struct PairedPhone {
     /// in signer_binding; never infer ownership from this list.
     pub wallet_fingerprints: Vec<Fingerprint>,
 
-    /// Vault id (`Wallet::id_fingerprint`) this phone was paired
-    /// against — the `wallet_fingerprint` claim from the offer the
-    /// phone scanned, validated during pairing. This is the hash of
-    /// the whole descriptor (distinct from the signer keys in
-    /// `wallet_fingerprints`) and scopes the phone to a single vault:
-    /// the hw refresh loop only dials/surfaces a phone whose
-    /// `vault_fingerprint` matches the currently-loaded vault, so a
-    /// phone paired for one vault never appears under another. This is
-    /// what makes the settings copy ("will sign for this vault")
-    /// true.
+    /// The first four bytes of the paired transport descriptor's SHA-256.
+    /// This legacy field name also carries the imported `/<0;1>/*`
+    /// descriptor's display ID. It gates device discovery, while the full
+    /// descriptor hash, chain-bound wallet ID and account origin in
+    /// `signer_binding` determine imported signing authority.
     ///
     /// `#[serde(default)]` so a row written before this field existed
     /// deserialises to `Fingerprint::default()`. An all-zero id never
@@ -102,15 +102,131 @@ pub struct PairedPhone {
 }
 
 /// QR-selected key independently resolved by the authenticated phone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignerBinding {
     pub key_id: String,
     pub xpub: String,
     pub fingerprint: Fingerprint,
     pub descriptor_sha256: Vec<u8>,
+    /// Present only after an imported wallet's exact account and chain-bound
+    /// storage identity were confirmed. Legacy and Vault rows omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_scope: Option<ImportedPairingScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportedPairingScope {
+    pub chain: ChainId,
+    pub wallet_id: WalletId,
+    pub account_origin: DerivationPath,
+    /// Fresh admission identity. The pairing transaction overwrites this with
+    /// its unique ID before publication, so same-second re-pairing revokes an
+    /// old pending response even when all cryptographic fields are identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_revision: Option<String>,
+}
+
+impl ImportedPairingScope {
+    /// Resolve the origin from the validated local wallet, never from a phone
+    /// claim or a shared master fingerprint alone. The pairing UI must still
+    /// obtain a fresh user confirmation before persisting this scope.
+    pub fn for_account(
+        wallet: &coincube_core::wallet_descriptor::ImportedWalletDescriptor,
+        wallet_id: &WalletId,
+        xpub: &str,
+        fingerprint: Fingerprint,
+    ) -> Result<Self, String> {
+        use coincube_core::miniscript::{DescriptorPublicKey, ForEachKey};
+        let error = "The selected Keychain account is not an exact imported wallet key.";
+        if *wallet_id != WalletId::for_imported(wallet, wallet.chain()).map_err(|_| error)? {
+            return Err(error.into());
+        }
+        let mut origins = Vec::new();
+        wallet.receive_descriptor().for_each_key(|key| {
+            if let DescriptorPublicKey::XPub(account) = key {
+                if account.xkey.to_string() == xpub {
+                    if let Some((origin_fp, path)) = &account.origin {
+                        if *origin_fp == fingerprint {
+                            origins.push(path.clone());
+                        }
+                    }
+                }
+            }
+            true
+        });
+        if origins.len() != 1 {
+            return Err(error.into());
+        }
+        Ok(Self {
+            chain: wallet.chain(),
+            wallet_id: wallet_id.clone(),
+            account_origin: origins.remove(0),
+            pairing_revision: Some(uuid::Uuid::new_v4().to_string()),
+        })
+    }
 }
 
 impl PairedPhone {
+    pub fn imported_pairing_revision(&self) -> Option<&str> {
+        self.signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref())
+            .and_then(|scope| scope.pairing_revision.as_deref())
+    }
+
+    pub fn exact_signer_for(&self, policy: &PhonePolicy) -> Result<&SignerBinding, String> {
+        match policy.kind() {
+            PhonePolicyKind::Vault(_) => self.exact_signer(policy.descriptor()),
+            PhonePolicyKind::Imported { wallet, wallet_id } => {
+                self.exact_imported_signer(policy.descriptor(), wallet, wallet_id)
+            }
+        }
+    }
+
+    fn exact_imported_signer(
+        &self,
+        descriptor: &str,
+        wallet: &coincube_core::wallet_descriptor::ImportedWalletDescriptor,
+        wallet_id: &WalletId,
+    ) -> Result<&SignerBinding, String> {
+        use coincube_core::miniscript::{DescriptorPublicKey, ForEachKey};
+        use sha2::{Digest, Sha256};
+        let error = "Pair this Keychain again and select its exact imported account key.";
+        let binding = self.signer_binding.as_ref().ok_or(error)?;
+        let scope = binding.imported_scope.as_ref().ok_or(error)?;
+        let digest = Sha256::digest(descriptor.as_bytes());
+        if scope.chain != wallet.chain()
+            || &scope.wallet_id != wallet_id
+            || *wallet_id != WalletId::for_imported(wallet, scope.chain).map_err(|_| error)?
+            || binding
+                .key_id
+                .parse::<u64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .is_none()
+            || binding.descriptor_sha256.as_slice() != digest.as_slice()
+            || self.vault_fingerprint.to_string() != hex::encode(&digest[..4])
+        {
+            return Err(error.into());
+        }
+        let mut matches = 0usize;
+        wallet.receive_descriptor().for_each_key(|key| {
+            if let DescriptorPublicKey::XPub(xpub) = key {
+                if xpub.xkey.to_string() == binding.xpub
+                    && xpub.origin.as_ref()
+                        == Some(&(binding.fingerprint, scope.account_origin.clone()))
+                {
+                    matches += 1;
+                }
+            }
+            true
+        });
+        if matches != 1 {
+            return Err(error.into());
+        }
+        Ok(binding)
+    }
+
     /// Full descriptor commitment and exact parsed key membership are authority;
     /// a master fingerprint or the four-byte vault display ID alone is not.
     pub fn exact_signer(&self, descriptor: &str) -> Result<&SignerBinding, String> {
@@ -185,6 +301,75 @@ pub struct PairingStoreFile {
     /// for signing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_unpairs: Vec<PendingUnpair>,
+}
+
+impl PairingStoreFile {
+    /// Decides whether a live hardware-list handle may be reused for the
+    /// current imported wallet. A valid newly paired row is not sufficient:
+    /// the handle captured the old row and old policy when it was dialled.
+    pub fn cached_imported_matches(
+        &self,
+        captured: &PairedPhone,
+        captured_policy: &PhonePolicy,
+        current_policy: &PhonePolicy,
+    ) -> bool {
+        captured_policy.same_imported_authority(current_policy)
+            && self.unique_signer_for(captured, current_policy).is_ok()
+    }
+
+    /// A hand-edited or partially migrated store with duplicate TLS identities
+    /// has no unambiguous current row. Never choose whichever entry appears
+    /// first when deciding imported signing authority.
+    pub fn unique_signer_for<'a>(
+        &self,
+        phone: &'a PairedPhone,
+        policy: &PhonePolicy,
+    ) -> Result<&'a SignerBinding, String> {
+        if matches!(policy.kind(), PhonePolicyKind::Vault(_)) {
+            return phone.exact_signer_for(policy);
+        }
+        let mut matching = self
+            .phones
+            .iter()
+            .filter(|row| row.cert_pin == phone.cert_pin);
+        let current = matching
+            .next()
+            .ok_or("This Keychain is no longer paired; pair it again.")?;
+        let revision = phone
+            .signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref())
+            .and_then(|scope| scope.pairing_revision.as_deref())
+            .filter(|revision| !revision.is_empty())
+            .ok_or("This imported Keychain pairing predates exact admission; pair it again.")?;
+        if matching.next().is_some()
+            || current
+                .signer_binding
+                .as_ref()
+                .and_then(|binding| binding.imported_scope.as_ref())
+                .and_then(|scope| scope.pairing_revision.as_deref())
+                != Some(revision)
+            || current.vault_fingerprint != phone.vault_fingerprint
+            || current.transport_pubkey != phone.transport_pubkey
+            || current.signer_binding != phone.signer_binding
+        {
+            return Err("This Keychain pairing is ambiguous; pair it again.".into());
+        }
+        let binding = phone.exact_signer_for(policy)?;
+        if self
+            .phones
+            .iter()
+            .filter_map(|row| row.exact_signer_for(policy).ok())
+            .filter(|candidate| candidate.key_id == binding.key_id)
+            .count()
+            != 1
+        {
+            return Err(
+                "This imported Keychain key ID has more than one pairing; pair again.".into(),
+            );
+        }
+        Ok(binding)
+    }
 }
 
 /// A removal still to be delivered to the phone it concerns. Carries only
@@ -377,20 +562,107 @@ pub fn unpair(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<P
     load_visible(dir)
 }
 
+/// A persisted store may contain duplicate full pins. Neither ordering can
+/// authorize a Vault-scoped removal.
+fn unique_phone_index_for_vault(
+    file: &PairingStoreFile,
+    cert_pin: &[u8; 32],
+    expected_vault: Fingerprint,
+    expected_descriptor: &[u8; 32],
+) -> Option<usize> {
+    let mut matches = file
+        .phones
+        .iter()
+        .enumerate()
+        .filter(|(_, phone)| &phone.cert_pin == cert_pin);
+    let (index, phone) = matches.next()?;
+    if matches.next().is_some()
+        || phone.vault_fingerprint != expected_vault
+        || phone.signer_binding.as_ref().is_none_or(|binding| {
+            binding.descriptor_sha256.as_slice() != expected_descriptor.as_slice()
+        })
+    {
+        return None;
+    }
+    Some(index)
+}
+
+/// Remove a phone only while its durable binding still belongs to the Vault
+/// that requested removal. The check and removal share the writer lock with
+/// `upsert`, so a re-pair cannot move this cert pin between them.
+pub fn unpair_if_vault(
+    dir: &CoincubeDirectory,
+    cert_pin: &[u8; 32],
+    expected_vault: Fingerprint,
+    expected_descriptor: &[u8; 32],
+) -> std::io::Result<bool> {
+    let _guard = super::pairing_transaction::WRITER.lock().unwrap();
+    // Refuse duplicate full pins, including one belonging to another Vault.
+    // Check both the visible binding and raw disk rows before revoking any
+    // provisional transaction for this pin.
+    if unique_phone_index_for_vault(
+        &load_visible(dir)?,
+        cert_pin,
+        expected_vault,
+        expected_descriptor,
+    )
+    .is_none()
+        || unique_phone_index_for_vault(
+            &load_raw(dir)?,
+            cert_pin,
+            expected_vault,
+            expected_descriptor,
+        )
+        .is_none()
+    {
+        return Ok(false);
+    }
+
+    super::pairing_transaction::revoke(dir, cert_pin)?;
+    let mut file = load_raw(dir)?;
+    let index = unique_phone_index_for_vault(&file, cert_pin, expected_vault, expected_descriptor)
+        .ok_or_else(|| std::io::Error::other("paired phone changed during removal"))?;
+    let removed = file.phones.remove(index);
+    file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
+    file.pending_unpairs.push(PendingUnpair {
+        cert_pin: removed.cert_pin,
+        name: removed.name,
+        fallback_addr: removed.fallback_addr,
+        removed_at_unix: now_unix(),
+    });
+    save(dir, &file)?;
+    Ok(true)
+}
+
 /// The phone said it removed this desktop. That carries the same authority as
 /// the user removing the phone here, so like [`unpair`] it supersedes any
 /// pairing journal for the phone, including one stuck after a lost final
 /// acknowledgement, which would otherwise keep the row dialled forever. Only
-/// the row that connection was made for is removed (`paired_at_unix` tells a
-/// later re-pairing of the same phone apart); for any other row nothing is
-/// touched. Returns whether a row was removed.
+/// the row that connection was made for is removed (the imported pairing's
+/// revision disambiguates even same-second re-pairing; Vault retains its
+/// existing display-time guard); for any other row nothing is touched.
+/// Returns whether a row was removed.
 pub fn remove_unpaired_by_peer(
     dir: &CoincubeDirectory,
     cert_pin: &[u8; 32],
     paired_at_unix: u64,
+    pairing_revision: Option<&str>,
 ) -> std::io::Result<bool> {
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
-    let dialled = |p: &PairedPhone| &p.cert_pin == cert_pin && p.paired_at_unix == paired_at_unix;
+    let dialled = |p: &PairedPhone| {
+        let imported_scope = p
+            .signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref());
+        let same_admission = match (imported_scope, pairing_revision) {
+            (None, None) => true,
+            (Some(scope), Some(revision)) if !revision.is_empty() => {
+                scope.pairing_revision.as_deref() == Some(revision)
+            }
+            _ => false,
+        };
+        &p.cert_pin == cert_pin && p.paired_at_unix == paired_at_unix && same_admission
+    };
     if !load_visible(dir)?.phones.iter().any(dialled) {
         return Ok(false);
     }
@@ -464,6 +736,7 @@ mod tests {
             xpub: "xpub-selected".into(),
             fingerprint: key_fp,
             descriptor_sha256: digest.to_vec(),
+            imported_scope: None,
         };
 
         assert!(
@@ -537,6 +810,16 @@ mod tests {
         }
     }
 
+    fn bind_descriptor(phone: &mut PairedPhone, digest: [u8; 32]) {
+        phone.signer_binding = Some(SignerBinding {
+            key_id: "1".into(),
+            xpub: "test-xpub".into(),
+            fingerprint: Fingerprint::default(),
+            descriptor_sha256: digest.to_vec(),
+            imported_scope: None,
+        });
+    }
+
     #[test]
     fn pending_rollback_preserves_exact_prior_and_stale_cleanup_cannot_delete_new_run() {
         use super::super::pairing_transaction::PairingTransaction;
@@ -591,15 +874,99 @@ mod tests {
     }
 
     #[test]
+    fn refused_vault_unpair_keeps_an_unrelated_provisional_pairing() {
+        use super::super::pairing_transaction::PairingTransaction;
+
+        let dir = fresh_dir();
+        let mut original = sample_phone(44);
+        let original_digest = [0u8; 32];
+        bind_descriptor(&mut original, original_digest);
+        upsert(&dir, original.clone()).unwrap();
+        let mut candidate = original.clone();
+        candidate.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        let candidate_digest = [1u8; 32];
+        bind_descriptor(&mut candidate, candidate_digest);
+        let transaction =
+            PairingTransaction::prepare(&dir, "new-binding".into(), candidate.clone()).unwrap();
+        transaction.write_candidate().unwrap();
+
+        // The provisional candidate is on disk, but the visible binding is
+        // still the prior Vault. A refusal must leave its journal intact.
+        assert!(!unpair_if_vault(
+            &dir,
+            &original.cert_pin,
+            candidate.vault_fingerprint,
+            &candidate_digest,
+        )
+        .unwrap());
+        transaction.decide().unwrap();
+        transaction.finish().unwrap();
+        let stored = load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 1);
+        assert_eq!(
+            stored.phones[0].vault_fingerprint,
+            candidate.vault_fingerprint
+        );
+        assert!(stored.pending_unpairs.is_empty());
+    }
+
+    #[test]
+    fn vault_unpair_refuses_duplicate_full_pins_in_either_order() {
+        let dir = fresh_dir();
+        let mut vault_a = sample_phone(45);
+        let digest_a = [0u8; 32];
+        bind_descriptor(&mut vault_a, digest_a);
+        let mut vault_b = vault_a.clone();
+        vault_b.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        bind_descriptor(&mut vault_b, [1u8; 32]);
+        for phones in [
+            vec![vault_b.clone(), vault_a.clone()],
+            vec![vault_a.clone(), vault_b.clone()],
+        ] {
+            save(
+                &dir,
+                &PairingStoreFile {
+                    phones: phones.clone(),
+                    ..PairingStoreFile::default()
+                },
+            )
+            .unwrap();
+            assert!(!unpair_if_vault(
+                &dir,
+                &vault_a.cert_pin,
+                vault_a.vault_fingerprint,
+                &digest_a,
+            )
+            .unwrap());
+            let stored = load(&dir).unwrap();
+            assert_eq!(stored.phones.len(), 2);
+            assert_eq!(
+                stored.phones[0].vault_fingerprint,
+                phones[0].vault_fingerprint
+            );
+            assert_eq!(
+                stored.phones[1].vault_fingerprint,
+                phones[1].vault_fingerprint
+            );
+            assert!(stored.pending_unpairs.is_empty());
+        }
+    }
+
+    #[test]
     fn peer_unpair_removes_only_the_row_it_was_made_for() {
         let dir = fresh_dir();
         let phone = sample_phone(4);
         upsert(&dir, phone.clone()).unwrap();
         // A connection from an earlier pairing of the same phone.
-        assert!(!remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix - 1).unwrap());
+        assert!(
+            !remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix - 1, None)
+                .unwrap()
+        );
         assert_eq!(load(&dir).unwrap().phones.len(), 1);
 
-        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(
+            remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix, None).unwrap()
+        );
         assert!(load(&dir).unwrap().phones.is_empty());
     }
 
@@ -626,7 +993,9 @@ mod tests {
             "the earlier pairing is what stays visible and dialled",
         );
 
-        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(
+            remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix, None).unwrap()
+        );
         assert!(load(&dir).unwrap().phones.is_empty());
         assert!(
             load_raw(&dir).unwrap().phones.is_empty(),

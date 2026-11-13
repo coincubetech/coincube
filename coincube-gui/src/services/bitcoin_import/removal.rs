@@ -99,109 +99,9 @@ fn remove_owned_directory(path: &Path, parent: &Path) -> Result<(), String> {
     }
 }
 
-fn check_missing_import_owner(
-    journal: Option<&Journal>,
-    final_from_attachment: &Option<std::path::PathBuf>,
-) -> Result<(), String> {
-    if journal.is_none() {
-        if let Some(path) = final_from_attachment.as_ref() {
-            if fs::symlink_metadata(path).is_ok() {
-                return Err(
-                    "Imported wallet storage lacks an owner; no files were removed.".into(),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_import_owner_records(
-    file_journal: &Option<Journal>,
-    staged_owner: &Option<Journal>,
-    final_owner: &Option<Journal>,
-    journal: Option<&Journal>,
-    expected: &CubeSettings,
-    expected_attachment: Option<&ImportedWalletAttachment>,
-) -> Result<(), String> {
-    for owner in [
-        file_journal.as_ref(),
-        staged_owner.as_ref(),
-        final_owner.as_ref(),
-    ]
-    .iter()
-    .flatten()
-    {
-        check_journal(owner, expected, expected_attachment)?;
-        if let Some(primary) = journal {
-            if owner.cube_id != primary.cube_id
-                || owner.operation_id != primary.operation_id
-                || owner.wallet != primary.wallet
-            {
-                return Err("The import ownership records disagree; no files were removed.".into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn another_cube_references_wallet(
-    settings: &Settings,
-    expected: &CubeSettings,
-    wallet_id: &super::WalletId,
-) -> bool {
-    settings.cubes.iter().any(|other| {
-        other.id != expected.id
-            && (other.vault_wallet_id.as_ref() == Some(wallet_id)
-                || other
-                    .bitcoin_import
-                    .as_ref()
-                    .and_then(|import| import.attachment())
-                    .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
-    })
-}
-
-fn detach_import_settings(
-    mut current: Settings,
-    expected: &CubeSettings,
-    wallet_id: Option<&super::WalletId>,
-) -> Result<Option<Settings>, SettingsError> {
-    checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
-    if let Some(wallet_id) = wallet_id {
-        if current.cubes.iter().any(|other| {
-            other.id != expected.id
-                && (other.vault_wallet_id.as_ref() == Some(wallet_id)
-                    || other
-                        .bitcoin_import
-                        .as_ref()
-                        .and_then(|import| import.attachment())
-                        .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
-        }) {
-            return Err(SettingsError::WritingFile(
-                "Another Cube now references this wallet; retry its deletion.".into(),
-            ));
-        }
-        current
-            .wallets
-            .retain(|wallet| wallet.wallet_id() != *wallet_id);
-    }
-    current.cubes.retain(|cube| cube.id != expected.id);
-    if current.cubes.is_empty() && current.wallets.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(current))
-    }
-}
-
-fn check_import_destination(
-    final_from_attachment: Option<&std::path::PathBuf>,
-    destination: Option<&std::path::PathBuf>,
-) -> Result<(), String> {
-    if let (Some(expected_path), Some(actual_path)) = (final_from_attachment, destination) {
-        if expected_path != actual_path {
-            return Err("The import destination differs from this Cube's wallet.".into());
-        }
-    }
-    Ok(())
+/// Whether anything (file, directory or dangling link) exists at `path`.
+fn storage_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 /// Delete the selected Cube's imported wallet and its exact operation record.
@@ -211,6 +111,14 @@ fn check_import_destination(
 pub async fn remove_cube_import(
     directory: &NetworkDirectory,
     expected: &CubeSettings,
+) -> Result<(), String> {
+    remove_cube_import_within(directory, expected, crate::daemon::stopping::WAIT_LIMIT).await
+}
+
+async fn remove_cube_import_within(
+    directory: &NetworkDirectory,
+    expected: &CubeSettings,
+    stop_limit: std::time::Duration,
 ) -> Result<(), String> {
     let intent = expected
         .bitcoin_import
@@ -266,17 +174,41 @@ pub async fn remove_cube_import(
         .as_ref()
         .or(staged_owner.as_ref())
         .or(final_owner.as_ref());
-    check_missing_import_owner(journal, &final_from_attachment)?;
-    check_import_owner_records(
-        &file_journal,
-        &staged_owner,
-        &final_owner,
-        journal,
-        expected,
-        expected_attachment,
-    )?;
+    if journal.is_none() {
+        if let Some(path) = final_from_attachment.clone() {
+            if super::blocking_fs(move || Ok(storage_present(&path))).await? {
+                return Err(
+                    "Imported wallet storage lacks an owner; no files were removed.".into(),
+                );
+            }
+        }
+    }
+    for owner in [
+        file_journal.as_ref(),
+        staged_owner.as_ref(),
+        final_owner.as_ref(),
+    ]
+    .iter()
+    .flatten()
+    {
+        check_journal(owner, expected, expected_attachment)?;
+        if let Some(primary) = journal {
+            if owner.cube_id != primary.cube_id
+                || owner.operation_id != primary.operation_id
+                || owner.wallet != primary.wallet
+            {
+                return Err("The import ownership records disagree; no files were removed.".into());
+            }
+        }
+    }
     let destination = journal.map(|owner| owner.final_path(directory));
-    check_import_destination(final_from_attachment.as_ref(), destination.as_ref())?;
+    if let (Some(expected_path), Some(actual_path)) =
+        (final_from_attachment.as_ref(), destination.as_ref())
+    {
+        if expected_path != actual_path {
+            return Err("The import destination differs from this Cube's wallet.".into());
+        }
+    }
     let stage_present = match journal {
         Some(owner) => checked_owner_directory(&stage, owner)?,
         None => {
@@ -303,9 +235,29 @@ pub async fn remove_cube_import(
         .map(|owner| &owner.wallet.wallet_id)
         .or_else(|| expected_attachment.map(|wallet| &wallet.wallet_id));
     if let Some(wallet_id) = wallet_id {
-        if another_cube_references_wallet(&settings, expected, wallet_id) {
+        if settings.cubes.iter().any(|other| {
+            other.id != expected.id
+                && (other.vault_wallet_id.as_ref() == Some(wallet_id)
+                    || other
+                        .bitcoin_import
+                        .as_ref()
+                        .and_then(|import| import.attachment())
+                        .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
+        }) {
             return Err("Another Cube still references this wallet; no files were removed.".into());
         }
+    }
+    // Deleting a Cube right after locking it: the imported wallet's daemon may
+    // still be stopping in its directory (see `crate::daemon::stopping`).
+    // If it outlasts the wait, remove nothing.
+    for dir in [Some(stage.clone()), destination.clone()].iter().flatten() {
+        if !crate::daemon::stopping::wait_for_async_within(dir.clone(), stop_limit).await {
+            return Err(crate::daemon::stopping::STILL_STOPPING.to_string());
+        }
+    }
+    if let Some(attachment) = expected_attachment {
+        crate::services::imported_keys::LocalKeyRepository::new(directory, expected, attachment)?
+            .remove_operation_storage()?;
     }
 
     // Keep the Cube visible until cleanup finishes. An interrupted removal
@@ -329,8 +281,32 @@ pub async fn remove_cube_import(
         Err(error) if error.kind() == ErrorKind::NotFound => (),
         Err(error) => return Err(error.to_string()),
     }
-    settings::update_settings_file_checked(directory, |current| {
-        detach_import_settings(current, expected, wallet_id)
+    settings::update_settings_file_checked(directory, |mut current| {
+        checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
+        if let Some(wallet_id) = wallet_id {
+            if current.cubes.iter().any(|other| {
+                other.id != expected.id
+                    && (other.vault_wallet_id.as_ref() == Some(wallet_id)
+                        || other
+                            .bitcoin_import
+                            .as_ref()
+                            .and_then(|import| import.attachment())
+                            .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
+            }) {
+                return Err(SettingsError::WritingFile(
+                    "Another Cube now references this wallet; retry its deletion.".into(),
+                ));
+            }
+            current
+                .wallets
+                .retain(|wallet| wallet.wallet_id() != *wallet_id);
+        }
+        current.cubes.retain(|cube| cube.id != expected.id);
+        if current.cubes.is_empty() && current.wallets.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(current))
+        }
     })
     .await
     .map_err(|error| error.to_string())?;
@@ -489,6 +465,80 @@ mod tests {
         assert!(!journal.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
+    }
+
+    /// Deleting a Cube right after locking it: its imported daemon may still
+    /// be stopping in the wallet directory, so removal waits for that stop.
+    #[tokio::test]
+    async fn removal_waits_for_a_daemon_still_stopping_in_the_wallet_directory() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
+            released.recv().unwrap();
+        });
+        let removal = remove_cube_import(&f.directory, &f.cube);
+        tokio::pin!(removal);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut removal)
+                .await
+                .is_err(),
+            "removal must wait for the stopping daemon"
+        );
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        release.send(()).unwrap();
+        removal.await.unwrap();
+        assert!(!destination.exists());
+    }
+
+    /// A stop that outlasts the wait leaves every file and the Cube in place.
+    #[tokio::test]
+    async fn removal_refuses_while_the_daemon_is_still_stopping() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let journal = journal_path(&f.directory, f.operation_id());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
+            released.recv().unwrap();
+        });
+        let error =
+            remove_cube_import_within(&f.directory, &f.cube, std::time::Duration::from_millis(50))
+                .await
+                .unwrap_err();
+        assert_eq!(error, crate::daemon::stopping::STILL_STOPPING);
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        assert!(journal.is_file());
+        let saved = Settings::from_file(&f.directory).unwrap();
+        assert!(saved.cubes.iter().any(|cube| cube.id == f.cube.id));
+        release.send(()).unwrap();
+        assert!(crate::daemon::stopping::wait_for(&destination));
+    }
+
+    #[tokio::test]
+    async fn owner_verified_removal_works_with_corrupt_local_key_manifest() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let key_root = f
+            .directory
+            .path()
+            .join("imported-local-keys")
+            .join(f.operation_id().to_string());
+        crate::dir::create_directory(&key_root).unwrap();
+        fs::write(key_root.join("manifest.json"), b"{invalid").unwrap();
+        fs::write(key_root.join("orphan.key"), b"synthetic ciphertext").unwrap();
+        let unrelated = f.directory.path().join("keep-me");
+        fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        assert!(!key_root.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+        assert_eq!(Settings::from_file(&f.directory).unwrap().cubes.len(), 1);
     }
 
     #[tokio::test]

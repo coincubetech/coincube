@@ -1,23 +1,24 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 
 use chrono::{DateTime, Local, Utc};
 use iced::{
-    widget::{tooltip, Space},
+    advanced::widget::Id,
+    widget::{scrollable, text::Wrapping, tooltip, Space},
     Alignment, Length,
 };
 
 use coincube_ui::{
     component::{
-        amount::*,
-        button, card, form,
-        pagination::pagination_controls,
-        text::*,
-        transaction::{TransactionBadge, TransactionDirection, TransactionListItem},
+        amount::*, button, card, form, pagination::pagination_controls, text::*,
+        transaction::TransactionDirection,
     },
     icon::{self, receipt_icon},
     theme,
-    widget::{Button, Column, Container, Element, Row},
+    widget::{action::Action, Button, Column, Container, Element, Row},
 };
 
 use crate::{
@@ -25,17 +26,39 @@ use crate::{
         cache::Cache,
         menu::{Menu, VaultSubMenu},
         view::{
-            dashboard, loading_placeholder,
+            dashboard_headed, loading_placeholder,
             message::{CreateRbfMessage, Message},
             placeholder,
             vault::label,
-            FiatAmountConverter,
+            vault_page_head, FiatAmountConverter,
         },
     },
     daemon::model::{HistoryTransaction, Txid},
     export::ImportExportMessage,
-    utils::format_time_ago,
 };
+
+pub const RBF_DESCENDANTS_SCROLL_ID: &str = "vault-rbf-descendants";
+pub const RBF_BUMP_TRIGGER_ID: &str = "vault-rbf-bump-trigger";
+pub const RBF_CANCEL_TRIGGER_ID: &str = "vault-rbf-cancel-trigger";
+
+fn rbf_trigger(is_cancel: bool) -> Action<'static, Message> {
+    button::secondary_action(
+        Id::new(if is_cancel {
+            RBF_CANCEL_TRIGGER_ID
+        } else {
+            RBF_BUMP_TRIGGER_ID
+        }),
+        None,
+        if is_cancel {
+            localized_copy("Cancel transaction")
+        } else {
+            localized_copy("Bump fee")
+        },
+        Message::FocusAction,
+    )
+    .width(Length::Fixed(200.0))
+    .on_press(Message::CreateRbf(CreateRbfMessage::New(is_cancel)))
+}
 
 pub fn transactions_view<'a>(
     menu: &'a Menu,
@@ -58,13 +81,14 @@ pub fn transactions_view<'a>(
     let list = txs
         .iter()
         .enumerate()
-        .fold(Column::new().spacing(10), |col, (i, tx)| {
+        .fold(Column::new().spacing(2), |col, (i, tx)| {
             col.push(tx_list_view(
                 i,
                 tx,
                 cache.bitcoin_unit,
                 fiat_converter,
                 cache.show_direction_badges,
+                cache.balance_amounts_masked(),
             ))
         });
 
@@ -73,8 +97,10 @@ pub fn transactions_view<'a>(
     } else if show_empty_state {
         placeholder(
             receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
+            coincube_ui::locale::copy("No transactions yet"),
+            coincube_ui::locale::copy(
+                "Your transaction history will appear here once you send or receive coins.",
+            ),
         )
     } else {
         // The dashboard already wraps the whole panel in a page-level
@@ -83,7 +109,27 @@ pub fn transactions_view<'a>(
         // unbounded parent and break layout. Pagination keeps each page
         // bounded (PAGE_SIZE rows), so the page scroll is enough.
         Column::new()
-            .spacing(10)
+            .spacing(12)
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .push(
+                        Container::new(text(localized_copy("Time")).size(CAPTION_SIZE))
+                            .width(Length::Fixed(104.0)),
+                    )
+                    .push(
+                        Container::new(text(localized_copy("Details")).size(CAPTION_SIZE))
+                            .width(Length::Fill),
+                    )
+                    .push(
+                        Container::new(text(localized_copy("Amount")).size(CAPTION_SIZE))
+                            .width(Length::Fixed(190.0)),
+                    )
+                    .push(
+                        Container::new(text(localized_copy("Status")).size(CAPTION_SIZE))
+                            .width(Length::Fixed(90.0)),
+                    ),
+            )
             .push(list)
             .push(pagination_controls(
                 Message::VaultPrevPage,
@@ -97,22 +143,20 @@ pub fn transactions_view<'a>(
             .into()
     };
 
-    dashboard(
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, localized_copy("Activity")),
         Column::new()
             .push(
-                Row::new()
-                    .push(Container::new(h3("Transactions").bold()))
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::secondary(Some(icon::backup_icon()), "Export")
-                            .on_press(ImportExportMessage::Open.into()),
-                    ),
+                Row::new().push(Space::new().width(Length::Fill)).push(
+                    button::secondary(Some(icon::backup_icon()), localized_copy("Export"))
+                        .on_press(ImportExportMessage::Open.into()),
+                ),
             )
             .push(body)
             .align_x(Alignment::Center)
-            .spacing(25),
+            .spacing(16),
     )
 }
 
@@ -122,6 +166,7 @@ fn tx_list_view(
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'_, Message> {
     let direction = if tx.is_external() {
         TransactionDirection::Incoming
@@ -141,42 +186,100 @@ fn tx_list_view(
     };
 
     let label = if let Some(outpoint) = tx.is_single_payment() {
-        tx.labels.get(&outpoint.to_string()).cloned()
+        tx.labels.get(&outpoint.to_string())
     } else {
-        tx.labels.get(&tx.tx.compute_txid().to_string()).cloned()
+        tx.labels.get(&tx.tx.compute_txid().to_string())
     };
-
-    let mut badges = Vec::new();
-    if tx.time.is_none() {
-        badges.push(TransactionBadge::Unconfirmed);
+    let title = label.filter(|label| !label.is_empty()).map_or_else(
+        || match direction {
+            TransactionDirection::Incoming => localized_copy("Received Bitcoin"),
+            TransactionDirection::Outgoing => localized_copy("Sent Bitcoin"),
+            TransactionDirection::SelfTransfer => localized_copy("Self-transfer"),
+        },
+        String::as_str,
+    );
+    let date = tx
+        .time
+        .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0))
+        .map(|t| {
+            let local = t.with_timezone(&Local);
+            local
+                .format(&coincube_ui::locale::date_pattern("%b %d, %H:%M", &local))
+                .to_string()
+        })
+        .unwrap_or_else(|| localized_copy("Pending").to_owned());
+    let status = if tx.time.is_none() {
+        localized_copy("Unconfirmed")
+    } else {
+        CopyText::Confirmed.get()
+    };
+    let sign = match direction {
+        TransactionDirection::Incoming => "+",
+        TransactionDirection::Outgoing => "−",
+        TransactionDirection::SelfTransfer => "",
+    };
+    let mut details = Row::new().spacing(8).align_y(Alignment::Center).push(
+        coincube_ui::image::asset_network_logo("btc", "bitcoin", 24.0),
+    );
+    if show_direction_badges {
+        details = details.push(text(match direction {
+            TransactionDirection::Incoming => "↓",
+            TransactionDirection::Outgoing => "↑",
+            TransactionDirection::SelfTransfer => "↺",
+        }));
     }
-    if tx.is_batch() {
-        badges.push(TransactionBadge::Batch);
-    }
-
-    let mut item = TransactionListItem::new(direction, amount, bitcoin_unit)
-        .with_custom_icon(coincube_ui::image::asset_network_logo(
-            "btc", "bitcoin", 40.0,
-        ))
-        .with_show_direction_badge(show_direction_badges)
-        .with_badges(badges);
-
-    if let Some(label) = label {
-        item = item.with_label(label);
-    }
-
-    if let Some(t) = tx.time {
-        item = item.with_time_ago(format_time_ago(t as i64));
-    }
-
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    details = details.push(
+        Column::new().spacing(2).push(text(title).bold()).push(
+            text(if tx.is_batch() {
+                localized_copy("Batch transaction")
+            } else {
+                localized_copy("Bitcoin on-chain")
+            })
+            .size(CAPTION_SIZE)
+            .style(theme::text::secondary),
+        ),
+    );
+    let mut amount_column = Column::new().align_x(Alignment::End).spacing(2).push(
+        Row::new()
+            .spacing(3)
+            .align_y(Alignment::Center)
+            .push(text(if mask_amounts { "" } else { sign }))
+            .push(if mask_amounts {
+                Row::new().push(text("••••••").size(P2_SIZE))
+            } else {
+                amount_with_size_and_unit(amount, P2_SIZE, bitcoin_unit)
+            }),
+    );
+    if let Some(converter) = fiat_converter.filter(|_| !mask_amounts) {
         let fiat = converter.convert(*amount);
-        format!("{} {}", fiat.to_formatted_string(), fiat.currency())
-    }) {
-        item = item.with_fiat_amount(fiat_amount);
+        amount_column = amount_column.push(
+            text(localized_format!(
+                "≈ {} {} · current rate",
+                "♥ {} {} · tasa actual",
+                fiat.to_formatted_string(),
+                fiat.currency()
+            ))
+            .size(CAPTION_SIZE)
+            .style(theme::text::secondary),
+        );
     }
-
-    item.view(Message::Select(i)).into()
+    Container::new(
+        Button::new(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(Container::new(text(date).size(CAPTION_SIZE)).width(Length::Fixed(104.0)))
+                .push(details.width(Length::Fill))
+                .push(Container::new(amount_column).width(Length::Fixed(190.0)))
+                .push(Container::new(text(status).size(CAPTION_SIZE)).width(Length::Fixed(90.0))),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .on_press(Message::Select(i))
+        .style(theme::button::transparent_border),
+    )
+    .style(theme::card::simple)
+    .into()
 }
 
 /// Return the modal view for a new RBF transaction.
@@ -184,130 +287,191 @@ fn tx_list_view(
 /// `descendant_txids` contains the IDs of any transactions from this wallet that are
 /// direct descendants of the transaction to be replaced.
 pub fn create_rbf_modal<'a>(
+    chain: crate::chain::ChainId,
     is_cancel: bool,
     descendant_txids: &HashSet<Txid>,
     feerate: &form::Value<String>,
     replacement_txid: Option<Txid>,
+    processing: bool,
 ) -> Element<'a, Message> {
-    let mut confirm_button = button::secondary(None, "Confirm").width(Length::Fixed(200.0));
-    if feerate.valid || is_cancel {
-        confirm_button =
-            confirm_button.on_press(Message::CreateRbf(super::super::CreateRbfMessage::Confirm));
+    let created = replacement_txid.is_some();
+    let mut confirm_button = button::primary_action(
+        Id::new("vault-rbf-confirm"),
+        None,
+        localized_copy("Confirm"),
+        Message::FocusAction,
+    );
+    if !created && !processing && (feerate.valid || is_cancel) {
+        confirm_button = confirm_button.on_press(Message::CreateRbf(CreateRbfMessage::Confirm));
     }
     let help_text = if is_cancel {
-        "Replace the transaction with one paying a higher feerate \
+        localized_copy(
+            "Replace the transaction with one paying a higher feerate \
         that sends the coins back to your wallet. There is no guarantee \
         the original transaction won't get mined first. New inputs may \
-        be used for the replacement transaction."
+        be used for the replacement transaction.",
+        )
     } else {
-        "Replace the transaction with one paying a higher feerate \
+        localized_copy(
+            "Replace the transaction with one paying a higher feerate \
         to incentivize faster confirmation. New inputs may be used \
-        for the replacement transaction."
+        for the replacement transaction.",
+        )
     };
-    card::simple(
-        Column::new()
-            .spacing(10)
-            .push(Container::new(h4_bold("Transaction replacement")).width(Length::Fill))
-            .push(Row::new().push(text(help_text)))
-            .push(if descendant_txids.is_empty() {
-                None
-            } else {
-                Some(
-                    descendant_txids.iter().fold(
-                        Column::new()
-                            .spacing(5)
-                            .push(Row::new().spacing(10).push(icon::warning_icon()).push(text(
-                                if descendant_txids.len() > 1 {
-                                    "WARNING: Replacing this transaction \
-                                    will invalidate some later payments."
-                                } else {
-                                    "WARNING: Replacing this transaction \
-                                    will invalidate a later payment."
-                                },
-                            )))
-                            .push(Row::new().padding([0, 30]).push(text(
-                                if descendant_txids.len() > 1 {
-                                    "The following transactions are \
-                                    spending one or more outputs \
-                                    from the transaction to be replaced \
-                                    and will be dropped when the replacement \
-                                    is broadcast, along with any other \
-                                    transactions that depend on them:"
-                                } else {
-                                    "The following transaction is \
-                                    spending one or more outputs \
-                                    from the transaction to be replaced \
-                                    and will be dropped when the replacement \
-                                    is broadcast, along with any other \
-                                    transactions that depend on it:"
-                                },
-                            ))),
-                        |col, txid| {
-                            col.push(
-                                Row::new()
-                                    .padding([0, 30])
-                                    .spacing(5)
-                                    .align_y(Alignment::Center)
-                                    .push(text(txid.to_string()))
-                                    .push(
-                                        Button::new(
-                                            icon::clipboard_icon().style(theme::text::secondary),
-                                        )
-                                        .on_press(Message::Clipboard(txid.to_string()))
-                                        .style(theme::button::transparent_border),
-                                    ),
-                            )
-                        },
-                    ),
-                )
-            })
-            .push(if !is_cancel {
-                Some(
-                    Row::new()
-                        .push(Container::new(p1_bold("Feerate")).padding(10))
-                        .spacing(10)
-                        .push(
-                            if replacement_txid.is_none() {
-                                form::Form::new_trimmed("", feerate, move |msg| {
-                                    Message::CreateRbf(CreateRbfMessage::FeerateEdited(msg))
-                                })
-                                .warning(
-                                    "Feerate must be greater than previous value and \
-                                    less than or equal to 1000 sats/vbyte",
-                                )
-                            } else {
-                                form::Form::new_disabled("", feerate)
-                            }
-                            .size(P1_SIZE)
-                            .padding(10),
-                        )
-                        .width(Length::Fill),
-                )
-            } else {
-                None
-            })
-            .push(Row::new().push(if replacement_txid.is_none() {
-                Row::new().push(confirm_button)
-            } else {
+    let mut body = Column::new()
+        .spacing(16)
+        .width(Length::Fill)
+        .push(h4_bold(CopyText::TransactionReplacement.get()))
+        .push(p2_regular(crate::chain::canonical_network_name(chain)));
+
+    if created {
+        body = body
+            .push(card::simple(
                 Row::new()
                     .spacing(10)
                     .align_y(Alignment::Center)
-                    .push(icon::square_check_icon().style(theme::text::secondary))
+                    .push(icon::square_check_icon().style(theme::text::success))
                     .push(
-                        text("Replacement PSBT created successfully and ready to be signed")
-                            .style(theme::text::success),
+                        text(localized_copy(
+                            "Replacement PSBT created successfully and ready to be signed",
+                        ))
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .style(theme::text::success),
+                    ),
+            ))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::secondary_action(
+                            Id::new("vault-rbf-close"),
+                            None,
+                            CopyText::Close.get(),
+                            Message::FocusAction,
+                        )
+                        .on_press(Message::CreateRbf(CreateRbfMessage::Cancel)),
                     )
+                    .push(
+                        button::primary_action(
+                            Id::new("vault-rbf-go-to-replacement"),
+                            None,
+                            localized_copy("Go to replacement"),
+                            Message::FocusAction,
+                        )
+                        .on_press(Message::Menu(Menu::Vault(
+                            VaultSubMenu::PSBTs(replacement_txid),
+                        ))),
+                    ),
+            );
+    } else {
+        body = body
+            .push(p1_bold(if is_cancel {
+                localized_copy("Cancel transaction")
+            } else {
+                localized_copy("Bump fee")
             }))
-            .push(replacement_txid.map(|id| {
-                Row::new().push(
-                    button::primary(None, "Go to replacement")
-                        .width(Length::Fixed(200.0))
-                        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::PSBTs(Some(id))))),
+            .push(
+                text(help_text)
+                    .width(Length::Fill)
+                    .wrapping(Wrapping::WordOrGlyph),
+            );
+
+        if !descendant_txids.is_empty() {
+            let mut descendants: Vec<_> = descendant_txids.iter().collect();
+            descendants.sort();
+            let visible_rows = descendant_txids.len().min(3);
+            let list = descendants.into_iter().fold(
+                Column::new().spacing(6).padding([4, 4]),
+                |col, txid| {
+                    let id = txid.to_string();
+                    col.push(
+                        Row::new()
+                            .spacing(8)
+                            .align_y(Alignment::Center)
+                            .push(
+                                text(id.clone())
+                                    .size(CAPTION_SIZE)
+                                    .width(Length::Fill)
+                                    .wrapping(Wrapping::Glyph),
+                            )
+                            .push(
+                                Action::new(
+                                    Id::from(format!("vault-rbf-copy-{id}")),
+                                    icon::clipboard_icon().style(theme::text::secondary),
+                                    Message::FocusAction,
+                                )
+                                .on_press(Message::Clipboard(id))
+                                .style(theme::button::transparent_border),
+                            ),
+                    )
+                },
+            );
+            body = body.push(Container::new(Row::new()
+                .spacing(10)
+                .push(icon::warning_icon())
+                .push(text(localized_format!(
+                    "Replacing this transaction will invalidate {} later {} when the replacement is broadcast. Transactions depending on them may also be dropped.",
+                    "Al publicar el reemplazo, se invalidarán {} {} posteriores. Las transacciones que dependan de esos pagos también podrían quedar descartadas.",
+                    descendant_txids.len(),
+                    localized_copy(if descendant_txids.len() == 1 { "payment" } else { "payments" }),
+                )).width(Length::Fill).wrapping(Wrapping::WordOrGlyph).style(theme::text::warning)))
+                .padding(12)
+                .width(Length::Fill)
+                .style(theme::card::warning))
+                .push(scrollable(list)
+                    .id(Id::new(RBF_DESCENDANTS_SCROLL_ID))
+                    .height(Length::Fixed((visible_rows * 31 + (visible_rows - 1) * 6 + 8) as f32)));
+        }
+
+        body = body.push(if is_cancel {
+            Column::new()
+                .spacing(5)
+                .push(p1_bold(localized_copy("Feerate")))
+                .push(text(localized_copy("Set automatically when the cancellation PSBT is created.")).style(theme::text::secondary))
+        } else {
+            Column::new()
+                .spacing(5)
+                .push(p1_bold(localized_copy("Feerate (sats/vbyte)")))
+                .push(
+                    if processing {
+                        form::Form::new_disabled("", feerate)
+                    } else {
+                        form::Form::new_trimmed("", feerate, |msg| {
+                            Message::CreateRbf(CreateRbfMessage::FeerateEdited(msg))
+                        })
+                    }
+                    .warning(localized_copy("Feerate must be greater than the previous value and at most 1000 sats/vbyte"))
+                    .size(P1_SIZE)
+                    .padding(10),
                 )
-            })),
-    )
-    .width(Length::Fixed(800.0))
-    .into()
+        });
+        if processing {
+            body = body.push(
+                text(localized_copy("Creating replacement PSBT…")).style(theme::text::secondary),
+            );
+        }
+        body = body.push(
+            Row::new()
+                .spacing(10)
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    button::secondary_action(
+                        Id::new("vault-rbf-back"),
+                        None,
+                        CopyText::Back.get(),
+                        Message::FocusAction,
+                    )
+                    .on_press_maybe(
+                        (!processing).then_some(Message::CreateRbf(CreateRbfMessage::Cancel)),
+                    ),
+                )
+                .push(confirm_button),
+        );
+    }
+
+    card::modal(body).width(Length::Fill).max_width(720).into()
 }
 
 pub fn transaction_detail_view<'a>(
@@ -319,23 +483,38 @@ pub fn transaction_detail_view<'a>(
     supports_vault_rbf: bool,
 ) -> Element<'a, Message> {
     let txid = tx.tx.compute_txid().to_string();
-    let back_btn: Element<'_, Message> = button::secondary(Some(icon::previous_icon()), "Back")
-        .width(Length::Fixed(150.0))
-        .on_press(Message::Close)
-        .into();
+    let display_amount = if tx.is_external() || tx.is_send_to_self() {
+        &tx.incoming_amount
+    } else {
+        &tx.outgoing_amount
+    };
+    let status = if tx.time.is_some() {
+        CopyText::Confirmed.get()
+    } else {
+        localized_copy("Unconfirmed · awaiting a Bitcoin confirmation")
+    };
+    let back_btn: Element<'_, Message> =
+        button::secondary(Some(icon::previous_icon()), CopyText::Back.get())
+            .width(Length::Fixed(150.0))
+            .on_press(Message::Close)
+            .into();
 
-    dashboard(
+    let title = if tx.is_send_to_self() {
+        localized_copy("Self-transfer")
+    } else if tx.is_external() {
+        localized_copy("Received Bitcoin")
+    } else {
+        localized_copy("Sent Bitcoin")
+    };
+
+    // The title and the Cube line are in the page head; Back stays a body
+    // action for now (plan L3 leaves screen actions to the W PRs).
+    dashboard_headed(
         menu,
         cache,
+        vault_page_head(cache, title),
         Column::new()
             .push(back_btn)
-            .push(if tx.is_send_to_self() {
-                Container::new(h3("Transaction")).width(Length::Fill)
-            } else if tx.is_external() {
-                Container::new(h3("Incoming transaction")).width(Length::Fill)
-            } else {
-                Container::new(h3("Outgoing transaction")).width(Length::Fill)
-            })
             .push(if let Some(outpoint) = tx.is_single_payment() {
                 // if the payment is a payment of a single payment transaction then
                 // the label of the transaction is attached to the label of the payment outpoint
@@ -357,24 +536,34 @@ pub fn transaction_detail_view<'a>(
             .push(
                 Column::new().spacing(20).push(
                     Column::new()
-                        .push(if tx.is_send_to_self() {
-                            Container::new(h1("Self-transfer"))
-                        } else if tx.is_external() {
-                            Container::new(amount_with_size_and_unit(&tx.incoming_amount, H1_SIZE, bitcoin_unit))
+                        .push(Container::new(if cache.balance_amounts_masked() {
+                            Row::new().push(text("••••••").size(H1_SIZE))
                         } else {
-                            Container::new(amount_with_size_and_unit(&tx.outgoing_amount, H1_SIZE, bitcoin_unit))
-                        })
+                            amount_with_size_and_unit(display_amount, H1_SIZE, bitcoin_unit)
+                        }))
+                        .push(cache.fiat_price.as_ref().and_then(|price| price.try_into().ok()).filter(|_| !cache.balance_amounts_masked()).map(|converter: FiatAmountConverter| {
+                            let fiat = converter.convert(*display_amount);
+                            text(localized_format!("≈ {} {} · current rate", "♥ {} {} · tasa actual", fiat.to_formatted_string(), fiat.currency()))
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary)
+                        }))
+                        .push(text(status).size(P2_SIZE))
                         .push(tx.fee_amount.map(|fee_amount| {
                             Row::new()
                                 .align_y(Alignment::Center)
-                                .push(h3("Miner fee: ").style(theme::text::secondary))
-                                .push(amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit))
+                                .push(h3(localized_copy("Miner fee: ")).style(theme::text::secondary))
+                                .push(if cache.balance_amounts_masked() {
+                                    Row::new().push(text("••••••").size(H3_SIZE))
+                                } else {
+                                    amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit)
+                                })
                                 .push(text(" ").size(H3_SIZE))
                                 .push(
-                                    text(format!(
-                                        "({} sats/vbyte)",
-                                        fee_amount.to_sat() / tx.tx.vsize() as u64
-                                    ))
+                                    text(if cache.balance_amounts_masked() {
+                                        "••••••".to_string()
+                                    } else {
+                                        format!("({} sats/vbyte)", fee_amount.to_sat() / tx.tx.vsize() as u64)
+                                    })
                                     .size(H4_SIZE)
                                     .style(theme::text::secondary),
                                 )
@@ -387,15 +576,11 @@ pub fn transaction_detail_view<'a>(
                 Some(
                     Row::new()
                         .push(
-                            button::secondary(None, "Bump fee")
-                                .width(Length::Fixed(200.0))
-                                .on_press(Message::CreateRbf(super::super::CreateRbfMessage::New(false))),
+                            rbf_trigger(false),
                         )
                         .push(
                             tooltip::Tooltip::new(
-                                button::secondary(None, "Cancel transaction")
-                                .width(Length::Fixed(200.0))
-                                .on_press(Message::CreateRbf(super::super::CreateRbfMessage::New(true))),
+                                rbf_trigger(true),
                                 "Best effort attempt at double spending an unconfirmed outgoing transaction",
                                 tooltip::Position::Top,
                             )
@@ -407,15 +592,15 @@ pub fn transaction_detail_view<'a>(
             })
             .push(card::simple(
                 Column::new()
-                    .push(tx.time.map(|t| {
-                        let date = DateTime::<Utc>::from_timestamp(t as i64, 0)
-                                        .expect("Correct unix timestamp")
-                                        .with_timezone(&Local)
-                                        .format("%b. %d, %Y - %T");
+                    .push(tx.time.and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0)).map(|t| {
+                        let local = t.with_timezone(&Local);
+                        let date = local
+                            .format(&coincube_ui::locale::date_pattern("%b. %d, %Y - %T %Z", &local))
+                            .to_string();
                         Row::new()
                             .width(Length::Fill)
-                            .push(Container::new(text("Date:").bold()).width(Length::Fill))
-                            .push(Container::new(text(format!("{}", date))).width(Length::Shrink))
+                            .push(Container::new(text(localized_copy("Date:")).bold()).width(Length::Fill))
+                            .push(Container::new(text(date)).width(Length::Shrink))
                     }))
                     .push(
                         Row::new()
@@ -443,15 +628,16 @@ pub fn transaction_detail_view<'a>(
                     .push(if tx.is_external() {
                         None
                     } else {
-                        Some(super::psbt::inputs_view(
+                        Some(super::psbt::history_inputs_view(
                             &tx.coins,
                             &tx.tx,
                             &tx.labels,
                             labels_editing,
                             bitcoin_unit,
+                            cache.balance_amounts_masked(),
                         ))
                     })
-                    .push(super::psbt::outputs_view(
+                    .push(super::psbt::history_outputs_view(
                         &tx.tx,
                         cache.network,
                         &tx.change_indexes,
@@ -460,8 +646,269 @@ pub fn transaction_detail_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         tx.is_external(),
+                        cache.balance_amounts_masked(),
                     )),
             )
             .spacing(20),
     )
+}
+
+#[cfg(test)]
+mod rbf_view_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use std::str::FromStr;
+
+    fn txid(hex: char) -> Txid {
+        Txid::from_str(&hex.to_string().repeat(64)).unwrap()
+    }
+
+    fn rate(value: &str, valid: bool) -> form::Value<String> {
+        form::Value {
+            value: value.into(),
+            valid,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn rbf_warning_text_meets_light_theme_body_contrast() {
+        let light = theme::Theme::light();
+        let card = theme::card::warning(&light);
+        let text = theme::text::warning(&light)
+            .color
+            .expect("warning text color");
+        let iced::Background::Color(background) = card.background.expect("warning background")
+        else {
+            panic!("warning background must be a solid color");
+        };
+        assert!(theme::tenshu::contrast(text, background) >= 4.5);
+        assert!(card.border.width > 0.0, "warning border remains visible");
+    }
+
+    #[test]
+    fn rbf_detail_triggers_activate_with_keyboard() {
+        for (is_cancel, trigger) in [(false, RBF_BUMP_TRIGGER_ID), (true, RBF_CANCEL_TRIGGER_ID)] {
+            let messages = capture::activate(
+                rbf_trigger(is_cancel).into(),
+                Id::new(trigger),
+                (1024, 768),
+                false,
+            );
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::CreateRbf(CreateRbfMessage::New(value)) if *value == is_cancel
+            )));
+        }
+    }
+
+    #[test]
+    fn rbf_descendant_list_tracks_row_height_and_caps_visible_rows() {
+        let inspect = |count: usize| {
+            let descendants: HashSet<_> = "abcdef".chars().take(count).map(txid).collect();
+            capture::inspect_full_window(
+                "vault-rbf-descendant-height",
+                create_rbf_modal(
+                    crate::chain::ChainId::Bitcoin,
+                    false,
+                    &descendants,
+                    &rate("12", true),
+                    None,
+                    false,
+                ),
+                (1024, 768),
+                "light",
+                theme::Theme::light(),
+            )
+        };
+        let feerate_top = |count| {
+            inspect(count)
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == "Feerate (sats/vbyte)").then_some(bounds.y))
+                .expect("feerate label")
+        };
+        let row_delta = feerate_top(2) - feerate_top(1);
+        assert!(
+            (32.0..=48.0).contains(&row_delta),
+            "one extra row: {row_delta}",
+            row_delta = row_delta
+        );
+        assert!((feerate_top(5) - feerate_top(3)).abs() <= 1.0);
+        let five: HashSet<_> = "abcde".chars().map(txid).collect();
+        let last = txid('e');
+        assert!(inspect(5).has_focus(Id::from(format!("vault-rbf-copy-{last}"))));
+        assert!(capture::activate(
+            create_rbf_modal(
+                crate::chain::ChainId::Bitcoin,
+                false,
+                &five,
+                &rate("12", true),
+                None,
+                false
+            ),
+            Id::from(format!("vault-rbf-copy-{last}")),
+            (1024, 768),
+            false,
+        )
+        .iter()
+        .any(|message| matches!(message, Message::Clipboard(id) if id == &last.to_string())));
+    }
+
+    #[test]
+    fn rbf_review_states_fit_compact_and_wide_in_both_themes() {
+        let descendants = HashSet::from([txid('a'), txid('b')]);
+        let none = HashSet::new();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let inspect = |scenario,
+                               cancel,
+                               ids: &HashSet<Txid>,
+                               rate: &form::Value<String>,
+                               created,
+                               processing| {
+                    capture::inspect_full_window(
+                        scenario,
+                        create_rbf_modal(
+                            crate::chain::ChainId::Bitcoin,
+                            cancel,
+                            ids,
+                            rate,
+                            created,
+                            processing,
+                        ),
+                        outer,
+                        appearance,
+                        theme,
+                    )
+                };
+                let bump = inspect(
+                    "vault-rbf-bump",
+                    false,
+                    &none,
+                    &rate("12", true),
+                    None,
+                    false,
+                );
+                assert!(bump.contains("Bump fee"));
+                assert!(bump.contains("Feerate (sats/vbyte)"));
+                assert!(bump.has_focus(Id::new("vault-rbf-confirm")));
+
+                let invalid = inspect(
+                    "vault-rbf-invalid",
+                    false,
+                    &none,
+                    &rate("3", false),
+                    None,
+                    false,
+                );
+                assert!(invalid.contains("Feerate must be greater"));
+                assert!(!invalid.has_focus(Id::new("vault-rbf-confirm")));
+                assert!(invalid.has_focus(Id::new("vault-rbf-back")));
+
+                let cancel = inspect(
+                    "vault-rbf-cancel",
+                    true,
+                    &none,
+                    &rate("5", true),
+                    None,
+                    false,
+                );
+                assert!(cancel.contains("Cancel transaction"));
+                assert!(cancel.contains("Set automatically"));
+                assert!(!cancel.contains("Feerate (sats/vbyte)"));
+                assert!(cancel.has_focus(Id::new("vault-rbf-confirm")));
+
+                let warning = inspect(
+                    "vault-rbf-descendants",
+                    false,
+                    &descendants,
+                    &rate("12", true),
+                    None,
+                    false,
+                );
+                assert!(warning.contains("invalidate 2 later payments"));
+                assert!(warning.contains(&txid('a').to_string()));
+                assert!(warning.contains(&txid('b').to_string()));
+                assert!(warning.has_focus(Id::from(format!("vault-rbf-copy-{}", txid('a')))));
+
+                let created = inspect(
+                    "vault-rbf-created",
+                    false,
+                    &none,
+                    &rate("12", true),
+                    Some(txid('c')),
+                    false,
+                );
+                assert!(created.contains("Replacement PSBT created successfully"));
+                assert!(created.has_focus(Id::new("vault-rbf-go-to-replacement")));
+                assert!(!created.has_focus(Id::new("vault-rbf-confirm")));
+
+                for is_cancel in [false, true] {
+                    let pending = inspect(
+                        "vault-rbf-pending",
+                        is_cancel,
+                        &none,
+                        &rate("12", true),
+                        None,
+                        true,
+                    );
+                    assert!(pending.contains("Creating replacement PSBT"));
+                    assert!(!pending.has_focus(Id::new("vault-rbf-back")));
+                    assert!(!pending.has_focus(Id::new("vault-rbf-confirm")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rbf_review_keyboard_actions_keep_existing_routes() {
+        let none = HashSet::new();
+        let valid = rate("12", true);
+        let activate = |cancel, rate: &form::Value<String>, created, target: &str| {
+            capture::activate(
+                create_rbf_modal(
+                    crate::chain::ChainId::Bitcoin,
+                    cancel,
+                    &none,
+                    rate,
+                    created,
+                    false,
+                ),
+                Id::from(target.to_owned()),
+                (1440, 900),
+                false,
+            )
+        };
+        assert!(activate(false, &valid, None, "vault-rbf-confirm")
+            .iter()
+            .any(|m| matches!(m, Message::CreateRbf(CreateRbfMessage::Confirm))));
+        assert!(activate(true, &valid, None, "vault-rbf-confirm")
+            .iter()
+            .any(|m| matches!(m, Message::CreateRbf(CreateRbfMessage::Confirm))));
+        assert!(activate(false, &valid, None, "vault-rbf-back")
+            .iter()
+            .any(|m| matches!(m, Message::CreateRbf(CreateRbfMessage::Cancel))));
+        let descendants = HashSet::from([txid('a')]);
+        assert!(capture::activate(
+            create_rbf_modal(
+                crate::chain::ChainId::Bitcoin,
+                false,
+                &descendants,
+                &valid,
+                None,
+                false
+            ),
+            Id::from(format!("vault-rbf-copy-{}", txid('a'))),
+            (1440, 900),
+            false,
+        )
+        .iter()
+        .any(|m| matches!(m, Message::Clipboard(id) if id == &txid('a').to_string())));
+        assert!(activate(false, &valid, Some(txid('c')), "vault-rbf-go-to-replacement")
+            .iter().any(|m| matches!(m, Message::Menu(Menu::Vault(VaultSubMenu::PSBTs(Some(id)))) if *id == txid('c'))));
+    }
 }

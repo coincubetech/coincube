@@ -228,6 +228,11 @@ const fn bytes_eq_ci(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
+/// Whether Spark offers **Swap BTC ⇄ USDB** (Tenshu v175 S3): the Spark
+/// page's head action, the Receive note's link and the Swap screen. Swap
+/// runs on mainnet only (`state::spark::swap::swap_available`).
+pub const SPARK_SWAP: bool = true;
+
 #[cfg(test)]
 mod tests {
     use super::*;

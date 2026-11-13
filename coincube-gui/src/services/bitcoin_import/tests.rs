@@ -579,6 +579,15 @@ async fn recovery_kit_restore_preserves_exact_cube_wallet_and_method_marker() {
                     .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
                     .is_none());
             }
+            RestoredKitSource::PasswordV3 => {
+                assert!(!restored.recovery_kit_password_backed_up);
+                assert!(restored
+                    .recovery_kit_last_backed_up_descriptor_fingerprint
+                    .is_none());
+                assert!(restored
+                    .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
+                    .is_none());
+            }
             RestoredKitSource::OwnerKeychain => {
                 assert!(!restored.recovery_kit_password_backed_up);
                 assert!(restored

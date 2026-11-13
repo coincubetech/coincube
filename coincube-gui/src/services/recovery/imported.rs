@@ -336,10 +336,15 @@ mod tests {
                 },
             )
             .unwrap();
-            let ciphertext =
-                encrypt(&serde_json::to_vec(&blob).unwrap(), &password, TEST_PARAMS).unwrap();
+            let ciphertext = encrypt(
+                &serde_json::to_vec(&blob).unwrap(),
+                &password,
+                TEST_PARAMS,
+                "42",
+            )
+            .unwrap();
             let RecoveredWalletBlob::Imported(restored) =
-                decrypt_wallet_descriptor_blob(&ciphertext, &password).unwrap()
+                decrypt_wallet_descriptor_blob(&ciphertext, &password, "42").unwrap()
             else {
                 panic!("{}: expected imported Kit", shape);
             };

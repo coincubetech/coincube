@@ -3,7 +3,9 @@ use crate::{
         menu::Menu,
         settings::unit::BitcoinDisplayUnit,
         view::{
-            global_home::{PickerSide, TransferError, TransferStage, WalletKind},
+            global_home::{
+                PickerSide, TransferDirection, TransferError, TransferStage, WalletKind,
+            },
             FiatAmountConverter,
         },
     },
@@ -114,6 +116,26 @@ pub trait Close {
     fn close() -> Self;
 }
 
+/// Coin control intents: choosing coins to send, and the Split coins overlay.
+#[derive(Debug, Clone)]
+pub enum CoinControlMessage {
+    /// Open the label editor for this coin, independently of its details.
+    EditLabel(coincube_core::miniscript::bitcoin::OutPoint),
+    Choose(coincube_core::miniscript::bitcoin::OutPoint),
+    ClearChosen,
+    SendSelected,
+    OpenSplit,
+    CancelSplit,
+    ToggleSplitCoin(coincube_core::miniscript::bitcoin::OutPoint),
+    SplitMethod(crate::services::split_coins::Method),
+    SignSplit,
+    /// The send warning's acknowledgement checkbox.
+    AcknowledgeBothChains(bool),
+    /// Send the selected coins despite the warning.
+    SendAnyway,
+    CloseWarning,
+}
+
 #[derive(Debug, Clone)]
 pub enum VaultReceiveMessage {
     Copy(String),
@@ -121,20 +143,9 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    Activity(crate::app::view::activity::ActivityMessage),
+    LocalMcp(crate::app::local_mcp::Message),
     ImportedBitcoin(crate::app::state::imported_bitcoin::ImportMessage),
-    /// Close the read-only foreign-wallet sweep review and destroy its
-    /// session-only evidence.
-    DismissSplitReview,
-    /// #568 B5c-2: start a split from the foreign-wallet sweep review. The
-    /// review overlay is its only sender, and it renders only under the
-    /// Review handoff; the App re-checks the server grant, the review's
-    /// context, that no Split panel is open and that this source was not
-    /// split into this Vault before (D15), in `App::start_split_from_review`.
-    StartSplit,
-    /// A Split panel intent (#568 B1b). Reachable only while a Split panel is
-    /// shown: one resumed from its journal, or one started from the review
-    /// (`StartSplit`). The panel's own intents have no "start".
-    Split(crate::app::state::vault::split::SplitMessage),
     /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
     OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),
@@ -143,6 +154,30 @@ pub enum Message {
     /// Copy text and show confirmation after the clipboard write is requested.
     CopyWithToast(String, String),
     Menu(Menu),
+    /// Show the Launcher while keeping this Cube's session in its App tab.
+    OpenLauncher,
+    /// Open installation-wide preferences above the retained Cube.
+    OpenAppPreferences,
+    /// Lock through the tab's secure lifecycle, then show the Launcher.
+    LockCubeToLauncher,
+    /// An import that never finished: lock this Cube and ask to delete it
+    /// from the Launcher, through the Launcher's own delete confirmation.
+    DeleteUnfinishedCube,
+    ToggleCubeSwitcher,
+    /// The Connect control in the top bar: opens or closes its panel.
+    ToggleConnectPanel,
+    /// A press outside the Connect panel, or Escape.
+    CloseConnectPanel,
+    /// "Not now" on Signed out by Connect: clears the red light and leaves
+    /// the control in the ordinary signed-out state.
+    DismissConnectSignOut,
+    AskCubeLock,
+    CancelCubeLock,
+    /// A shared Action's pointer-down request. The App applies whole-tree
+    /// focus so a captured sidebar click also blurs content controls.
+    FocusAction(iced::advanced::widget::Id),
+    /// Device-wide privacy intent handled only by the GUI preferences owner.
+    ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default
@@ -152,6 +187,10 @@ pub enum Message {
     SetupVaultRestoreFromKit,
     Close,
     Select(usize),
+    /// Coin control's checkbox selection and Split coins overlay.
+    CoinControl(CoinControlMessage),
+    /// Go to Coin control and open the Split coins overlay.
+    SplitFirst,
     SelectRefundable(usize),
     RefundAddressEdited(String),
     RefundAddressValidated(bool),
@@ -199,20 +238,13 @@ pub enum Message {
     ExportPsbt,
     ImportPsbt,
     OpenUrl(String),
-    /// Start the Bitcoin Blake2b claim-target installer from this Cube
-    /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
-    /// poisoned, swept or broadcast by this flow.
+    /// Open the installer that creates this Bitcoin Cube's Bitcoin Blake2b
+    /// copy (Tools › Split coins). Creates the copy Cube only — nothing is
+    /// split, swept or broadcast by this flow.
     StartClaimBlake2b,
-    /// Start the imported Bitcoin policy claim flow after App rechecks the
-    /// live attachment, completed scan, and current Connect feature grant.
-    StartImportedClaim,
-    ContinueForkClaim,
-    ReturnBitcoinClaim,
-    /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
-    /// handled by `state::vault::claim::ClaimStep1Panel`.
-    Claim(ClaimMessage),
-    /// Route a paired Claim signer view message to its Bitcoin or BTCB2 PSBT.
-    ClaimPairedSigner(u64, coincube_core::chain::ChainId, Box<Message>),
+    /// Tools › Split coins › Create copy. The App re-checks the disk for an
+    /// existing copy before it starts [`Self::StartClaimBlake2b`].
+    CreateBlake2bCopy,
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
@@ -224,6 +256,7 @@ pub enum Message {
     SparkSettings(crate::app::view::spark::SparkSettingsMessage),
     SparkSend(crate::app::view::spark::SparkSendMessage),
     SparkReceive(crate::app::view::spark::SparkReceiveMessage),
+    SparkSwap(crate::app::view::spark::SparkSwapMessage),
     LiquidReceive(LiquidReceiveMessage),
     VaultReceive(VaultReceiveMessage),
     LiquidSend(LiquidSendMessage),
@@ -242,6 +275,9 @@ pub enum Message {
     ShowError(String),
     ShowSuccess(String),
     ShowToast(log::Level, String),
+    /// Keep the incoming amount structured until the toast is rendered, so an
+    /// already-visible notice follows the current device privacy choice.
+    ShowIncomingLiquidWaitingToast(u64),
     DismissToast(usize),
     SideshiftReceive(SideshiftReceiveMessage),
     SideshiftSend(SideshiftSendMessage),
@@ -270,11 +306,18 @@ pub enum Message {
     /// plans". The Pane intercepts it and focuses the Home tab on its
     /// Connect → Plan & Billing section. Mirrors [`OpenConnectSignIn`].
     OpenPlanBilling,
+    /// A focusable paid-feature CTA records its own return target for the
+    /// Connect sheet's Close and Escape route.
+    OpenPlanBillingFrom(&'static str),
     /// Remote duress activation arrived over the gRPC stream (Phase 7b). The
     /// tab shell intercepts this and locks the running app into the cryptic
     /// "Duress Mode Activated" screen — WITHOUT wiping (remote activation can
     /// be accidental; only a local duress PIN wipes).
     DuressLockRemote,
+    /// A settings PIN trial matched this Cube's local duress marker. The tab
+    /// checks the originating App/Cube before invoking the same local wipe
+    /// orchestrator used by ordinary PIN unlock; no seed travels in this event.
+    DuressActivateLocal(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ToggleTheme,
     DismissReceivedCelebration,
     /// Answer to the one-time recovery-alerts consent prompt overlay
@@ -282,7 +325,6 @@ pub enum Message {
     /// `false` = decline. Handled at the App level; the answer is persisted
     /// per-cube so the prompt never re-fires.
     RecoveryAlertsConsent(bool),
-    DismissBackupWarning,
     /// Close the Spark Stable Balance banner for this session
     /// (`Cache::spark_notice`). Handled at the App level.
     DismissSparkNotice,
@@ -318,6 +360,17 @@ pub enum CreateSpendMessage {
     Generate,
     SendMaxToRecipient(usize),
     FetchFeeEstimate(usize),
+    /// A preset's estimate (`None` if the fetch failed), carrying the identity
+    /// of the `FetchFeeEstimate` request it answers.
+    FeeEstimated {
+        request: u64,
+        feerate: Option<usize>,
+    },
+    /// Choose coins: open the coin list instead of the automatic selection.
+    ChooseCoins,
+    /// The Custom fee segment: reveal the feerate field, restoring the last
+    /// rate typed into it.
+    CustomFeerate,
     SessionError(SpendCreationError),
     Clear,
 }
@@ -333,6 +386,9 @@ pub enum ImportSpendMessage {
 pub enum SpendTxMessage {
     Delete,
     Sign,
+    /// Leave the view-only MCP review and show the ordinary save and sign controls.
+    #[cfg(feature = "mcp-transactions")]
+    ContinueNativeSigning,
     /// Request a Keychain signature from one specific signer, chosen from
     /// the unified signing picker. Carries the descriptor fingerprint of
     /// the keychain signer to address. Creates just that signer's
@@ -416,41 +472,66 @@ impl std::fmt::Debug for BorderWalletReconMessage {
     }
 }
 
+/// A successful Re-register, tagged with the sign-in it was started from.
+/// The App adopts `device_id` into the live stream only while that stream
+/// still runs as `email` on `replaces`, so a result landing after an account
+/// switch, or after a newer sign-in registered its own id, changes nothing.
+#[derive(Debug, Clone)]
+pub struct ReregisteredDevice {
+    pub email: String,
+    pub replaces: String,
+    pub device_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
+    DataExportsSection,
     EditBitcoindSettings,
     BitcoindSettings(SettingsEditMessage),
     ElectrumSettings(SettingsEditMessage),
     RescanSettings(SettingsEditMessage),
     ImportExport(ImportExportMessage),
-    EditRemoteBackendSettings,
-    RemoteBackendSettings(RemoteBackendSettingsMessage),
     EditWalletSettings,
+    ToggleWalletExpert,
+    ReviewDescriptorCopy,
+    ConfirmDescriptorCopy,
+    CancelDescriptorCopy,
     ImportExportSection,
     ExportEncryptedDescriptor,
+    ReviewPlaintextDescriptorExport,
+    CancelPlaintextDescriptorExport,
     ExportPlaintextDescriptor,
     ExportTransactions,
     ExportLabels,
     ExportWallet,
     ImportWallet,
     AboutSection,
-    /// Triggered by the "Re-register this device" button on the
-    /// Settings → About page's Connect-device card. Clears the cached
-    /// `device_id` and re-runs `ensure_device_registered`, getting a
-    /// fresh `SignerDevice` row server-side. Useful when a device id
-    /// is suspect (compromise, machine swap) or the row went stale on
-    /// the API and signing started 404'ing.
+    /// Install Cube › Settings › Connections (Connect account and this
+    /// computer's live updates).
+    ConnectionsSection,
+    /// "Try again" after automatic renewal failed: the App registers this
+    /// computer again with its stored key (`renewal_task`).
     ReregisterConnectDevice,
-    /// Settled result of the re-registration RPC. Payload is the new
-    /// device_id on success, or a user-facing error string. Routed
-    /// straight to the About settings state so it can refresh its
-    /// banner without going through the catchall update path.
-    ConnectDeviceReregistered(Result<String, String>),
+    /// Settled result of a renewal, automatic or Try again: the registration
+    /// on success, or an error for the log. Handled by the App.
+    ConnectDeviceReregistered(Result<ReregisteredDevice, String>),
+    /// Shows or hides Details for support (the device ID) under Couldn't
+    /// reconnect on Cube › Settings › Connections.
+    ToggleConnectSupportDetails,
     RegisterWallet,
     FingerprintAliasEdited(Fingerprint, String),
     WalletAliasEdited(String),
     Save,
     GeneralSection,
+    /// The inline Cube name field on Display & appearance changed.
+    CubeNameEdited(String),
+    /// Save the Cube name typed on Display & appearance (Return or leaving
+    /// the field). The App writes it locally, then to Connect.
+    CubeNameSubmitted(String),
+    PaymentChecksSection,
+    /// Ask before turning recipient checks off (Payment checks).
+    AskRecipientChecksOff,
+    CancelRecipientChecksOff,
     /// Install the Recovery settings section (backup + Recovery Kit + alerts).
     RecoverySection,
     DisplayUnitChanged(BitcoinDisplayUnit),
@@ -485,6 +566,8 @@ pub enum SettingsMessage {
 /// these messages. `Debug` is derived.
 #[derive(Debug, Clone)]
 pub enum RecoveryAlertsMessage {
+    /// Open or close the alerts controls under the Recovery alerts row.
+    ToggleManage,
     /// Fetch the vault's monitoring status (resolves the Connect vault id,
     /// then GETs `/vaults/{id}/monitoring`). Fired on entering General
     /// settings and after a successful change.
@@ -533,6 +616,15 @@ pub enum RecoveryAlertsMessage {
     ConfirmFullCube,
     /// Abandon the in-progress Full-Cube PIN entry.
     CancelFullCube,
+    /// Seed JSON was staged privately after the PIN trial. The handler must
+    /// admit this exact attempt before it may begin any escrow network call.
+    FullCubePinReady(crate::app::cache::AppGeneration, u64),
+    FullCubePinFailed(crate::app::cache::AppGeneration, u64, String),
+    FullCubeUploadResult(
+        crate::app::cache::AppGeneration,
+        u64,
+        Result<crate::services::coincube::VaultMonitoringStatus, String>,
+    ),
     /// Async result of a level change — the updated status. The `u64` is the
     /// spawn-time `session_generation` (see `StatusLoaded`); a stale result is
     /// dropped rather than clobbering a newer session's state. The trailing
@@ -597,6 +689,8 @@ pub enum LocalSigningMessage {
     ),
     /// User asked to remove a paired phone (8-hex fingerprint of the
     /// phone's cert pin).
+    ReviewRemovePhone(String),
+    CancelRemovePhone,
     RemovePhone(String),
     /// Periodic tick while no pairing is in progress: tell phones about
     /// removals made here, and ask paired phones whether they removed this
@@ -624,6 +718,11 @@ pub enum InstallStatsViewMessage {
 #[derive(Debug, Clone)]
 pub enum NodeSettingsMessage {
     RecoveryAdvancedToggled,
+    /// Pick where history recovery starts: `true` for a date or block
+    /// height, `false` for Connect's history.
+    RecoverySourceSelected(bool),
+    /// Show or hide the local node's latest log line.
+    NodeLogToggled,
     NodeAdvancedToggled,
     RecoveryDismiss,
     RecoveryStartEdited(String),
@@ -719,12 +818,6 @@ pub enum NodeSettingsMessage {
     /// Probe result: the tip height the endpoint reported, or why it didn't
     /// answer. A failure never changes the daemon config.
     CustomEsploraProbeResult(Result<u32, String>),
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteBackendSettingsMessage {
-    EditInvitationEmail(String),
-    SendInvitation,
 }
 
 #[derive(Debug, Clone)]
@@ -850,6 +943,12 @@ pub enum SparkSideshiftReceiveMessage {
     },
     /// Copy the deposit address.
     Copy,
+    /// Copy the shift ID (what SideShift support asks for).
+    CopyShiftId,
+    /// Copy the refund address the user gave.
+    CopyRefundAddress,
+    /// Flip the in-progress step's pulse phase.
+    PulseTick,
     Back,
     Reset,
 }
@@ -877,7 +976,7 @@ pub enum SideshiftSendMessage {
     /// Breez payment failed.
     PaymentFailed(String),
     PollStatus,
-    StatusUpdated(Result<ShiftStatus, String>),
+    StatusUpdated(String, Result<ShiftStatus, String>),
     /// Go back one step, preserving entered data.
     Back,
     Reset,
@@ -911,7 +1010,9 @@ pub enum LiquidOverviewMessage {
     /// button is hidden off-mainnet, where SideSwap is unavailable).
     Swap,
     History,
-    SelectTransaction(usize),
+    SelectTransaction(crate::app::wallets::types::DomainPaymentIdentity),
+    /// Request whole-tree focus after a pointer interaction with a landing action.
+    FocusAction(iced::advanced::widget::Id),
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,
@@ -926,7 +1027,11 @@ pub enum LiquidOverviewMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidSendMessage {
+    FocusAction(iced::advanced::widget::Id),
     PresetAsset(crate::app::state::liquid::send::SendAsset),
+    /// Asset choice within the current Send draft. Selecting the current
+    /// segment keeps the typed destination and amount.
+    SelectMasterAsset(crate::app::state::liquid::send::SendAsset),
     InputEdited(String),
     /// Carries (original_input, validation_result) so stale async results are discarded.
     InputValidated(String, Option<InputType>),
@@ -997,6 +1102,8 @@ pub enum LiquidSendMessage {
 /// [`crate::app::state::liquid::swap`].
 #[derive(Debug, Clone)]
 pub enum LiquidSwapMessage {
+    /// Focus a keyboard action after pointer activation.
+    FocusAction(iced::advanced::widget::Id),
     /// Balances + recorded-swap payments loaded for the Swap screen.
     DataLoaded {
         btc_balance: Amount,
@@ -1087,6 +1194,8 @@ pub enum SendPopupMessage {
 
 #[derive(Debug, Clone)]
 pub enum LiquidReceiveMessage {
+    FocusAction(iced::advanced::widget::Id),
+    BackToOverview,
     ToggleMethod(ReceiveMethod),
     Copy,
     ShowQrCode,
@@ -1244,6 +1353,11 @@ pub enum BackupWalletMessage {
     /// final one stashed in state was `Zeroizing`. Matches
     /// `RecoveryKitMessage::PinVerified`, which already did this.
     PinVerified(Result<zeroize::Zeroizing<Vec<String>>, String>),
+    /// PIN-only result fenced to the exact prompt; passkey keeps `PinVerified`.
+    PinVerifiedAttempt(
+        crate::app::cache::AppGeneration,
+        Result<zeroize::Zeroizing<Vec<String>>, String>,
+    ),
     /// Async result of persisting `backed_up = true` to settings.json after
     /// the user successfully completed the verification step.
     BackupSaveResult(Result<(), String>),
@@ -1269,6 +1383,11 @@ impl std::fmt::Debug for BackupWalletMessage {
             Self::PinVerified(Ok(_)) => write!(f, "PinVerified(Ok(<redacted>))"),
             Self::PinVerified(Err(e)) => f
                 .debug_tuple("PinVerified")
+                .field(&Err::<(), _>(e))
+                .finish(),
+            Self::PinVerifiedAttempt(_, Ok(_)) => write!(f, "PinVerifiedAttempt(Ok(<redacted>))"),
+            Self::PinVerifiedAttempt(_, Err(e)) => f
+                .debug_tuple("PinVerifiedAttempt")
                 .field(&Err::<(), _>(e))
                 .finish(),
             Self::BackupSaveResult(res) => f.debug_tuple("BackupSaveResult").field(res).finish(),
@@ -1367,6 +1486,11 @@ pub enum RecoveryKitMessage {
     /// the wrap, a plain `Vec<String>` with the phrase bytes would
     /// linger on the heap past the message cycle.
     PinVerified(Result<zeroize::Zeroizing<Vec<String>>, String>),
+    /// PIN-only result fenced to the exact prompt; passkey keeps `PinVerified`.
+    PinVerifiedAttempt(
+        crate::app::cache::AppGeneration,
+        Result<zeroize::Zeroizing<Vec<String>>, String>,
+    ),
     /// Recovery password input changed. Wrapped in `Zeroizing` at
     /// the message level (not just on the state field) because
     /// Iced's runtime clones messages between update/task/view —
@@ -1506,6 +1630,11 @@ impl std::fmt::Debug for RecoveryKitMessage {
                 .debug_tuple("PinVerified")
                 .field(&Err::<(), _>(e))
                 .finish(),
+            Self::PinVerifiedAttempt(_, Ok(_)) => write!(f, "PinVerifiedAttempt(Ok(<redacted>))"),
+            Self::PinVerifiedAttempt(_, Err(e)) => f
+                .debug_tuple("PinVerifiedAttempt")
+                .field(&Err::<(), _>(e))
+                .finish(),
             Self::PasswordChanged(_) => f
                 .debug_tuple("PasswordChanged")
                 .field(&"<redacted>")
@@ -1595,11 +1724,25 @@ pub enum ConnectAccountMessage {
     RefreshSession {
         refresh_token: String,
     },
-    /// A login or refresh result. The number is the panel's authentication
+    /// A new OTP login result. The number is the panel's authentication
     /// epoch when the operation that produced it was spawned: a completion
     /// of an operation begun before a global auth invalidation carries an
     /// older epoch than one begun after, whatever order they arrive in.
     SetSession(crate::services::coincube::LoginResponse, u64),
+    OtpVerified(crate::services::coincube::LoginResponse, u64, u64),
+    OtpVerifyFailed(crate::user_error::UserError, u64, u64),
+    /// A keyring session refresh updates the stored bearer without starting
+    /// the new-login device registration and stream bootstrap.
+    RefreshedSession(crate::services::coincube::LoginResponse, u64, String),
+    /// Result persisted to connect.json before the App panel adopts it.
+    AuthCommitAccepted {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        refreshed: bool,
+    },
+    AuthCommitRejected {
+        epoch: u64,
+    },
     SessionLoaded {
         user: crate::services::coincube::User,
         plan: Option<crate::services::coincube::ConnectPlan>,
@@ -1615,8 +1758,17 @@ pub enum ConnectAccountMessage {
     OverviewCountsLoaded {
         contacts: Option<usize>,
         cubes: Option<usize>,
+        /// Same `list_cubes` response, retained for the sanitized Recovery
+        /// services projection without another request.
+        recovery: Result<Vec<crate::services::coincube::CubeResponse>, UserError>,
         generation: u64,
+        request_seq: u64,
     },
+    /// Refresh public Cube metadata for Account → Recovery services.
+    RefreshRecoveryServices,
+    /// Ask the Launcher to resolve this server Cube to an exact local Cube
+    /// before opening its ordinary authenticated unlock path.
+    OpenRecoveryService(crate::app::state::connect::account::RecoveryServiceTarget),
     /// A session refresh failed for a reason that is *not* an auth rejection
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
@@ -1628,7 +1780,18 @@ pub enum ConnectAccountMessage {
     RefreshRejected {
         epoch: u64,
     },
+    /// A refresh that never reached Connect: no network, or Connect didn't
+    /// answer. The stored session is kept and re-checked (`RecheckSession`)
+    /// instead of falling back to the sign-in form.
+    RefreshUnreachable {
+        trouble: crate::services::connect::grpc::trouble::Trouble,
+        epoch: u64,
+    },
+    /// The wait before re-checking an unverified session is over.
+    RecheckSession,
     LogOut,
+    /// Open or dismiss the account's inline sign-out review.
+    ReviewSignOut(bool),
     EmailChanged(String),
     SubmitLogin,
     SubmitRegistration,
@@ -1638,9 +1801,14 @@ pub enum ConnectAccountMessage {
         is_signup: bool,
     },
     OtpChanged(String),
-    OtpCooldownTick,
+    /// Return from token entry to the same email form, retaining signup mode.
+    BackToEmail,
+    /// A cooldown tick belongs only to the OTP attempt that scheduled it.
+    OtpCooldownTick(u64),
     ResendOtp,
-    OtpResent,
+    /// A resend completion belongs only to the OTP attempt that requested it.
+    OtpResent(u64),
+    OtpResendFailed(UserError, u64),
     VerifyOtp,
     EmailNotVerified {
         email: String,
@@ -1648,6 +1816,8 @@ pub enum ConnectAccountMessage {
     VerifiedDevicesLoaded(Vec<crate::services::coincube::VerifiedDevice>, u64),
     LoginActivityLoaded(Vec<crate::services::coincube::LoginActivity>, u64),
     DeleteVerifiedDevice(u32),
+    /// Open or dismiss the inline removal review for one verified device.
+    ReviewVerifiedDeviceRemoval(Option<u32>),
     VerifiedDeviceDeleted(u32, u64, Result<(), String>),
     CopyToClipboard(String),
     Contacts(ContactsMessage),
@@ -1688,9 +1858,12 @@ pub enum ConnectAccountMessage {
     /// Renewal banner CTA — open Plan & Billing checkout pre-selected to
     /// the current tier + cycle (D1).
     RenewCurrentPlan,
-    /// Navigate to the Plan & Billing picker (e.g. the expired-state renew
-    /// CTA, D3).
+    /// Navigate to account-first Plan & Billing management.
     OpenPlanBilling,
+    /// Show or close the server-priced plan comparison within Plan & Billing.
+    ComparePlans(bool),
+    /// Show or close the optional referral-code field.
+    ShowCampaignRedeem(bool),
     /// Billing history load result, with the session generation it belongs to.
     ///
     /// The error is a [`UserError`], converted from the real `CoincubeError` at
@@ -2051,6 +2224,8 @@ pub enum ContactsMessage {
 /// Per-Cube Connect messages (Lightning Address, Avatar).
 #[derive(Debug, Clone)]
 pub enum ConnectCubeMessage {
+    /// Apply whole-tree focus for a keyboard-reachable Members action.
+    FocusAction(iced::advanced::widget::Id),
     LnUsernameChanged(String),
     LnUsernameChecked {
         available: bool,
@@ -2058,25 +2233,51 @@ pub enum ConnectCubeMessage {
         version: u32,
     },
     ClaimLightningAddress,
-    LightningAddressClaimed(crate::services::coincube::LightningAddress),
-    LightningAddressLoaded(Option<crate::services::coincube::LightningAddress>),
+    /// Give a Cube with no Lightning address a random one (e.g.
+    /// `orangezebra`): checked free, reserved, registered and confirmed like
+    /// a manual claim. Only runs once the Cube's (empty) address is known;
+    /// after a failure only an explicit `retry` runs it again.
+    AutoAssignLightningAddress {
+        retry: bool,
+    },
+    LightningAddressAutoAssigned {
+        generation: u64,
+        address: crate::services::coincube::LightningAddress,
+    },
+    LightningAddressAutoAssignFailed {
+        generation: u64,
+        error: String,
+    },
+    LightningAddressClaimed {
+        generation: u64,
+        address: crate::services::coincube::LightningAddress,
+    },
+    LightningAddressClaimFailed {
+        generation: u64,
+        error: String,
+    },
+    LightningAddressLoaded {
+        generation: u64,
+        address: Option<crate::services::coincube::LightningAddress>,
+    },
     /// Flip the claimed-address card into the in-place edit form.
     BeginEditLightningAddress,
     /// Drop edit mode, clear the input, abort any pending availability check.
     CancelEditLightningAddress,
-    /// User clicked "Change" on the edit form — open the destructive
-    /// confirmation modal with the proposed new username.
-    RequestChangeLightningAddress,
-    /// User backed out of the confirmation modal.
-    DismissChangeConfirmation,
-    /// User confirmed the swap — fires the PUT + SDK delete+register chain.
-    ConfirmChangeLightningAddress,
+    /// "Save new address" on Spark › Settings › Lightning address: validates
+    /// the new username, then fires the PUT + SDK delete+register chain. The
+    /// form states what happens to the old address before Save, so there is
+    /// no confirmation step.
+    SaveLightningAddress,
     /// Terminal result of the change chain. The outcome variants
     /// distinguish server-side rejection (address unchanged) from
     /// server-committed-but-SDK-out-of-sync (the new address is
     /// confirmed in the API and the existing re-registration prompt
     /// is surfaced for the user to retry the SDK side).
-    LightningAddressUpdated(crate::app::state::connect::cube::LightningAddressChangeOutcome),
+    LightningAddressUpdated {
+        generation: u64,
+        outcome: crate::app::state::connect::cube::LightningAddressChangeOutcome,
+    },
     /// Terminal result of the manual SDK rebind retry kicked off by
     /// `RetryLightningAddressReregister`. `Ok` clears the
     /// re-registration prompt; `Err` keeps it surfaced with an
@@ -2201,6 +2402,10 @@ pub enum AvatarMessage {
 
 #[derive(Debug, Clone)]
 pub enum HomeMessage {
+    /// Toggle only the Overview aggregate; the global privacy setting still wins.
+    ToggleTotalBalance,
+    /// Toggle only the Overview wallet cards; the global privacy setting still wins.
+    ToggleWalletBalances,
     /// Navigate to Liquid Send with asset preset.
     SendAsset(crate::app::state::liquid::send::SendAsset),
     /// Navigate to Liquid Receive with asset preset.
@@ -2218,9 +2423,9 @@ pub enum HomeMessage {
     /// 0 even though the wallet still has spendable value).
     SparkBalanceUpdated {
         btc: Amount,
-        stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+        usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
+        identity_pubkey: String,
     },
-    ToggleBalanceMask,
     /// Open the wallet-picker popup on the amount screen, editing the named side.
     OpenWalletPicker(PickerSide),
     /// Close the wallet-picker popup without changing the selected pair.
@@ -2228,6 +2433,37 @@ pub enum HomeMessage {
     /// Commit a wallet selection from the popup; the state layer applies it to
     /// the side currently being edited and recomputes `transfer_direction`.
     SelectWalletInPicker(WalletKind),
+    /// Choose a source or destination directly from the Transfer form.
+    SelectTransferWallet(PickerSide, WalletKind),
+    /// The To list's "Another Cube…" row (Spark or Vault source).
+    SelectAnotherCube,
+    /// Wallets page → Amount, or → Other Cube for "Another Cube…".
+    ContinueFromWallets,
+    /// Other Cube page: choose a row of the local catalog by Cube id.
+    SelectOtherCube(String),
+    SelectOtherCubeWallet(WalletKind),
+    /// Other Cube page → Unlock.
+    ContinueWithCube,
+    /// The chosen Cube's 4-digit PIN fields.
+    OtherCubePin(crate::pin_input::Message),
+    /// Check the entered PIN against the chosen Cube.
+    UnlockOtherCube,
+    /// Start the chosen Cube's passkey ceremony (macOS).
+    UnlockOtherCubePasskey,
+    /// Poll the passkey ceremony on the UI thread.
+    OtherCubePasskeyPoll,
+    OtherCubePinChecked(crate::app::transfer_destination_loader::PinCheck),
+    OtherCubeBackendBound(crate::app::transfer_destination_loader::BackendReply),
+    OtherCubeAddress(crate::app::transfer_destination_loader::AddressReply),
+    OtherCubeSparkAddress(crate::app::transfer_destination_loader::SparkAddressReply),
+    /// Unlock page → Amount, once every check passed.
+    ContinueFromUnlock,
+    /// Amount page: send the source wallet's whole balance, fees included.
+    TransferMax,
+    /// Done page: close the dialog and open Activity.
+    OpenTransferActivity,
+    /// Done page: start another transfer.
+    RestartTransfer,
     AmountEdited(String),
     NextStep,
     PreviousStep,
@@ -2267,8 +2503,29 @@ pub enum HomeMessage {
     /// no longer matches the current state (keystroke-fast previews would
     /// otherwise flicker out-of-order).
     TransferPsbtPreviewReady {
+        generation: u64,
+        direction: TransferDirection,
         feerate_vb: u64,
-        result: Result<Amount, String>,
+        /// The fee and what the destination receives.
+        result: Result<(Amount, Amount), String>,
+    },
+    /// Destination fetch result bound to the request and direction that started it.
+    TransferDestinationReady {
+        generation: u64,
+        direction: TransferDirection,
+        result: Result<
+            (
+                String,
+                coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+            ),
+            TransferError,
+        >,
+    },
+    /// Failure from the same request; old failures must not disturb a newer transfer.
+    TransferDestinationFailed {
+        generation: u64,
+        direction: TransferDirection,
+        error: TransferError,
     },
     /// Result of the async step-1→2 prep for Spark-sourced transfers: we
     /// fetched a fresh Vault address (for SparkToVault) or a Breez peg-in
@@ -2276,6 +2533,8 @@ pub enum HomeMessage {
     /// on it. Handler stores the destination address + prepare handle so
     /// the confirm screen can render it and `ConfirmSparkSend` can broadcast.
     SparkPrepareSendReady {
+        generation: u64,
+        direction: TransferDirection,
         /// The destination address Spark will send to. For SparkToVault this
         /// is a fresh Vault BIP-32 address; for SparkToLiquid it's Breez's
         /// on-chain peg-in swap address.
@@ -2286,14 +2545,21 @@ pub enum HomeMessage {
         /// the Fees row on the Transfer confirm screen.
         fee_sat: u64,
     },
-    /// Broadcast a previously-prepared Spark send (SparkToVault, SparkToLiquid).
+    /// Broadcast a previously-prepared Spark send.
     /// Calls `spark.send_payment(handle)` and transitions the pending transfer
     /// to `PendingDeposit` on success.
     ConfirmSparkSend,
+    /// Broadcast result for the preparation that the user confirmed.
+    SparkTransferFinished {
+        generation: u64,
+        direction: TransferDirection,
+        amount_sat: u64,
+        result: Result<(), TransferError>,
+    },
     /// A transfer's broadcast step has completed — advance to the Pending
     /// Deposit success screen and mark the destination wallet's pending
     /// indicator. Fired from:
-    ///   - `spark.send_payment` success (SparkToVault, SparkToLiquid)
+    ///   - `spark.send_payment` success
     ///   - `breez.pay_onchain` success (LiquidToSpark — the LiquidToVault path
     ///     still uses the richer `LiquidToVaultSubmitted` for swap persistence)
     ///   - Vault PSBT broadcast success routed here for VaultToSpark
@@ -2307,10 +2573,13 @@ pub enum HomeMessage {
         /// the badge stuck permanently because no Spark deposit ever arrives.
         swap_id: Option<String>,
     },
-    PrepareOnChainResponseReceived(PreparePayOnchainResponse),
+    PrepareOnChainResponseReceived {
+        generation: u64,
+        direction: TransferDirection,
+        response: PreparePayOnchainResponse,
+    },
     TransferSuccessful,
     BackToHome,
-    BreezOnchainAddress(String),
     RefreshLiquidBalance,
     RefreshSparkBalance,
     /// Bridge has emitted `Event::Synced`. The next (or already
@@ -2332,8 +2601,20 @@ pub enum HomeMessage {
     /// balance, if any, is left intact.
     SparkLoadFailed,
     SignVaultToLiquidTx,
-    TransferPsbtReady(TransferPsbtResult),
-    TransferSigningComplete,
+    TransferPsbtReady {
+        request_id: u64,
+        generation: u64,
+        direction: TransferDirection,
+        destination: String,
+        amount_sat: u64,
+        feerate_vb: u64,
+        result: TransferPsbtResult,
+    },
+    TransferSigningComplete {
+        request_id: u64,
+        generation: u64,
+        direction: TransferDirection,
+    },
     ConfirmTransfer,
     LiquidToVaultSubmitted {
         amount: Amount,
@@ -2760,45 +3041,4 @@ mod duress_message_debug_tests {
             "DisableMethodProbed(Err(\"settings unreadable\"), 5)"
         );
     }
-}
-
-/// User intents on the claim step-1 panel. Every one is re-checked by the
-/// panel against its current stage; none is a permission on its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimMessage {
-    ReviewPairedBitcoin,
-    ConfirmPairedBitcoin,
-    BackPairedBitcoin,
-    ReviewPairedFork,
-    ConfirmPairedFork,
-    BackPairedFork,
-    /// Reserve distinct source-Vault addresses for chain-specific deposits.
-    StartFunding,
-    ToggleDepositDetails,
-    ToggleSetupDetails,
-    CheckFunding,
-    /// Copy identifier-free timing evidence from the current deposit check.
-    CopyVerificationReport,
-    /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
-    SignPair,
-    ShowPairBitcoin,
-    ShowPairBtcb2,
-    /// Review the original transaction being re-mined after a reorg.
-    ReviewReconfirmation,
-    ReviewResubmission,
-    ConfirmResubmission,
-    /// Explicitly acknowledge the freshly reviewed replacement inclusion.
-    ConfirmReconfirmation,
-    /// Run the preconditions again (after a refusal, or to refresh them).
-    Recheck,
-    /// Build the poison self-transfer from the pre-fork coins shown.
-    Build,
-    /// Hand the built transaction to the Vault's own signing flow.
-    Sign,
-    /// Explicit confirmation of the review on screen: submit step 1.
-    Confirm,
-    /// Re-read the chains for the submitted transaction.
-    Refresh,
-    /// Abandon an unsubmitted attempt and return to the preconditions.
-    Cancel,
 }

@@ -92,6 +92,7 @@ fn binding(descriptor: &str, root: &Xpriv) -> pairing_store::SignerBinding {
         xpub: Xpub::from_priv(&Secp256k1::new(), root).to_string(),
         fingerprint: root.fingerprint(&Secp256k1::new()),
         descriptor_sha256: Sha256::digest(descriptor.as_bytes()).to_vec(),
+        imported_scope: None,
     }
 }
 

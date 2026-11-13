@@ -17,15 +17,15 @@ use zeroize::Zeroizing;
 pub const MIN_PASSWORD_LEN: usize = 12;
 
 /// Coarse strength band shown to the user. Ordered so comparisons
-/// (`strength >= PasswordStrength::Fair`) work as expected.
+/// (`strength >= PasswordStrength::Strong`) work as expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PasswordStrength {
     /// Too short, too common, or trivially guessable (zxcvbn score 0).
     VeryWeak,
     /// Bruteforceable in under an hour online (score 1).
     Weak,
-    /// Resistant to online throttled attacks; a reasonable default floor
-    /// for a recovery password (score 2).
+    /// Resistant to online throttled attacks (score 2). Not enough for a
+    /// Recovery Kit: that ciphertext is an offline copy of the mnemonic.
     Fair,
     /// Resistant to offline slow attacks (score 3).
     Strong,
@@ -57,11 +57,11 @@ impl PasswordStrength {
         }
     }
 
-    /// True when the strength meets the submit floor set by the plan
-    /// (§2.3 — Submit gated on `strength >= medium`, which we interpret
-    /// as `Fair`).
+    /// True when the strength meets the submit floor. Recovery Kit
+    /// ciphertext leaves the device, so the floor is `Strong` (zxcvbn 3):
+    /// resistance to an offline attack at the envelope's KDF cost.
     pub fn is_acceptable(self) -> bool {
-        self >= Self::Fair
+        self >= Self::Strong
     }
 }
 
@@ -147,10 +147,10 @@ mod tests {
     }
 
     #[test]
-    fn is_acceptable_gates_on_fair() {
+    fn is_acceptable_gates_on_strong() {
         assert!(!PasswordStrength::VeryWeak.is_acceptable());
         assert!(!PasswordStrength::Weak.is_acceptable());
-        assert!(PasswordStrength::Fair.is_acceptable());
+        assert!(!PasswordStrength::Fair.is_acceptable());
         assert!(PasswordStrength::Strong.is_acceptable());
         assert!(PasswordStrength::VeryStrong.is_acceptable());
     }

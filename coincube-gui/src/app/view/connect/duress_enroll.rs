@@ -6,6 +6,8 @@
 //! wizard is shown in place of the duress dashboard panel while
 //! `ConnectAccountPanel::duress_enroll` is `Some`.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{button, text},
@@ -42,17 +44,17 @@ pub fn recovery_ux<'a>(
 ) -> Element<'a, ConnectAccountMessage> {
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
-        .push(text::h4_bold("Duress Mode").style(theme::text::primary));
+        .max_width(640)
+        .push(text::h4_bold(localized_copy("Duress Mode")).style(theme::text::primary));
 
     if cleared {
         // Phase 6 Task 6.2 hand-off into the CRK download / restore flow.
         col = col
-            .push(text::p1_regular(
+            .push(text::p1_regular(localized_copy(
                 "Duress cleared. Download your Cube Recovery Kit to restore your Cubes.",
-            ))
+            )))
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Fixed(220.0))
                     .on_press(msg(DuressMessage::FinishRecovery)),
             );
@@ -65,29 +67,36 @@ pub fn recovery_ux<'a>(
     if locked {
         let when = unlock_at
             .map(|u| {
-                u.with_timezone(&chrono::Local)
-                    .format("%b %d, %Y %H:%M %Z")
+                let local = u.with_timezone(&chrono::Local);
+                local
+                    .format(&coincube_ui::locale::date_pattern(
+                        "%b %d, %Y %H:%M %Z",
+                        &local,
+                    ))
                     .to_string()
             })
             .unwrap_or_else(|| "later".to_string());
-        col = col.push(card(
+        col = col.push(
             Column::new()
-                .push(text::p1_bold("Account locked").style(theme::text::primary))
+                .push(text::p1_bold(localized_copy("Account locked")).style(theme::text::warning))
                 .push(
-                    text::p2_regular(format!("Account is locked until {when}. Come back then."))
-                        .color(color::GREY_3),
+                    text::p2_regular(localized_format!(
+                        "Account is locked until {when}. Come back then.",
+                        "La cuenta está bloqueada hasta {when}. Vuelve después de esa hora."
+                    ))
+                    .style(theme::text::secondary),
                 ),
-        ));
+        );
         return col.width(Length::Fill).into();
     }
 
     // Window elapsed — collect the all-clear passphrase.
     let submit: Element<ConnectAccountMessage> = if submitting {
-        button::primary(None, "Clearing…")
+        button::primary(None, localized_copy("Clearing…"))
             .width(Length::Fixed(220.0))
             .into()
     } else {
-        button::primary(None, "Clear Duress")
+        button::primary(None, localized_copy("Clear Duress"))
             .width(Length::Fixed(220.0))
             .on_press(msg(DuressMessage::SubmitClear))
             .into()
@@ -95,19 +104,31 @@ pub fn recovery_ux<'a>(
 
     col = col.push(card(
         Column::new()
-            .push(text::p1_bold("Enter your all-clear passphrase").style(theme::text::primary))
             .push(
-                TextInput::new("All-clear passphrase", passphrase)
+                text::p1_bold(localized_copy("Enter your all-clear passphrase"))
+                    .style(theme::text::primary),
+            )
+            .push(
+                text::p2_regular(localized_copy("All-clear passphrase"))
+                    .style(theme::text::secondary),
+            )
+            .push(
+                TextInput::new(localized_copy("All-clear passphrase"), passphrase)
                     .on_input(|v| msg(DuressMessage::RecoveryPassphraseChanged(v)))
                     .on_submit(msg(DuressMessage::SubmitClear))
                     .secure(true)
                     .padding(15),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(submit)
             .push(
-                button::transparent(None, "Forgot all-clear passphrase?")
-                    .on_press(msg(DuressMessage::ForgotAllClear)),
+                Row::new()
+                    .spacing(12)
+                    .align_y(iced::Alignment::Center)
+                    .push(submit)
+                    .push(
+                        button::transparent(None, localized_copy("Forgot all-clear passphrase?"))
+                            .on_press(msg(DuressMessage::ForgotAllClear)),
+                    ),
             ),
     ));
 
@@ -150,38 +171,38 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
         // later.
         None => (
             Column::new()
-                .push(text::p1_bold("Checking this device…").style(theme::text::primary))
+                .push(text::p1_bold(localized_copy("Checking this device…")).style(theme::text::primary))
                 .push(
-                    text::p2_regular("Looking for a Cube here that can confirm it's you.")
-                        .color(color::GREY_3),
+                    text::p2_regular(localized_copy("Looking for a Cube here that can confirm it's you."))
+                        .style(theme::text::secondary),
                 ),
             None,
         ),
         Some(DuressStepUpMethod::Pin) => (
             Column::new()
-                .push(text::p1_bold("Confirm with a Cube unlock PIN").style(theme::text::primary))
+                .push(text::p1_bold(localized_copy("Confirm with a Cube unlock PIN")).style(theme::text::primary))
                 .push(
                     text::p2_regular(
-                        "Turning off duress disarms it on all your devices. Enter the \
+                        localized_copy("Turning off duress disarms it on all your devices. Enter the \
                              regular unlock PIN of any PIN-protected Cube on this device — \
-                             not your duress PIN.",
+                             not your duress PIN."),
                     )
-                    .color(color::GREY_3),
+                    .style(theme::text::secondary),
                 )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    TextInput::new("Unlock PIN for a PIN-protected Cube", &state.pin)
+                    TextInput::new(localized_copy("Unlock PIN for a PIN-protected Cube"), &state.pin)
                         .on_input(|v| msg(DuressMessage::DisablePinChanged(v)))
                         .on_submit(msg(DuressMessage::DisableSubmit))
                         .secure(true)
                         .padding(15),
                 ),
             Some(if state.submitting {
-                button::primary(None, "Disabling…")
+                button::primary(None, localized_copy("Disabling…"))
                     .width(Length::Fixed(220.0))
                     .into()
             } else {
-                button::primary(None, "Disable Duress Mode")
+                button::primary(None, localized_copy("Disable Duress Mode"))
                     .width(Length::Fixed(220.0))
                     .on_press_maybe(
                         (!state.pin.is_empty()).then(|| msg(DuressMessage::DisableSubmit)),
@@ -195,21 +216,21 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
         // its own copy.
         Some(DuressStepUpMethod::Passkey(cube)) => (
             Column::new()
-                .push(text::p1_bold("Confirm with your passkey").style(theme::text::primary))
+                .push(text::p1_bold(localized_copy("Confirm with your passkey")).style(theme::text::primary))
                 .push(
-                    text::p2_regular(format!(
+                    text::p2_regular(localized_format!(
                         "Turning off duress disarms it on all your devices. No Cube here \
-                             uses an unlock PIN, so confirm with the passkey for '{}' instead.",
+                             uses an unlock PIN, so confirm with the passkey for '{}' instead.", "Apagando la duresa lo desarma en todos tus dispositivos. No Cube usa aquí un PIN desbloqueado, así que confirma con el llave de acceso para '{}' en su lugar.",
                         cube.name
                     ))
-                    .color(color::GREY_3),
+                    .style(theme::text::secondary),
                 ),
             Some(if state.submitting {
-                button::primary(None, "Waiting for passkey…")
+                button::primary(None, localized_copy("Waiting for passkey…"))
                     .width(Length::Fixed(220.0))
                     .into()
             } else {
-                button::primary(None, "Confirm with passkey")
+                button::primary(None, localized_copy("Confirm with passkey"))
                     .width(Length::Fixed(220.0))
                     .on_press(msg(DuressMessage::DisablePasskeySubmit))
                     .into()
@@ -217,20 +238,30 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
         ),
         Some(DuressStepUpMethod::Unavailable) => (
             Column::new()
-                .push(text::p1_bold("Can't confirm on this device").style(theme::text::primary))
-                .push(text::p2_regular(crate::app::DURESS_STEP_UP_NO_PIN_MSG).color(color::GREY_3)),
+                .push(text::p1_bold(localized_copy("Can't confirm on this device")).style(theme::text::primary))
+                .push(
+                    text::p2_regular(crate::app::DURESS_STEP_UP_NO_PIN_MSG)
+                        .style(theme::text::secondary),
+                ),
             None,
         ),
     };
 
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
-        .push(text::h4_bold("Disable Duress Mode").style(theme::text::primary))
+        .max_width(640)
+        .push(text::h4_bold(localized_copy("Disable Duress Mode")).style(theme::text::primary))
+        .push(
+            text::p2_regular(localized_copy(
+                "Turns off duress on all your devices. You can re-enable it anytime.",
+            ))
+            .style(theme::text::secondary),
+        )
         .push(card(body));
 
     if let Some(err) = &state.error {
-        col = col.push(text::p2_regular(err.clone()).color(color::RED));
+        col =
+            col.push(text::p2_regular(coincube_ui::locale::notice(err.clone())).color(color::RED));
     }
 
     col = col.push(
@@ -239,7 +270,7 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
             .push(
                 // Disabled mid-flight: cancelling between the server disable and
                 // the local disarm would orphan the in-flight result.
-                button::secondary(None, "Cancel")
+                button::secondary(None, localized_copy("Cancel"))
                     .width(Length::Fixed(120.0))
                     .on_press_maybe((!state.submitting).then(|| msg(DuressMessage::DisableCancel))),
             )
@@ -268,29 +299,36 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
 
     let mut col = Column::new()
         .spacing(16)
-        .max_width(560)
-        .push(text::h4_bold("Set up Duress Mode").style(theme::text::primary))
+        .max_width(640)
+        .push(text::h4_bold(localized_copy("Set up Duress Mode")).style(theme::text::primary))
+        .push(enrollment_progress(state.step))
         .push(body);
 
     if let Some(err) = &state.error {
-        col = col.push(text::p2_regular(err.clone()).color(color::RED));
+        col =
+            col.push(text::p2_regular(coincube_ui::locale::notice(err.clone())).color(color::RED));
     }
 
     // Navigation row: Back + (Next | Complete enrollment).
     let is_last = matches!(state.step, DuressEnrollStep::Confirm);
     let primary = if is_last {
         if state.submitting {
-            button::primary(None, "Enrolling…").width(Length::Fixed(200.0))
+            button::primary(None, localized_copy("Enrolling…")).width(Length::Fixed(200.0))
         } else {
-            button::primary(None, "Complete enrollment")
+            button::primary(None, localized_copy("Complete enrollment"))
                 .width(Length::Fixed(200.0))
-                .on_press(msg(DuressMessage::SubmitEnrollment))
+                .on_press_maybe(
+                    state
+                        .memorized
+                        .then(|| msg(DuressMessage::SubmitEnrollment)),
+                )
         }
     } else {
-        // Each step advances freely; its own validation runs on press.
-        button::primary(None, "Next")
+        // Length and matching requirements are visible here; the state handler
+        // still runs the full credential and collision validation on press.
+        button::primary(None, localized_copy("Next"))
             .width(Length::Fixed(120.0))
-            .on_press(msg(DuressMessage::EnrollNext))
+            .on_press_maybe(enrollment_step_ready(state).then(|| msg(DuressMessage::EnrollNext)))
     };
     col = col.push(
         Row::new()
@@ -298,7 +336,7 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
             .push(
                 // Inert on the first step: there is no previous step to return
                 // to (matches the Cancel affordance's disabled pattern).
-                button::secondary(None, "Back")
+                button::secondary(None, localized_copy("Back"))
                     .width(Length::Fixed(120.0))
                     .on_press_maybe(
                         (!matches!(state.step, DuressEnrollStep::SetDuressPin))
@@ -309,7 +347,7 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
             .push(
                 // Disabled while submitting: cancelling mid-enroll would
                 // zeroize the duress secrets before the server result lands.
-                button::transparent(None, "Cancel").on_press_maybe(
+                button::transparent(None, localized_copy("Cancel")).on_press_maybe(
                     (!state.submitting).then(|| msg(DuressMessage::CancelEnrollment)),
                 ),
             )
@@ -317,6 +355,48 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
     );
 
     col.width(Length::Fill).into()
+}
+
+/// Keep the five steps visible without exposing any entered credential. The
+/// current step is named in text as well as color for keyboard and low-vision
+/// users. A compact row fits within the Connect panel at its 1024px minimum.
+fn enrollment_progress(step: DuressEnrollStep) -> Element<'static, ConnectAccountMessage> {
+    let steps = [
+        (DuressEnrollStep::SetDuressPin, "PIN"),
+        (DuressEnrollStep::SetAllClear, "All-clear"),
+        (DuressEnrollStep::SetCrkPassword, "Kit password"),
+        (DuressEnrollStep::PickDelay, "Delay"),
+        (DuressEnrollStep::Confirm, "Confirm"),
+    ];
+    let mut row = Row::new().spacing(8).width(Length::Fill);
+    for (index, (item, label)) in steps.iter().enumerate() {
+        let current = *item == step;
+        let caption = if current {
+            format!("{}. {} (current)", index + 1, label)
+        } else {
+            format!("{}. {}", index + 1, label)
+        };
+        let label = if current {
+            text::caption(caption).style(theme::text::adaptive(color::ORANGE))
+        } else {
+            text::caption(caption).style(theme::text::secondary)
+        };
+        row = row.push(Container::new(label).width(Length::Fill));
+    }
+    row.into()
+}
+
+fn enrollment_step_ready(state: &DuressEnrollState) -> bool {
+    match state.step {
+        DuressEnrollStep::SetDuressPin => {
+            state.duress_pin.len() == 4 && state.duress_pin == state.duress_pin_confirm
+        }
+        DuressEnrollStep::SetAllClear => state.all_clear.chars().count() >= MIN_ALL_CLEAR_LEN,
+        // The state handler performs the full password and collision checks.
+        DuressEnrollStep::SetCrkPassword => state.crk_password.chars().count() >= MIN_ALL_CLEAR_LEN,
+        DuressEnrollStep::PickDelay => true,
+        DuressEnrollStep::Confirm => false,
+    }
 }
 
 fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
@@ -333,33 +413,44 @@ fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessa
     };
 
     let mut col = Column::new()
-        .push(text::p1_bold("Set your duress PIN").style(theme::text::primary))
+        .push(text::p1_bold(localized_copy("Set your duress PIN")).style(theme::text::primary))
         .push(
-            text::p2_regular(
+            text::p2_regular(localized_copy(
                 "Choose a PIN you don't use to unlock any of your Cubes. Entering it at any \
                  Cube's unlock screen triggers a duress wipe, so it can't be one of your real \
                  unlock PINs.",
-            )
-            .color(color::GREY_3),
+            ))
+            .style(theme::text::secondary),
         )
-        .push(text::p2_regular("Duress PIN (4 digits)").color(color::GREY_3))
+        .push(
+            text::p2_regular(localized_copy("Duress PIN (4 digits)")).style(theme::text::secondary),
+        )
         .push(
             TextInput::new("Duress PIN", &state.duress_pin)
                 .on_input(|v| msg(DuressMessage::DuressPinChanged(v)))
                 .secure(true)
                 .padding(15),
         )
-        .push(text::caption("Must be exactly 4 digits.").color(hint_color))
-        .push(text::p2_regular("Confirm duress PIN").color(color::GREY_3))
         .push(
-            TextInput::new("Confirm duress PIN", &state.duress_pin_confirm)
-                .on_input(|v| msg(DuressMessage::DuressPinConfirmChanged(v)))
-                .secure(true)
-                .padding(15),
+            text::caption(localized_copy("Must be exactly 4 digits."))
+                .style(theme::text::adaptive(hint_color)),
+        )
+        .push(text::p2_regular(localized_copy("Confirm duress PIN")).style(theme::text::secondary))
+        .push(
+            TextInput::new(
+                localized_copy("Confirm duress PIN"),
+                &state.duress_pin_confirm,
+            )
+            .on_input(|v| msg(DuressMessage::DuressPinConfirmChanged(v)))
+            .secure(true)
+            .padding(15),
         );
 
     if !state.duress_pin_confirm.is_empty() && !confirm_valid {
-        col = col.push(text::caption("PINs do not match.").color(color::RED));
+        col = col.push(
+            text::caption(localized_copy("PINs do not match."))
+                .style(theme::text::adaptive(color::RED)),
+        );
     }
 
     card(col)
@@ -368,20 +459,31 @@ fn duress_pin_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessa
 fn all_clear_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
     card(
         Column::new()
-            .push(text::p1_bold("Set your all-clear passphrase").style(theme::text::primary))
+            .push(
+                text::p1_bold(localized_copy("Set your all-clear passphrase"))
+                    .style(theme::text::primary),
+            )
             .push(
                 text::p2_regular(format!(
                 "A memorable phrase, at least {MIN_ALL_CLEAR_LEN} characters. You'll need this \
                  to recover your account from a trusted device — choose something you can \
                  remember even after months of disuse.",
             ))
-                .color(color::GREY_3),
+                .style(theme::text::secondary),
             )
             .push(
-                TextInput::new("All-clear passphrase", &state.all_clear)
+                text::p2_regular(localized_copy("All-clear passphrase"))
+                    .style(theme::text::secondary),
+            )
+            .push(
+                TextInput::new(localized_copy("All-clear passphrase"), &state.all_clear)
                     .on_input(|v| msg(DuressMessage::AllClearChanged(v)))
                     .secure(true)
                     .padding(15),
+            )
+            .push(
+                text::caption(format!("At least {MIN_ALL_CLEAR_LEN} characters."))
+                    .style(theme::text::secondary),
             ),
     )
 }
@@ -390,20 +492,32 @@ fn crk_password_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMes
     card(
         Column::new()
             .push(
-                text::p1_bold("Set your duress recovery-kit password").style(theme::text::primary),
+                text::p1_bold(localized_copy("Set your duress recovery-kit password"))
+                    .style(theme::text::primary),
             )
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "This password applies to all your Cubes. If you ever enter it on a recovery \
                  screen, the entire account enters duress.",
-                )
-                .color(color::GREY_3),
+                ))
+                .style(theme::text::secondary),
             )
             .push(
-                TextInput::new("Duress recovery-kit password", &state.crk_password)
-                    .on_input(|v| msg(DuressMessage::CrkPasswordChanged(v)))
-                    .secure(true)
-                    .padding(15),
+                text::p2_regular(localized_copy("Duress recovery-kit password"))
+                    .style(theme::text::secondary),
+            )
+            .push(
+                TextInput::new(
+                    localized_copy("Duress recovery-kit password"),
+                    &state.crk_password,
+                )
+                .on_input(|v| msg(DuressMessage::CrkPasswordChanged(v)))
+                .secure(true)
+                .padding(15),
+            )
+            .push(
+                text::caption(format!("At least {MIN_ALL_CLEAR_LEN} characters."))
+                    .style(theme::text::secondary),
             ),
     )
 }
@@ -413,7 +527,10 @@ fn delay_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
     for d in DuressDelay::ALL {
         let selected = d == state.delay;
         let chip = if selected {
-            button::primary(None, d.label()).width(Length::Fixed(90.0))
+            button::secondary(None, d.label())
+                .style(selected_delay_style)
+                .width(Length::Fixed(90.0))
+                .on_press(msg(DuressMessage::DelaySelected(d)))
         } else {
             button::secondary(None, d.label())
                 .width(Length::Fixed(90.0))
@@ -423,17 +540,37 @@ fn delay_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
     }
     card(
         Column::new()
-            .push(text::p1_bold("Pick an unlock delay").style(theme::text::primary))
+            .push(text::p1_bold(localized_copy("Pick an unlock delay")).style(theme::text::primary))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Connect refuses recovery-kit downloads during this window, giving you time \
                  to reach a trusted device.",
-                )
-                .color(color::GREY_3),
+                ))
+                .style(theme::text::secondary),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(chips),
+            .push(chips)
+            .push(
+                text::caption(localized_format!(
+                    "Selected unlock delay: {}",
+                    "Retraso de desbloqueo seleccionado: {}",
+                    state.delay.label()
+                ))
+                .style(theme::text::secondary),
+            ),
     )
+}
+
+fn selected_delay_style(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let mut style = theme::button::secondary(theme, status);
+    style.background = Some(iced::Background::Color(theme.colors.shell.selected));
+    style.text_color = theme.colors.shell.ink;
+    style.border.color = theme.colors.shell.accent;
+    style.border.width = 1.0;
+    style
 }
 
 fn confirm_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage> {
@@ -442,26 +579,106 @@ fn confirm_step(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage>
     // recovery-kit password.
     let creds = Column::new()
         .spacing(4)
-        .push(text::p2_regular("• Duress PIN").color(color::GREY_3))
-        .push(text::p2_regular("• All-clear passphrase").color(color::GREY_3))
-        .push(text::p2_regular("• Duress recovery-kit password").color(color::GREY_3));
+        .push(text::p2_regular(localized_copy("• Duress PIN")).style(theme::text::secondary))
+        .push(
+            text::p2_regular(localized_copy("• All-clear passphrase"))
+                .style(theme::text::secondary),
+        )
+        .push(
+            text::p2_regular(localized_copy("• Duress recovery-kit password"))
+                .style(theme::text::secondary),
+        );
 
     card(
         Column::new()
-            .push(text::p1_bold("Memorize your credentials").style(theme::text::primary))
             .push(
-                text::p2_regular(
+                text::p1_bold(localized_copy("Memorize your credentials"))
+                    .style(theme::text::primary),
+            )
+            .push(
+                text::p2_regular(localized_copy(
                     "Make sure you have memorized the following. They are never shown again.",
-                )
-                .color(color::GREY_3),
+                ))
+                .style(theme::text::secondary),
             )
             .push(creds)
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
                 CheckBox::new(state.memorized)
-                    .label("I have memorized all credentials")
+                    .label(localized_copy("I have memorized all credentials"))
                     .on_toggle(|v| msg(DuressMessage::MemorizedToggled(v)))
                     .style(theme::checkbox::primary),
             ),
     )
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn enrollment_steps_fit_compact_connect_in_both_themes() {
+        let mut state = DuressEnrollState {
+            step: DuressEnrollStep::SetDuressPin,
+            duress_pin: "1234".to_string(),
+            duress_pin_confirm: "1234".to_string(),
+            all_clear: "synthetic all clear phrase".to_string(),
+            crk_password: "synthetic kit password".to_string(),
+            delay: DuressDelay::default(),
+            memorized: true,
+            submitting: false,
+            error: None,
+            pending_code: None,
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (step, label, scenario) in [
+                (DuressEnrollStep::SetDuressPin, "Set your duress PIN", "pin"),
+                (
+                    DuressEnrollStep::SetAllClear,
+                    "Set your all-clear passphrase",
+                    "all-clear",
+                ),
+                (
+                    DuressEnrollStep::SetCrkPassword,
+                    "Set your duress recovery-kit password",
+                    "kit-password",
+                ),
+                (DuressEnrollStep::PickDelay, "Pick an unlock delay", "delay"),
+                (
+                    DuressEnrollStep::Confirm,
+                    "Memorize your credentials",
+                    "confirm",
+                ),
+            ] {
+                state.step = step;
+                let inspection = capture::inspect_wide_content(
+                    &format!("duress-enroll-{scenario}"),
+                    enroll_ux(&state),
+                    (1024, 768),
+                    appearance,
+                    theme,
+                    640,
+                );
+                assert!(
+                    inspection.contains(label),
+                    "{} heading is missing",
+                    scenario
+                );
+                assert!(
+                    inspection.contains("(current)"),
+                    "{} has no step cue",
+                    scenario
+                );
+                assert!(
+                    inspection.contains("Cancel"),
+                    "{} cannot be cancelled",
+                    scenario
+                );
+            }
+        }
+    }
 }

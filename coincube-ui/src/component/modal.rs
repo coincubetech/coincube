@@ -1,3 +1,4 @@
+use crate::locale::copy as localized_copy;
 use iced::{
     alignment::{Horizontal, Vertical},
     widget::{
@@ -43,7 +44,12 @@ where
     Close: 'static + Fn() -> Message,
     Message: Clone + 'static,
 {
-    let title = label.map(text::h3);
+    // The title weight matches the wizard sheets' headers.
+    let title = label.map(|label| {
+        iced::widget::text(label)
+            .size(text::H4_SIZE)
+            .font(crate::font::SEMIBOLD)
+    });
     // Build the close button without the `button::transparent` helper:
     // that helper assumes an icon+text pair and pads for the spacing
     // gap + empty label, which leaves a visible gutter between the ×
@@ -81,7 +87,7 @@ where
         Row::new()
             .push(icon::previous_icon().style(theme::text::secondary))
             .push(Space::new().width(Length::Fixed(4.0)))
-            .push(text::p1_medium("Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("Back")).style(theme::text::secondary))
             .spacing(4)
             .align_y(Vertical::Center),
     )

@@ -47,7 +47,6 @@ impl std::fmt::Display for Error {
                     }
                 }
                 DaemonError::ConnectAnchor(e) => write!(f, "{}", e),
-                DaemonError::PoisonSubmission(e) => write!(f, "{}", e),
                 DaemonError::Start(e) => {
                     write!(f, "Failed to start daemon: {}", e)
                 }
@@ -61,7 +60,9 @@ impl std::fmt::Display for Error {
                     write!(f, "[{:?}] {}", code, e)
                 }
                 DaemonError::CoinSelectionError => write!(f, "{}", e),
-                DaemonError::NotImplemented => write!(f, "{}", e),
+                DaemonError::NotImplemented
+                | DaemonError::FeeCeilingExceeded
+                | DaemonError::FeeRateExceeded => write!(f, "{}", e),
             },
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
             Self::HardwareWallet(e) => write!(f, "error: {}\nPlease check if the device is still connected and unlocked with the correct firmware open for the current network and no other application is accessing the device.", e),

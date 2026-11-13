@@ -549,15 +549,13 @@ impl MavapayState {
                         ));
                     }
                 }
-                MavapayMessage::SellInvoiceFulfilled(payment) => {
+                MavapayMessage::SellInvoiceFulfilled(_payment) => {
                     *fulfilling_ln_invoice = false;
-
-                    let msg = format!(
-                        "[LIQUID] Successfully satisfied invoice for {} SATS, TXID = {:?}",
-                        payment.amount_sat, payment.tx_id
-                    );
-
-                    return Some(iced::Task::done(view::Message::ShowSuccess(msg)));
+                    // Generic success toasts stay mounted when privacy changes.
+                    // Keep this asynchronous notification amount-free.
+                    return Some(iced::Task::done(view::Message::ShowSuccess(
+                        "Liquid invoice paid successfully".to_owned(),
+                    )));
                 }
 
                 MavapayMessage::WriteInvoiceToClipboard => {
