@@ -164,6 +164,7 @@ catalog! {
     WaitingForTouchId => ("Waiting for Touch ID…", "Esperando Touch ID…"),
     CancellationOutcome => ("will return to your wallet once the cancellation confirms.", "volverá a tu cartera cuando se confirme la cancelación."),
     WriteDownYourSeedPhrase => ("Write down your seed phrase", "Anota tu frase de recuperación"),
+    WriteTheNetworkWithYourWords => ("Network: {network}. Write this on the same paper. The words alone don't say which network this Cube uses.", "Red de este Cube: {network}. Anótala en el mismo papel. Las palabras por sí solas no indican qué red usa."),
     WriteEachWordNextToItsNumberThenCheck => ("Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.", "Escribe cada palabra junto a su número y revisa que esté bien escrita. Conserva el papel fuera de línea. Cualquiera que tenga estas palabras puede quedarse con tus bitcoin."),
     YouLlSee12WordsWriteThemOnPaper => ("You'll see 12 words. Write them on paper, numbered, in the order shown. They restore this Cube on any computer.", "Verás 12 palabras. Escríbelas en papel, numeradas y en el orden en que aparecen. Con ellas puedes restaurar este Cube en cualquier computadora."),
     LiquidHistoryEmpty => ("Your Liquid wallet is ready. Once you send or receive\nfunds, they'll show up here.", "Tu cartera Liquid está lista. Aquí verás los fondos que envíes o recibas."),
