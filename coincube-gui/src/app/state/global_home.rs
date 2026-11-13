@@ -240,40 +240,6 @@ pub(crate) fn effective_transfer_min_sat(
     }
 }
 
-/// Lays the transfer dialog over `content`: as its own modal, or, beneath
-/// an upper modal (QR card, signer), in the base, because Iced draws only the
-/// root widget's overlay. The upper modal already blocks the base's input.
-fn with_transfer_dialog<'a>(
-    content: Element<'a, view::Message>,
-    dialog: Option<Element<'a, view::Message>>,
-    upper_modal: bool,
-    dismiss: Option<view::Message>,
-) -> Element<'a, view::Message> {
-    match dialog {
-        Some(dialog) if upper_modal => iced::widget::Stack::new()
-            .push(content)
-            .push(
-                iced::widget::Container::new(dialog)
-                    .width(iced::Length::Fill)
-                    .height(iced::Length::Fill)
-                    .center_x(iced::Length::Fill)
-                    .center_y(iced::Length::Fill)
-                    .style(|_| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(iced::Color {
-                            a: 0.80,
-                            ..iced::Color::BLACK
-                        })),
-                        ..Default::default()
-                    }),
-            )
-            .into(),
-        Some(dialog) => coincube_ui::widget::modal::Modal::new(content, dialog)
-            .on_blur(dismiss)
-            .into(),
-        None => content,
-    }
-}
-
 pub(crate) fn effective_transfer_max_sat(
     direction: TransferDirection,
     onchain_send_limit: Option<(u64, u64)>,
@@ -964,28 +930,24 @@ impl GlobalHome {
         };
         let transfer_action = view::global_home::transfer_head_action(&config);
         let (overview, transfer) = view::global_home::global_home_view(config);
-        let content = view::global_home::overview_page(
-            menu,
-            cache,
-            transfer_action,
-            overview,
-            recent_activity,
-        );
-        // A QR card or the signer can open over Review. Iced draws only the
-        // root widget's overlay, so beneath one of those the transfer dialog
-        // is laid out in the base instead (the upper modal already blocks the
-        // base's input); otherwise it is its own modal.
-        let upper_modal = match &self.modal {
-            Modal::ShowQrCode(_) => true,
-            Modal::Sign(_) => self.transfer_spend_tx.is_some(),
-            Modal::None => false,
+        // A transfer step is a page of its own, as Send is: its head has the
+        // steps and Back to Overview, which cancels the flow (it isn't
+        // offered while a send is in flight).
+        let content = match transfer {
+            Some(screen) => crate::app::view::dashboard_payment(
+                menu,
+                cache,
+                Some(view::global_home::transfer_page_head(cache, &screen)),
+                screen.body,
+            ),
+            None => view::global_home::overview_page(
+                menu,
+                cache,
+                transfer_action,
+                overview,
+                recent_activity,
+            ),
         };
-        // The transfer steps are a dialog over the Overview. Clicking outside
-        // or Escape cancels the flow, except on the review step: a signed or
-        // in-flight transfer there is left only through its own controls.
-        let dismiss =
-            (self.current_view.step != 2).then_some(view::Message::Home(HomeMessage::BackToHome));
-        let content = with_transfer_dialog(content, transfer, upper_modal, dismiss);
 
         let overlay = match &self.modal {
             Modal::ShowQrCode(m) => m.view(),
@@ -7332,37 +7294,6 @@ mod tests {
             assert!(matches!(home.modal, Modal::None));
             assert!(home.transfer_signed, "Confirm & Broadcast stays available");
             assert!(home.transfer_psbt_ready_for.is_some());
-        }
-
-        /// Iced draws only the root overlay. Beneath the QR card or signer the
-        /// dialog must be in the base (a nested modal's overlay is never
-        /// drawn); alone it is a modal overlay. The capture probe walks the
-        /// widget tree, which a modal hides from it below its base.
-        #[test]
-        fn review_is_in_the_base_beneath_an_upper_modal() {
-            use crate::app::view::shared::landing::capture;
-            let review = || -> Element<'static, view::Message> {
-                coincube_ui::component::text::text("Review and confirm").into()
-            };
-            let base = || -> Element<'static, view::Message> {
-                coincube_ui::component::text::text("Overview").into()
-            };
-            let inspect = |element| {
-                capture::inspect(
-                    "transfer-layering",
-                    element,
-                    (1440, 900),
-                    "dark",
-                    coincube_ui::theme::Theme::dark(),
-                )
-            };
-            let under = inspect(with_transfer_dialog(base(), Some(review()), true, None));
-            assert!(under.contains("Overview") && under.contains("Review and confirm"));
-            let alone = inspect(with_transfer_dialog(base(), Some(review()), false, None));
-            assert!(
-                !alone.contains("Review and confirm"),
-                "a modal overlay alone"
-            );
         }
 
         /// Tenshu v175 hides Liquid, so a Liquid → Vault transfer persisted by

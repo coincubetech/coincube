@@ -10,7 +10,7 @@ use coincube_ui::{
     component::{amount::*, button, form, spinner, text::*},
     font::MEDIUM,
     icon::{
-        arrow_right, check_circle_icon, clipboard_icon, clock_icon, cross_icon, dash_circle_icon,
+        arrow_right, check_circle_icon, clipboard_icon, clock_icon, dash_circle_icon,
         droplet_fill_icon, exclamation_circle_icon, eye_icon, eye_slash_icon, key_icon, lock_icon,
         spark_icon, usd_icon, vault_icon, warning_icon,
     },
@@ -640,7 +640,6 @@ struct TransferCtx<'a> {
     cube_id: &'a str,
     cube_name: &'a str,
     chain: ChainId,
-    light: bool,
     direction: TransferDirection,
     has_vault: bool,
     has_spark: bool,
@@ -782,16 +781,6 @@ enum StatusTone {
     Muted,
 }
 
-/// The network coin shown beside a Cube's name.
-fn network_coin<'a>(chain: ChainId, light: bool) -> Element<'a, Message> {
-    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
-        crate::home::launcher_coin::widget_source(chain, 16.0, 1.0, light).into_bytes(),
-    ))
-    .width(Length::Fixed(16.0))
-    .height(Length::Fixed(16.0))
-    .into()
-}
-
 fn network_name(chain: ChainId) -> &'static str {
     crate::app::view::nav::shell::network_label(chain)
 }
@@ -845,23 +834,6 @@ fn overview_eye<'a>(
     .into()
 }
 
-/// P-Transfer's steps on the head rule (`.phead .stepper`): the shared
-/// [`steps`](coincube_ui::component::tenshu::steps) row, its underline on the
-/// rule that closes the dialog's head. Finished steps take the "good"
-/// colour; `active == labels.len()` marks every step finished.
-fn transfer_steps<'a>(labels: &[&'static str], active: usize) -> Element<'a, Message> {
-    Column::new()
-        .push(coincube_ui::component::tenshu::steps(labels, active))
-        .push(iced::widget::rule::horizontal(1).style(|t: &theme::Theme| {
-            iced::widget::rule::Style {
-                color: t.colors.shell.line,
-                ..theme::rule::default(t)
-            }
-        }))
-        .width(Length::Fill)
-        .into()
-}
-
 /// Outlined panel for the review address.
 fn review_panel_style(t: &theme::Theme) -> iced::widget::container::Style {
     iced::widget::container::Style {
@@ -881,19 +853,6 @@ fn legacy_form<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Mess
         .width(Length::Fill)
         .style(crate::app::view::shared::payment_columns::rail_card_style)
         .into()
-}
-
-/// The dialog's own surface: the page background of P-Transfer's `.pg`.
-fn dialog_style(t: &theme::Theme) -> iced::widget::container::Style {
-    iced::widget::container::Style {
-        background: Some(iced::Background::Color(t.colors.shell.background)),
-        border: iced::Border {
-            color: t.colors.shell.line,
-            width: 1.0,
-            radius: 16.0.into(),
-        },
-        ..Default::default()
-    }
 }
 
 /// The other Cube's state above the form: open while the transfer runs,
@@ -931,70 +890,56 @@ fn other_cube_context<'a>(
     })
 }
 
-/// The dialog's widest: room for the card and its rail side by side
-/// (`payment_columns` stacks them when the window is narrower).
-const DIALOG_MAX: f32 = 1200.0;
+/// A transfer step as a page of its own (Send's layout): the body under
+/// a page head the state layer builds from `step` and `can_leave`.
+pub struct TransferScreen<'a> {
+    /// The active step on [`TRANSFER_STEPS`]; `TRANSFER_STEPS.len()` once
+    /// sent (every step done).
+    pub step: usize,
+    /// Back to Overview is offered; `false` while a send is in flight.
+    pub can_leave: bool,
+    pub body: Element<'a, Message>,
+}
 
-/// The transfer flow as a dialog over the Overview: P-Transfer's title, Cube
-/// line and stepper, then the step's form card, which scrolls when the window
-/// is short. `close` is `None` while a send is in flight.
+/// The transfer as a page: the other Cube's state, then the step's card
+/// and rail. The title, Cube line, steps and Back to Overview are the page
+/// head's ([`transfer_page_head`]).
 fn transfer_dialog<'a>(
-    ctx: &TransferCtx<'a>,
+    _ctx: &TransferCtx<'a>,
     active: usize,
     context: Option<Element<'a, Message>>,
     close: Option<Message>,
     form: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    let header = Row::new()
-        .spacing(12)
-        .align_y(Alignment::Start)
-        .push(
-            Column::new()
-                .spacing(4)
-                .width(Length::Fill)
-                .push(text(localized_copy("Transfer")).size(22).bold())
-                .push(
-                    Row::new()
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                        .push(network_coin(ctx.chain, ctx.light))
-                        .push(muted(format!(
-                            "{} · {}",
-                            ctx.cube_name,
-                            network_name(ctx.chain)
-                        ))),
-                ),
-        )
-        .push(
-            Button::new(cross_icon().size(16).style(theme::text::secondary))
-                .padding(8)
-                .style(theme::button::transparent)
-                .on_press_maybe(close),
-        );
-    Container::new(
-        Container::new(
-            Column::new()
-                .spacing(16)
-                .push(header)
-                .push(transfer_steps(ctx.steps(), active))
-                .push_maybe(context)
-                .push(iced::widget::scrollable(Container::new(form).padding(
-                    iced::Padding {
-                        right: 12.0,
-                        ..Default::default()
-                    },
-                ))),
-        )
-        .padding(28)
-        .width(Length::Fill)
-        .max_width(DIALOG_MAX)
-        .style(dialog_style),
-    )
-    // The card's Fill width makes this wrapper fill the modal too, so the
-    // modal's own centering has nothing to move: center the card here.
-    .center_x(Length::Fill)
-    .padding(24)
-    .into()
+) -> TransferScreen<'a> {
+    TransferScreen {
+        step: active,
+        can_leave: close.is_some(),
+        body: Column::new()
+            .spacing(16)
+            .push_maybe(context)
+            .push(form)
+            .into(),
+    }
+}
+
+/// The steps every transfer takes, for the page head's rule.
+pub fn transfer_steps_row<'a>(step: usize) -> Element<'a, Message> {
+    coincube_ui::component::tenshu::steps(&TRANSFER_STEPS, step)
+}
+
+/// The Transfer page's head: title and Cube line, the steps on its rule,
+/// and Back to Overview unless a send is in flight.
+pub fn transfer_page_head<'a>(
+    cache: &crate::app::cache::Cache,
+    screen: &TransferScreen<'a>,
+) -> coincube_ui::component::tenshu::PageHead<'a, Message> {
+    let head = crate::app::view::page_head(cache, localized_copy("Transfer"))
+        .rule(transfer_steps_row(screen.step));
+    if screen.can_leave {
+        head.back("Overview", Message::Home(HomeMessage::BackToHome))
+    } else {
+        head
+    }
 }
 
 /// One row of the unlock checks: done, running or waiting.
@@ -1702,7 +1647,7 @@ fn details_page<'a>(
     amount: &'a form::Value<String>,
     onchain_send_limit: Option<(u64, u64)>,
     onchain_receive_limit: Option<(u64, u64)>,
-) -> Element<'a, Message> {
+) -> TransferScreen<'a> {
     let direction = ctx.direction;
     let source = direction.from_kind();
     let source_empty = ctx.balance(source) == Amount::ZERO;
@@ -2022,7 +1967,7 @@ fn review_page<'a>(
     transfer_feerate: &'a form::Value<String>,
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     spark_send_fee_sat: Option<u64>,
-) -> Element<'a, Message> {
+) -> TransferScreen<'a> {
     let direction = ctx.direction;
     let unit = ctx.unit;
     let parsed = parse_amount(amount, unit);
@@ -2270,7 +2215,7 @@ fn review_page<'a>(
 
 /// Done: the sender has submitted the payment. On-chain deposits can still
 /// be awaiting confirmations or a Spark claim.
-fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Element<'a, Message> {
+fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> TransferScreen<'a> {
     let direction = ctx.direction;
     let to = if direction.is_other_cube() {
         format!("{} · {}", direction.to_wallet(), ctx.other.name())
@@ -2743,11 +2688,11 @@ impl HomeView {
     }
 }
 
-/// The Overview, and the transfer dialog to lay over it while a transfer step
-/// (1–3) is active.
+/// The Overview, and the Transfer page that replaces it while a transfer
+/// step (1–3) is active.
 pub fn global_home_view<'a>(
     config: GlobalViewConfig<'a>,
-) -> (Element<'a, Message>, Option<Element<'a, Message>>) {
+) -> (Element<'a, Message>, Option<TransferScreen<'a>>) {
     let GlobalViewConfig {
         cube_id,
         liquid_balance,
@@ -2812,7 +2757,7 @@ pub fn global_home_view<'a>(
         cube_name,
         vault_alias,
         chain,
-        light_theme,
+        light_theme: _,
         transfer_page,
         transfer_unit,
         transfer_max,
@@ -2840,7 +2785,6 @@ pub fn global_home_view<'a>(
             cube_id,
             cube_name,
             chain,
-            light: light_theme,
             direction,
             has_vault,
             has_spark,
@@ -3685,10 +3629,32 @@ mod tests {
     }
 
     /// The dialog a transfer step (1–3) lays over the Overview.
+    /// A transfer step as the shell shows it: the page head (as
+    /// [`transfer_page_head`] builds it from the Cube) above the body.
     fn transfer_dialog_for(config: GlobalViewConfig<'_>) -> Element<'_, Message> {
-        global_home_view(config)
+        let context = format!("{} · {}", config.cube_name, network_name(config.chain));
+        let screen = global_home_view(config)
             .1
-            .expect("a transfer step renders its dialog")
+            .expect("a transfer step renders its page");
+        let head = coincube_ui::component::tenshu::page_head("Transfer", Message::FocusAction)
+            .context(Space::new(), context)
+            .rule(transfer_steps_row(screen.step));
+        let head = if screen.can_leave {
+            head.back("Overview", Message::Home(HomeMessage::BackToHome))
+        } else {
+            head
+        };
+        // The shell's page column pads the body to the head's gutter.
+        let gutter = crate::app::view::page_gutter(1192.0);
+        Column::new()
+            .push(head.view(crate::app::view::page_gutter))
+            .push(Container::new(screen.body).padding(iced::Padding {
+                top: 24.0,
+                bottom: 24.0,
+                left: gutter,
+                right: gutter,
+            }))
+            .into()
     }
     use crate::{
         app::{
@@ -4560,35 +4526,30 @@ mod tests {
         }
     }
 
+    /// Transfer is a page, as Send is: Back to Overview in its head
+    /// cancels it, except while a send is in flight.
     #[test]
-    fn transfer_dialog_is_centered_horizontally() {
+    fn transfer_is_a_page_with_back_to_overview() {
         let fixture = ViewFixture::new();
-        // The dialog is a modal over the whole window, not the page column.
-        for (width, height) in [(1024, 768), (1440, 900)] {
-            let inspection = capture::inspect_full_window(
-                "transfer-dialog-centered",
-                transfer_dialog_for(fixture.config(1, Some(TransferDirection::SparkToVault), None)),
-                (width, height),
-                "dark",
-                theme::Theme::dark(),
+        // Details, Review, then Sent with every step done.
+        for (step, active) in [(1, 0), (2, 1), (3, TRANSFER_STEPS.len())] {
+            let screen =
+                global_home_view(fixture.config(step, Some(TransferDirection::SparkToVault), None))
+                    .1
+                    .expect("a transfer step renders its page");
+            assert!(screen.can_leave, "step {}", step);
+            assert_eq!(screen.step, active);
+            let page = inspect_dialog(
+                "transfer-page",
+                fixture.config(step, Some(TransferDirection::SparkToVault), None),
             );
-            let title = inspection
-                .text
-                .iter()
-                .find_map(|(value, bounds)| (value == "Transfer").then_some(*bounds))
-                .expect("rendered dialog title");
-            // The card (up to DIALOG_MAX wide, 24 clear of the window) sits
-            // mid-window; its title starts 28 inside it.
-            let card = (width as f32 - 48.0).min(DIALOG_MAX);
-            let expected = (width as f32 - card) / 2.0 + 28.0;
-            assert!(
-                (title.x - expected).abs() < 1.0,
-                "{}: title at x={}, expected {}",
-                width,
-                title.x,
-                expected
-            );
+            assert!(page.contains("Back to Overview"), "step {}", step);
         }
+        let mut sending = fixture.config(2, Some(TransferDirection::SparkToVault), None);
+        sending.is_sending = true;
+        let screen = global_home_view(sending).1.expect("review");
+        assert!(!screen.can_leave, "no way out while a send is in flight");
+        assert!(global_home_view(fixture.config(0, None, None)).1.is_none());
     }
 
     #[test]
@@ -5291,7 +5252,6 @@ mod tests {
             cube_id: config.cube_id,
             cube_name: config.cube_name,
             chain: config.chain,
-            light: config.light_theme,
             direction: config.transfer_direction.expect("a direction"),
             has_vault: config.has_vault,
             has_spark: config.has_spark,
@@ -5395,7 +5355,10 @@ mod tests {
         ] {
             assert!(amount.contains(label), "details: {}", label);
         }
-        assert!(!amount.contains("Continue") && !amount.contains("Back"));
+        // The old page buttons are gone: Back to Overview is the head's.
+        assert!(!amount.contains("Continue"));
+        assert!(!amount.text.iter().any(|(value, _)| value == "Back"));
+        assert!(amount.contains("Back to Overview"));
         assert!(
             !amount.contains("BTC"),
             "the unit follows the wallet setting"
