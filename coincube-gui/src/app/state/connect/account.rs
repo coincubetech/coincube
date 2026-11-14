@@ -2999,13 +2999,17 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::ComparePlans(show) => {
-                // Leaving Review returns to Change plan; an invoice that is
-                // already out for payment is never dropped this way.
-                if self
-                    .checkout
-                    .as_ref()
-                    .is_some_and(|cs| matches!(cs.phase, CheckoutPhase::Review))
-                {
+                // Leaving Review (or a finished Expired / Failed checkout)
+                // returns to Change plan; an invoice that is still out for
+                // payment is never dropped this way.
+                if self.checkout.as_ref().is_some_and(|cs| {
+                    matches!(
+                        cs.phase,
+                        CheckoutPhase::Review
+                            | CheckoutPhase::Expired
+                            | CheckoutPhase::Failed { .. }
+                    )
+                }) {
                     self.checkout = None;
                 }
                 self.active_sub = ConnectSubMenu::PlanBilling;
@@ -8922,6 +8926,23 @@ mod plan_lifecycle_tests {
                 refused: true
             }
         );
+    }
+
+    #[test]
+    fn change_plan_leaves_a_refused_checkout() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let id = panel.checkout.as_ref().unwrap().id;
+        let gen = panel.session_generation;
+        let _ = panel.update_message(ConnectAccountMessage::CheckoutCreated(
+            Err(("A plan change is already scheduled".into(), true)),
+            gen,
+            id,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(true));
+        assert!(panel.checkout.is_none());
+        assert!(panel.show_plan_comparison);
     }
 
     #[test]
