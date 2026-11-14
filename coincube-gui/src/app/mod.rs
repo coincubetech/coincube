@@ -10862,18 +10862,36 @@ impl App {
                 .panels
                 .global_home
                 .wallet_transfer_entry(cache, view::global_home::WalletKind::Spark);
+            let conversion = self.panels.spark_receive.conversion_summary();
             self.panels.spark_overview.view_with_lightning_share(
                 &self.panels.current,
                 &self.cache,
                 lightning_address,
                 transfer,
                 move || {
-                    view::activity::recent_activity(
+                    let recent = view::activity::recent_activity(
                         activity,
                         cache,
                         view::activity::RecentScope::Wallet(view::activity::WalletFilter::Spark),
                         None,
-                    )
+                    );
+                    // A cross-network receive still running (or arrived and not
+                    // yet closed) isn't a payment yet, so Activity can't list it:
+                    // say so above it, with the way back to its page.
+                    match conversion {
+                        Some((option, arrived)) => iced::widget::Column::new()
+                            .spacing(16)
+                            .push(view::spark::receive::conversion_notice(
+                                option,
+                                arrived,
+                                view::Message::SparkOverview(
+                                    view::SparkOverviewMessage::ViewConversion,
+                                ),
+                            ))
+                            .push(recent)
+                            .into(),
+                        None => recent,
+                    }
                 },
                 move || {
                     view::activity::wallet_activity_detail(

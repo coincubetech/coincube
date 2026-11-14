@@ -951,6 +951,15 @@ pub enum SparkSideshiftReceiveMessage {
     CopyRefundAddress,
     /// Flip the in-progress step's pulse phase.
     PulseTick,
+    /// A shift stored in the Cube's settings, read back at unlock, to put on
+    /// the Spark Receive panel again.
+    Restore(Box<crate::app::settings::PendingSparkShift>),
+    /// Where a restored shift that reports `Settled` has its bitcoin: claimed,
+    /// still an unclaimed deposit, or not found yet.
+    RestoredSettleChecked(crate::app::state::spark::sideshift_receive::RestoredSettle),
+    /// Look again for a restored, settled shift's bitcoin (a timer, while it
+    /// is still unknown).
+    RecheckRestoredArrival,
     Back,
     Reset,
 }
@@ -2658,6 +2667,9 @@ pub enum HomeMessage {
     SwapSettledAwaitingArrival {
         amount_sat: u64,
     },
+    /// Store (`Some`) or clear (`None`) the Cube's live Spark cross-network
+    /// receive, so its page can come back after a lock or restart.
+    StoreSparkShift(Option<Box<crate::app::settings::PendingSparkShift>>),
     /// Fired when the Spark bridge reports `DepositsChanged`. The Home state
     /// re-queries `list_unclaimed_deposits` and decides whether to auto-claim
     /// a matured deposit or clear `pending_spark_incoming` (claimed already).
