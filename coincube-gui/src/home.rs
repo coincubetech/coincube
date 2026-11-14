@@ -6158,13 +6158,24 @@ impl Home {
             .push(paths.push(rule()));
         if projection.at_limit() {
             content = content.push(
-                p2_regular(localized_format!(
-                    "{}: {} of {} Cubes on the {} plan. Upgrade, or delete a Cube on this network, to bring one in.", "{}: {} de {} Cubes en el plan {}. Actualizar, o eliminar un Cube en esta red, para traer uno en.",
-                    launcher_chrome::network_name(self.network),
-                    projection.total_count,
-                    projection.cube_limit,
-                    projection.tier
-                ))
+                p2_regular(if projection.total_count > projection.cube_limit {
+                    localized_format!(
+                        "{}: {} Cubes; the {} plan includes {}. Existing Cubes keep working. Upgrade, or delete a Cube on this network, to bring one in.",
+                        "{}: {} Cubes; el plan {} incluye {}. Los Cubes existentes siguen funcionando. Mejora tu plan, o elimina un Cube en esta red, para traer uno.",
+                        launcher_chrome::network_name(self.network),
+                        projection.total_count,
+                        projection.tier,
+                        projection.cube_limit
+                    )
+                } else {
+                    localized_format!(
+                        "{}: {} of {} Cubes on the {} plan. Upgrade, or delete a Cube on this network, to bring one in.", "{}: {} de {} Cubes en el plan {}. Actualizar, o eliminar un Cube en esta red, para traer uno en.",
+                        launcher_chrome::network_name(self.network),
+                        projection.total_count,
+                        projection.cube_limit,
+                        projection.tier
+                    )
+                })
                 .style(theme::text::warning),
             );
         }
