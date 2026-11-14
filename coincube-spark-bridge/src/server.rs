@@ -2179,7 +2179,9 @@ async fn handle_prepare_cross_chain(
     };
     let Some(route) = live_routes
         .into_iter()
-        .find(|r| sdk_route_to_protocol(r) == params.route)
+        // Identity only: the published limits may have moved since the
+        // gui looked the route up, and the bridge never trusts them anyway.
+        .find(|r| sdk_route_to_protocol(r).same_route_as(&params.route))
     else {
         return Response::err(
             id,
