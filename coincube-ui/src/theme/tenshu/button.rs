@@ -70,7 +70,38 @@ pub fn action(theme: &Theme, status: Status, kind: ActionKind, shape: ActionShap
         }
     };
 
-    let (fill, ink) = match status {
+    let (fill, ink) = pointer_colors(theme, status, kind, shape, fill, ink);
+
+    let fade = |color: Color| {
+        if status == Status::Disabled {
+            faded(color, DISABLED_ALPHA)
+        } else {
+            color
+        }
+    };
+
+    Style {
+        background: fill.map(|color| Background::Color(fade(color))),
+        text_color: fade(ink),
+        border: Border {
+            color: border.map(fade).unwrap_or(Color::TRANSPARENT),
+            width: if border.is_some() { 1.0 } else { 0.0 },
+            radius: radius.into(),
+        },
+        ..Style::default()
+    }
+}
+
+fn pointer_colors(
+    theme: &Theme,
+    status: Status,
+    kind: ActionKind,
+    shape: ActionShape,
+    fill: Option<Color>,
+    ink: Color,
+) -> (Option<Color>, Color) {
+    let shell = &theme.colors.shell;
+    match status {
         Status::Active | Status::Disabled => (fill, ink),
         Status::Hovered | Status::Pressed => {
             let pressed = status == Status::Pressed;
@@ -103,25 +134,6 @@ pub fn action(theme: &Theme, status: Status, kind: ActionKind, shape: ActionShap
             };
             (fill, ink)
         }
-    };
-
-    let fade = |color: Color| {
-        if status == Status::Disabled {
-            faded(color, DISABLED_ALPHA)
-        } else {
-            color
-        }
-    };
-
-    Style {
-        background: fill.map(|color| Background::Color(fade(color))),
-        text_color: fade(ink),
-        border: Border {
-            color: border.map(fade).unwrap_or(Color::TRANSPARENT),
-            width: if border.is_some() { 1.0 } else { 0.0 },
-            radius: radius.into(),
-        },
-        ..Style::default()
     }
 }
 

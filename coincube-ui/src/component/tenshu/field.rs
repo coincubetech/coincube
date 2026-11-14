@@ -350,6 +350,114 @@ fn message<'a, M: 'a>(
     }
 }
 
+fn field_control<'a, M: Clone + 'static>(
+    input: iced::widget::TextInput<'a, M, Theme, Renderer>,
+    overlay: Option<Element<'a, M>>,
+    enabled: bool,
+    id: &Id,
+    focus_intent: fn(Id) -> M,
+    clear: Option<(Id, M)>,
+) -> KeyScope<'a, M> {
+    let input: Element<'a, M> = if enabled {
+        input.into()
+    } else {
+        Inert::new(input).into()
+    };
+    // The scope and the input (the stack's first child) keep their places
+    // whatever the value, so clearing the field (by Escape or the Clear
+    // action) keeps Iced's focus and cursor state in the input. With no
+    // overlay the stack holds the input alone: an empty second child still
+    // opens a draw layer, and on a 2x display that empty layer clipped
+    // every later overlay (App preferences over a Cube) to this page.
+    let control = iced::widget::Stack::with_children(std::iter::once(input).chain(overlay))
+        .width(Length::Fill);
+    let input_id = id.clone();
+    KeyScope::new(
+        control,
+        Box::new(move |key, modifiers, focused| {
+            let (clear_id, message) = clear.as_ref()?;
+            let keyboard::Key::Named(named) = key else {
+                return None;
+            };
+            match named {
+                // Escape in the input clears it and keeps focus there.
+                key::Named::Escape if focused == Some(&input_id) => Some(vec![message.clone()]),
+                // Enter or Space on Clear: the Clear action leaves with the
+                // value, so hand focus back to the input first, as a
+                // pointer press on Clear does.
+                key::Named::Enter | key::Named::Space
+                    if focused == Some(clear_id) && !modifiers.command() && !modifiers.alt() =>
+                {
+                    Some(vec![focus_intent(input_id.clone()), message.clone()])
+                }
+                _ => None,
+            }
+        }),
+    )
+}
+
+fn visible_heading<'a, M: 'a>(
+    mut column: Column<'a, M>,
+    label: Element<'a, M>,
+    accessory: Option<Element<'a, M>>,
+) -> Column<'a, M> {
+    let label_row: Element<'a, M> = match accessory {
+        Some(accessory) => Row::new()
+            .align_y(Alignment::Center)
+            .push(Container::new(label).width(Length::Fill))
+            .push(accessory)
+            .into(),
+        None => label,
+    };
+    column = column.push(label_row);
+    column
+}
+
+fn field_messages<'a, M: 'a>(
+    mut column: Column<'a, M>,
+    error: Option<Cow<'a, str>>,
+    notice: Option<Cow<'a, str>>,
+    hint: Option<Cow<'a, str>>,
+    trailing_hint: Option<Cow<'a, str>>,
+    size: FieldSize,
+) -> Column<'a, M> {
+    let mut lines: Vec<Element<'a, M>> = Vec::new();
+    if let Some(error) = error {
+        lines.push(message(
+            error,
+            Tone::Bad,
+            icon::exclamation_circle_icon(),
+            size,
+        ));
+    }
+    if let Some(notice) = notice {
+        lines.push(message(notice, Tone::Muted, icon::tooltip_icon(), size));
+    }
+    if hint.is_some() || trailing_hint.is_some() {
+        lines.push(
+            Row::new()
+                .spacing(12)
+                .push(
+                    Container::new(
+                        hint.map(|hint| note(hint, Tone::Muted, size))
+                            .unwrap_or_else(|| note(Cow::Borrowed(""), Tone::Muted, size)),
+                    )
+                    .width(Length::Fill),
+                )
+                .push_maybe(trailing_hint.map(|hint| note(hint, Tone::Muted, size)))
+                .into(),
+        );
+    }
+    if !lines.is_empty() {
+        column = column.push(
+            lines
+                .into_iter()
+                .fold(Column::new().spacing(4), |column, line| column.push(line)),
+        );
+    }
+    column
+}
+
 impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
     fn from(field: TextField<'a, M>) -> Self {
         let TextField {
@@ -528,44 +636,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             (None, None, _) => None,
         };
 
-        let input: Element<'a, M> = if enabled {
-            input.into()
-        } else {
-            Inert::new(input).into()
-        };
-        // The scope and the input (the stack's first child) keep their places
-        // whatever the value, so clearing the field (by Escape or the Clear
-        // action) keeps Iced's focus and cursor state in the input. With no
-        // overlay the stack holds the input alone: an empty second child still
-        // opens a draw layer, and on a 2x display that empty layer clipped
-        // every later overlay (App preferences over a Cube) to this page.
-        let control = iced::widget::Stack::with_children(std::iter::once(input).chain(overlay))
-            .width(Length::Fill);
-        let input_id = id.clone();
-        let control = KeyScope::new(
-            control,
-            Box::new(move |key, modifiers, focused| {
-                let (clear_id, message) = clear.as_ref()?;
-                let keyboard::Key::Named(named) = key else {
-                    return None;
-                };
-                match named {
-                    // Escape in the input clears it and keeps focus there.
-                    key::Named::Escape if focused == Some(&input_id) => Some(vec![message.clone()]),
-                    // Enter or Space on Clear: the Clear action leaves with the
-                    // value, so hand focus back to the input first, as a
-                    // pointer press on Clear does.
-                    key::Named::Enter | key::Named::Space
-                        if focused == Some(clear_id)
-                            && !modifiers.command()
-                            && !modifiers.alt() =>
-                    {
-                        Some(vec![focus_intent(input_id.clone()), message.clone()])
-                    }
-                    _ => None,
-                }
-            }),
-        );
+        let control = field_control(input, overlay, enabled, &id, focus_intent, clear);
 
         let label = label_text(label, size, enabled);
         let label: Element<'a, M> = if enabled {
@@ -588,51 +659,10 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                 );
             }
         } else {
-            let label_row: Element<'a, M> = match accessory {
-                Some(accessory) => Row::new()
-                    .align_y(Alignment::Center)
-                    .push(Container::new(label).width(Length::Fill))
-                    .push(accessory)
-                    .into(),
-                None => label,
-            };
-            column = column.push(label_row);
+            column = visible_heading(column, label, accessory);
         }
         column = column.push(control);
-        let mut lines: Vec<Element<'a, M>> = Vec::new();
-        if let Some(error) = error {
-            lines.push(message(
-                error,
-                Tone::Bad,
-                icon::exclamation_circle_icon(),
-                size,
-            ));
-        }
-        if let Some(notice) = notice {
-            lines.push(message(notice, Tone::Muted, icon::tooltip_icon(), size));
-        }
-        if hint.is_some() || trailing_hint.is_some() {
-            lines.push(
-                Row::new()
-                    .spacing(12)
-                    .push(
-                        Container::new(
-                            hint.map(|hint| note(hint, Tone::Muted, size))
-                                .unwrap_or_else(|| note(Cow::Borrowed(""), Tone::Muted, size)),
-                        )
-                        .width(Length::Fill),
-                    )
-                    .push_maybe(trailing_hint.map(|hint| note(hint, Tone::Muted, size)))
-                    .into(),
-            );
-        }
-        if !lines.is_empty() {
-            column = column.push(
-                lines
-                    .into_iter()
-                    .fold(Column::new().spacing(4), |column, line| column.push(line)),
-            );
-        }
+        column = field_messages(column, error, notice, hint, trailing_hint, size);
         column.into()
     }
 }
