@@ -28,7 +28,8 @@ def test_config_rejects_alternate_driver_and_receipt_import_paths(config, bad):
 
 
 def test_live_cua_adapter_is_explicitly_unavailable_not_a_success_receipt():
-    with pytest.raises(Blocked) as error: gui.CuaWorker().connect({'nonce': 'fresh'})
+    worker = gui.CuaWorker()
+    with pytest.raises(Blocked) as error: worker.connect({'nonce': 'fresh'})
     assert error.value.code == 'GUI_RECOVERY_CUA_UNAVAILABLE'
 
 
@@ -110,7 +111,8 @@ def test_independent_public_verifier_checks_chain_specific_signature(chain):
     psbt, manifest = signature_case(chain)
     proof = gui_verify.verify_export(psbt.serialize(), manifest)
     assert proof['sighash'] == (0x21 if chain == gui.CHAINS[1] else 1)
-    assert proof['broadcast'] is False and proof['fee_sats'] == 262
+    assert proof['broadcast'] is False
+    assert proof['fee_sats'] == 262
     assert 'GUI provenance is required separately' in proof['scope']
 
 
@@ -130,7 +132,8 @@ def test_independent_verifier_refuses_wrong_domain_key_coin_or_export(chain, cha
         key = 0xfc if chain == gui.CHAINS[1] else 2
         pub = next(iter(psbt.i[0].map[key])); sig = psbt.i[0].map[key][pub]
         psbt.i[0].map[key][pub] = sig[:-1] + bytes([0x01 if sig[-1] == 0x21 else 0x21]) if change == 'sighash' else sig[:-2] + bytes([sig[-2] ^ 1]) + sig[-1:]
-    with pytest.raises(Failed): gui_verify.verify_export(psbt.serialize(), manifest)
+    serialized = psbt.serialize()
+    with pytest.raises(Failed): gui_verify.verify_export(serialized, manifest)
 
 
 class OfflineWorker:
@@ -212,7 +215,8 @@ def test_offline_protocol_complete_journal_cannot_claim_live_gui(config, tmp_pat
             for stage in gui.STAGES: runner.run(chain, stage)
             assert runner.state(chain)['acceptance']['kind'] == 'offline_selftest'
             assert runner.state(chain)['acceptance']['broadcast'] is False
-            assert (runner.directory(chain) / 'original').is_dir() and (runner.directory(chain) / 'restored').is_dir()
+            assert (runner.directory(chain) / 'original').is_dir()
+            assert (runner.directory(chain) / 'restored').is_dir()
         assert {v['status'] for v in runner.journal.data['stages'].values()} == {'offline_passed'}
     finally: runner.close()
 
@@ -301,14 +305,16 @@ def test_valid_replacement_export_cannot_inherit_original_gui_provenance(config,
     ('txid', None), ('txid', 'a' * 63), ('txid', 'A' * 64), ('txid', 'z' * 64)])
 def test_funding_schema_rejects_bool_indexes_values_and_malformed_ids(field, value):
     psbt, manifest = signature_case(gui.CHAINS[0]); manifest['funding'][field] = value
-    with pytest.raises(Failed, match='FUNDING_SCHEMA'): gui_verify.verify_export(psbt.serialize(), manifest)
+    serialized = psbt.serialize()
+    with pytest.raises(Failed, match='FUNDING_SCHEMA'): gui_verify.verify_export(serialized, manifest)
 
 
 @pytest.mark.parametrize('value', [-1, 0, 100001])
 def test_invalid_output_value_is_rejected_before_fee_or_signature(value):
     psbt, manifest = signature_case(gui.CHAINS[0])
     psbt.tx.vout[0].nValue = value; psbt.g.map[0] = psbt.tx.serialize()
-    with pytest.raises(Failed, match='OUTPUT_VALUE'): gui_verify.verify_export(psbt.serialize(), manifest)
+    serialized = psbt.serialize()
+    with pytest.raises(Failed, match='OUTPUT_VALUE'): gui_verify.verify_export(serialized, manifest)
 
 
 @pytest.mark.parametrize('field,value', [('vout', False), ('vout', None), ('vout', -1), ('vout', 1), ('value_sats', True), ('value_sats', -1), ('txid', 'A'*64)])
