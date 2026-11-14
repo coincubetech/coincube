@@ -246,6 +246,14 @@ pub struct CheckoutState {
     /// The last charge status Connect returned (amounts, invoice id).
     pub last_status: Option<ChargeStatusResponse>,
     pub poll_errors: u8,
+    /// The polling phase a `PollFailed` interrupted (Awaiting, Paying in
+    /// browser, Partly paid or Processing). "Check again" restores it, so a
+    /// partly paid invoice keeps its remaining amount and a seen payment
+    /// isn't shown as unpaid again.
+    pub resume_phase: Option<CheckoutPhase>,
+    /// When Review opened. Covers dates for "starts now" purchases are
+    /// computed from it, so they don't move while the invoice stays open.
+    pub opened_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl CheckoutState {
@@ -263,6 +271,8 @@ impl CheckoutState {
             network: PaymentNetwork::Lightning,
             last_status: None,
             poll_errors: 0,
+            resume_phase: None,
+            opened_at: chrono::Utc::now(),
         }
     }
 }
@@ -1153,6 +1163,9 @@ pub struct ConnectAccountPanel {
     pub checkout: Option<CheckoutState>,
     /// Last checkout generation handed out (see [`CheckoutState::id`]).
     checkout_seq: u64,
+    /// Sequence of the latest billing plan reload; an older response that
+    /// lands after a newer one is dropped (`PlanReloaded`).
+    plan_seq: u64,
     /// Billing history entries.
     pub billing_history: Option<Vec<BillingHistoryEntry>>,
     /// Whether the billing history sub-view is shown.
@@ -1244,6 +1257,7 @@ impl ConnectAccountPanel {
             selected_plan_tier: None,
             checkout: None,
             checkout_seq: 0,
+            plan_seq: 0,
             billing_history: None,
             show_billing_history: false,
             show_plan_comparison: false,
@@ -2207,11 +2221,15 @@ impl ConnectAccountPanel {
 
             ConnectAccountMessage::PlanLoaded(plan, gen) => {
                 if gen == self.session_generation && plan.is_some() {
-                    if let Some(cycle) = plan.as_ref().and_then(|p| p.billing_cycle) {
-                        self.selected_billing_cycle = cycle;
-                    }
-                    self.plan = plan;
-                    self.leave_hidden_duress_route();
+                    self.apply_loaded_plan(plan);
+                }
+            }
+
+            ConnectAccountMessage::PlanReloaded(plan, gen, seq) => {
+                // Only the newest billing reload may set the plan: one sent
+                // before a payment must not land over one sent after it.
+                if gen == self.session_generation && seq == self.plan_seq && plan.is_some() {
+                    self.apply_loaded_plan(plan);
                 }
             }
 
@@ -2745,7 +2763,15 @@ impl ConnectAccountPanel {
                     .filter(|cs| cs.tier == tier)
                     .and_then(|cs| cs.plan.clone())
                     .or_else(|| self.plan.clone());
+                let opened_at = self
+                    .checkout
+                    .as_ref()
+                    .filter(|cs| cs.tier == tier)
+                    .map(|cs| cs.opened_at);
                 let mut checkout = CheckoutState::new(id, tier.clone(), cycle, snapshot);
+                if let Some(opened_at) = opened_at {
+                    checkout.opened_at = opened_at;
+                }
                 checkout.phase = CheckoutPhase::Creating;
                 self.checkout = Some(checkout);
                 let gen = self.session_generation;
@@ -2879,19 +2905,7 @@ impl ConnectAccountPanel {
                             // Refresh the plan and the history the receipt
                             // lands in.
                             self.billing_history = None;
-                            let g = self.session_generation;
-                            let c = self.client.clone();
-                            return iced::Task::batch([
-                                iced::Task::perform(
-                                    async move { (c.get_connect_plan().await.ok(), g) },
-                                    |(plan, g)| {
-                                        Message::View(view::Message::ConnectAccount(
-                                            ConnectAccountMessage::PlanLoaded(plan, g),
-                                        ))
-                                    },
-                                ),
-                                self.reload_billing_history(),
-                            ]);
+                            return self.reload_plan_billing();
                         }
                         if keep_polling {
                             return poll;
@@ -2900,6 +2914,7 @@ impl ConnectAccountPanel {
                     Err((e, terminal)) => {
                         if terminal {
                             log::error!("[CONNECT] Charge poll terminal error: {}", e);
+                            cs.resume_phase = Some(cs.phase.clone());
                             cs.phase = CheckoutPhase::PollFailed(e);
                         } else {
                             cs.poll_errors += 1;
@@ -2909,6 +2924,7 @@ impl ConnectAccountPanel {
                                     cs.poll_errors,
                                     e
                                 );
+                                cs.resume_phase = Some(cs.phase.clone());
                                 cs.phase = CheckoutPhase::PollFailed(e);
                             } else {
                                 log::warn!(
@@ -2956,7 +2972,13 @@ impl ConnectAccountPanel {
                     .as_mut()
                     .filter(|cs| matches!(cs.phase, CheckoutPhase::PollFailed(_)))
                 {
-                    cs.phase = CheckoutPhase::AwaitingPayment;
+                    // Back to the phase polling stopped in (never a fresh
+                    // "send the full amount" after a partial payment).
+                    cs.phase = cs
+                        .resume_phase
+                        .take()
+                        .filter(CheckoutPhase::polls)
+                        .unwrap_or(CheckoutPhase::AwaitingPayment);
                     cs.poll_errors = 0;
                     let id = cs.id;
                     return iced::Task::done(Message::View(view::Message::ConnectAccount(
@@ -5327,20 +5349,34 @@ impl ConnectAccountPanel {
 
     /// What opening Plan & billing loads: the plan (a payment confirmed after
     /// the user left the pay screen shows here) and billing history.
-    pub fn reload_plan_billing(&self) -> iced::Task<Message> {
+    pub fn reload_plan_billing(&mut self) -> iced::Task<Message> {
         let gen = self.session_generation;
+        self.plan_seq = self.plan_seq.wrapping_add(1);
+        let seq = self.plan_seq;
         let client = self.client.clone();
         iced::Task::batch([
             iced::Task::perform(
-                async move { (client.get_connect_plan().await.ok(), gen) },
-                |(plan, gen)| {
+                async move { client.get_connect_plan().await.ok() },
+                move |plan| {
                     Message::View(view::Message::ConnectAccount(
-                        ConnectAccountMessage::PlanLoaded(plan, gen),
+                        ConnectAccountMessage::PlanReloaded(plan, gen, seq),
                     ))
                 },
             ),
             self.reload_billing_history(),
         ])
+    }
+
+    fn apply_loaded_plan(&mut self, plan: Option<ConnectPlan>) {
+        // Seed the picker's period from the plan, but never move it under
+        // someone choosing a plan.
+        if self.checkout.is_none() && !self.show_plan_comparison {
+            if let Some(cycle) = plan.as_ref().and_then(|p| p.billing_cycle) {
+                self.selected_billing_cycle = cycle;
+            }
+        }
+        self.plan = plan;
+        self.leave_hidden_duress_route();
     }
 
     /// Fetch `GET /connect/billing/history` for Plan & billing's inline
@@ -8985,6 +9021,100 @@ mod plan_lifecycle_tests {
         assert_eq!(plan.plan, PlanTier::Estate);
         assert_eq!(plan.pending_plan, None);
         assert_eq!(plan.pending_billing_cycle, None);
+    }
+
+    #[test]
+    fn check_again_restores_a_partly_paid_invoice_with_its_amounts() {
+        let (mut panel, gen, id) = awaiting_panel();
+        let partial = charge_status(
+            r#"{"chargeId":"inv-1","status":"unpaid","state":"partially_paid","plan":"pro",
+                "amountReceivedSats":62000,"amountDueSats":38000}"#,
+        );
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(partial),
+            gen,
+            id,
+        ));
+        for _ in 0..3 {
+            let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+                Err(("timeout".into(), false)),
+                gen,
+                id,
+            ));
+        }
+        assert!(matches!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::PollFailed(_)
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::ResumeChargePolling);
+        // Never back to "send the full amount" after a partial payment.
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::PartlyPaid {
+                received_sats: 62_000,
+                due_sats: 38_000
+            }
+        );
+        // A seen payment resumes as Confirming, not as unpaid.
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"processing","plan":"pro"}"#,
+            )),
+            gen,
+            id,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Err(("gone".into(), true)),
+            gen,
+            id,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::ResumeChargePolling);
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Processing
+        );
+    }
+
+    #[test]
+    fn an_older_plan_reload_never_overwrites_a_newer_one() {
+        let mut panel = panel_with_plan(plan(PlanTier::Pro, PlanStatus::Active, None, None));
+        let gen = panel.session_generation;
+        let _first = panel.reload_plan_billing();
+        let first = panel.plan_seq;
+        let _second = panel.reload_plan_billing();
+        let second = panel.plan_seq;
+        let _ = panel.update_message(ConnectAccountMessage::PlanReloaded(
+            Some(plan(PlanTier::Estate, PlanStatus::Active, None, None)),
+            gen,
+            second,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::PlanReloaded(
+            Some(plan(PlanTier::Pro, PlanStatus::Active, None, None)),
+            gen,
+            first,
+        ));
+        assert_eq!(panel.plan.as_ref().unwrap().plan, PlanTier::Estate);
+    }
+
+    #[test]
+    fn plan_loads_never_move_the_period_under_the_picker() {
+        let mut panel = panel_with_plan(plan(PlanTier::Pro, PlanStatus::Active, None, None));
+        let gen = panel.session_generation;
+        let annual = || {
+            plan(
+                PlanTier::Pro,
+                PlanStatus::Active,
+                None,
+                Some(BillingCycle::Annual),
+            )
+        };
+        panel.show_plan_comparison = true;
+        panel.selected_billing_cycle = BillingCycle::Monthly;
+        let _ = panel.update_message(ConnectAccountMessage::PlanLoaded(Some(annual()), gen));
+        assert_eq!(panel.selected_billing_cycle, BillingCycle::Monthly);
+        panel.show_plan_comparison = false;
+        let _ = panel.update_message(ConnectAccountMessage::PlanLoaded(Some(annual()), gen));
+        assert_eq!(panel.selected_billing_cycle, BillingCycle::Annual);
     }
 
     #[test]
