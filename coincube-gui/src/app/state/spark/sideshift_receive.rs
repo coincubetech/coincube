@@ -41,6 +41,29 @@ use view::SparkSideshiftReceiveMessage as Msg;
 /// Same cadence as the pulsing Connect light.
 const PULSE_INTERVAL: Duration = Duration::from_millis(800);
 
+/// How often a restored, settled shift looks again for where its bitcoin is,
+/// while that is still unknown (right after unlock the Spark wallet may not
+/// have synced yet).
+const ARRIVAL_RECHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Payments read per page, and pages at most, when looking for a restored
+/// shift's claimed deposit (newest first).
+const PAYMENTS_PAGE: u32 = 100;
+const PAYMENTS_PAGES: u32 = 5;
+
+/// Where a restored, settled shift's bitcoin is, as the wallet shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoredSettle {
+    /// Already claimed into the wallet, for this many sats.
+    Claimed(u64),
+    /// Still among the wallet's unclaimed deposits: register it with Home,
+    /// which will see it and auto-claim it.
+    StillPending,
+    /// In neither place yet, or a lookup failed: look again later rather
+    /// than guess.
+    Unknown,
+}
+
 /// Where the flow is. Mirrors the Liquid flow's `ReceivePhase`, minus the
 /// fixed-rate quote step: a BTC settle is always variable-rate here, because
 /// the user is depositing an arbitrary amount of some other asset and we can't
@@ -111,6 +134,11 @@ pub struct SparkSideshiftReceiveFlow {
     /// its bitcoin even arrived, while the app was closed; that first answer
     /// is checked against the wallet before anything is registered.
     restored: bool,
+    /// A restored shift reported `Settled`, and where its bitcoin is (claimed,
+    /// or still an unclaimed deposit) isn't known yet. Until it is, the arrival
+    /// is not registered with Home: registering an already-claimed deposit
+    /// would leave Home, and this page, waiting forever.
+    arrival_unconfirmed: bool,
 
     loading: bool,
     error: Option<String>,
@@ -139,6 +167,7 @@ impl SparkSideshiftReceiveFlow {
             arrived_amount_sat: None,
             qr_data: None,
             restored: false,
+            arrival_unconfirmed: false,
             loading: false,
             error: None,
         }
@@ -276,6 +305,7 @@ impl SparkSideshiftReceiveFlow {
         self.arrived_amount_sat = None;
         self.qr_data = None;
         self.restored = false;
+        self.arrival_unconfirmed = false;
         self.loading = false;
         self.error = None;
         if had_shift {
@@ -348,23 +378,59 @@ impl SparkSideshiftReceiveFlow {
     }
 
     /// A restored shift reports `Settled`: its bitcoin may already have
-    /// arrived while the app was closed. Look for a claimed deposit paid by the
-    /// settle transaction; `RestoredSettleChecked` gets its amount, or `None`
-    /// when the bitcoin is still on its way (or the lookup failed, which errs
-    /// on still waiting).
+    /// arrived while the app was closed. Find the settle transaction among the
+    /// wallet's unclaimed deposits first, then among its claimed deposit
+    /// payments (a few pages, newest first). Found in neither, or a lookup
+    /// failed, is [`RestoredSettle::Unknown`] and is looked for again later.
     fn check_restored_arrival(&self, settle_hash: String) -> Task<Message> {
         let spark = self.spark.clone();
         Task::perform(
             async move {
-                let payments = spark.list_payments(None, None).await.ok()?;
-                claimed_settle_amount(&payments.payments, &settle_hash)
+                let Ok(unclaimed) = spark.list_unclaimed_deposits().await else {
+                    return RestoredSettle::Unknown;
+                };
+                if unclaimed
+                    .deposits
+                    .iter()
+                    .any(|d| d.txid.eq_ignore_ascii_case(&settle_hash))
+                {
+                    return RestoredSettle::StillPending;
+                }
+                for page in 0..PAYMENTS_PAGES {
+                    let Ok(found) = spark
+                        .list_payments(Some(PAYMENTS_PAGE), Some(page * PAYMENTS_PAGE))
+                        .await
+                    else {
+                        return RestoredSettle::Unknown;
+                    };
+                    if let Some(amount_sat) = claimed_settle_amount(&found.payments, &settle_hash) {
+                        return RestoredSettle::Claimed(amount_sat);
+                    }
+                    if found.payments.len() < PAYMENTS_PAGE as usize {
+                        break;
+                    }
+                }
+                RestoredSettle::Unknown
             },
-            |amount_sat| {
+            |found| {
                 Message::View(view::Message::SparkSideshiftReceive(
-                    Msg::RestoredSettleChecked(amount_sat),
+                    Msg::RestoredSettleChecked(found),
                 ))
             },
         )
+    }
+
+    /// Look again for a restored, settled shift's bitcoin: the deposits and
+    /// payments when the settle hash is known, else SideShift's status, which
+    /// carries the hash once it has sent the bitcoin.
+    fn recheck_restored_arrival(&self) -> Task<Message> {
+        if !self.arrival_unconfirmed || self.phase != SparkShiftPhase::Active {
+            return Task::none();
+        }
+        match self.settle_hash.clone() {
+            Some(hash) => self.check_restored_arrival(hash),
+            None => self.poll_shift_status(),
+        }
     }
 
     /// What a settle does: refresh the panel's deposits, and register the
@@ -573,34 +639,52 @@ impl SparkSideshiftReceiveFlow {
                         // A shift put back after a restart may have settled long
                         // ago, its deposit already claimed. Registering that would
                         // leave Home waiting for a deposit that never comes, so
-                        // look for the claim first.
+                        // find where the bitcoin is first, and keep looking until
+                        // the wallet shows it (it may not have synced yet).
                         if first_after_restore {
-                            if let Some(hash) = self.settle_hash.clone() {
-                                return self.check_restored_arrival(hash);
-                            }
+                            self.arrival_unconfirmed = true;
+                        } else if !self.arrival_unconfirmed {
+                            return self.settled_tasks();
                         }
-                        return self.settled_tasks();
+                    }
+                    if self.arrival_unconfirmed {
+                        // Waiting to learn where the bitcoin is: look as soon
+                        // as the settle hash is known. Without it, the recheck
+                        // timer polls again (never straight from here, which
+                        // would loop poll → answer → poll).
+                        if let Some(hash) = self.settle_hash.clone() {
+                            return self.check_restored_arrival(hash);
+                        }
                     }
                 }
                 Task::none()
             }
 
-            Msg::RestoredSettleChecked(claimed) => {
-                if self.phase != SparkShiftPhase::Active {
+            Msg::RecheckRestoredArrival => self.recheck_restored_arrival(),
+
+            Msg::RestoredSettleChecked(found) => {
+                if self.phase != SparkShiftPhase::Active || !self.arrival_unconfirmed {
                     return Task::none();
                 }
-                match claimed {
-                    Some(amount_sat) => {
+                match found {
+                    RestoredSettle::Claimed(amount_sat) => {
+                        self.arrival_unconfirmed = false;
                         self.arrived_amount_sat = Some(*amount_sat);
                         self.phase = SparkShiftPhase::Arrived;
                         store_record(None)
                     }
-                    None => self.settled_tasks(),
+                    RestoredSettle::StillPending => {
+                        self.arrival_unconfirmed = false;
+                        self.settled_tasks()
+                    }
+                    // The recheck subscription tries again.
+                    RestoredSettle::Unknown => Task::none(),
                 }
             }
 
             Msg::Arrived { amount_sat } => {
                 if arrival_belongs_to_this_shift(&self.phase, self.shift_status.as_ref()) {
+                    self.arrival_unconfirmed = false;
                     self.arrived_amount_sat = Some(*amount_sat);
                     self.phase = SparkShiftPhase::Arrived;
                     return store_record(None);
@@ -697,7 +781,18 @@ impl SparkSideshiftReceiveFlow {
         } else {
             Subscription::none()
         };
-        Subscription::batch([poll, pulse])
+        // A restored, settled shift whose bitcoin hasn't been found yet keeps
+        // looking: the status poll above has stopped (`Settled` is terminal).
+        let recheck = if self.phase == SparkShiftPhase::Active && self.arrival_unconfirmed {
+            iced::time::every(ARRIVAL_RECHECK_INTERVAL).map(|_| {
+                Message::View(view::Message::SparkSideshiftReceive(
+                    Msg::RecheckRestoredArrival,
+                ))
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([poll, pulse, recheck])
     }
 }
 
@@ -1091,8 +1186,70 @@ mod tests {
     fn an_arrival_on_a_restored_shift_finishes_it() {
         let mut flow =
             SparkSideshiftReceiveFlow::restored(backend(), &PendingSparkShift::sample()).unwrap();
-        let _ = flow.update(&Msg::RestoredSettleChecked(Some(27_961)));
+        flow.arrival_unconfirmed = true;
+        let _ = flow.update(&Msg::RestoredSettleChecked(RestoredSettle::Claimed(27_961)));
         assert_eq!(flow.phase(), &SparkShiftPhase::Arrived);
         assert_eq!(flow.arrived_amount_sat(), Some(27_961));
+    }
+
+    fn status(kind: &str, settle_hash: Option<&str>) -> Msg {
+        Msg::StatusUpdated(Ok(crate::services::sideshift::ShiftStatus {
+            id: "d97d3994cd95e54364b6".to_string(),
+            status: kind.to_string(),
+            deposit_address: None,
+            deposit_amount: Some("20".to_string()),
+            settle_amount: Some("0.00027961".to_string()),
+            expires_at: None,
+            settle_hash: settle_hash.map(str::to_string),
+        }))
+    }
+
+    fn restored_flow() -> SparkSideshiftReceiveFlow {
+        SparkSideshiftReceiveFlow::restored(backend(), &PendingSparkShift::sample()).unwrap()
+    }
+
+    /// A restored shift that turns out settled is not registered with Home
+    /// until the wallet shows where its bitcoin is, with or without the hash.
+    #[test]
+    fn a_restored_settled_shift_waits_to_learn_where_its_bitcoin_is() {
+        let mut with_hash = restored_flow();
+        let _ = with_hash.update(&status("settled", Some("abc")));
+        assert!(with_hash.arrival_unconfirmed);
+        assert_eq!(with_hash.settle_hash(), Some("abc"));
+
+        let mut without_hash = restored_flow();
+        let _ = without_hash.update(&status("settled", None));
+        assert!(without_hash.arrival_unconfirmed);
+        // The hash arriving on a later poll doesn't end the wait by itself.
+        let _ = without_hash.update(&status("settled", Some("abc")));
+        assert!(without_hash.arrival_unconfirmed);
+    }
+
+    /// Not found yet keeps looking; found pending or claimed ends the wait.
+    #[test]
+    fn the_restored_arrival_check_keeps_looking_until_the_wallet_shows_it() {
+        let mut flow = restored_flow();
+        let _ = flow.update(&status("settled", Some("abc")));
+
+        let _ = flow.update(&Msg::RestoredSettleChecked(RestoredSettle::Unknown));
+        assert!(flow.arrival_unconfirmed);
+        assert_eq!(flow.phase(), &SparkShiftPhase::Active);
+
+        let _ = flow.update(&Msg::RestoredSettleChecked(RestoredSettle::StillPending));
+        assert!(!flow.arrival_unconfirmed);
+        assert_eq!(flow.phase(), &SparkShiftPhase::Active);
+
+        // A late answer after the wait ended changes nothing.
+        let _ = flow.update(&Msg::RestoredSettleChecked(RestoredSettle::Claimed(1)));
+        assert_eq!(flow.phase(), &SparkShiftPhase::Active);
+    }
+
+    /// A shift restored while still moving settles the ordinary way.
+    #[test]
+    fn a_restored_shift_that_settles_later_is_not_held_back() {
+        let mut flow = restored_flow();
+        let _ = flow.update(&status("settling", None));
+        let _ = flow.update(&status("settled", Some("abc")));
+        assert!(!flow.arrival_unconfirmed);
     }
 }

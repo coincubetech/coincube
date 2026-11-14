@@ -954,10 +954,12 @@ pub enum SparkSideshiftReceiveMessage {
     /// A shift stored in the Cube's settings, read back at unlock, to put on
     /// the Spark Receive panel again.
     Restore(Box<crate::app::settings::PendingSparkShift>),
-    /// Answer to a restored shift that reports `Settled`: the amount of the
-    /// claimed deposit its settle transaction paid, or `None` while its
-    /// bitcoin is still on the way.
-    RestoredSettleChecked(Option<u64>),
+    /// Where a restored shift that reports `Settled` has its bitcoin: claimed,
+    /// still an unclaimed deposit, or not found yet.
+    RestoredSettleChecked(crate::app::state::spark::sideshift_receive::RestoredSettle),
+    /// Look again for a restored, settled shift's bitcoin (a timer, while it
+    /// is still unknown).
+    RecheckRestoredArrival,
     Back,
     Reset,
 }
