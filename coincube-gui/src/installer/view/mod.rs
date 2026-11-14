@@ -2736,24 +2736,21 @@ fn restore_stepper<'a>(
     stepper
 }
 
-fn restore_cube_choice<'a>(
-    ui_instance: u64,
+fn restore_cube_availability(
     scope: crate::installer::step::RestoreScope,
-    c: &crate::installer::step::recovery_kit_restore::RestoreCubeCandidate,
-    selected: &Option<u64>,
-) -> Action<'a, Message> {
-    use crate::installer::message::RecoveryKitRestoreMsg;
+    status: &crate::services::coincube::RecoveryKitStatus,
+) -> (bool, &'static str) {
     // Scope-aware availability: a descriptor-only
     // kit can't satisfy a Full restore, and a
     // seed-only kit can't satisfy DescriptorOnly.
     // Disable the row (and say why) rather than
     // let the user click through to a post-decrypt
     // "missing half" error.
-    let available = c.status.has_recovery_kit
+    let available = status.has_recovery_kit
         && match scope {
-            crate::installer::step::RestoreScope::Full => c.status.has_encrypted_seed,
+            crate::installer::step::RestoreScope::Full => status.has_encrypted_seed,
             crate::installer::step::RestoreScope::DescriptorOnly => {
-                c.status.has_encrypted_wallet_descriptor
+                status.has_encrypted_wallet_descriptor
             }
         };
     let availability = if available {
@@ -2761,7 +2758,7 @@ fn restore_cube_choice<'a>(
             crate::installer::step::RestoreScope::Full => "Recovery Kit available",
             crate::installer::step::RestoreScope::DescriptorOnly => "Wallet descriptor available",
         }
-    } else if !c.status.has_recovery_kit {
+    } else if !status.has_recovery_kit {
         "No Recovery Kit"
     } else {
         match scope {
@@ -2769,6 +2766,17 @@ fn restore_cube_choice<'a>(
             crate::installer::step::RestoreScope::DescriptorOnly => "No descriptor in kit",
         }
     };
+    (available, availability)
+}
+
+fn restore_cube_choice<'a>(
+    ui_instance: u64,
+    scope: crate::installer::step::RestoreScope,
+    c: &crate::installer::step::recovery_kit_restore::RestoreCubeCandidate,
+    selected: &Option<u64>,
+) -> Action<'a, Message> {
+    use crate::installer::message::RecoveryKitRestoreMsg;
+    let (available, availability) = restore_cube_availability(scope, &c.status);
     let id = c.id;
     let chosen = *selected == Some(id);
     let row_text = Column::new()
