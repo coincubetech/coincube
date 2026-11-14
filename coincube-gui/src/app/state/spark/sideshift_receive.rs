@@ -227,6 +227,16 @@ impl SparkSideshiftReceiveFlow {
         flow
     }
 
+    /// A live shift whose bitcoin SideShift has sent, in settle tx `settle_hash`.
+    #[cfg(test)]
+    pub(crate) fn settled_for_test(spark: Arc<SparkBackend>, settle_hash: &str) -> Self {
+        let mut flow = Self::new(spark);
+        flow.phase = SparkShiftPhase::Active;
+        flow.shift_status = Some(ShiftStatusKind::Settled);
+        flow.settle_hash = Some(settle_hash.to_string());
+        flow
+    }
+
     pub fn phase(&self) -> &SparkShiftPhase {
         &self.phase
     }

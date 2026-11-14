@@ -651,6 +651,16 @@ pub enum SparkReceiveMessage {
     /// event (the SDK only re-emits at mature/refund-status boundaries,
     /// not on every new confirmation).
     RefreshConfirmations,
+    /// An Esplora fetch of a cross-network swap's settle transaction, by the
+    /// txid SideShift reported, came back. Feeds the swap's "X of 3" count
+    /// while the wallet's pending deposits don't list that transaction yet.
+    /// `None` when the fetch failed.
+    SettleConfirmationsUpdated {
+        txid: String,
+        confirmations: Option<u32>,
+    },
+    /// Re-read only the swap's settle confirmations by txid (panel reload).
+    RefreshSettleConfirmations,
     Reset,
     /// The received receipt's View in Activity: [`Self::Reset`], then Activity.
     ViewActivity,
