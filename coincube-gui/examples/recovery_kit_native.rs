@@ -997,12 +997,13 @@ mod native {
     const ORPHAN_HELPER: &str = "0f039ee515d7918b288f916872272a26224bded02e89388beaf88f7a16fefaff";
 
     fn orphan_save(root: &Path, state: &OrphanState) -> Result<()> {
+        let staging = format!("orphan-{}.next", uuid::Uuid::new_v4());
         write(
             root,
-            "orphan.next",
+            &staging,
             &serde_json::to_vec(state).map_err(|_| "native_orphan_state")?,
         )?;
-        fs::rename(root.join("orphan.next"), root.join("orphan.json"))
+        fs::rename(root.join(staging), root.join("orphan.json"))
             .map_err(|_| "native_orphan_state")?;
         fs::File::open(root)
             .and_then(|file| file.sync_all())
@@ -1161,6 +1162,21 @@ mod native {
             orphan_claim_matches(existing.as_ref().map(|bytes| bytes.as_slice()), &value),
             "native_orphan_claim_missing",
         )
+    }
+    // Only the remote-present path, after fresh guards, may finish a lost
+    // add-only intent seal. Absence is always verification-only.
+    fn orphan_resume_claims(
+        state: &OrphanState,
+        remote_present: bool,
+        mut verify: impl FnMut(&OrphanState, bool) -> Result<()>,
+        mut add: impl FnMut(&OrphanState, bool) -> Result<()>,
+    ) -> Result<()> {
+        verify(state, false)?;
+        if remote_present {
+            add(state, true)
+        } else {
+            verify(state, true)
+        }
     }
     async fn retire_orphan_215(input: &OrphanInput) -> Result<()> {
         let c = &input.config;
@@ -1350,8 +1366,7 @@ mod native {
             // The sealed intent is identical to the durable delete_started state.
             let mut intent_state = state;
             intent_state.phase = "delete_started".into();
-            orphan_verify_claim(&intent_state, false)?;
-            orphan_verify_claim(&intent_state, true)?;
+            orphan_resume_claims(&intent_state, false, orphan_verify_claim, orphan_claim)?;
             intent_state.phase = "complete".into();
             orphan_local_unchanged(old, &origin, &intent_state)?;
             orphan_save(root, &intent_state)?;
@@ -1397,8 +1412,7 @@ mod native {
             orphan_save(root, &state)?;
             orphan_claim(&state, true)?;
         } else {
-            orphan_verify_claim(&state, false)?;
-            orphan_verify_claim(&state, true)?;
+            orphan_resume_claims(&state, true, orphan_verify_claim, orphan_claim)?;
         }
         orphan_local_unchanged(old, &origin, &state)?;
         client
@@ -2004,6 +2018,96 @@ mod native {
                 old_dp: vec![("original_factor".into(), "unit-digest".into())],
                 phase: "delete_started".into(),
                 oracle: None,
+            }
+        }
+        #[test]
+        fn interrupted_orphan_staging_never_blocks_private_atomic_retry() {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+            write(root, "orphan.next", b"interrupted old staging").unwrap();
+            write(root, "orphan-old.next", b"interrupted unique staging").unwrap();
+            let mut state = orphan_fixture();
+            orphan_save(root, &state).unwrap();
+            state.phase = "complete".into();
+            orphan_save(root, &state).unwrap();
+            assert_eq!(
+                fs::read(root.join("orphan.next")).unwrap(),
+                b"interrupted old staging"
+            );
+            assert_eq!(
+                fs::read(root.join("orphan-old.next")).unwrap(),
+                b"interrupted unique staging"
+            );
+            assert_eq!(
+                private(&root.join("orphan.json")).unwrap(),
+                serde_json::to_vec(&state).unwrap()
+            );
+            assert_eq!(
+                fs::metadata(root.join("orphan.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        #[test]
+        fn orphan_retry_can_finish_intent_only_when_remote_present_and_consumer_matches() {
+            use std::cell::RefCell;
+            for remote_present in [false, true] {
+                for valid_consumer in [false, true] {
+                    for prior_intent in [None, Some("conflicting"), Some("matching")] {
+                        let state = orphan_fixture();
+                        let expected = orphan_claim_value(&state, true).unwrap();
+                        let intent = RefCell::new(prior_intent.map(|value| {
+                            if value == "matching" {
+                                expected.clone()
+                            } else {
+                                value.into()
+                            }
+                        }));
+                        let additions = RefCell::new(0);
+                        let result = orphan_resume_claims(
+                            &state,
+                            remote_present,
+                            |_, is_intent| {
+                                check(
+                                    if is_intent {
+                                        intent.borrow().as_deref() == Some(expected.as_str())
+                                    } else {
+                                        valid_consumer
+                                    },
+                                    "unit_claim_refused",
+                                )
+                            },
+                            |_, is_intent| {
+                                assert!(is_intent);
+                                *additions.borrow_mut() += 1;
+                                let mut value = intent.borrow_mut();
+                                if value.is_none() {
+                                    *value = Some(expected.clone());
+                                }
+                                check(
+                                    value.as_deref() == Some(expected.as_str()),
+                                    "unit_claim_conflict",
+                                )
+                            },
+                        );
+                        let accepted = valid_consumer
+                            && (prior_intent == Some("matching")
+                                || (remote_present && prior_intent.is_none()));
+                        assert_eq!(result.is_ok(), accepted);
+                        assert_eq!(
+                            *additions.borrow(),
+                            usize::from(remote_present && valid_consumer)
+                        );
+                        if !remote_present || !valid_consumer {
+                            assert_eq!(intent.borrow().is_none(), prior_intent.is_none());
+                        }
+                    }
+                }
             }
         }
         #[test]
