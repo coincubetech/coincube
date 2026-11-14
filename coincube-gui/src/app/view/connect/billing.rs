@@ -518,8 +518,15 @@ pub(super) fn account_feature_rows(state: &ConnectAccountPanel) -> Vec<(String, 
     let Some(plan) = state.plan.as_ref() else {
         return Vec::new();
     };
-    let tier = plan.tier();
-    let ent = entitlements_for(state, tier);
+    // A lapsed plan keeps its old tier name with Free entitlements (I4):
+    // list what the account has now.
+    let lapsed = matches!(state.plan_lifecycle(), PlanLifecycle::Expired);
+    let tier = if lapsed { &PlanTier::Free } else { plan.tier() };
+    let ent = if lapsed && plan.entitlements.cube_limit > 0 {
+        plan.entitlements.clone()
+    } else {
+        entitlements_for(state, tier)
+    };
     let mut rows = vec![(
         "Cubes per network".to_string(),
         match (tier, ent.cube_limit) {
@@ -856,65 +863,116 @@ fn plan_description(tier: &PlanTier) -> &'static str {
     }
 }
 
-/// Whether `tier` at `cycle` is the account's current plan. Free has no
-/// cycle, so the tier alone decides.
-fn is_current(state: &ConnectAccountPanel, tier: &PlanTier, cycle: BillingCycle) -> bool {
-    let Some(plan) = state.plan.as_ref() else {
-        return *tier == PlanTier::Free;
-    };
-    // A lapsed plan (past_due) is not "current" for its old tier.
-    let current_tier = if matches!(state.plan_lifecycle(), PlanLifecycle::Expired) {
-        &PlanTier::Free
-    } else {
-        plan.tier()
-    };
-    tier == current_tier
-        && (*tier == PlanTier::Free || plan.billing_cycle.is_none_or(|c| c == cycle))
-}
-
-fn current_tier(state: &ConnectAccountPanel) -> PlanTier {
-    match (state.plan.as_ref(), state.plan_lifecycle()) {
-        (_, PlanLifecycle::Expired) | (None, _) => PlanTier::Free,
-        (Some(plan), _) => plan.tier().clone(),
+/// The tier `plan` effectively gives today: a lapsed plan (`past_due`, the
+/// API's "already demoted") counts as Free, as does no plan at all.
+pub(super) fn effective_tier(plan: Option<&ConnectPlan>) -> PlanTier {
+    match plan {
+        Some(plan) if !matches!(plan.status, PlanStatus::PastDue) => plan.tier().clone(),
+        _ => PlanTier::Free,
     }
 }
 
-/// The Change plan CTA label and the line under it (board 2 logic).
+fn current_tier(state: &ConnectAccountPanel) -> PlanTier {
+    effective_tier(state.plan.as_ref())
+}
+
+/// Whether a Change plan row is the account's current plan, for the
+/// "Current" tag. `/connect/plan` does not send the billing cycle today, so
+/// an unknown cycle tags the tier on both periods.
+fn is_current(state: &ConnectAccountPanel, tier: &PlanTier, cycle: BillingCycle) -> bool {
+    *tier == current_tier(state)
+        && (*tier == PlanTier::Free
+            || state
+                .plan
+                .as_ref()
+                .and_then(|p| p.billing_cycle)
+                .is_none_or(|c| c == cycle))
+}
+
+/// The future end of the current paid period, if any.
+fn paid_until(plan: Option<&ConnectPlan>) -> Option<chrono::DateTime<chrono::Utc>> {
+    plan.and_then(|p| p.renewal_at.as_deref())
+        .and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok())
+        .map(|r| r.with_timezone(&chrono::Utc))
+        .filter(|r| *r > chrono::Utc::now())
+}
+
+/// The Change plan CTA label, the line under it and whether it is enabled
+/// (board 2 logic plus the API's rules for buying a lower tier ahead).
 pub(super) fn change_plan_cta(
     state: &ConnectAccountPanel,
     selected: &PlanTier,
     cycle: BillingCycle,
-) -> (String, &'static str, bool) {
+) -> (String, String, bool) {
     let current = current_tier(state);
-    if !state.purchasing_enabled() {
-        return (
+    let plan = state.plan.as_ref();
+    let blocked = |label: String, why: &str| (label, why.to_string(), false);
+    if *selected == current && current == PlanTier::Free {
+        return blocked(
             "Continue to review".to_string(),
-            "Purchasing is paused, so plan changes can’t be started right now.",
-            false,
+            "This is your current plan. Pick another plan to continue.",
         );
     }
-    if is_current(state, selected, cycle) {
-        return (
-            "Continue to review".to_string(),
-            "This is your current plan. Pick another plan or billing period to continue.",
-            false,
-        );
-    }
+    // Switching to Free costs nothing and needs no purchase.
     if *selected == PlanTier::Free {
         return (
             "Review switch to Free".to_string(),
-            "You’ll see when the switch takes effect before you confirm it.",
+            "You’ll see when the switch takes effect before you confirm it.".to_string(),
             true,
         );
     }
-    let label = if rank(selected) > rank(&current) {
-        format!("Review upgrade to {selected}")
-    } else {
-        format!("Review switch to {selected} · {}", cycle_label(cycle))
-    };
+    if !state.purchasing_enabled() {
+        return blocked(
+            "Continue to review".to_string(),
+            "Purchasing is paused, so plan changes can’t be started right now.",
+        );
+    }
+    let sats_note =
+        "You’ll see the amount in sats and choose Lightning or on-chain before anything is charged.";
+    if *selected == current {
+        // Buying the current tier again adds a period after this one (the
+        // API stacks same-tier purchases), whatever the cycle.
+        let until = paid_until(plan).map(short_date);
+        return (
+            format!("Review renewal · {selected} · {}", cycle_label(cycle)),
+            match until {
+                Some(date) => format!(
+                    "Adds a {} period after your current one ends on {date}. {sats_note}",
+                    cycle_label(cycle).to_lowercase()
+                ),
+                None => sats_note.to_string(),
+            },
+            true,
+        );
+    }
+    if rank(selected) < rank(&current) {
+        if let Some(pending) = plan.and_then(|p| p.pending_plan.as_ref()) {
+            let date = plan
+                .and_then(|p| p.pending_plan_at.as_deref())
+                .map(format_date)
+                .unwrap_or_else(|| "the end of this period".to_string());
+            return (
+                format!("Review switch to {selected} · {}", cycle_label(cycle)),
+                format!("A change to {pending} is already scheduled for {date}."),
+                false,
+            );
+        }
+        if paid_until(plan).is_none() {
+            return blocked(
+                format!("Review switch to {selected} · {}", cycle_label(cycle)),
+                "A lower plan starts when your current paid period ends, and this plan has no \
+                 end date to follow.",
+            );
+        }
+        return (
+            format!("Review switch to {selected} · {}", cycle_label(cycle)),
+            format!("{selected} starts when your current period ends. {sats_note}"),
+            true,
+        );
+    }
     (
-        label,
-        "You’ll see the amount in sats and choose Lightning or on-chain before anything is charged.",
+        format!("Review upgrade to {selected}"),
+        sats_note.to_string(),
         true,
     )
 }
@@ -1183,7 +1241,7 @@ fn change_plan_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Msg> {
                     .into(),
             ]))
             .push(space(8.0))
-            .push(lead(localized_copy(conseq)));
+            .push(lead(conseq));
     } else {
         col = col.push(space(20.0)).push(billing_notice(
             exclamation_circle_icon(),
@@ -1216,8 +1274,14 @@ pub(super) struct ReviewFacts {
     pub replaces: Option<String>,
     pub amount: Option<String>,
     pub covers: Option<String>,
-    /// For a lower tier: the date the paid period starts (decision 12).
+    /// For a lower tier or a renewal: the date the paid period starts
+    /// (decision 12; Connect stacks it onto the current period).
     pub starts: Option<String>,
+    /// A lower tier already scheduled (A4 `pendingPlan`).
+    pub pending: Option<PlanTier>,
+    /// Facts the buyer should know before paying (an upgrade forfeits the
+    /// rest of the current period; a scheduled change stays).
+    pub notes: Vec<String>,
 }
 
 fn add_cycle(
@@ -1238,6 +1302,10 @@ fn short_date(at: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Review facts for `checkout`, against `now`. Pure so it is testable.
+///
+/// Reads the plan as it was when Review opened (`CheckoutState::plan`), so
+/// the Paid screen still describes the purchase after `/connect/plan`
+/// reloads with the new tier.
 pub(super) fn review_facts(
     state: &ConnectAccountPanel,
     checkout: &CheckoutState,
@@ -1245,27 +1313,48 @@ pub(super) fn review_facts(
 ) -> ReviewFacts {
     let tier = &checkout.tier;
     let cycle = checkout.cycle;
-    let current = current_tier(state);
-    let plan = state.plan.as_ref();
-    let replaces = plan
-        .filter(|_| current != PlanTier::Free)
-        .map(|p| match p.billing_cycle {
-            Some(c) => format!("Replaces {} · {}", p.tier(), cycle_label(c)),
-            None => format!("Replaces {}", p.tier()),
-        });
+    let plan = checkout.plan.as_ref();
+    let current = effective_tier(plan);
     let renewal = plan
         .and_then(|p| p.renewal_at.as_deref())
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok())
         .map(|r| r.with_timezone(&chrono::Utc))
         .filter(|r| *r > now);
+    let replaces = plan.filter(|_| current != PlanTier::Free).map(|p| {
+        if p.tier() == tier {
+            format!("Adds to your current {tier} plan")
+        } else {
+            match p.billing_cycle {
+                Some(c) => format!("Replaces {} · {}", p.tier(), cycle_label(c)),
+                None => format!("Replaces {}", p.tier()),
+            }
+        }
+    });
     // Connect stacks a same-tier renewal and a lower tier onto the current
-    // period; an upgrade or a lapsed plan starts now (API A4).
+    // period; an upgrade or a lapsed plan starts now (API A4 activatePlan).
     let stacks = current != PlanTier::Free && rank(tier) <= rank(&current);
     let start = if stacks { renewal.unwrap_or(now) } else { now };
-    let starts = (stacks && rank(tier) < rank(&current))
-        .then_some(renewal)
-        .flatten()
-        .map(short_date);
+    let starts = if stacks {
+        renewal.map(short_date)
+    } else {
+        None
+    };
+    let pending = plan.and_then(|p| p.pending_plan.clone());
+    let mut notes = Vec::new();
+    if current != PlanTier::Free && rank(tier) > rank(&current) {
+        if let Some(until) = renewal {
+            notes.push(format!(
+                "{tier} starts today. Your remaining {current} time (until {}) isn’t credited.",
+                short_date(until)
+            ));
+        }
+        if let Some(pending) = &pending {
+            notes.push(format!(
+                "Your scheduled change to {pending} stays scheduled and starts when this new \
+                 period ends."
+            ));
+        }
+    }
     if *tier == PlanTier::Free {
         return ReviewFacts {
             plan: "Free".to_string(),
@@ -1273,6 +1362,8 @@ pub(super) fn review_facts(
             amount: Some("Nothing to pay".to_string()),
             covers: renewal.map(|r| format!("Free from {}", short_date(r))),
             starts: renewal.map(short_date),
+            pending,
+            notes,
         };
     }
     ReviewFacts {
@@ -1285,6 +1376,8 @@ pub(super) fn review_facts(
             short_date(add_cycle(start, cycle))
         )),
         starts,
+        pending,
+        notes,
     }
 }
 
@@ -1293,10 +1386,7 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
     let to_free = checkout.tier == PlanTier::Free;
     let mut plan_main = Column::new().push(tenshu_text::label(facts.plan.clone()));
     if let Some(replaces) = facts.replaces.clone() {
-        plan_main = plan_main.push(lead(match &facts.starts {
-            Some(date) => format!("{replaces} from {date}"),
-            None => replaces,
-        }));
+        plan_main = plan_main.push(lead(replaces));
     }
     let mut amount_main = Column::new().push(tenshu_text::label(
         facts
@@ -1345,15 +1435,24 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
         )))
         .push(space(20.0))
         .push(list);
+    let mut col = col;
+    for note in &facts.notes {
+        col = col.push(space(12.0)).push(lead(note.clone()));
+    }
 
     if to_free {
-        let body = match &facts.starts {
-            Some(date) => format!(
+        let body = match (&facts.starts, &facts.pending) {
+            (Some(date), Some(pending)) => format!(
+                "Bitcoin plans don't renew by themselves, so there is nothing to cancel. Your \
+                 current plan stays on until {date}, then the {pending} period you already paid \
+                 for starts. The account moves to Free when that ends."
+            ),
+            (Some(date), None) => format!(
                 "Bitcoin plans don't renew by themselves, so there is nothing to cancel. Your \
                  current plan stays on until {date}, then the account moves to Free. All your \
                  Cubes stay; Cubes over Free's limit lose Connect features."
             ),
-            None => "Bitcoin plans don't renew by themselves, so there is nothing to cancel."
+            _ => "Bitcoin plans don't renew by themselves, so there is nothing to cancel."
                 .to_string(),
         };
         return col
@@ -1405,24 +1504,57 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
         ))
         .push(horizontal_rule());
 
-    col.push(space(32.0))
+    let purchasing = state.purchasing_enabled();
+    col.push(space(24.0))
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(group_title(localized_copy("Billing period")).width(Length::Fill))
+                .push(
+                    tenshu::segmented(
+                        [
+                            tenshu::segment(
+                                "tenshu.connect.billing.review.monthly",
+                                BillingCycle::Monthly,
+                                localized_copy("Monthly"),
+                            ),
+                            tenshu::segment(
+                                "tenshu.connect.billing.review.annual",
+                                BillingCycle::Annual,
+                                localized_copy("Annual"),
+                            ),
+                        ],
+                        Some(checkout.cycle),
+                        Msg::FocusAction,
+                    )
+                    .size(tenshu::SegmentSize::Compact)
+                    .plain()
+                    .on_select(Msg::SetReviewCycle),
+                ),
+        )
+        .push(space(24.0))
         .push(group_title(localized_copy("Pay with")))
         .push(space(8.0))
         .push(methods)
         .push(space(20.0))
         .push(actions_row(vec![
             sheet_button(localized_copy("Create invoice"), ActionKind::Primary, false)
-                .on_press(Msg::StartCheckout(checkout.tier.clone()))
+                .on_press_maybe(purchasing.then(|| Msg::StartCheckout(checkout.tier.clone())))
                 .into(),
             sheet_button(localized_copy("Back"), ActionKind::Secondary, false)
                 .on_press(Msg::ComparePlans(true))
                 .into(),
         ]))
         .push(space(8.0))
-        .push(lead(localized_copy(
-            "Creates a BTCPay invoice you can pay with Lightning or on-chain. It shows when it \
-             expires.",
-        )))
+        .push(lead(if purchasing {
+            localized_copy(
+                "Creates a BTCPay invoice you can pay with Lightning or on-chain. It shows when \
+                 it expires.",
+            )
+        } else {
+            localized_copy("Purchasing is paused, so an invoice can’t be created right now.")
+        }))
         .into()
 }
 
@@ -1457,7 +1589,7 @@ pub(super) fn checkout_status(checkout: &CheckoutState) -> (String, Tone) {
         CheckoutPhase::Paid { .. } => ("Paid".to_string(), Tone::Good),
         CheckoutPhase::Expired => ("Expired · nothing received".to_string(), Tone::Muted),
         CheckoutPhase::NeedsSupport { .. } => ("Needs support".to_string(), Tone::Bad),
-        CheckoutPhase::Failed(_) => ("Not invoiced".to_string(), Tone::Bad),
+        CheckoutPhase::Failed { .. } => ("Not invoiced".to_string(), Tone::Bad),
         CheckoutPhase::PollFailed(_) => ("Couldn’t check the payment".to_string(), Tone::Warn),
     }
 }
@@ -1695,10 +1827,13 @@ fn checkout_phase_ux<'a>(
 ) -> Element<'a, Msg> {
     let facts = review_facts(state, checkout, chrono::Utc::now());
     let tier = &checkout.tier;
+    // A4: the poll's startsAt wins (a renewal may have moved the period end
+    // since the invoice was created), then the create response's.
     let starts = checkout
-        .checkout
+        .last_status
         .as_ref()
-        .and_then(|r| r.starts_at.as_deref())
+        .and_then(|s| s.starts_at.as_deref())
+        .or_else(|| checkout.checkout.as_ref()?.starts_at.as_deref())
         .map(format_date);
     let (heading, lead_text) = match &checkout.phase {
         CheckoutPhase::Creating => (
@@ -1719,7 +1854,7 @@ fn checkout_phase_ux<'a>(
             format!("Pay for {tier}"),
             "There is a problem with this payment.".to_string(),
         ),
-        CheckoutPhase::Failed(_) => (
+        CheckoutPhase::Failed { .. } => (
             "Review plan change".to_string(),
             "The invoice couldn’t be created.".to_string(),
         ),
@@ -1744,10 +1879,7 @@ fn checkout_phase_ux<'a>(
     };
     let mut plan_main = Column::new().push(tenshu_text::label(facts.plan.clone()));
     if let Some(replaces) = facts.replaces.clone() {
-        plan_main = plan_main.push(lead(match &facts.starts {
-            Some(date) => format!("{replaces} from {date}"),
-            None => replaces,
-        }));
+        plan_main = plan_main.push(lead(replaces));
     }
     let mut covers = Column::new().push(tenshu_text::label(
         facts.covers.clone().unwrap_or_else(|| "—".to_string()),
@@ -1756,7 +1888,7 @@ fn checkout_phase_ux<'a>(
         covers = covers.push(lead(format!("Starts {date}")));
     }
     let invoice_id = match &checkout.phase {
-        CheckoutPhase::Creating | CheckoutPhase::Failed(_) => None,
+        CheckoutPhase::Creating | CheckoutPhase::Failed { .. } => None,
         _ => checkout
             .last_status
             .as_ref()
@@ -1840,8 +1972,9 @@ fn checkout_phase_ux<'a>(
             Tone::Warn,
             localized_copy("Payment seen, waiting for confirmation"),
             format!(
-                "BTCPay has seen your payment. {tier} turns on once it confirms. You can close \
-                 this; your plan updates either way."
+                "BTCPay has seen your payment. {tier} turns on once it confirms. You can leave \
+                 this screen: Connect applies the payment when it confirms, and Plan & billing \
+                 shows it the next time it loads."
             ),
             Some(back_to_billing()),
         ),
@@ -1941,13 +2074,25 @@ fn checkout_phase_ux<'a>(
                 ),
             )
         }
-        CheckoutPhase::Failed(error) => billing_notice(
+        CheckoutPhase::Failed { message, refused } if *refused => billing_notice(
+            exclamation_circle_icon(),
+            Tone::Bad,
+            localized_copy("Connect didn’t accept this plan change"),
+            format!("{message}. Nothing was charged."),
+            Some(actions_row(vec![
+                sheet_button(localized_copy("Change plan"), ActionKind::Primary, true)
+                    .on_press(Msg::ComparePlans(true))
+                    .into(),
+                back_to_billing(),
+            ])),
+        ),
+        CheckoutPhase::Failed { message, .. } => billing_notice(
             exclamation_circle_icon(),
             Tone::Bad,
             localized_copy("Couldn’t create the invoice"),
             format!(
                 "Connect or BTCPay didn’t respond. Nothing was charged. Check your connection \
-                 and try again. ({error})"
+                 and try again. ({message})"
             ),
             Some(actions_row(vec![
                 sheet_button(localized_copy("Try again"), ActionKind::Primary, true)

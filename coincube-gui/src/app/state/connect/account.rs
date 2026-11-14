@@ -126,8 +126,11 @@ pub enum CheckoutPhase {
         invoice_id: String,
         received_sats: u64,
     },
-    /// The invoice couldn't be created (B10). No invoice exists.
-    Failed(String),
+    /// The invoice couldn't be created (B10). No invoice exists. `refused`
+    /// is a 4xx from Connect (for example a plan change already scheduled):
+    /// retrying the same request would be refused again, so the view offers
+    /// Change plan instead of Try again.
+    Failed { message: String, refused: bool },
     /// Polling stopped after errors. The invoice may still be paid; "Check
     /// again" resumes polling the same invoice instead of creating another.
     PollFailed(String),
@@ -230,6 +233,10 @@ pub struct CheckoutState {
     /// The billing cycle snapshotted when Review opened; every invoice for
     /// this checkout (including "Create new invoice" after expiry) uses it.
     pub cycle: BillingCycle,
+    /// `/connect/plan` as it was when Review opened. Review and the pay
+    /// screens describe the purchase against it, so the Paid screen still
+    /// says what was bought after the plan reloads with the new tier.
+    pub plan: Option<ConnectPlan>,
     pub phase: CheckoutPhase,
     pub checkout: Option<CheckoutResponse>,
     pub lightning_qr: Option<qr_code::Data>,
@@ -243,11 +250,12 @@ pub struct CheckoutState {
 
 impl CheckoutState {
     /// A checkout at the Review step.
-    pub fn new(id: u64, tier: PlanTier, cycle: BillingCycle) -> Self {
+    pub fn new(id: u64, tier: PlanTier, cycle: BillingCycle, plan: Option<ConnectPlan>) -> Self {
         Self {
             id,
             tier,
             cycle,
+            plan,
             phase: CheckoutPhase::Review,
             checkout: None,
             lightning_qr: None,
@@ -2664,7 +2672,9 @@ impl ConnectAccountPanel {
                 // reachable while purchasing is open, like StartCheckout, so
                 // a stale message never shows a "Create invoice" the API
                 // would reject.
-                if !self.purchasing_enabled() {
+                // Switching to Free buys nothing, so its Review is shown
+                // even while purchasing is closed.
+                if tier != PlanTier::Free && !self.purchasing_enabled() {
                     log::warn!("[CONNECT] ReviewPlanChange ignored — purchasing disabled");
                     return iced::Task::none();
                 }
@@ -2686,6 +2696,7 @@ impl ConnectAccountPanel {
                     self.checkout_seq,
                     tier,
                     self.selected_billing_cycle,
+                    self.plan.clone(),
                 ));
             }
 
@@ -2697,6 +2708,20 @@ impl ConnectAccountPanel {
                 // reject even if a stale message slips through.
                 if !self.purchasing_enabled() {
                     log::warn!("[CONNECT] StartCheckout ignored — purchasing disabled");
+                    return iced::Task::none();
+                }
+                // Never replace an invoice that is out for payment (a double
+                // press, or a stale message): only Review, Expired and Failed
+                // may start a new one.
+                if self.checkout.as_ref().is_some_and(|cs| {
+                    !matches!(
+                        cs.phase,
+                        CheckoutPhase::Review
+                            | CheckoutPhase::Expired
+                            | CheckoutPhase::Failed { .. }
+                    )
+                }) {
+                    log::warn!("[CONNECT] StartCheckout ignored — an invoice is in progress");
                     return iced::Task::none();
                 }
                 // The cycle reviewed for this tier wins over the picker's
@@ -2713,7 +2738,14 @@ impl ConnectAccountPanel {
                 // dropped when it lands.
                 self.checkout_seq += 1;
                 let id = self.checkout_seq;
-                let mut checkout = CheckoutState::new(id, tier.clone(), cycle);
+                // Keep the plan snapshot taken when Review opened.
+                let snapshot = self
+                    .checkout
+                    .as_ref()
+                    .filter(|cs| cs.tier == tier)
+                    .and_then(|cs| cs.plan.clone())
+                    .or_else(|| self.plan.clone());
+                let mut checkout = CheckoutState::new(id, tier.clone(), cycle, snapshot);
                 checkout.phase = CheckoutPhase::Creating;
                 self.checkout = Some(checkout);
                 let gen = self.session_generation;
@@ -2723,7 +2755,20 @@ impl ConnectAccountPanel {
                     billing_cycle: cycle,
                 };
                 return iced::Task::perform(
-                    async move { client.create_checkout(req).await.map_err(|e| e.to_string()) },
+                    async move {
+                        client.create_checkout(req).await.map_err(|e| {
+                            use crate::services::coincube::CoincubeError;
+                            let refused = matches!(
+                                &e,
+                                CoincubeError::Unsuccessful(info)
+                                    if (400..500).contains(&info.status_code)
+                                        && info.status_code != 401
+                                        && info.status_code != 408
+                                        && info.status_code != 429
+                            );
+                            (e.to_string(), refused)
+                        })
+                    },
                     move |result| {
                         Message::View(view::Message::ConnectAccount(
                             ConnectAccountMessage::CheckoutCreated(result, gen, id),
@@ -2752,9 +2797,9 @@ impl ConnectAccountPanel {
                             ConnectAccountMessage::PollChargeStatus(id),
                         )));
                     }
-                    Err(e) => {
+                    Err((message, refused)) => {
                         if let Some(cs) = &mut self.checkout {
-                            cs.phase = CheckoutPhase::Failed(e);
+                            cs.phase = CheckoutPhase::Failed { message, refused };
                         }
                     }
                 }
@@ -2875,6 +2920,17 @@ impl ConnectAccountPanel {
                             }
                         }
                     }
+                }
+            }
+
+            ConnectAccountMessage::SetReviewCycle(cycle) => {
+                if let Some(cs) = self
+                    .checkout
+                    .as_mut()
+                    .filter(|cs| cs.phase == CheckoutPhase::Review)
+                {
+                    cs.cycle = cycle;
+                    self.selected_billing_cycle = cycle;
                 }
             }
 
@@ -5263,6 +5319,24 @@ impl ConnectAccountPanel {
     /// Whether checkout generation `id` is the one on screen.
     fn is_current_checkout(&self, id: u64) -> bool {
         self.checkout.as_ref().is_some_and(|cs| cs.id == id)
+    }
+
+    /// What opening Plan & billing loads: the plan (a payment confirmed after
+    /// the user left the pay screen shows here) and billing history.
+    pub fn reload_plan_billing(&self) -> iced::Task<Message> {
+        let gen = self.session_generation;
+        let client = self.client.clone();
+        iced::Task::batch([
+            iced::Task::perform(
+                async move { (client.get_connect_plan().await.ok(), gen) },
+                |(plan, gen)| {
+                    Message::View(view::Message::ConnectAccount(
+                        ConnectAccountMessage::PlanLoaded(plan, gen),
+                    ))
+                },
+            ),
+            self.reload_billing_history(),
+        ])
     }
 
     /// Fetch `GET /connect/billing/history` for Plan & billing's inline
@@ -8815,6 +8889,81 @@ mod plan_lifecycle_tests {
             bip21_uri("bc1qaddr", 100_000_000),
             "bitcoin:bc1qaddr?amount=1"
         );
+    }
+
+    #[test]
+    fn start_checkout_never_replaces_an_invoice_out_for_payment() {
+        let (mut panel, _gen, id) = awaiting_panel();
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.id, id);
+        assert_eq!(cs.phase, CheckoutPhase::AwaitingPayment);
+    }
+
+    #[test]
+    fn a_refused_create_is_not_reported_as_a_network_failure() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let id = panel.checkout.as_ref().unwrap().id;
+        let gen = panel.session_generation;
+        let _ = panel.update_message(ConnectAccountMessage::CheckoutCreated(
+            Err((
+                "A plan change is already scheduled for the end of this period".into(),
+                true,
+            )),
+            gen,
+            id,
+        ));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Failed {
+                message: "A plan change is already scheduled for the end of this period".into(),
+                refused: true
+            }
+        );
+    }
+
+    #[test]
+    fn free_review_opens_while_purchasing_is_closed_and_review_cycle_is_editable() {
+        let mut panel = panel_with_plan(plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2099-01-01T00:00:00Z"),
+            None,
+        ));
+        panel.features = Some(features_with_purchasing(None, Some(false)));
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Free));
+        assert!(panel.checkout.is_some());
+        panel.checkout = None;
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        panel.selected_billing_cycle = BillingCycle::Monthly;
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        let _ = panel.update_message(ConnectAccountMessage::SetReviewCycle(BillingCycle::Annual));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.cycle, BillingCycle::Annual);
+        assert!(cs.plan.is_some(), "Review snapshots the plan");
+    }
+
+    #[test]
+    fn pending_plan_fields_parse_leniently() {
+        let plan: ConnectPlan = serde_json::from_str(
+            r#"{"plan":"estate","status":"active","renewalAt":"2027-03-14T00:00:00Z",
+                "entitlements":{},"pendingPlan":"pro","pendingPlanAt":"2027-03-14T00:00:00Z",
+                "pendingBillingCycle":"annual"}"#,
+        )
+        .unwrap();
+        assert_eq!(plan.pending_plan, Some(PlanTier::Pro));
+        assert_eq!(plan.pending_billing_cycle, Some(BillingCycle::Annual));
+        // An empty or future value never drops the account to Free.
+        let plan: ConnectPlan = serde_json::from_str(
+            r#"{"plan":"estate","status":"active","renewalAt":null,"entitlements":{},
+                "pendingPlan":"","pendingBillingCycle":"quarterly"}"#,
+        )
+        .unwrap();
+        assert_eq!(plan.plan, PlanTier::Estate);
+        assert_eq!(plan.pending_plan, None);
+        assert_eq!(plan.pending_billing_cycle, None);
     }
 
     #[test]

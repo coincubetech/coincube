@@ -1851,8 +1851,9 @@ pub enum ConnectAccountMessage {
     ReviewPlanChange(crate::services::coincube::PlanTier),
     StartCheckout(crate::services::coincube::PlanTier),
     /// Create result: session generation, then checkout generation.
+    /// The error carries the message and whether Connect refused it (4xx).
     CheckoutCreated(
-        Result<crate::services::coincube::CheckoutResponse, String>,
+        Result<crate::services::coincube::CheckoutResponse, (String, bool)>,
         u64,
         u64,
     ),
@@ -1864,6 +1865,8 @@ pub enum ConnectAccountMessage {
         u64,
         u64,
     ),
+    /// Review: pick the billing period for this purchase.
+    SetReviewCycle(crate::services::coincube::BillingCycle),
     /// Awaiting payment: show the Lightning invoice or the on-chain address.
     SelectPaymentNetwork(crate::app::state::connect::account::PaymentNetwork),
     /// Paying in browser → back to the QR code here.

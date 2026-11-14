@@ -713,14 +713,27 @@ pub struct ConnectPlan {
     #[serde(default, alias = "plan_provenance")]
     pub plan_provenance: Option<PlanProvenance>,
     /// A lower tier already paid for, starting when the current period ends
-    /// (billing v2 A4). Absent on older backends.
-    #[serde(default)]
+    /// (billing v2 A4). Absent on older backends. Parsed leniently: an empty
+    /// or unknown value reads as `None` instead of failing the whole plan
+    /// (which would show the account as Free).
+    #[serde(default, deserialize_with = "lenient_option")]
     pub pending_plan: Option<PlanTier>,
     /// RFC-3339 instant the pending plan starts.
     #[serde(default)]
     pub pending_plan_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_option")]
     pub pending_billing_cycle: Option<BillingCycle>,
+}
+
+/// `Option<T>` that never fails its parent: a value that doesn't parse as
+/// `T` (an empty string, a future enum value) reads as `None`.
+fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = <Option<serde_json::Value> as Deserialize>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 impl ConnectPlan {
@@ -975,6 +988,9 @@ pub struct ChargeStatusResponse {
     pub overpaid_sats: u64,
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// A4: when a lower tier bought ahead starts.
+    #[serde(default)]
+    pub starts_at: Option<String>,
 }
 
 impl ChargeStatusResponse {

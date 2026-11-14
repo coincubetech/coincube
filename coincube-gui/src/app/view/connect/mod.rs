@@ -4021,32 +4021,116 @@ mod renewal_banner_tests {
     }
 
     #[test]
-    fn change_plan_cta_names_the_change_and_blocks_the_current_plan() {
+    fn change_plan_cta_names_the_change_and_follows_the_api_rules() {
         let mut account = dashboard_panel();
         account.features = Some(billing_v2_features());
-        // dashboard_panel is Pro · Monthly.
+        // /connect/plan sends no billing cycle in production.
+        let mut pro = plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2099-01-01T00:00:00Z"),
+        );
+        pro.billing_cycle = None;
+        account.plan = Some(pro.clone());
         let (label, _, ok) =
             billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
         assert_eq!((label.as_str(), ok), ("Review upgrade to Estate", true));
-        let (_, note, ok) =
-            billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Monthly);
-        assert!(!ok);
-        assert!(note.contains("current plan"));
-        let (label, _, ok) =
-            billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Annual);
-        assert_eq!(
-            (label.as_str(), ok),
-            ("Review switch to Pro · Annual", true)
-        );
+        // The current tier is renewable on either period (Connect stacks it).
+        for cycle in [BillingCycle::Monthly, BillingCycle::Annual] {
+            let (label, note, ok) = billing::change_plan_cta(&account, &PlanTier::Pro, cycle);
+            assert!(ok, "renewal enabled for {:?}", cycle);
+            assert!(label.starts_with("Review renewal · Pro"), "{}", label);
+            assert!(note.contains("after your current one ends"), "{}", note);
+        }
         let (label, _, ok) =
             billing::change_plan_cta(&account, &PlanTier::Free, BillingCycle::Annual);
         assert_eq!((label.as_str(), ok), ("Review switch to Free", true));
 
+        // A lower tier needs a future period end and no change already scheduled.
+        let mut estate = plan(
+            PlanTier::Estate,
+            PlanStatus::Active,
+            Some("2099-01-01T00:00:00Z"),
+        );
+        estate.billing_cycle = None;
+        account.plan = Some(estate.clone());
+        let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Annual);
+        assert!(ok);
+        estate.pending_plan = Some(PlanTier::Pro);
+        estate.pending_plan_at = Some("2099-01-01T00:00:00Z".into());
+        account.plan = Some(estate.clone());
+        let (_, note, ok) =
+            billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Annual);
+        assert!(!ok);
+        assert!(note.contains("already scheduled"), "{}", note);
+        estate.pending_plan = None;
+        estate.renewal_at = None;
+        account.plan = Some(estate);
+        let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Annual);
+        assert!(!ok, "no period end to start after");
+
+        // Free is never the current plan to renew; paused purchasing blocks
+        // purchases but not the switch to Free.
+        account.plan = Some(plan(PlanTier::Free, PlanStatus::Active, None));
+        let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Free, BillingCycle::Annual);
+        assert!(!ok);
+        account.plan = Some(pro);
         account.features.as_mut().unwrap().purchasing_enabled = Some(false);
         let (_, note, ok) =
             billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
         assert!(!ok);
         assert!(note.contains("paused"));
+        let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Free, BillingCycle::Annual);
+        assert!(ok);
+    }
+
+    #[test]
+    fn paid_screen_keeps_the_reviewed_facts_after_the_plan_reloads() {
+        let now = chrono::Utc::now();
+        let renewal = (now + chrono::Duration::days(120)).to_rfc3339();
+        let mut account = dashboard_panel();
+        account.features = Some(billing_v2_features());
+        account.plan = Some(plan(PlanTier::Pro, PlanStatus::Active, Some(&renewal)));
+        let mut cs = CheckoutState::new(
+            1,
+            PlanTier::Estate,
+            BillingCycle::Annual,
+            account.plan.clone(),
+        );
+        let before = billing::review_facts(&account, &cs, now);
+        assert!(before
+            .replaces
+            .as_deref()
+            .unwrap()
+            .starts_with("Replaces Pro"));
+        assert!(
+            before.notes.iter().any(|n| n.contains("isn’t credited")),
+            "{:?}",
+            before.notes
+        );
+        // Paid: /connect/plan now says Estate for a year.
+        cs.phase = CheckoutPhase::Paid { overpaid_sats: 0 };
+        let next_year = (now + chrono::Duration::days(365)).to_rfc3339();
+        account.plan = Some(plan(PlanTier::Estate, PlanStatus::Active, Some(&next_year)));
+        let after = billing::review_facts(&account, &cs, now);
+        assert_eq!(after.covers, before.covers);
+        assert_eq!(after.replaces, before.replaces);
+    }
+
+    #[test]
+    fn lapsed_account_lists_free_features() {
+        let mut account = dashboard_panel();
+        account.features = Some(billing_v2_features());
+        let mut lapsed = plan(
+            PlanTier::Pro,
+            PlanStatus::PastDue,
+            Some("2026-01-01T00:00:00Z"),
+        );
+        lapsed.entitlements.cube_limit = 1;
+        account.plan = Some(lapsed);
+        let rows = billing::account_feature_rows(&account);
+        assert_eq!(rows[0].1, billing::FeatureValue::Muted("1 on Free".into()));
+        assert!(!rows.iter().any(|(n, _)| n == billing::SPENDING_POLICIES));
     }
 
     #[test]
@@ -4063,12 +4147,14 @@ mod renewal_banner_tests {
         );
         p.billing_cycle = Some(BillingCycle::Annual);
         account.plan = Some(p);
-        let checkout = |tier, cycle| CheckoutState::new(1, tier, cycle);
+        let checkout = |plan: &Option<ConnectPlan>, tier, cycle| {
+            CheckoutState::new(1, tier, cycle, plan.clone())
+        };
 
         // Upgrade starts now.
         let up = billing::review_facts(
             &account,
-            &checkout(PlanTier::Estate, BillingCycle::Annual),
+            &checkout(&account.plan, PlanTier::Estate, BillingCycle::Annual),
             now,
         );
         assert_eq!(up.plan, "Estate · Annual");
@@ -4080,11 +4166,15 @@ mod renewal_banner_tests {
         // Same-tier renewal stacks onto the paid period.
         let renew = billing::review_facts(
             &account,
-            &checkout(PlanTier::Pro, BillingCycle::Annual),
+            &checkout(&account.plan, PlanTier::Pro, BillingCycle::Annual),
             now,
         );
         assert_eq!(renew.covers.as_deref(), Some("Mar 14, 2027 – Mar 14, 2028"));
-        assert_eq!(renew.starts, None);
+        assert_eq!(renew.starts.as_deref(), Some("Mar 14, 2027"));
+        assert_eq!(
+            renew.replaces.as_deref(),
+            Some("Adds to your current Pro plan")
+        );
 
         // A lower tier starts when the current period ends (decision 12).
         let mut estate = plan(
@@ -4096,7 +4186,7 @@ mod renewal_banner_tests {
         account.plan = Some(estate);
         let down = billing::review_facts(
             &account,
-            &checkout(PlanTier::Pro, BillingCycle::Monthly),
+            &checkout(&account.plan, PlanTier::Pro, BillingCycle::Monthly),
             now,
         );
         assert_eq!(down.amount.as_deref(), Some("$10 USD"));
@@ -4523,7 +4613,10 @@ mod renewal_banner_tests {
             ),
             (
                 "b10-failed",
-                CheckoutPhase::Failed("Connect returned 502".into()),
+                CheckoutPhase::Failed {
+                    message: "Connect returned 502".into(),
+                    refused: false,
+                },
                 PaymentNetwork::Lightning,
                 None,
                 &["Couldn’t create the invoice", "Try again", "Not invoiced"],
@@ -4537,8 +4630,13 @@ mod renewal_banner_tests {
             ),
         ];
         for (name, phase, network, last, expected) in cases {
-            let mut cs = CheckoutState::new(7, PlanTier::Estate, BillingCycle::Annual);
-            if phase != CheckoutPhase::Creating && !matches!(phase, CheckoutPhase::Failed(_)) {
+            let mut cs = CheckoutState::new(
+                7,
+                PlanTier::Estate,
+                BillingCycle::Annual,
+                account.plan.clone(),
+            );
+            if phase != CheckoutPhase::Creating && !matches!(phase, CheckoutPhase::Failed { .. }) {
                 cs.checkout = Some(resp.clone());
                 cs.lightning_qr = iced::widget::qr_code::Data::new(&resp.lightning_invoice).ok();
                 cs.onchain_qr = iced::widget::qr_code::Data::new(
@@ -4619,9 +4717,13 @@ mod renewal_banner_tests {
             CheckoutPhase::Processing,
             CheckoutPhase::Paid { overpaid_sats: 0 },
             CheckoutPhase::Expired,
-            CheckoutPhase::Failed("invoice failed".to_string()),
+            CheckoutPhase::Failed {
+                message: "invoice failed".to_string(),
+                refused: false,
+            },
         ] {
-            let mut cs = CheckoutState::new(1, PlanTier::Pro, BillingCycle::Annual);
+            let mut cs =
+                CheckoutState::new(1, PlanTier::Pro, BillingCycle::Annual, account.plan.clone());
             cs.phase = phase;
             cs.checkout = Some(checkout_response());
             account.checkout = Some(cs);
@@ -5044,8 +5146,12 @@ mod renewal_banner_tests {
                             panel.review_device_removal = Some(9);
                         }
                         if section == "checkout" {
-                            let mut cs =
-                                CheckoutState::new(1, PlanTier::Pro, BillingCycle::Monthly);
+                            let mut cs = CheckoutState::new(
+                                1,
+                                PlanTier::Pro,
+                                BillingCycle::Monthly,
+                                panel.plan.clone(),
+                            );
                             cs.phase = CheckoutPhase::AwaitingPayment;
                             cs.checkout = Some(checkout_response());
                             panel.checkout = Some(cs);
