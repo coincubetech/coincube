@@ -185,7 +185,17 @@ impl SparkSideshiftReceiveFlow {
         flow.refund_address = record.refund_address.clone();
         flow.qr_data = qr_code::Data::new(&record.shift.deposit_address).ok();
         flow.shift = Some(record.shift.clone());
-        flow.shift_status = Some(ShiftStatusKind::Waiting);
+        // A shift whose deposit address has expired by the clock starts as
+        // expired, so its address and QR are not offered while SideShift is
+        // unreachable. The first successful poll still has the last word (a
+        // deposit sent in time moves it on).
+        flow.shift_status = Some(
+            if deposit_window_closed(record.shift.expires_at.as_deref(), chrono::Utc::now()) {
+                ShiftStatusKind::Expired
+            } else {
+                ShiftStatusKind::Waiting
+            },
+        );
         flow.phase = SparkShiftPhase::Active;
         flow.restored = true;
         Some(flow)
@@ -435,7 +445,10 @@ impl SparkSideshiftReceiveFlow {
 
     /// What a settle does: refresh the panel's deposits, and register the
     /// arrival with Home so the deposit is auto-claimed and celebrated.
-    fn settled_tasks(&self) -> Task<Message> {
+    /// `deposit_seen`: the deposit was just seen among the unclaimed ones (a
+    /// restored shift), so Home may read it vanishing as claimed even if the
+    /// SDK claims it before Home looks.
+    fn settled_tasks(&self, deposit_seen: bool) -> Task<Message> {
         // The amount is the swap's settle estimate, used only for the pending
         // indicator; the celebration uses the actual claimed amount. Read the
         // cached figure rather than this poll's `settle_sat`: a settle response
@@ -448,6 +461,7 @@ impl SparkSideshiftReceiveFlow {
             Task::done(Message::View(view::Message::Home(
                 view::HomeMessage::SwapSettledAwaitingArrival {
                     amount_sat: self.settle_amount_sat.unwrap_or(0),
+                    deposit_seen,
                 },
             ))),
         ])
@@ -590,9 +604,12 @@ impl SparkSideshiftReceiveFlow {
                     let kind = ShiftStatusKind::from(status.status.as_str());
                     let settled = kind == ShiftStatusKind::Settled
                         && self.shift_status.as_ref() != Some(&ShiftStatusKind::Settled);
-                    let expired = kind == ShiftStatusKind::Expired
-                        && self.shift_status.as_ref() != Some(&ShiftStatusKind::Expired);
                     let first_after_restore = std::mem::take(&mut self.restored);
+                    // A restored shift may already show as expired by the
+                    // clock; SideShift confirming it is what clears the record.
+                    let expired = kind == ShiftStatusKind::Expired
+                        && (first_after_restore
+                            || self.shift_status.as_ref() != Some(&ShiftStatusKind::Expired));
                     self.shift_status = Some(kind);
                     // SideShift reports the settle output (BTC, as a decimal
                     // string) once a deposit is detected. Keep the latest so the
@@ -644,7 +661,7 @@ impl SparkSideshiftReceiveFlow {
                         if first_after_restore {
                             self.arrival_unconfirmed = true;
                         } else if !self.arrival_unconfirmed {
-                            return self.settled_tasks();
+                            return self.settled_tasks(false);
                         }
                     }
                     if self.arrival_unconfirmed {
@@ -675,7 +692,7 @@ impl SparkSideshiftReceiveFlow {
                     }
                     RestoredSettle::StillPending => {
                         self.arrival_unconfirmed = false;
-                        self.settled_tasks()
+                        self.settled_tasks(true)
                     }
                     // The recheck subscription tries again.
                     RestoredSettle::Unknown => Task::none(),
@@ -802,6 +819,15 @@ pub fn store_record(record: Option<PendingSparkShift>) -> Task<Message> {
     Task::done(Message::View(view::Message::Home(
         view::HomeMessage::StoreSparkShift(record.map(Box::new)),
     )))
+}
+
+/// Whether a shift's deposit window has closed by the clock: `expires_at` (as
+/// SideShift writes it, RFC 3339) is at or before `now`. Unknown or unreadable
+/// is not closed: SideShift's status decides then.
+fn deposit_window_closed(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    expires_at
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at.trim()).ok())
+        .is_some_and(|at| at <= now)
 }
 
 /// The amount a claimed deposit paid by `settle_hash` brought in, if the
@@ -1251,5 +1277,36 @@ mod tests {
         let _ = flow.update(&status("settling", None));
         let _ = flow.update(&status("settled", Some("abc")));
         assert!(!flow.arrival_unconfirmed);
+    }
+
+    #[test]
+    fn a_deposit_window_closes_at_its_expiry_and_unknown_never_closes() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(deposit_window_closed(Some("2026-11-13T11:59:59.000Z"), now));
+        assert!(deposit_window_closed(Some("2026-11-13T12:00:00Z"), now));
+        assert!(!deposit_window_closed(Some("2026-11-13T12:00:01Z"), now));
+        assert!(!deposit_window_closed(Some("not a time"), now));
+        assert!(!deposit_window_closed(None, now));
+    }
+
+    /// An expired shift doesn't offer its deposit address while SideShift is
+    /// unreachable, and SideShift confirming the expiry clears the record.
+    #[test]
+    fn a_restored_shift_past_its_expiry_starts_expired() {
+        let mut record = PendingSparkShift::sample();
+        record.shift.expires_at = Some("2020-01-01T00:00:00.000Z".to_string());
+        let mut flow = SparkSideshiftReceiveFlow::restored(backend(), &record).unwrap();
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Expired));
+
+        let _ = flow.update(&status("expired", None));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Expired));
+        assert!(!flow.restored);
+
+        // A deposit sent in time: SideShift's answer wins over the clock.
+        let mut late = SparkSideshiftReceiveFlow::restored(backend(), &record).unwrap();
+        let _ = late.update(&status("processing", None));
+        assert_eq!(late.shift_status(), Some(&ShiftStatusKind::Processing));
     }
 }
