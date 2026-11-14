@@ -479,6 +479,34 @@ pub struct UnfundedProof {
     pub addresses_checked: u64,
     pub known_coin_count: u64,
 }
+fn oracle_failure_category(message: &str) -> &'static str {
+    if message.contains("All Esplora providers are temporarily backing off") {
+        "all_providers_cooling"
+    } else if message.contains("Esplora scan aborted") {
+        "scan_aborted"
+    } else {
+        "unknown"
+    }
+}
+
+fn oracle_runtime_config(
+    persisted: &coincubed::config::Config,
+    chain: ChainId,
+    token: Option<&str>,
+) -> Result<coincubed::config::Config> {
+    let mut runtime = persisted.clone();
+    check(runtime.bitcoin_config.chain == chain, "native_oracle_chain")?;
+    if chain == ChainId::Testnet4 {
+        let token = token
+            .filter(|token| !token.is_empty())
+            .ok_or("native_auth_blocked")?;
+        runtime.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
+            installer::connect_esplora_config(ChainId::Testnet4, token),
+        ));
+    }
+    Ok(runtime)
+}
+
 fn oracle_diagnostic(
     path: &std::path::Path,
     info: &coincubed::commands::GetInfoResult,
@@ -511,7 +539,11 @@ fn oracle_diagnostic(
         "full_scan_completed_generation":info.history_sync.full_scan_completed_generation,
         "last_poll_timestamp":info.last_poll_timestamp,"failure_present":info.history_sync.last_failure.is_some(),
         "rescan_progress":info.rescan_progress,"chain_divergence":info.chain_divergence,
-        "refused_reorg_depth":info.refused_reorg_depth});
+        "refused_reorg_depth":info.refused_reorg_depth,
+        "failure_category":info.history_sync.last_failure.as_ref().map(|failure| oracle_failure_category(&failure.message)),
+        "failure_since":info.history_sync.last_failure.as_ref().map(|failure| failure.since),
+        "failure_last_at":info.history_sync.last_failure.as_ref().map(|failure| failure.last_at),
+        "failure_consecutive":info.history_sync.last_failure.as_ref().map(|failure| failure.consecutive)});
     writeln!(file, "{}", row).map_err(|_| "native_oracle_diagnostic")?;
     file.sync_all().map_err(|_| "native_oracle_diagnostic")
 }
@@ -674,6 +706,18 @@ async fn require_unfunded_config(
 ) -> Result<UnfundedProof> {
     use crate::daemon::{embedded::EmbeddedDaemon, Daemon};
     let chain = identity.cube.network;
+    check(
+        client
+            .get_user()
+            .await
+            .map_err(|_| "native_auth_blocked")?
+            .id
+            == identity.owner_id,
+        "native_account_changed",
+    )?;
+    // Runtime-only credentials: never serialize/debug this clone or replace
+    // the retained public-only daemon configuration.
+    let cfg = oracle_runtime_config(&cfg, chain, client.token())?;
     let started = chrono::Utc::now().timestamp() as u32;
     let daemon = if chain.is_blake2b() {
         EmbeddedDaemon::start_authenticated(cfg, client)
@@ -1101,6 +1145,29 @@ mod tests {
         info.history_sync = cache.snapshot();
         assert_eq!(info.history_sync.addresses_checked, 0);
         assert!(oracle_ready(&info, &identity, 100).unwrap());
+        let diagnostic = tempfile::tempdir().unwrap();
+        let path = diagnostic.path().join("oracle.jsonl");
+        let mut failed = info.clone();
+        failed.history_sync.last_failure = serde_json::from_value(serde_json::json!({
+            "message":"All Esplora providers are temporarily backing off secret-jwt scripthash/private-address",
+            "since":101,"last_at":103,"consecutive":3})).unwrap();
+        oracle_diagnostic(&path, &failed, None).unwrap();
+        assert!(!oracle_ready(&failed, &identity, 100).unwrap());
+        let row = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !row.contains("secret-jwt")
+                && !row.contains("private-address")
+                && !row.contains("scripthash")
+        );
+        let row: serde_json::Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(row["failure_category"], "all_providers_cooling");
+        assert_eq!(row["failure_since"], 101);
+        assert_eq!(row["failure_last_at"], 103);
+        assert_eq!(row["failure_consecutive"], 3);
+        assert_eq!(
+            oracle_failure_category("secret-jwt private-address 429"),
+            "unknown"
+        );
         for case in 0..8 {
             let mut bad = info.clone();
             match case {
@@ -1195,6 +1262,34 @@ mod tests {
         let path = directory.join("daemon.toml");
         let serialized = toml::to_string_pretty(&cfg.for_persistence()).unwrap();
         assert!(!serialized.contains("never_persist_this_token"));
+        let runtime =
+            oracle_runtime_config(&cfg, ChainId::Testnet4, Some("runtime-only-token")).unwrap();
+        assert_eq!(
+            toml::to_string_pretty(&cfg.for_persistence()).unwrap(),
+            serialized
+        );
+        assert!(!toml::to_string_pretty(&cfg)
+            .unwrap()
+            .contains("runtime-only-token"));
+        let expected = installer::connect_esplora_config(ChainId::Testnet4, "runtime-only-token");
+        assert_eq!(
+            runtime.bitcoin_backend,
+            Some(coincubed::config::BitcoinBackend::Esplora(expected))
+        );
+        assert!(oracle_runtime_config(&cfg, ChainId::Testnet4, None).is_err());
+        let mut fork = cfg.clone();
+        fork.bitcoin_config.chain = ChainId::BitcoinBlake2bTestnet4;
+        fork.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
+            installer::connect_esplora_config(ChainId::BitcoinBlake2bTestnet4, "fork-token"),
+        ));
+        let fork_before = toml::to_string(&fork).unwrap();
+        let fork_runtime = oracle_runtime_config(
+            &fork,
+            ChainId::BitcoinBlake2bTestnet4,
+            Some("different-token"),
+        )
+        .unwrap();
+        assert_eq!(toml::to_string(&fork_runtime).unwrap(), fork_before);
         std::fs::write(&path, serialized).unwrap();
         assert!(saved_vault_config(&root, &identity).is_ok());
         assert!(!network.coincubed_data_directory(&original).path().exists());

@@ -1888,6 +1888,47 @@ mod tests {
     }
 
     #[test]
+    fn public_rate_limit_uses_authenticated_backstop_and_all_cooling_stays_unknown() {
+        let mut throttled = StdHashMap::new();
+        throttled.insert("/blocks/tip/height", (429, "capacity".into()));
+        throttled.insert("/blocks", (429, "capacity".into()));
+        let public = mock_esplora(throttled.clone());
+        let mut healthy = StdHashMap::new();
+        healthy.insert("/blocks/tip/height", (200, "2".into()));
+        healthy.insert(
+            "/blocks",
+            (200, blocks_json(&[bitcoin_summary(H2, 2, 1700000000, H1)])),
+        );
+        let backstop = mock_esplora(healthy);
+        let config = crate::config::EsploraConfig {
+            addr: public.base.clone(),
+            token: None,
+            fallback_addr: Some(backstop.base.clone()),
+            fallback_token: Some("localhost-unit-token".into()),
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        };
+        let client = Client::new(&config, Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(client.tip_time().unwrap(), 1700000000);
+        assert!(public
+            .heads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|head| !head.contains("localhost-unit-token")));
+        assert!(backstop.heads.lock().unwrap().iter().any(|head| head
+            .to_ascii_lowercase()
+            .contains("authorization: bearer localhost-unit-token")));
+        let unavailable = mock_esplora(throttled);
+        let failed_config = crate::config::EsploraConfig {
+            fallback_addr: Some(unavailable.base.clone()),
+            ..config
+        };
+        let failed = Client::new(&failed_config, Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(matches!(failed.tip_time(), Err(Error::AllCooling)));
+    }
+
+    #[test]
     fn full_scan_shutdown_stops_address_batches_and_rejects_partial_result() {
         use bdk_electrum::bdk_chain::{local_chain::CheckPoint, BlockId};
         use bitcoin::{
