@@ -1281,20 +1281,34 @@ impl SparkReceive {
         )
     }
 
-    /// The swap's settle confirmations: live from the pending deposits, else
-    /// the last count seen (the deposit leaves that list once claimed).
+    /// The swap's settle confirmations: the count fetched for its pending
+    /// deposit, else the last count seen (by txid before the wallet listed
+    /// the deposit, or before it left that list once claimed), else zero for
+    /// a deposit listed before any count is known.
+    ///
+    /// A deposit the wallet has just listed has no fetched count yet; it must
+    /// not read as zero over a count already seen by txid.
     fn swap_settle_confirmations(&self) -> Option<u32> {
         let flow = self.sideshift_flow.as_ref()?;
         if !flow.settle_output_live() {
             return None;
         }
-        settle_confirmations(
-            flow.settle_hash(),
-            flow.settle_amount_sat(),
+        let (hash, sats) = (flow.settle_hash(), flow.settle_amount_sat());
+        known_settle_confirmations(
+            hash,
+            sats,
             &self.pending_deposits,
             &self.pending_deposit_confirmations,
         )
         .or(flow.last_settle_confirmations())
+        .or_else(|| {
+            settle_confirmations(
+                hash,
+                sats,
+                &self.pending_deposits,
+                &self.pending_deposit_confirmations,
+            )
+        })
     }
 
     /// The swap's settle txid, when its confirmations must be read straight
@@ -1344,7 +1358,7 @@ impl SparkReceive {
         let live = self.sideshift_flow.as_ref().and_then(|flow| {
             flow.settle_output_live()
                 .then(|| {
-                    settle_confirmations(
+                    known_settle_confirmations(
                         flow.settle_hash(),
                         flow.settle_amount_sat(),
                         &self.pending_deposits,
@@ -1407,6 +1421,26 @@ fn settle_confirmations(
         Some(fetched.unwrap_or(0).max(DEPOSIT_MATURITY_CONFIRMATIONS))
     } else {
         Some(fetched.unwrap_or(0))
+    }
+}
+
+/// [`settle_confirmations`], but only when a count is actually known: a
+/// fetched count, or maturity. A deposit listed with no fetched count yet is
+/// `None` here rather than zero, so it can't overwrite a count already seen.
+fn known_settle_confirmations(
+    settle_hash: Option<&str>,
+    settle_amount_sat: Option<u64>,
+    deposits: &[DepositInfo],
+    confirmations: &HashMap<(String, u32), u32>,
+) -> Option<u32> {
+    let deposit = settle_deposit(settle_hash, settle_amount_sat, deposits)?;
+    let fetched = confirmations
+        .get(&(deposit.txid.clone(), deposit.vout))
+        .copied();
+    if deposit.is_mature {
+        Some(fetched.unwrap_or(0).max(DEPOSIT_MATURITY_CONFIRMATIONS))
+    } else {
+        fetched
     }
 }
 
@@ -2218,6 +2252,54 @@ mod tests {
             SparkReceiveMessage::PendingDepositsLoaded(vec![]),
         );
         assert_eq!(panel.swap_settle_confirmations(), Some(1));
+    }
+
+    /// Bugbot on #1229: once the wallet lists the settle deposit, its count
+    /// hasn't been fetched yet. That must not reset a count already read by
+    /// txid, nor store zero over it; a count fetched for the deposit then
+    /// takes over, even a lower one (a reorg).
+    #[test]
+    fn a_newly_listed_settle_deposit_keeps_the_count_read_by_txid() {
+        let mut panel = panel_with_settled_swap("abc123");
+        update(
+            &mut panel,
+            SparkReceiveMessage::SettleConfirmationsUpdated {
+                txid: "abc123".to_string(),
+                confirmations: Some(2),
+            },
+        );
+        assert_eq!(panel.swap_settle_confirmations(), Some(2));
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::PendingDepositsLoaded(vec![deposit("ABC123", 0, false)]),
+        );
+        assert_eq!(panel.swap_settle_confirmations(), Some(2));
+        assert_eq!(
+            panel
+                .sideshift_flow
+                .as_ref()
+                .unwrap()
+                .last_settle_confirmations(),
+            Some(2)
+        );
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::DepositConfirmationsUpdated(HashMap::from([(
+                ("ABC123".to_string(), 0),
+                1,
+            )])),
+        );
+        assert_eq!(panel.swap_settle_confirmations(), Some(1));
+    }
+
+    /// A deposit listed before any count is known still reads "0 of 3".
+    #[test]
+    fn a_listed_settle_deposit_with_no_count_reads_zero() {
+        let mut panel = panel_with_settled_swap("abc123");
+        panel.pending_deposits = vec![deposit("ABC123", 0, false)];
+        assert_eq!(panel.swap_settle_confirmations(), Some(0));
     }
 
     #[test]
