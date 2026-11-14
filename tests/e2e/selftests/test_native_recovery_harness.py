@@ -517,3 +517,47 @@ def test_initial_identity_write_failure_reaps_child_without_action_payload(tmp_p
     assert len(children)==1 and children[0].poll() is not None
     with pytest.raises(ChildProcessError):os.waitpid(children[0].pid,os.WNOHANG)
     assert not marker.exists()
+
+
+@pytest.mark.parametrize('target',['wipe_original','restore','reopen_sign','retire_remote'])
+def test_auth_refresh_failure_does_not_create_lifecycle_intent_and_retry_runs_once(config,tmp_path,monkeypatch,target):
+    calls=offline_protocol(config,tmp_path,monkeypatch)
+    original=native.process;failure=[True];suite=None
+    def worker(executable,request,directory,access_token=None):
+        if request['action']=='refresh_auth' and request['config']['chain']=='testnet4' and failure[0]:
+            records=suite.journal.data['artifacts']['testnet4']
+            next_action=next((action for action in (*native.ACTIONS,'retire_remote') if action not in records),None)
+            if next_action==target:
+                failure[0]=False
+                raise Blocked('UNIT_AUTH_FAILURE','unit auth refresh failed')
+        return original(executable,request,directory,access_token=access_token)
+    monkeypatch.setattr(native,'process',worker)
+    suite=native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    try:
+        with pytest.raises(Blocked,match='unit auth refresh failed'):
+            suite.execute({'tokens':{'access_token':'expired-unit-token'}},1)
+        assert 'pending_native_action' not in suite.journal.data['artifacts']
+        assert ('testnet4',target) not in calls
+        suite.execute({'tokens':{'access_token':'current-unit-token'}},1)
+        assert calls.count(('testnet4',target))==1
+    finally:suite.close()
+
+
+def test_refresh_failure_preserves_real_pending_retirement(config,tmp_path,monkeypatch):
+    offline_protocol(config,tmp_path,monkeypatch,crash_retirement=True)
+    suite=native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    account={'tokens':{'access_token':'unit-token'}}
+    try:
+        with pytest.raises(Blocked):suite.execute(account,1)
+        pending=deepcopy(suite.journal.data['artifacts']['pending_native_action'])
+        original=native.process
+        def fail_refresh(executable,request,directory,access_token=None):
+            if request['action']=='refresh_auth':raise Blocked('UNIT_AUTH_FAILURE','unit auth refresh failed')
+            return original(executable,request,directory,access_token=access_token)
+        monkeypatch.setattr(native,'process',fail_refresh)
+        with pytest.raises(Blocked,match='unit auth refresh failed'):suite.execute(account,1)
+        assert suite.journal.data['artifacts']['pending_native_action']==pending
+        monkeypatch.setattr(native,'process',original)
+        suite.execute(account,1)
+        assert 'pending_native_action' not in suite.journal.data['artifacts']
+    finally:suite.close()

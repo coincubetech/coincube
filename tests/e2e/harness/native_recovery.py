@@ -504,10 +504,10 @@ class NativeRecovery:
                 if self.journal.data['artifacts'].get('pending_native_action'):
                     raise Blocked('NATIVE_RECOVERY_UNCERTAIN', 'A native action has uncertain outcome; preserve the sealed fixture and reconcile it.')
                 require(source(self.config) == self.binding and hashlib.sha256(executable.read_bytes()).hexdigest() == receipt['sha256'], 'BUILD_CHANGED')
-                self.journal.artifact('pending_native_action', {'chain': chain, 'action': action, 'config_sha256': digest(config)})
                 if action in ('wipe_original', 'restore', 'reopen_sign'):
                     checked_process(self.config, self.binding, executable, receipt, {'action': 'refresh_auth', 'config': config}, self.directory,
                                     access_token=account['tokens']['access_token'])
+                self.journal.artifact('pending_native_action', {'chain': chain, 'action': action, 'config_sha256': digest(config)})
                 record = checked_process(self.config, self.binding, executable, receipt, {'action': action, 'config': config}, self.directory,
                                  access_token=account['tokens']['access_token'] if action == 'bind_auth' else None)
                 records[action] = record
@@ -531,9 +531,9 @@ class NativeRecovery:
             records['proof'] = proof; records['state_sha256'] = hashlib.sha256(private_read(case / 'state.json')).hexdigest()
             self.journal.save()
             if 'retire_remote' not in records:
-                self.journal.artifact('pending_native_action', {'chain': chain, 'action': 'retire_remote', 'config_sha256': digest(config)})
                 checked_process(self.config, self.binding, executable, receipt, {'action': 'refresh_auth', 'config': config}, self.directory,
                                 access_token=account['tokens']['access_token'])
+                self.journal.artifact('pending_native_action', {'chain': chain, 'action': 'retire_remote', 'config_sha256': digest(config)})
                 records['retire_remote'] = checked_process(self.config, self.binding, executable, receipt, {'action': 'retire_remote', 'config': config}, self.directory)
                 retired = json.loads(private_read(case / 'state.json'))
                 require(retired['stage'] == 'retired_unfunded' and retired['pending'] is None and retired['proof_sha256'] == proof['psbt_sha256'], 'RETIREMENT')
