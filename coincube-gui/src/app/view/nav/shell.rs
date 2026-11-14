@@ -1068,9 +1068,17 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         .height(Length::Fill);
     // The menu covers the rows below it rather than pushing them down.
     if state.switcher_open {
-        sidebar = sidebar.push(Floating::new(
-            container(switcher_menu(ctx, state)).padding([0, 8]),
-        ));
+        // Escape belongs to the menu while it is open, so a page underneath
+        // that also answers Escape (a payment result) keeps its screen.
+        sidebar = sidebar.push(
+            Floating::new(container(switcher_menu(ctx, state)).padding([0, 8])).on_escape(
+                if state.lock_confirmation {
+                    Message::CancelCubeLock
+                } else {
+                    Message::ToggleCubeSwitcher
+                },
+            ),
+        );
     }
     sidebar = sidebar
         .push(top)

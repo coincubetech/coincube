@@ -60,6 +60,20 @@ fn paid_to(psbt: &Psbt, script: &ScriptBuf) -> Amount {
 /// Construct a `form::Value<String>` at the default Transfer feerate. Used on
 /// `GlobalHome::new`, and on every flow reset so a value (or stuck loading
 /// flag) from a prior transfer doesn't leak into the next flow.
+/// `settings` with this Cube's stored Spark conversion set to `record`. A Cube
+/// missing from the file leaves it unchanged: a settings updater that returns
+/// `None` would delete the file (see `settings::update_settings_file`).
+fn with_pending_spark_shift(
+    mut settings: settings::Settings,
+    cube_id: &str,
+    record: Option<settings::PendingSparkShift>,
+) -> settings::Settings {
+    if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+        cube.pending_spark_shift = record;
+    }
+    settings
+}
+
 fn default_transfer_feerate() -> form::Value<String> {
     form::Value {
         value: DEFAULT_TRANSFER_FEERATE_SATS_VB.to_string(),
@@ -545,6 +559,10 @@ pub struct GlobalHome {
     /// `SwapSettledAwaitingArrival`, and reset wherever `pending_spark_incoming`
     /// is cleared or replaced so it can never leak onto a transfer's claim.
     pending_spark_incoming_is_swap: bool,
+    /// The Cube's stored Spark cross-network receive has been read back and
+    /// handed to the Spark Receive panel this session. Once is enough: after
+    /// that the panel holds the shift and keeps the record current.
+    spark_shift_restore_requested: bool,
     /// Prepared Spark send handle, populated on step 1→2 for Spark-sourced
     /// transfers (SparkToVault, SparkToLiquid). Consumed by `ConfirmSparkSend`.
     spark_send_handle: Option<String>,
@@ -709,6 +727,7 @@ impl GlobalHome {
             pending_spark_incoming_swap_id: None,
             pending_spark_deposit_seen: false,
             pending_spark_incoming_is_swap: false,
+            spark_shift_restore_requested: false,
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
@@ -804,6 +823,7 @@ impl GlobalHome {
             pending_spark_incoming_swap_id: None,
             pending_spark_deposit_seen: false,
             pending_spark_incoming_is_swap: false,
+            spark_shift_restore_requested: false,
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
@@ -3158,6 +3178,9 @@ impl State for GlobalHome {
                         self.pending_usdt_receive_sats = usdt_receive_sats;
                         Task::none()
                     }
+                    HomeMessage::StoreSparkShift(record) => {
+                        self.store_pending_spark_shift(record.as_deref().cloned())
+                    }
                     HomeMessage::SwapSettledAwaitingArrival { amount_sat } => {
                         // A SideShift swap just settled: bitcoin is en route to the
                         // Spark wallet's static on-chain deposit address.
@@ -4163,6 +4186,7 @@ impl State for GlobalHome {
         if let Some(spark) = self.load_spark_balance() {
             tasks.push(spark);
         }
+        tasks.push(self.restore_pending_spark_shift());
         Task::batch(tasks)
     }
 }
@@ -5123,6 +5147,62 @@ impl GlobalHome {
                     log::warn!("Failed to clear pending liquid->vault transfer: {}", e);
                 }
                 Message::Tick
+            },
+        )
+    }
+
+    /// Store or clear the Cube's live Spark cross-network receive
+    /// ([`settings::CubeSettings::pending_spark_shift`]).
+    fn store_pending_spark_shift(
+        &self,
+        record: Option<settings::PendingSparkShift>,
+    ) -> Task<Message> {
+        let network_dir = self.datadir_path.network_directory(self.network);
+        let cube_id = self.cube_id.clone();
+        Task::perform(
+            async move {
+                settings::update_settings_file(&network_dir, move |current| {
+                    Some(with_pending_spark_shift(current, &cube_id, record))
+                })
+                .await
+            },
+            |res| {
+                if let Err(e) = res {
+                    log::warn!("Failed to store the pending Spark conversion: {}", e);
+                }
+                Message::Tick
+            },
+        )
+    }
+
+    /// Read the Cube's stored Spark cross-network receive, once a session, and
+    /// hand it to the Spark Receive panel. Mainnet only, as conversions are,
+    /// and only with a Spark wallet to receive into; elsewhere the record is
+    /// left alone for a build or network that can use it.
+    fn restore_pending_spark_shift(&mut self) -> Task<Message> {
+        if self.spark_shift_restore_requested
+            || self.spark_backend.is_none()
+            || !matches!(self.network, crate::chain::ChainId::Bitcoin)
+        {
+            return Task::none();
+        }
+        self.spark_shift_restore_requested = true;
+        let network_dir = self.datadir_path.network_directory(self.network);
+        let cube_id = self.cube_id.clone();
+        Task::perform(
+            async move {
+                settings::Settings::from_file(&network_dir)
+                    .ok()?
+                    .cubes
+                    .into_iter()
+                    .find(|c| c.id == cube_id)?
+                    .pending_spark_shift
+            },
+            |record| match record {
+                Some(record) => Message::View(view::Message::SparkSideshiftReceive(
+                    view::SparkSideshiftReceiveMessage::Restore(Box::new(record)),
+                )),
+                None => Message::Tick,
             },
         )
     }
@@ -8349,5 +8429,54 @@ mod tests {
             let _ = shown.update(None, &cache, restored());
             assert!(overview(&shown).contains("Pending deposit"));
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_spark_shift_tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
+
+    fn file(ids: &[&str]) -> settings::Settings {
+        settings::Settings {
+            cubes: ids
+                .iter()
+                .map(|id| {
+                    settings::CubeSettings::new_with_raw_id(
+                        id.to_string(),
+                        id.to_string(),
+                        Network::Bitcoin,
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn storing_a_conversion_touches_only_its_own_cube() {
+        let record = settings::PendingSparkShift::sample();
+        let stored = with_pending_spark_shift(file(&["a", "b"]), "b", Some(record.clone()));
+        assert_eq!(stored.cubes[0].pending_spark_shift, None);
+        assert_eq!(stored.cubes[1].pending_spark_shift, Some(record));
+
+        let cleared = with_pending_spark_shift(stored, "b", None);
+        assert!(cleared
+            .cubes
+            .iter()
+            .all(|c| c.pending_spark_shift.is_none()));
+    }
+
+    /// A Cube missing from the file (removed since) must leave the file as it
+    /// was: an updater that gave up would delete every Cube on the network.
+    #[test]
+    fn storing_for_a_missing_cube_keeps_the_file() {
+        let stored = with_pending_spark_shift(
+            file(&["a"]),
+            "gone",
+            Some(settings::PendingSparkShift::sample()),
+        );
+        assert_eq!(stored.cubes.len(), 1);
+        assert_eq!(stored.cubes[0].pending_spark_shift, None);
     }
 }

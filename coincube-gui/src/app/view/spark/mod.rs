@@ -326,6 +326,9 @@ pub enum SparkOverviewMessage {
     /// The US Dollar row's Receive: Spark's Receive with USDB sent and
     /// received.
     ReceiveUsdb,
+    /// The "conversion in progress" notice: open Spark's Receive on the
+    /// cross-network conversion.
+    ViewConversion,
     History,
     SelectTransaction(String),
     /// Use the existing Spark Settings handler for an in-place landing toggle.
@@ -461,6 +464,8 @@ pub enum SparkSendMessage {
     /// prepared/sent state. Fired from the "Send another" / "Try
     /// again" / "Cancel" buttons.
     Reset,
+    /// The sent receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU SEND card — BTC sats plus the Stable
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
@@ -569,6 +574,9 @@ pub enum SparkReceiveMessage {
     /// Picked a cross-network asset (by `DepositOption` key) in the picker —
     /// launches the SideShift flow pre-selected to that asset. Mainnet only.
     SelectSenderCrossNetwork(String),
+    /// Bring back the cross-network conversion that was set aside when
+    /// another rail was picked mid-shift (the "Conversion in progress" notice).
+    ShowConversion,
     AmountInputChanged(String),
     DescriptionInputChanged(String),
     GenerateRequested,
@@ -641,6 +649,8 @@ pub enum SparkReceiveMessage {
         confirmations: Option<u32>,
     },
     Reset,
+    /// The received receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU RECEIVE card — BTC sats plus the
     /// Stable Balance snapshot, folded into a unified total by the handler.
     /// `None` when `get_info` failed; the card keeps its last value.

@@ -371,6 +371,14 @@ impl State for SparkOverview {
                 view::SparkOverviewMessage::ReceiveUsdb => {
                     return receive_into(coincube_spark_protocol::WalletAsset::Usdb);
                 }
+                view::SparkOverviewMessage::ViewConversion => {
+                    return Task::batch(vec![
+                        redirect(Menu::Spark(SparkSubMenu::Receive)),
+                        Task::done(Message::View(view::Message::SparkReceive(
+                            view::SparkReceiveMessage::ShowConversion,
+                        ))),
+                    ]);
+                }
                 view::SparkOverviewMessage::History => {
                     return redirect(Menu::Spark(SparkSubMenu::Transactions(None)));
                 }

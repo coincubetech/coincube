@@ -30,7 +30,7 @@ cold loader (`9e9a1f25995b4be9a6ab188240a2bf92d5f3209b` ancestor); otherwise
 preflight is BLOCKED before credentials or fixtures. Do not cherry-pick or
 silently bypass this dependency. An explicitly reviewed unpublished integration
 candidate must be identified as such; it cannot establish primary-branch live
-acceptance. The current source has not completed a live full-kit run.
+acceptance. A source-bound offline test or native helper build alone is never live full-kit acceptance.
 
 New `workstation.example.json` enables `native_recovery`. The fresh mobile
 pipeline performs read-only native source/dependency preflight in environment,
@@ -41,7 +41,7 @@ branch it revalidates the same completed run-bound native proof, blocking faucet
 missing prerequisites, malformed evidence or native failure. Historical configs
 without this field preserve their original fifteen stages and record
 `legacy_mobile_only`; they do not gain full Recovery Kit coverage retroactively.
-The new native proof is version1 and bound to the exact mobile consumer, source,
+The new native lifecycle proof is version1 and bound to the exact mobile consumer, source,
 helper hash and both chains. No existing strict stage or cleanup proof is weakened.
 
 ## Product lifecycle and isolation
@@ -63,6 +63,16 @@ it never loads the original PIN, old seed files or quarantined original factor.
 The signing process loads only the new PIN, never the recovery password/old
 factor. These are enforced signed-program role boundaries on one host, **not a
 claim of a separate OS user, sandbox or fresh physical device**.
+
+The oracle requires a real committed full-scan generation and a fresh poll.
+Running address counters return to zero after completion and do not prove
+coverage. A fresh startup full scan may satisfy the baseline; a synced database
+requests a new full scan from the actual admitted chain's genesis time through
+the normal rescan guard. No projected Bitcoin genesis or epoch-zero date is used.
+The scan keeps the product gap of 200, with an in-memory one-second integration
+poll interval and a bounded 540-second wait (660-second child timeout). Sanitized
+private progress records show chain/sync/scan generations/failure presence, not
+keys or backend error bodies. Unknown/funded state remains BLOCKED.
 
 Before wiping, the original process must have exited (PID plus kernel start
 identity), the sealed creation provenance/tree must still match, and the real
@@ -142,6 +152,37 @@ block. There is no global atomic graph snapshot; concurrent changes remain a
 backend/TOCTOU limitation, so only this fresh private unfunded fixture is eligible.
 The local full kit, profiles, credential handles, factors/quarantine and public
 proofs remain intact. Personal keys, mobile keys and QA funding sources are untouched.
+
+Future fixtures retain exact per-file inventory rows under the protected origin
+binding. Historical source 215 stored only an aggregate digest; those missing
+historical rows are never reconstructed or represented as verified.
+
+`--retire-orphan-215-from /private/old-run` and
+`--orphan-215-helper /private/archive/RecoveryNative.app/Contents/MacOS/recovery_kit_native`
+provide one explicit remote-only route for the reviewed source 215/helper pair.
+It accepts only that origin's exported, pending-prewipe fixture and takes both
+old leases. It checks the protected origin binding, current owner, full kit
+ciphertexts/root/descriptor/chain, retained factor and no restore/quarantine.
+It snapshots the CURRENT whole old file tree and protected item audits, then
+checks them unchanged before DELETE and afterward. PIN audit digests use HMAC
+keyed by the retained high-entropy factor, never an unsalted four-digit PIN hash.
+Old files, pending journal, factors and auth item remain unchanged. Only a new
+auth scope is updated.
+
+The orphan oracle creates an initially absent descriptor-only database from the
+validated kit: it imports no old database, seed or factor. Actual configured and
+global QA funding-source protections hold the funding registry lease through the
+operation. The normal native sharing/key/Vault/pending guards are reused and
+freshened before the single DELETE. Add-only consumer and DELETE claims bind the
+exact old remote ID/UUID/source/kit; a first 404 never manufactures intent. The
+result says only remote metadata retired, local recovery retained, old flow
+BLOCKED, native acceptance false. A separate normal fresh suite must still prove
+both full lifecycles. No orphan result can satisfy a signing/GUI/funding stage.
+
+Each child PID and kernel start identity is durably recorded before request
+input/wait, including failed children. Pending backend actions refresh only the
+exact auth item after checking the current token's owner; completed lifecycle
+proof revalidation remains read-only and does not refresh auth.
 
 Actions journal intent before effects. Only a previously durable DELETE-started intent can reconcile
 an already absent remote Cube; a first 404 without that intent is BLOCKED. Other interrupted actions stay BLOCKED with all
