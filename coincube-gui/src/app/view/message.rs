@@ -1751,6 +1751,9 @@ pub enum ConnectAccountMessage {
         epoch: u64,
     },
     PlanLoaded(Option<crate::services::coincube::ConnectPlan>, u64),
+    /// A billing plan reload: session generation, then reload sequence
+    /// (only the newest applies).
+    PlanReloaded(Option<crate::services::coincube::ConnectPlan>, u64, u64),
     /// Lightweight Account Overview counts (contacts, cubes), fetched on
     /// entering the Overview tab. Each is `None` when its fetch failed —
     /// the row simply hides rather than surfacing an error. Carries
