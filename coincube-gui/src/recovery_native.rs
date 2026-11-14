@@ -497,7 +497,8 @@ pub fn oracle_failure_category(message: &str) -> &'static str {
         return match status {
             401 | 403 => "http_authorization",
             404 => "http_not_found",
-            402 | 429 => "http_rate_limit",
+            402 => "http_payment_required",
+            429 => "http_rate_limit",
             400..=499 => "http_4xx",
             500..=599 => "http_5xx",
             _ => "unknown",
@@ -545,6 +546,7 @@ fn oracle_runtime_config(
         let token = token
             .filter(|token| !token.is_empty())
             .ok_or("native_auth_blocked")?;
+        runtime.set_native_recovery_pacing(std::time::Duration::from_millis(1200))?;
         runtime.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
             installer::connect_esplora_config(ChainId::Testnet4, token),
         ));
@@ -775,7 +777,7 @@ async fn require_unfunded_config(
             .map_err(|_| "native_unfunded_backend_blocked")?
     };
     let result = async {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1200);
         let mut requested = None;
         let mut after_generation = None;
         loop {
@@ -1364,6 +1366,14 @@ mod tests {
         assert!(!toml::to_string_pretty(&cfg)
             .unwrap()
             .contains("runtime-only-token"));
+        assert!(!toml::to_string(&runtime).unwrap().contains("pacing"));
+        let mut invalid = cfg.clone();
+        assert!(invalid
+            .set_native_recovery_pacing(std::time::Duration::ZERO)
+            .is_err());
+        assert!(invalid
+            .set_native_recovery_pacing(std::time::Duration::from_secs(3))
+            .is_err());
         let expected = installer::connect_esplora_config(ChainId::Testnet4, "runtime-only-token");
         assert_eq!(
             runtime.bitcoin_backend,
@@ -1375,6 +1385,9 @@ mod tests {
         fork.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
             installer::connect_esplora_config(ChainId::BitcoinBlake2bTestnet4, "fork-token"),
         ));
+        assert!(fork
+            .set_native_recovery_pacing(std::time::Duration::from_millis(75))
+            .is_err());
         let fork_before = toml::to_string(&fork).unwrap();
         let fork_runtime = oracle_runtime_config(
             &fork,
