@@ -292,6 +292,168 @@ fn non_empty(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn vault_entry_label(tx: &HistoryTransaction) -> (LabelItem, Option<String>) {
+    // The title reads the single payment's label before the txid's, so
+    // an edit is stored where the title will read it back.
+    // Edit the key the title reads: the payment's own label, else the
+    // transaction's, else (nothing stored yet) the payment's.
+    let has = |key: &str| tx.labels.get(key).is_some_and(|label| !label.is_empty());
+    let label_key = match tx.is_single_payment() {
+        Some(outpoint) if has(&outpoint.to_string()) || !has(&tx.txid.to_string()) => {
+            LabelItem::OutPoint(outpoint)
+        }
+        _ => LabelItem::Txid(tx.txid),
+    };
+    let label = tx
+        .is_single_payment()
+        .and_then(|outpoint| tx.labels.get(&outpoint.to_string()))
+        .or_else(|| tx.labels.get(&tx.txid.to_string()))
+        .filter(|label| !label.is_empty())
+        .cloned();
+    (label_key, label)
+}
+
+fn spark_route_presentation(
+    method: &str,
+    received: bool,
+    address: &Option<String>,
+    invoice: &Option<String>,
+    ticker: &str,
+) -> (&'static str, String, &'static str) {
+    match (method, received) {
+        ("lightning", false) => (
+            "Spark → Lightning",
+            match (address, invoice) {
+                (Some(address), _) => format!("Lightning address · {address}"),
+                (None, Some(invoice)) => {
+                    format!("Lightning invoice · {}", short_identifier(invoice))
+                }
+                (None, None) => "Lightning payment".to_owned(),
+            },
+            "payment settled",
+        ),
+        ("lightning", true) => (
+            "Lightning → Spark",
+            "Lightning invoice paid".to_owned(),
+            "payment received",
+        ),
+        ("deposit", _) => (
+            "Bitcoin on-chain → Spark deposit",
+            "Bitcoin deposit".to_owned(),
+            "claimed into Spark",
+        ),
+        ("withdraw", _) => (
+            "Spark → Bitcoin on-chain",
+            "Bitcoin withdrawal".to_owned(),
+            "sent on-chain",
+        ),
+        ("token", true) => ("Spark token", format!("Received {ticker}"), "received"),
+        ("token", false) => ("Spark token", format!("Sent {ticker}"), "sent"),
+        (_, true) => (
+            "Spark",
+            "Received on Spark".to_owned(),
+            "received instantly",
+        ),
+        (_, false) => ("Spark", "Sent on Spark".to_owned(), "sent instantly"),
+    }
+}
+
+fn spark_conversion_presentation(
+    conversion: &coincube_spark_protocol::PaymentConversionSummary,
+    token_amount: Option<u64>,
+) -> (&'static str, String, StatusFilter) {
+    use coincube_spark_protocol::SwapStatus;
+    let to_usdb = token_amount.is_some();
+    // Only a completed conversion is "Converted": one still
+    // settling, or one that failed, says so, as the Swap
+    // screen's result does.
+    let title = match conversion.status {
+        SwapStatus::RefundNeeded | SwapStatus::Refunded => localized_copy("Swap refund"),
+        SwapStatus::Failed => localized_copy("Conversion didn't go through"),
+        SwapStatus::Pending if to_usdb => localized_copy("Converting to USDB"),
+        SwapStatus::Pending => localized_copy("Converting to bitcoin"),
+        SwapStatus::Completed if to_usdb => localized_copy("Converted to USDB"),
+        SwapStatus::Completed => localized_copy("Converted to bitcoin"),
+    };
+    let status = match conversion.status {
+        SwapStatus::Completed => StatusFilter::Confirmed,
+        SwapStatus::Pending => StatusFilter::Pending,
+        SwapStatus::Failed | SwapStatus::RefundNeeded | SwapStatus::Refunded => {
+            StatusFilter::Failed
+        }
+    };
+    ("Spark · BTC ⇄ USDB", title.to_owned(), status)
+}
+
+fn spark_entry_facts(
+    payment: &PaymentSummary,
+    conversion: Option<&coincube_spark_protocol::PaymentConversionSummary>,
+    received: bool,
+    invoice: &Option<String>,
+    description: &Option<String>,
+    identifiers: &[Fact],
+) -> Vec<Fact> {
+    let mut facts = Vec::new();
+    if let Some(amounts) = conversion.and_then(|conversion| conversion.amounts) {
+        facts.push((
+            if received {
+                "Conversion"
+            } else {
+                "Paid from USDB"
+            },
+            conversion_amounts(amounts, payment.token_decimals.unwrap_or(6)),
+        ));
+    }
+    if let Some(invoice) = invoice {
+        facts.push(("Invoice", short_identifier(invoice)));
+    }
+    if let Some(description) = description {
+        facts.push(("Description", description.clone()));
+    }
+    if identifiers.iter().all(|(name, _)| *name != "Payment ID") {
+        facts.push(("Payment ID", payment.id.clone()));
+    }
+    facts
+}
+
+fn liquid_entry_amount(payment: &DomainPayment) -> (String, String, String) {
+    match &payment.details {
+        DomainPaymentDetails::LiquidAsset {
+            asset_id,
+            asset_info,
+            ..
+        } => {
+            let usdt = asset_id == USDT_ASSET_ID_MAINNET;
+            match asset_info {
+                Some(info) => (
+                    format_token_display(info.amount_minor, u32::from(info.precision)),
+                    if usdt { "USDt" } else { asset_id.as_str() }.to_owned(),
+                    if usdt {
+                        "USDt on Liquid".to_owned()
+                    } else {
+                        asset_id.clone()
+                    },
+                ),
+                None if usdt => (
+                    format_usdt_display(payment.amount_sat),
+                    "USDt".to_owned(),
+                    "USDt on Liquid".to_owned(),
+                ),
+                None => (
+                    grouped(payment.amount_sat),
+                    format!("base units · {asset_id}"),
+                    asset_id.clone(),
+                ),
+            }
+        }
+        _ => (
+            grouped(payment.amount_sat),
+            "SATS".to_owned(),
+            "L-BTC".to_owned(),
+        ),
+    }
+}
+
 impl Entry {
     fn display_title(&self) -> &str {
         if self.generated_vault_title {
@@ -315,23 +477,7 @@ impl Entry {
         } else {
             tx.outgoing_amount
         };
-        // The title reads the single payment's label before the txid's, so
-        // an edit is stored where the title will read it back.
-        // Edit the key the title reads: the payment's own label, else the
-        // transaction's, else (nothing stored yet) the payment's.
-        let has = |key: &str| tx.labels.get(key).is_some_and(|label| !label.is_empty());
-        let label_key = match tx.is_single_payment() {
-            Some(outpoint) if has(&outpoint.to_string()) || !has(&tx.txid.to_string()) => {
-                LabelItem::OutPoint(outpoint)
-            }
-            _ => LabelItem::Txid(tx.txid),
-        };
-        let label = tx
-            .is_single_payment()
-            .and_then(|outpoint| tx.labels.get(&outpoint.to_string()))
-            .or_else(|| tx.labels.get(&tx.txid.to_string()))
-            .filter(|label| !label.is_empty())
-            .cloned();
+        let (label_key, label) = vault_entry_label(&tx);
         let generated_vault_title = label.is_none();
         let title = label.unwrap_or_else(|| {
             match direction {
@@ -466,42 +612,13 @@ impl Entry {
         let address = non_empty(details.lightning_address.as_deref());
         let tx_id = non_empty(details.tx_id.as_deref());
         let ticker = payment.token_ticker.as_deref().unwrap_or("token");
-        let (rail, fallback_title, status_note) = match (payment.method.as_str(), received) {
-            ("lightning", false) => (
-                "Spark → Lightning",
-                match (&address, &invoice) {
-                    (Some(address), _) => format!("Lightning address · {address}"),
-                    (None, Some(invoice)) => {
-                        format!("Lightning invoice · {}", short_identifier(invoice))
-                    }
-                    (None, None) => "Lightning payment".to_owned(),
-                },
-                "payment settled",
-            ),
-            ("lightning", true) => (
-                "Lightning → Spark",
-                "Lightning invoice paid".to_owned(),
-                "payment received",
-            ),
-            ("deposit", _) => (
-                "Bitcoin on-chain → Spark deposit",
-                "Bitcoin deposit".to_owned(),
-                "claimed into Spark",
-            ),
-            ("withdraw", _) => (
-                "Spark → Bitcoin on-chain",
-                "Bitcoin withdrawal".to_owned(),
-                "sent on-chain",
-            ),
-            ("token", true) => ("Spark token", format!("Received {ticker}"), "received"),
-            ("token", false) => ("Spark token", format!("Sent {ticker}"), "sent"),
-            (_, true) => (
-                "Spark",
-                "Received on Spark".to_owned(),
-                "received instantly",
-            ),
-            (_, false) => ("Spark", "Sent on Spark".to_owned(), "sent instantly"),
-        };
+        let (rail, fallback_title, status_note) = spark_route_presentation(
+            payment.method.as_str(),
+            received,
+            &address,
+            &invoice,
+            ticker,
+        );
         let (amount, unit) = if let Some(minor) = payment.token_amount {
             (
                 format_token_display(minor, payment.token_decimals.unwrap_or(0)),
@@ -546,54 +663,18 @@ impl Entry {
         let conversion = details.conversion.as_ref();
         let converted = conversion.filter(|_| received);
         let (rail, fallback_title, status) = match converted {
-            Some(conversion) => {
-                use coincube_spark_protocol::SwapStatus;
-                let to_usdb = payment.token_amount.is_some();
-                // Only a completed conversion is "Converted": one still
-                // settling, or one that failed, says so, as the Swap
-                // screen's result does.
-                let title = match conversion.status {
-                    SwapStatus::RefundNeeded | SwapStatus::Refunded => {
-                        localized_copy("Swap refund")
-                    }
-                    SwapStatus::Failed => localized_copy("Conversion didn't go through"),
-                    SwapStatus::Pending if to_usdb => localized_copy("Converting to USDB"),
-                    SwapStatus::Pending => localized_copy("Converting to bitcoin"),
-                    SwapStatus::Completed if to_usdb => localized_copy("Converted to USDB"),
-                    SwapStatus::Completed => localized_copy("Converted to bitcoin"),
-                };
-                let status = match conversion.status {
-                    SwapStatus::Completed => StatusFilter::Confirmed,
-                    SwapStatus::Pending => StatusFilter::Pending,
-                    SwapStatus::Failed | SwapStatus::RefundNeeded | SwapStatus::Refunded => {
-                        StatusFilter::Failed
-                    }
-                };
-                ("Spark · BTC ⇄ USDB", title.to_owned(), status)
-            }
+            Some(conversion) => spark_conversion_presentation(conversion, payment.token_amount),
             None => (rail, fallback_title, status),
         };
         let description = non_empty(payment.description.as_deref());
-        let mut facts = Vec::new();
-        if let Some(amounts) = conversion.and_then(|conversion| conversion.amounts) {
-            facts.push((
-                if received {
-                    "Conversion"
-                } else {
-                    "Paid from USDB"
-                },
-                conversion_amounts(amounts, payment.token_decimals.unwrap_or(6)),
-            ));
-        }
-        if let Some(invoice) = &invoice {
-            facts.push(("Invoice", short_identifier(invoice)));
-        }
-        if let Some(description) = &description {
-            facts.push(("Description", description.clone()));
-        }
-        if identifiers.iter().all(|(name, _)| *name != "Payment ID") {
-            facts.push(("Payment ID", payment.id.clone()));
-        }
+        let facts = spark_entry_facts(
+            &payment,
+            conversion,
+            received,
+            &invoice,
+            &description,
+            &identifiers,
+        );
         let rail_details = match payment.method.as_str() {
             "lightning" => Some(("Lightning details", facts)),
             "deposit" | "withdraw" => Some(("On-chain details", facts)),
@@ -680,41 +761,7 @@ impl Entry {
             DomainPaymentStatus::RefundPending => "Refund pending",
             DomainPaymentStatus::WaitingFeeAcceptance => "Awaiting fee",
         };
-        let (amount, unit, asset) = match &payment.details {
-            DomainPaymentDetails::LiquidAsset {
-                asset_id,
-                asset_info,
-                ..
-            } => {
-                let usdt = asset_id == USDT_ASSET_ID_MAINNET;
-                match asset_info {
-                    Some(info) => (
-                        format_token_display(info.amount_minor, u32::from(info.precision)),
-                        if usdt { "USDt" } else { asset_id.as_str() }.to_owned(),
-                        if usdt {
-                            "USDt on Liquid".to_owned()
-                        } else {
-                            asset_id.clone()
-                        },
-                    ),
-                    None if usdt => (
-                        format_usdt_display(payment.amount_sat),
-                        "USDt".to_owned(),
-                        "USDt on Liquid".to_owned(),
-                    ),
-                    None => (
-                        grouped(payment.amount_sat),
-                        format!("base units · {asset_id}"),
-                        asset_id.clone(),
-                    ),
-                }
-            }
-            _ => (
-                grouped(payment.amount_sat),
-                "SATS".to_owned(),
-                "L-BTC".to_owned(),
-            ),
-        };
+        let (amount, unit, asset) = liquid_entry_amount(&payment);
         let (rail, details_title) = match &payment.details {
             DomainPaymentDetails::Lightning { .. } => ("Lightning on Liquid", "Lightning details"),
             DomainPaymentDetails::OnChainBitcoin { .. } => ("Bitcoin swap", "Swap details"),
