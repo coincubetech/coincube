@@ -316,8 +316,9 @@ impl SparkReceive {
 
     /// A shift read back from the Cube's settings at unlock. Ignored when this
     /// session already has a live one (the record is that same shift). It goes
-    /// on screen unless another flow is there, in which case it is set aside
-    /// behind the notice.
+    /// on screen, replacing a flow that has no shift yet (one the user opened
+    /// before the read finished): flow messages reach the on-screen flow first,
+    /// so a restored shift parked behind it would never hear its own.
     fn restore_shift(&mut self, record: &crate::app::settings::PendingSparkShift) -> Task<Message> {
         if self.live_shift().is_some() || self.parked_shift.is_some() {
             return Task::none();
@@ -330,11 +331,7 @@ impl SparkReceive {
             return super::sideshift_receive::store_record(None);
         };
         let poll = flow.poll_now();
-        if self.sideshift_flow.is_none() {
-            self.sideshift_flow = Some(flow);
-        } else {
-            self.parked_shift = Some(flow);
-        }
+        self.sideshift_flow = Some(flow);
         poll
     }
 }
@@ -2737,5 +2734,25 @@ mod tests {
         assert!(panel.sideshift_flow.is_none());
         assert!(panel.parked_shift.is_none());
         assert_eq!(panel.conversion_summary(), None);
+    }
+
+    /// The settings read behind a restore can finish after the user opened a
+    /// conversion of their own; one with no shift yet gives way to the
+    /// restored shift, which must hear its own polls.
+    #[test]
+    fn a_restore_replaces_a_conversion_that_has_no_shift_yet() {
+        let record = crate::app::settings::PendingSparkShift::sample();
+        let mut panel = backed_panel();
+        let key = crate::services::sideshift::deposit_options()[0].key();
+        update_with_cache(
+            &mut panel,
+            &mainnet(),
+            SparkReceiveMessage::SelectSenderCrossNetwork(key),
+        );
+        assert!(shown_shift_id(&panel).is_none());
+
+        restore(&mut panel, record.clone());
+        assert_eq!(shown_shift_id(&panel), Some(record.shift.id.as_str()));
+        assert!(panel.parked_shift.is_none());
     }
 }
