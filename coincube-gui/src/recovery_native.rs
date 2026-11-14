@@ -480,13 +480,58 @@ pub struct UnfundedProof {
     pub known_coin_count: u64,
 }
 fn oracle_failure_category(message: &str) -> &'static str {
+    // Match only known error variants/markers and emit static labels. Never
+    // copy upstream bodies, URLs, addresses, credentials or numeric payloads.
     if message.contains("All Esplora providers are temporarily backing off") {
-        "all_providers_cooling"
-    } else if message.contains("Esplora scan aborted") {
-        "scan_aborted"
-    } else {
-        "unknown"
+        return "all_providers_cooling";
     }
+    if message.contains("Esplora scan aborted") {
+        return "scan_aborted";
+    }
+    if let Some(status) = message
+        .split("HttpResponse { status: ")
+        .nth(1)
+        .and_then(|tail| tail.split(',').next())
+        .and_then(|status| status.parse::<u16>().ok())
+    {
+        return match status {
+            401 | 403 => "http_authorization",
+            404 => "http_not_found",
+            402 | 429 => "http_rate_limit",
+            400..=499 => "http_4xx",
+            500..=599 => "http_5xx",
+            _ => "unknown",
+        };
+    }
+    for (marker, category) in [
+        ("SerdeJsonError(", "json_schema"),
+        ("IoError(", "transport_io"),
+        ("RustlsCreateConnection(", "transport_tls"),
+        ("MalformedChunkLength", "http_framing"),
+        ("MalformedChunkEnd", "http_framing"),
+        ("MalformedContentLength", "http_framing"),
+        ("HeadersOverflow", "http_framing"),
+        ("StatusLineOverflow", "http_framing"),
+        ("InvalidUtf8InResponse", "http_framing"),
+        ("InvalidUtf8InBody(", "response_encoding"),
+        ("Parsing(", "response_parsing"),
+        ("BitcoinEncoding(", "bitcoin_encoding"),
+        ("HexToArray(", "hex_encoding"),
+        ("HexToBytes(", "hex_encoding"),
+        ("HeaderHeightNotFound(", "header_height_missing"),
+        ("HeaderHashNotFound(", "header_hash_missing"),
+        ("GenesisHashMismatch(", "genesis_mismatch"),
+        ("Genesis hash mismatch.", "genesis_mismatch"),
+        ("GenesisMetadata(", "genesis_metadata"),
+        ("TipMetadata(", "tip_metadata"),
+        ("CannotConnect(", "chain_update"),
+        ("chain update did not connect", "chain_update"),
+    ] {
+        if message.contains(marker) {
+            return category;
+        }
+    }
+    "unknown"
 }
 
 fn oracle_runtime_config(
@@ -1212,6 +1257,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(flag.hits(), 1);
+    }
+    #[test]
+    fn oracle_diagnostic_categories_never_serialize_tainted_error_payloads() {
+        let taint = "secret-jwt https://private.invalid/scripthash/private-address";
+        for (error, expected) in [
+            ("HttpResponse { status: 404, message: ", "http_not_found"),
+            (
+                "HttpResponse { status: 401, message: ",
+                "http_authorization",
+            ),
+            ("HttpResponse { status: 429, message: ", "http_rate_limit"),
+            ("HttpResponse { status: 400, message: ", "http_4xx"),
+            ("HttpResponse { status: 503, message: ", "http_5xx"),
+            ("Minreq(SerdeJsonError(", "json_schema"),
+            ("Minreq(IoError(", "transport_io"),
+            ("Minreq(RustlsCreateConnection(", "transport_tls"),
+            ("MalformedChunkEnd", "http_framing"),
+            ("InvalidUtf8InBody(", "response_encoding"),
+            ("Parsing(", "response_parsing"),
+            ("BitcoinEncoding(", "bitcoin_encoding"),
+            ("HexToArray(", "hex_encoding"),
+            ("HexToBytes(", "hex_encoding"),
+            ("HeaderHeightNotFound(", "header_height_missing"),
+            ("HeaderHashNotFound(", "header_hash_missing"),
+            ("GenesisHashMismatch(", "genesis_mismatch"),
+            ("GenesisMetadata(", "genesis_metadata"),
+            ("TipMetadata(", "tip_metadata"),
+            ("CannotConnect(", "chain_update"),
+            ("UnknownVariant(", "unknown"),
+        ] {
+            let message = format!("{}{}", error, taint);
+            let category = oracle_failure_category(&message);
+            assert_eq!(category, expected);
+            let serialized = serde_json::to_string(&category).unwrap();
+            assert!(
+                !serialized.contains("secret-jwt")
+                    && !serialized.contains("private-address")
+                    && !serialized.contains("private.invalid")
+            );
+        }
+        assert_eq!(
+            oracle_failure_category("HttpResponse { status: not-a-code, message: secret"),
+            "unknown"
+        );
+        assert_eq!(
+            oracle_failure_category("HttpResponse { status: 200, message: secret"),
+            "unknown"
+        );
     }
     #[test]
     fn saved_wallet_config_uses_actual_restored_id_and_refuses_corruption() {
