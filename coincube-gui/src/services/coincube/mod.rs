@@ -712,6 +712,15 @@ pub struct ConnectPlan {
     /// alias also accepts a snake_case `plan_provenance`.)
     #[serde(default, alias = "plan_provenance")]
     pub plan_provenance: Option<PlanProvenance>,
+    /// A lower tier already paid for, starting when the current period ends
+    /// (billing v2 A4). Absent on older backends.
+    #[serde(default)]
+    pub pending_plan: Option<PlanTier>,
+    /// RFC-3339 instant the pending plan starts.
+    #[serde(default)]
+    pub pending_plan_at: Option<String>,
+    #[serde(default)]
+    pub pending_billing_cycle: Option<BillingCycle>,
 }
 
 impl ConnectPlan {
@@ -738,6 +747,12 @@ pub struct PlanFeatureInfo {
     pub features: Vec<String>,
     #[serde(default)]
     pub included_linked_participants: Option<u32>,
+    /// The tier's entitlements as `/connect/features` serves them (the same
+    /// shape as `/connect/plan`'s). The Change plan comparison and the
+    /// "Cubes per network" row read the server's values from here; absent on
+    /// older backends, when the desktop falls back to its offline defaults.
+    #[serde(default)]
+    pub entitlements: Option<PlanEntitlements>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

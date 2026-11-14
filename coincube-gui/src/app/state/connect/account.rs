@@ -100,6 +100,9 @@ pub fn read_session_for_integration(namespace: &str) -> Result<LoginResponse, &'
 
 #[derive(Debug, Clone)]
 pub enum CheckoutPhase {
+    /// Review step (board 3): plan, amount, dates covered and how to pay.
+    /// Nothing has been sent to Connect yet.
+    Review,
     /// Waiting for POST /checkout response.
     Creating,
     /// Invoice received, awaiting payment.
@@ -116,6 +119,11 @@ pub enum CheckoutPhase {
 
 #[derive(Debug)]
 pub struct CheckoutState {
+    /// The tier being bought (or reviewed).
+    pub tier: PlanTier,
+    /// The billing cycle snapshotted when Review opened; every invoice for
+    /// this checkout (including "Create new invoice" after expiry) uses it.
+    pub cycle: BillingCycle,
     pub phase: CheckoutPhase,
     pub checkout: Option<CheckoutResponse>,
     pub lightning_qr: Option<qr_code::Data>,
@@ -1001,6 +1009,9 @@ pub struct ConnectAccountPanel {
     pub features: Option<FeaturesResponse>,
     /// The currently selected billing cycle for the upgrade cards.
     pub selected_billing_cycle: BillingCycle,
+    /// The plan row picked on Change plan; `None` until the user picks one
+    /// (the view then pre-selects the current tier).
+    pub selected_plan_tier: Option<PlanTier>,
     /// Active checkout flow (None when no checkout in progress).
     pub checkout: Option<CheckoutState>,
     /// Billing history entries.
@@ -1091,6 +1102,7 @@ impl ConnectAccountPanel {
             otp_attempt_generation: 0,
             features: None,
             selected_billing_cycle: BillingCycle::Monthly,
+            selected_plan_tier: None,
             checkout: None,
             billing_history: None,
             show_billing_history: false,
@@ -2503,8 +2515,48 @@ impl ConnectAccountPanel {
                 }
             }
 
+            ConnectAccountMessage::FocusAction(id) => {
+                return iced::widget::operation::focus(id);
+            }
+
             ConnectAccountMessage::BillingCycleSelected(cycle) => {
                 self.selected_billing_cycle = cycle;
+            }
+
+            ConnectAccountMessage::SelectPlanTier(tier) => {
+                self.selected_plan_tier = Some(tier);
+            }
+
+            ConnectAccountMessage::ReviewPlanChange(tier) => {
+                // Review is the step before any invoice exists. It is only
+                // reachable while purchasing is open, like StartCheckout, so
+                // a stale message never shows a "Create invoice" the API
+                // would reject.
+                if !self.purchasing_enabled() {
+                    log::warn!("[CONNECT] ReviewPlanChange ignored — purchasing disabled");
+                    return iced::Task::none();
+                }
+                // Never replace an invoice that is already out for payment.
+                if self
+                    .checkout
+                    .as_ref()
+                    .is_some_and(|cs| !matches!(cs.phase, CheckoutPhase::Review))
+                {
+                    return iced::Task::none();
+                }
+                self.active_sub = ConnectSubMenu::PlanBilling;
+                self.show_billing_history = false;
+                self.show_plan_comparison = false;
+                // Back from Review lands on the same picked row.
+                self.selected_plan_tier = Some(tier.clone());
+                self.checkout = Some(CheckoutState {
+                    tier,
+                    cycle: self.selected_billing_cycle,
+                    phase: CheckoutPhase::Review,
+                    checkout: None,
+                    lightning_qr: None,
+                    poll_errors: 0,
+                });
             }
 
             ConnectAccountMessage::StartCheckout(tier) => {
@@ -2517,7 +2569,18 @@ impl ConnectAccountPanel {
                     log::warn!("[CONNECT] StartCheckout ignored — purchasing disabled");
                     return iced::Task::none();
                 }
+                // The cycle reviewed for this tier wins over the picker's
+                // current toggle, so a retry after expiry re-issues the same
+                // plan the user confirmed.
+                let cycle = self
+                    .checkout
+                    .as_ref()
+                    .filter(|cs| cs.tier == tier)
+                    .map(|cs| cs.cycle)
+                    .unwrap_or(self.selected_billing_cycle);
                 self.checkout = Some(CheckoutState {
+                    tier: tier.clone(),
+                    cycle,
                     phase: CheckoutPhase::Creating,
                     checkout: None,
                     lightning_qr: None,
@@ -2527,7 +2590,7 @@ impl ConnectAccountPanel {
                 let client = self.client.clone();
                 let req = CheckoutRequest {
                     plan: tier,
-                    billing_cycle: self.selected_billing_cycle,
+                    billing_cycle: cycle,
                 };
                 return iced::Task::perform(
                     async move { client.create_checkout(req).await.map_err(|e| e.to_string()) },
@@ -2546,12 +2609,11 @@ impl ConnectAccountPanel {
                 match result {
                     Ok(resp) => {
                         let qr = qr_code::Data::new(&resp.lightning_invoice).ok();
-                        self.checkout = Some(CheckoutState {
-                            phase: CheckoutPhase::AwaitingPayment,
-                            checkout: Some(resp),
-                            lightning_qr: qr,
-                            poll_errors: 0,
-                        });
+                        let cs = self.checkout.as_mut().expect("checked above");
+                        cs.phase = CheckoutPhase::AwaitingPayment;
+                        cs.checkout = Some(resp);
+                        cs.lightning_qr = qr;
+                        cs.poll_errors = 0;
                         return iced::Task::done(Message::View(view::Message::ConnectAccount(
                             ConnectAccountMessage::PollChargeStatus,
                         )));
@@ -2712,6 +2774,15 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::ComparePlans(show) => {
+                // Leaving Review returns to Change plan; an invoice that is
+                // already out for payment is never dropped this way.
+                if self
+                    .checkout
+                    .as_ref()
+                    .is_some_and(|cs| matches!(cs.phase, CheckoutPhase::Review))
+                {
+                    self.checkout = None;
+                }
                 self.active_sub = ConnectSubMenu::PlanBilling;
                 self.show_billing_history = false;
                 self.show_plan_comparison = show;
@@ -2744,10 +2815,11 @@ impl ConnectAccountPanel {
                 if let Some(cycle) = cycle {
                     self.selected_billing_cycle = cycle;
                 }
-                // Reuse the existing StartCheckout path so the invoice
-                // creation + polling stay in one place.
+                // Renew goes through Review (board 1 "Renew Pro" → board 3)
+                // so the amount and covered dates are shown before an
+                // invoice is created.
                 return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::StartCheckout(tier),
+                    ConnectAccountMessage::ReviewPlanChange(tier),
                 )));
             }
 
@@ -2756,23 +2828,9 @@ impl ConnectAccountPanel {
                 if self.show_billing_history {
                     self.show_plan_comparison = false;
                     let gen = self.session_generation;
-                    let c1 = self.client.clone();
                     let c2 = self.client.clone();
                     return iced::Task::batch([
-                        iced::Task::perform(
-                            async move { c1.get_billing_history().await },
-                            move |res| match res {
-                                Ok(history) => Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::BillingHistoryLoaded(Ok(history), gen),
-                                )),
-                                Err(e) => Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::BillingHistoryLoaded(
-                                        Err((&e).into()),
-                                        gen,
-                                    ),
-                                )),
-                            },
-                        ),
+                        self.reload_billing_history(),
                         iced::Task::perform(
                             async move {
                                 match c2.get_user().await {
@@ -3232,6 +3290,7 @@ impl ConnectAccountPanel {
         self.register_campaign_code = String::new();
         self.pending_campaign_code = None;
         self.selected_billing_cycle = BillingCycle::Monthly;
+        self.selected_plan_tier = None;
         self.contacts_state.clear();
         self.duress_contacts.clear();
         self.duress_cubes = None;
@@ -5032,6 +5091,24 @@ impl Default for ConnectAccountPanel {
 
 // ── Plan lifecycle / pricing-schema helpers (D1 / D3 / D4) ──────────────────
 impl ConnectAccountPanel {
+    /// Fetch `GET /connect/billing/history` for Plan & billing's inline
+    /// list and the full history page. Tagged with the session generation.
+    pub fn reload_billing_history(&self) -> iced::Task<Message> {
+        let gen = self.session_generation;
+        let client = self.client.clone();
+        iced::Task::perform(
+            async move { client.get_billing_history().await },
+            move |res| match res {
+                Ok(history) => Message::View(view::Message::ConnectAccount(
+                    ConnectAccountMessage::BillingHistoryLoaded(Ok(history), gen),
+                )),
+                Err(e) => Message::View(view::Message::ConnectAccount(
+                    ConnectAccountMessage::BillingHistoryLoaded(Err((&e).into()), gen),
+                )),
+            },
+        )
+    }
+
     /// Classify the current plan against `now`. Pure (takes the clock as
     /// an argument) so the banner/expired-state branching is unit-testable.
     pub fn plan_lifecycle_at(&self, now: chrono::DateTime<chrono::Utc>) -> PlanLifecycle {
@@ -7327,6 +7404,9 @@ mod plan_lifecycle_tests {
             entitlements: PlanEntitlements::default(),
             billing_cycle: cycle,
             plan_provenance: None,
+            pending_plan: None,
+            pending_plan_at: None,
+            pending_billing_cycle: None,
         }
     }
 
@@ -7500,6 +7580,7 @@ mod plan_lifecycle_tests {
                 price: None,
                 features: Vec::new(),
                 included_linked_participants: None,
+                entitlements: None,
             }],
             pricing_schema_version: version,
             purchasing_enabled,
@@ -8195,6 +8276,81 @@ mod plan_lifecycle_tests {
     }
 
     #[test]
+    fn review_plan_change_opens_review_with_tier_and_cycle() {
+        let mut panel = panel_with_plan(plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2027-01-01T00:00:00Z"),
+            Some(BillingCycle::Monthly),
+        ));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        panel.show_plan_comparison = true;
+        panel.selected_billing_cycle = BillingCycle::Annual;
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Estate));
+        let cs = panel.checkout.as_ref().expect("review opened");
+        assert!(matches!(cs.phase, CheckoutPhase::Review));
+        assert_eq!(cs.tier, PlanTier::Estate);
+        assert_eq!(cs.cycle, BillingCycle::Annual);
+        assert!(!panel.show_plan_comparison);
+        assert_eq!(panel.selected_plan_tier, Some(PlanTier::Estate));
+
+        // Back returns to Change plan and drops the un-invoiced review.
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(true));
+        assert!(panel.checkout.is_none());
+        assert!(panel.show_plan_comparison);
+    }
+
+    #[test]
+    fn review_plan_change_blocked_while_purchasing_closed_or_invoice_open() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(false)));
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        assert!(panel.checkout.is_none());
+
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Estate));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert!(matches!(cs.phase, CheckoutPhase::Creating));
+        assert_eq!(cs.tier, PlanTier::Pro);
+        // Change plan never drops an invoice that is out for payment.
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(true));
+        assert!(panel.checkout.is_some());
+    }
+
+    #[test]
+    fn start_checkout_uses_the_reviewed_cycle() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        panel.selected_billing_cycle = BillingCycle::Annual;
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        // The picker's toggle moving afterwards doesn't change the invoice.
+        panel.selected_billing_cycle = BillingCycle::Monthly;
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert!(matches!(cs.phase, CheckoutPhase::Creating));
+        assert_eq!(cs.cycle, BillingCycle::Annual);
+    }
+
+    #[test]
+    fn renew_current_plan_opens_review_for_the_current_tier_and_cycle() {
+        let mut panel = panel_with_plan(plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2026-06-13T00:00:00Z"),
+            Some(BillingCycle::Annual),
+        ));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        let task = panel.update_message(ConnectAccountMessage::RenewCurrentPlan);
+        drop(task);
+        // The task re-dispatches ReviewPlanChange; apply it as the runtime would.
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert!(matches!(cs.phase, CheckoutPhase::Review));
+        assert_eq!(cs.cycle, BillingCycle::Annual);
+    }
+
+    #[test]
     fn start_checkout_ignored_when_purchasing_disabled() {
         let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
         panel.features = Some(features_with_purchasing(None, Some(false)));
@@ -8259,6 +8415,9 @@ mod duress_contacts_tests {
             entitlements: entitlements(duress_alerts),
             billing_cycle: Some(BillingCycle::Monthly),
             plan_provenance: None,
+            pending_plan: None,
+            pending_plan_at: None,
+            pending_billing_cycle: None,
         }
     }
 

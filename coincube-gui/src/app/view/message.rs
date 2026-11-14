@@ -1839,8 +1839,16 @@ pub enum ConnectAccountMessage {
     /// The error card's "Try again" was pressed.
     Retry(RetryAction),
     // --- Plan & Billing ---
+    /// Focus a Tenshu control (segmented choice, plan row, Copy button)
+    /// after pointer activation, as `Action` requires.
+    FocusAction(iced::advanced::widget::Id),
     FeaturesLoaded(Option<crate::services::coincube::FeaturesResponse>, u64),
     BillingCycleSelected(crate::services::coincube::BillingCycle),
+    /// Change plan: a plan row was picked (not yet confirmed).
+    SelectPlanTier(crate::services::coincube::PlanTier),
+    /// Change plan → Review: open the Review step for this tier at the
+    /// selected billing cycle. Nothing is charged until "Create invoice".
+    ReviewPlanChange(crate::services::coincube::PlanTier),
     StartCheckout(crate::services::coincube::PlanTier),
     CheckoutCreated(
         Result<crate::services::coincube::CheckoutResponse, String>,
