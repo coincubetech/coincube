@@ -1862,6 +1862,15 @@ fn sdk_route_to_protocol(route: &CrossChainRoutePair) -> coincube_spark_protocol
         contract_address: route.contract_address.clone(),
         decimals: route.decimals,
         btc_source_supported: route_accepts_btc(route),
+        btc_limits: route.limits_for(&SparkAsset::Bitcoin).map(|limits| {
+            coincube_spark_protocol::CrossChainRouteLimits {
+                // Sats fit in u64; anything larger is not a real bound.
+                min_sats: limits.min_amount.map(|v| v.min(u64::MAX as u128) as u64),
+                max_sats: limits.max_amount.map(|v| v.min(u64::MAX as u128) as u64),
+                min_usd_cents: limits.min_usd_cents,
+                max_usd_cents: limits.max_usd_cents,
+            }
+        }),
     }
 }
 
