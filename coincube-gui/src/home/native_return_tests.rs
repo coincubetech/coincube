@@ -40,6 +40,10 @@ fn labels(home: &Home, renderer: &iced::Renderer) -> Vec<String> {
 #[test]
 fn native_refusal_survives_startup_order_and_feature_revocation_visibly() {
     let _guard = crate::app::session::test_guard();
+    // The session is process-wide. Other guarded tests can finish with one
+    // still open (several gui tests do), so start from none: these tests
+    // assert that the refused launcher never opens one.
+    crate::app::session::close();
     // Native refusal is reached after its caller closes the setup session.
     crate::app::session::close();
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
@@ -98,6 +102,10 @@ fn native_refusal_survives_startup_order_and_feature_revocation_visibly() {
 #[test]
 fn native_refusal_blocks_stale_actions_until_explicit_dismissal() {
     let _guard = crate::app::session::test_guard();
+    // The session is process-wide. Other guarded tests can finish with one
+    // still open (several gui tests do), so start from none: these tests
+    // assert that the refused launcher never opens one.
+    crate::app::session::close();
     // Native refusal is reached after its caller closes the setup session.
     crate::app::session::close();
     let temp = TestDir::new();
