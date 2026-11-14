@@ -297,7 +297,10 @@ impl SparkSideshiftReceiveFlow {
     /// shift: every button that resets one (Start over, Get a new address,
     /// Done) is on a finished shift's page.
     fn reset(&mut self) -> Task<Message> {
-        let had_shift = self.shift.is_some();
+        // A restored shift SideShift hasn't answered for yet may only look
+        // expired by the clock, with money in flight: keep its record (the
+        // next restore asks SideShift again) rather than lose its Shift ID.
+        let had_shift = self.shift.is_some() && !self.restored;
         // Keep `selected` / `asset_preselected`: inline, the asset is chosen via
         // the Spark Receive THEY SEND card, and "Start over" returns to the
         // refund step for the *same* asset, not a default.
@@ -772,7 +775,7 @@ impl SparkSideshiftReceiveFlow {
         // `is_terminal` includes `Review` — a held shift will not advance on
         // its own, so polling it forever just burns requests and leaves the UI
         // implying progress. The status card shows a call to action instead.
-        let poll = if self.phase == SparkShiftPhase::Active && !is_terminal {
+        let poll = if polls_status(&self.phase, is_terminal, self.restored) {
             iced::time::every(Duration::from_secs(10))
                 .map(|_| Message::View(view::Message::SparkSideshiftReceive(Msg::PollStatus)))
         } else {
@@ -819,6 +822,14 @@ pub fn store_record(record: Option<PendingSparkShift>) -> Task<Message> {
     Task::done(Message::View(view::Message::Home(
         view::HomeMessage::StoreSparkShift(record.map(Box::new)),
     )))
+}
+
+/// Whether the status poll runs: while the shift is live and not terminal, and
+/// for a restored shift until SideShift has answered once — its status until
+/// then is a guess (an expiry by the clock looks terminal), and one failed poll
+/// at unlock must not leave it there.
+fn polls_status(phase: &SparkShiftPhase, is_terminal: bool, restored: bool) -> bool {
+    *phase == SparkShiftPhase::Active && (!is_terminal || restored)
 }
 
 /// Whether a shift's deposit window has closed by the clock: `expires_at` (as
@@ -1308,5 +1319,26 @@ mod tests {
         let mut late = SparkSideshiftReceiveFlow::restored(backend(), &record).unwrap();
         let _ = late.update(&status("processing", None));
         assert_eq!(late.shift_status(), Some(&ShiftStatusKind::Processing));
+    }
+
+    /// A restored shift keeps asking SideShift until it answers, even while
+    /// it looks expired by the clock; after that, terminal stops the poll.
+    #[test]
+    fn a_restored_shift_polls_until_sideshift_answers_once() {
+        assert!(polls_status(&SparkShiftPhase::Active, true, true));
+        assert!(!polls_status(&SparkShiftPhase::Active, true, false));
+        assert!(polls_status(&SparkShiftPhase::Active, false, false));
+        assert!(!polls_status(&SparkShiftPhase::Arrived, false, true));
+
+        let mut record = PendingSparkShift::sample();
+        record.shift.expires_at = Some("2020-01-01T00:00:00.000Z".to_string());
+        let mut flow = SparkSideshiftReceiveFlow::restored(backend(), &record).unwrap();
+        // A failed poll leaves it waiting for an answer, still polling.
+        let _ = flow.update(&Msg::StatusUpdated(Err("offline".to_string())));
+        assert!(flow.restored);
+        // "Get a new address" on the unconfirmed page keeps the shift's
+        // record for the next restore; it is only the on-screen page reset.
+        let _ = flow.update(&Msg::Reset);
+        assert_eq!(flow.phase(), &SparkShiftPhase::Setup);
     }
 }
