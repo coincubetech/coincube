@@ -891,15 +891,6 @@ pub struct FeaturesResponse {
     pub marketplace_enabled: Option<bool>,
     /// Server switch for Buy/Sell (fiat on/off-ramp). Only consulted when
     /// `marketplace_enabled` is on. Fails closed (absent → off).
-    /// Card payment through Stripe is available to this caller (B1,
-    /// `cardPaymentsEnabled`). Fails closed: absent reads as off, and Review
-    /// shows Card as "Coming soon".
-    #[serde(
-        default,
-        alias = "cardPaymentsEnabled",
-        alias = "card_payments_enabled"
-    )]
-    pub card_payments_enabled: Option<bool>,
     #[serde(default, alias = "buySellEnabled", alias = "buy_sell_enabled")]
     pub buy_sell_enabled: Option<bool>,
     /// Server switch for P2P trading. Only consulted when
@@ -958,6 +949,15 @@ pub struct FeaturesResponse {
         alias = "bitcoin_blake2b_enabled"
     )]
     pub bitcoin_blake2b_enabled: Option<bool>,
+    /// Card payment through Stripe is available to this caller (B1,
+    /// `cardPaymentsEnabled`). Fails closed: absent reads as off, and Review
+    /// shows Card as "Coming soon".
+    #[serde(
+        default,
+        alias = "cardPaymentsEnabled",
+        alias = "card_payments_enabled"
+    )]
+    pub card_payments_enabled: Option<bool>,
 }
 
 // ── Checkout / Billing ──────────────────────────────────────────────────────

@@ -680,7 +680,9 @@ fn card_notices<'a>(state: &'a ConnectAccountPanel) -> Vec<Element<'a, Msg>> {
                     ActionKind::Secondary,
                     true,
                 )
-                .on_press_maybe((!busy).then_some(Msg::SetAutoRenew(false)))
+                .on_press_maybe(
+                    (!busy && state.card_payments_enabled()).then_some(Msg::SetAutoRenew(false)),
+                )
                 .into(),
                 sheet_button(localized_copy("Keep it on"), ActionKind::Primary, true)
                     .on_press(Msg::ShowAutoRenewOff(false))
@@ -1273,21 +1275,40 @@ pub(super) fn change_plan_cta(
             "Purchasing is paused, so plan changes can’t be started right now.",
         );
     }
-    if let Some(card) = plan.filter(|p| p.card_auto_renews()) {
-        // A card that renews by itself changes through the card (B3): a
-        // higher tier or monthly → annual now, prorated; anything else at
-        // the period end.
+    if let Some(card) = plan.filter(|p| p.is_card()) {
+        let renews = card.auto_renew == Some(true);
+        let higher = rank(selected) > rank(&current);
+        // A card that starts after a paid period (trialing; the API sends no
+        // cycle then) can't change until it starts.
+        if card.billing_cycle.is_none() && renews {
+            return blocked(
+                "Continue to review".to_string(),
+                "Your card subscription starts when your paid period ends; the plan can change \
+                 after that.",
+            );
+        }
+        if matches!(state.plan_lifecycle(), PlanLifecycle::PastDue { .. }) && *selected != current {
+            return blocked(
+                "Continue to review".to_string(),
+                "Update your card first: the plan can change once the renewal is paid. You can \
+                 renew this plan with bitcoin.",
+            );
+        }
+        if !state.card_payments_enabled() && (renews || higher) {
+            return blocked(
+                "Continue to review".to_string(),
+                "Card plan changes are unavailable right now.",
+            );
+        }
+    }
+    if let Some(card) = plan.filter(|_| state.card_change_route(selected, cycle)) {
+        // Through the card subscription (B3): a higher tier or monthly →
+        // annual now, prorated; anything else at the period end.
         let current_cycle = card.billing_cycle;
         if *selected == current && current_cycle.is_none_or(|c| c == cycle) {
             return blocked(
                 "Continue to review".to_string(),
                 "This is your current plan; it renews automatically by card.",
-            );
-        }
-        if matches!(state.plan_lifecycle(), PlanLifecycle::PastDue { .. }) {
-            return blocked(
-                "Continue to review".to_string(),
-                "Update your card first: the plan can change once the renewal is paid.",
             );
         }
         let upgrade = rank(selected) > rank(&current)
@@ -1723,7 +1744,9 @@ pub(super) fn review_facts(
     });
     // Connect stacks a same-tier renewal and a lower tier onto the current
     // period; an upgrade or a lapsed plan starts now (API A4 activatePlan).
-    let stacks = current != PlanTier::Free && rank(tier) <= rank(&current);
+    // Card grace time (past_due) isn't paid time: a purchase starts now.
+    let in_grace = plan.is_some_and(|p| matches!(p.status, PlanStatus::PastDue));
+    let stacks = current != PlanTier::Free && rank(tier) <= rank(&current) && !in_grace;
     let start = if stacks { renewal.unwrap_or(now) } else { now };
     let starts = if stacks {
         renewal.map(short_date)
@@ -1865,7 +1888,11 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
                         ActionKind::Primary,
                         true,
                     )
-                    .on_press(Msg::ShowAutoRenewOff(true))
+                    .on_press_maybe(
+                        state
+                            .card_payments_enabled()
+                            .then_some(Msg::ShowAutoRenewOff(true)),
+                    )
                     .into(),
                     sheet_button(localized_copy("Back"), ActionKind::Secondary, true)
                         .on_press(Msg::ComparePlans(true))
@@ -2008,6 +2035,31 @@ fn card_offered(state: &ConnectAccountPanel, checkout: &CheckoutState) -> bool {
         && checkout.tier != PlanTier::Free
 }
 
+/// When a new card subscription is first charged: Stripe's `startsAt` once
+/// the session exists, else the end of a paid period or grant still running
+/// (the API trials the card until then, for any tier). `None` = today.
+pub(super) fn card_start(checkout: &CheckoutState) -> Option<String> {
+    if let Some(starts) = checkout
+        .card_session
+        .as_ref()
+        .and_then(|s| s.starts_at.as_deref())
+    {
+        return Some(format_date(starts));
+    }
+    if effective_tier(checkout.plan.as_ref()) == PlanTier::Free {
+        return None;
+    }
+    let plan = checkout.plan.as_ref()?;
+    if matches!(plan.status, PlanStatus::PastDue) {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(plan.renewal_at.as_deref()?)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .filter(|t| *t > chrono::Utc::now())
+        .map(short_date)
+}
+
 /// The Card row on Review: selectable with the charge schedule (C1), or a
 /// disabled "Coming soon" row while the flag is off (board 3).
 fn card_choice<'a>(
@@ -2032,7 +2084,7 @@ fn card_choice<'a>(
         BillingCycle::Monthly => "every month",
     };
     let amount = facts.amount.clone().unwrap_or_default().replace(" USD", "");
-    let description = match &facts.starts {
+    let description = match &card_start(checkout) {
         Some(date) => format!(
             "Through Stripe. First charged {amount} on {date}, when your paid period ends, then \
              {every} until you turn auto-renewal off."
@@ -2087,11 +2139,7 @@ fn card_phase_ux<'a>(
     let tier = &checkout.tier;
     let cycle = cycle_label(checkout.cycle);
     let price = price_for(state, tier, checkout.cycle);
-    let starts = checkout
-        .card_session
-        .as_ref()
-        .and_then(|s| s.starts_at.as_deref())
-        .map(format_date);
+    let starts = card_start(checkout);
     let preview = checkout.preview.as_ref();
     let upgrade = preview.is_some_and(|p| p.is_upgrade());
     let current = effective_tier(checkout.plan.as_ref());
@@ -2106,10 +2154,16 @@ fn card_phase_ux<'a>(
             format!("Pay for {tier}"),
             "Finish checkout on Stripe’s page.".to_string(),
         ),
-        CheckoutPhase::CardActive => (
-            "Plan changed".to_string(),
-            "Your new plan is active and renews automatically.".to_string(),
-        ),
+        CheckoutPhase::CardActive => match &starts {
+            Some(date) => (
+                "Card subscription set up".to_string(),
+                format!("{tier} starts on {date}, when your current period ends."),
+            ),
+            None => (
+                "Plan changed".to_string(),
+                "Your new plan is active and renews automatically.".to_string(),
+            ),
+        },
         CheckoutPhase::CardCancelled => (
             "Review plan change".to_string(),
             "Checkout didn’t finish.".to_string(),
@@ -2124,7 +2178,13 @@ fn card_phase_ux<'a>(
         ),
         CheckoutPhase::ChangeDone { scheduled: false } => (
             "Plan changed".to_string(),
-            format!("{tier} is active now. Your renewal date hasn’t changed."),
+            match preview
+                .and_then(|p| p.renewal_at.as_deref())
+                .map(format_date)
+            {
+                Some(d) => format!("{tier} is active now and renews on {d}."),
+                None => format!("{tier} is active now."),
+            },
         ),
         _ if upgrade => (
             format!("Upgrade to {tier}"),
@@ -2211,13 +2271,19 @@ fn card_phase_ux<'a>(
             },
         ),
     };
-    let (status_text, tone) = checkout_status(checkout);
+    let (status_text, tone) = match (&checkout.phase, &starts) {
+        (CheckoutPhase::CardActive, Some(date)) => {
+            (format!("Starts {date} · auto-renews"), Tone::Good)
+        }
+        _ => checkout_status(checkout),
+    };
     let mut plan_main = Column::new().push(tenshu_text::label(format!("{tier} · {cycle}")));
     if current != PlanTier::Free {
         if let Some(p) = checkout.plan.as_ref() {
+            let paid_by = if p.is_card() { ", paid by card" } else { "" };
             plan_main = plan_main.push(lead(match p.billing_cycle {
-                Some(c) => format!("Replaces {} · {}, paid by card", p.tier(), cycle_label(c)),
-                None => format!("Replaces {}", p.tier()),
+                Some(c) => format!("Replaces {} · {}{paid_by}", p.tier(), cycle_label(c)),
+                None => format!("Replaces {}{paid_by}", p.tier()),
             }));
         }
     }
@@ -2245,9 +2311,13 @@ fn card_phase_ux<'a>(
 
     let body: Element<'a, Msg> = match &checkout.phase {
         CheckoutPhase::CardOpening => lead(localized_copy("Opening Stripe Checkout…")).into(),
-        CheckoutPhase::ChangePreviewing => {
-            lead(localized_copy("Asking Stripe what this change costs…")).into()
-        }
+        CheckoutPhase::ChangePreviewing => Column::new()
+            .spacing(12)
+            .push(lead(localized_copy(
+                "Asking Stripe what this change costs…",
+            )))
+            .push(back_to_billing())
+            .into(),
         CheckoutPhase::CardInBrowser => billing_notice(
             clock_icon(),
             Tone::Warn,
@@ -2289,7 +2359,11 @@ fn card_phase_ux<'a>(
             billing_notice(
                 check_circle_icon(),
                 Tone::Good,
-                format!("You're on {tier}"),
+                if starts.is_some() {
+                    format!("{tier} starts on your card later")
+                } else {
+                    format!("You're on {tier}")
+                },
                 body,
                 Some(
                     sheet_button(localized_copy("Done"), ActionKind::Primary, true)
@@ -2426,9 +2500,11 @@ fn card_phase_ux<'a>(
             let limit = entitlements_for(state, tier).cube_limit;
             let note = if p.is_upgrade() {
                 format!(
-                    "Your renewal date stays{}. If your bank asks you to confirm the payment, \
-                     Stripe opens in your browser.",
-                    renew.as_ref().map(|d| format!(" {d}")).unwrap_or_default()
+                    "{}If your bank asks you to confirm the payment, Stripe opens in your browser.",
+                    renew
+                        .as_ref()
+                        .map(|d| format!("{tier} renews on {d}. "))
+                        .unwrap_or_default()
                 )
             } else {
                 format!(
@@ -2477,6 +2553,9 @@ fn card_phase_ux<'a>(
                     sheet_button(localized_copy("Back"), ActionKind::Secondary, false)
                         .on_press_maybe((!applying).then_some(Msg::ComparePlans(true)))
                         .into(),
+                    sheet_link(localized_copy("Back to Plan & billing"))
+                        .on_press_maybe((!applying).then_some(Msg::DismissCheckout))
+                        .into(),
                 ]))
                 .push(space(8.0))
                 .push(lead(note))
@@ -2490,7 +2569,7 @@ fn card_phase_ux<'a>(
                 "Your bank asked to confirm this payment. Stripe’s page is open in your browser; \
                  this screen updates when it’s confirmed.",
             ),
-            Some(
+            Some(actions_row(vec![
                 sheet_button(
                     localized_copy("Reopen the page"),
                     ActionKind::Secondary,
@@ -2498,7 +2577,12 @@ fn card_phase_ux<'a>(
                 )
                 .on_press(Msg::ReopenCardPage)
                 .into(),
-            ),
+                // Leaving stops this screen's polling; if the payment is
+                // confirmed later, Plan & billing shows it when it loads.
+                sheet_link(localized_copy("Back to Plan & billing"))
+                    .on_press(Msg::DismissCheckout)
+                    .into(),
+            ])),
         ),
         CheckoutPhase::ChangeDone { scheduled } => billing_notice(
             check_circle_icon(),
@@ -2515,8 +2599,10 @@ fn card_phase_ux<'a>(
             } else {
                 format!(
                     "Charged to {card_label}. The receipt is in your billing history{}.",
-                    renewal
-                        .as_ref()
+                    preview
+                        .and_then(|p| p.renewal_at.as_deref())
+                        .map(format_date)
+                        .or(renewal.clone())
                         .map(|d| format!("; {tier} renews on {d}"))
                         .unwrap_or_default()
                 )

@@ -4761,7 +4761,12 @@ mod renewal_banner_tests {
             (
                 "c03-active",
                 CheckoutPhase::CardActive,
-                vec!["You're on Estate", "Paid · auto-renews"],
+                // From bitcoin Pro, the card starts when the paid period ends.
+                vec![
+                    "Card subscription set up",
+                    "Estate starts on your card later",
+                    "Replaces Pro · Annual",
+                ],
             ),
             (
                 "c04-cancelled",
@@ -4915,6 +4920,37 @@ mod renewal_banner_tests {
     }
 
     #[test]
+    fn card_start_and_grace_follow_the_api() {
+        let renewal = (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339();
+        let mut account = dashboard_panel();
+        let mut f = billing_v2_features();
+        f.card_payments_enabled = Some(true);
+        account.features = Some(f);
+        // A bitcoin Pro subscriber buying Estate by card: the card trials
+        // until the paid period ends (any tier).
+        let pro = plan(PlanTier::Pro, PlanStatus::Active, Some(&renewal));
+        let cs = CheckoutState::new(1, PlanTier::Estate, BillingCycle::Annual, Some(pro));
+        assert!(billing::card_start(&cs).is_some());
+        // From Free: charged today.
+        let free = CheckoutState::new(
+            1,
+            PlanTier::Pro,
+            BillingCycle::Annual,
+            Some(plan(PlanTier::Free, PlanStatus::Active, None)),
+        );
+        assert_eq!(billing::card_start(&free), None);
+        // In card grace, a bitcoin renewal starts now (grace isn't paid time).
+        let grace = (chrono::Utc::now() + chrono::Duration::days(5)).to_rfc3339();
+        let mut due = card_plan_fixture("estate", true, &format!(r#","graceEndsAt":"{grace}""#));
+        due.status = PlanStatus::PastDue;
+        due.renewal_at = Some(renewal.clone());
+        account.plan = Some(due.clone());
+        let cs = CheckoutState::new(1, PlanTier::Estate, BillingCycle::Annual, Some(due));
+        let facts = billing::review_facts(&account, &cs, chrono::Utc::now());
+        assert_eq!(facts.starts, None);
+    }
+
+    #[test]
     fn change_plan_cta_for_a_card_subscriber() {
         let mut account = dashboard_panel();
         let mut f = billing_v2_features();
@@ -4942,6 +4978,24 @@ mod renewal_banner_tests {
         ));
         let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Monthly);
         assert!(!ok, "a change is already scheduled");
+        // Trialing card: nothing can change until it starts.
+        let mut trialing = card_plan_fixture("pro", true, "");
+        trialing.billing_cycle = None;
+        account.plan = Some(trialing);
+        let (_, note, ok) =
+            billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
+        assert!(!ok);
+        assert!(
+            note.contains("starts when your paid period ends"),
+            "{}",
+            note
+        );
+        // Flag off: no card change is offered.
+        account.plan = Some(card_plan_fixture("pro", true, ""));
+        account.features.as_mut().unwrap().card_payments_enabled = Some(false);
+        let (_, _, ok) =
+            billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
+        assert!(!ok);
     }
 
     #[test]
