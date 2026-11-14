@@ -258,7 +258,7 @@ pub async fn create_export(
     .await?;
     let location = unlock::CubeLocation::new(root.path(), &cube);
     let master =
-        match unlock::unlock_blocking(&location, pin).map_err(|_| "native_original_unlock")? {
+        match unlock_admitted(&location, chain, pin).map_err(|_| "native_original_unlock")? {
             unlock::PinOutcome::Unlock(signer) => signer,
             _ => return Err("native_original_unlock"),
         };
@@ -473,9 +473,49 @@ pub struct UnfundedProof {
     pub observed_at: u32,
     pub last_poll_timestamp: u32,
     pub full_scan_completed_at: u32,
+    pub full_scan_requested_at: Option<u32>,
+    pub full_scan_completed_generation: u64,
+    pub daemon_started_at: u32,
     pub addresses_checked: u64,
     pub known_coin_count: u64,
 }
+fn oracle_diagnostic(
+    path: &std::path::Path,
+    info: &coincubed::commands::GetInfoResult,
+    requested: Option<u32>,
+) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::{fs::OpenOptions, io::Write};
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "native_oracle_diagnostic")?;
+    let metadata = file.metadata().map_err(|_| "native_oracle_diagnostic")?;
+    check(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0
+            && metadata.len() < 1_000_000,
+        "native_oracle_diagnostic",
+    )?;
+    let row = serde_json::json!({"version":1,"observed_at":chrono::Utc::now().timestamp(),
+        "chain":info.chain_id,"block_height":info.block_height,"sync":info.sync,
+        "full_scan_requested_at":requested,"full_scan_in_progress":info.history_sync.full_scan_in_progress,
+        "running_addresses_checked":info.history_sync.addresses_checked,
+        "running_addresses_expected":info.history_sync.addresses_expected,
+        "full_scan_completed_at":info.history_sync.full_scan_completed_at,
+        "full_scan_generation":info.history_sync.full_scan_generation,
+        "full_scan_completed_generation":info.history_sync.full_scan_completed_generation,
+        "last_poll_timestamp":info.last_poll_timestamp,"failure_present":info.history_sync.last_failure.is_some(),
+        "rescan_progress":info.rescan_progress,"chain_divergence":info.chain_divergence,
+        "refused_reorg_depth":info.refused_reorg_depth});
+    writeln!(file, "{}", row).map_err(|_| "native_oracle_diagnostic")?;
+    file.sync_all().map_err(|_| "native_oracle_diagnostic")
+}
+
 fn oracle_ready(
     info: &coincubed::commands::GetInfoResult,
     identity: &Identity,
@@ -494,7 +534,9 @@ fn oracle_ready(
         && info.rescan_progress.is_none()
         && info.history_sync.last_failure.is_none()
         && !info.history_sync.full_scan_in_progress
-        && info.history_sync.addresses_checked > 0
+        && info.history_sync.full_scan_completed_generation > 0
+        && info.history_sync.full_scan_completed_generation
+            == info.history_sync.full_scan_generation
         && info.last_poll_timestamp.is_some_and(|t| t >= started)
         && info
             .history_sync
@@ -542,8 +584,8 @@ pub async fn require_unfunded(
     root: &CoincubeDirectory,
     identity: &Identity,
     client: CoincubeClient,
+    diagnostic: &std::path::Path,
 ) -> Result<UnfundedProof> {
-    use crate::daemon::{embedded::EmbeddedDaemon, Daemon};
     let chain = identity.cube.network;
     allowed_chain(chain)?;
     check(
@@ -555,7 +597,83 @@ pub async fn require_unfunded(
             == identity.owner_id,
         "native_account_changed",
     )?;
-    let (_, cfg) = saved_vault_config(root, identity)?;
+    let (_, mut cfg) = saved_vault_config(root, identity)?;
+    cfg.bitcoin_config.poll_interval_secs = std::time::Duration::from_secs(1); // in-memory integration retry only
+    require_unfunded_config(cfg, identity, client, diagnostic).await
+}
+
+/// New watch-only oracle: only the validated full kit's public descriptor enters
+/// this initially absent data directory. No old database, seed or factor is used.
+pub async fn descriptor_only_unfunded(
+    directory: &std::path::Path,
+    identity: &Identity,
+    kit: &RecoveryKit,
+    password: &Zeroizing<String>,
+    client: CoincubeClient,
+    jwt: &str,
+    diagnostic: &std::path::Path,
+) -> Result<UnfundedProof> {
+    check(
+        identity.cube.network == ChainId::Testnet4
+            && tokio::fs::symlink_metadata(directory)
+                .await
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "native_orphan_oracle_scope",
+    )?;
+    validate_kit(kit, password, identity)?;
+    check(
+        client
+            .get_user()
+            .await
+            .map_err(|_| "native_auth_blocked")?
+            .id
+            == identity.owner_id,
+        "native_account_changed",
+    )?;
+    let desc = recovery::decrypt_descriptor_blob(
+        &kit.encrypted_wallet_descriptor,
+        password,
+        &identity.remote_cube_id.to_string(),
+    )
+    .map_err(|_| "native_kit_descriptor")?;
+    let descriptor =
+        CoincubeDescriptor::from_str(&desc.vault.descriptor).map_err(|_| "native_descriptor")?;
+    check(
+        descriptor.to_string() == identity.descriptor,
+        "native_orphan_oracle_scope",
+    )?;
+    tokio::fs::create_dir(directory)
+        .await
+        .map_err(|_| "native_orphan_oracle_scope")?;
+    check(
+        tokio::fs::canonicalize(directory)
+            .await
+            .is_ok_and(|canonical| canonical == directory),
+        "native_orphan_oracle_scope",
+    )?;
+    let cfg = coincubed::config::Config::new(
+        coincubed::config::BitcoinConfig::new(
+            identity.cube.network,
+            std::time::Duration::from_secs(1),
+        ),
+        Some(coincubed::config::BitcoinBackend::Esplora(
+            installer::integration::recovery_esplora_config(identity.cube.network, jwt),
+        )),
+        log::LevelFilter::Off,
+        descriptor,
+        coincubed::datadir::DataDirectory::new(directory.to_owned()),
+    );
+    require_unfunded_config(cfg, identity, client, diagnostic).await
+}
+
+async fn require_unfunded_config(
+    cfg: coincubed::config::Config,
+    identity: &Identity,
+    client: CoincubeClient,
+    diagnostic: &std::path::Path,
+) -> Result<UnfundedProof> {
+    use crate::daemon::{embedded::EmbeddedDaemon, Daemon};
+    let chain = identity.cube.network;
     let started = chrono::Utc::now().timestamp() as u32;
     let daemon = if chain.is_blake2b() {
         EmbeddedDaemon::start_authenticated(cfg, client)
@@ -568,13 +686,59 @@ pub async fn require_unfunded(
             .map_err(|_| "native_unfunded_backend_blocked")?
     };
     let result = async {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(540);
+        let mut requested = None;
+        let mut after_generation = None;
         loop {
             let info = daemon
                 .get_info()
                 .await
                 .map_err(|_| "native_unfunded_oracle_blocked")?;
-            if oracle_ready(&info, identity, started)? {
+            let ready = oracle_ready(&info, identity, requested.unwrap_or(started))?;
+            oracle_diagnostic(diagnostic, &info, requested)?;
+            if after_generation.is_none() && info.history_sync.full_scan_generation > 0 {
+                // This cache was created with the new daemon: a startup full
+                // scan is genuine fresh work, not persisted historical state.
+                after_generation = Some(0);
+            }
+            if after_generation.is_none()
+                && info.sync.is_finite()
+                && info.sync >= 1.0
+                && info.last_poll_timestamp.is_some_and(|t| t >= started)
+                && info.rescan_progress.is_none()
+                && !info.history_sync.full_scan_in_progress
+                && info.history_sync.last_failure.is_none()
+                && info.refused_reorg_depth.is_none()
+                && !info.chain_divergence
+            {
+                let at = chrono::Utc::now().timestamp() as u32;
+                let bounds = daemon
+                    .integration_rescan_time_bounds()
+                    .await
+                    .map_err(|_| "native_unfunded_rescan_bounds")?;
+                check(
+                    bounds.chain == chain && bounds.tip_timestamp > bounds.genesis_timestamp,
+                    "native_unfunded_rescan_bounds",
+                )?;
+                // Full history from the ACTUAL admitted chain, never projected
+                // Bitcoin genesis or a fabricated wallet birthday.
+                daemon
+                    .start_rescan(bounds.genesis_timestamp)
+                    .await
+                    .map_err(|_| "native_unfunded_rescan_blocked")?;
+                daemon
+                    .request_sync()
+                    .await
+                    .map_err(|_| "native_unfunded_rescan_blocked")?;
+                requested = Some(at);
+                after_generation = Some(info.history_sync.full_scan_generation);
+                continue;
+            }
+            if ready
+                && after_generation.is_some_and(|generation| {
+                    info.history_sync.full_scan_completed_generation > generation
+                })
+            {
                 let coins = daemon
                     .list_coins(&[], &[])
                     .await
@@ -585,12 +749,15 @@ pub async fn require_unfunded(
                     .await
                     .map_err(|_| "native_unfunded_oracle_blocked")?;
                 check(
-                    oracle_ready(&fresh, identity, started)?,
+                    oracle_ready(&fresh, identity, requested.unwrap_or(started))?
+                        && after_generation.is_some_and(|generation| {
+                            fresh.history_sync.full_scan_completed_generation > generation
+                        }),
                     "native_unfunded_history_changed",
                 )?;
                 use bitcoin::hashes::{sha256, Hash};
                 return Ok(UnfundedProof {
-                    version: 1,
+                    version: 2,
                     chain,
                     descriptor_sha256: sha256::Hash::hash(identity.descriptor.as_bytes())
                         .to_string(),
@@ -602,6 +769,11 @@ pub async fn require_unfunded(
                         .history_sync
                         .full_scan_completed_at
                         .ok_or("native_oracle_history_unknown")?,
+                    full_scan_requested_at: requested,
+                    full_scan_completed_generation: fresh
+                        .history_sync
+                        .full_scan_completed_generation,
+                    daemon_started_at: started,
                     addresses_checked: fresh.history_sync.addresses_checked,
                     known_coin_count: 0,
                 });
@@ -622,29 +794,67 @@ pub async fn require_unfunded(
     Ok(proof)
 }
 
+fn unlock_admitted(
+    location: &unlock::CubeLocation<'_>,
+    chain: ChainId,
+    pin: &str,
+) -> std::result::Result<unlock::PinOutcome, unlock::UnlockError> {
+    if chain == ChainId::BitcoinBlake2bTestnet4 {
+        unlock::unlock_connect_fork(location, pin)
+    } else {
+        unlock::unlock_blocking(location, pin)
+    }
+}
+
 /// Cold native product loaders. Wrong PIN is tested before any correct unlock.
 /// The runner must invoke this in a different process from both create/restore.
-pub fn cold_load(
+pub async fn cold_load(
     root: &CoincubeDirectory,
     identity: &Identity,
     new_pin: &str,
     wrong_pin: &str,
+    client: CoincubeClient,
 ) -> Result<Wallet> {
     check(new_pin != wrong_pin, "native_wrong_pin_equal")?;
     let chain = identity.cube.network;
     allowed_chain(chain)?;
     check(!crate::app::session::is_open(), "native_session_not_cold")?;
     let (cube, cfg) = saved_vault_config(root, identity)?;
+    check(
+        client
+            .get_user()
+            .await
+            .map_err(|_| "native_auth_blocked")?
+            .id
+            == identity.owner_id,
+        "native_account_changed",
+    )?;
+    require_backend_feature(chain, &client, root).await?;
     let location = unlock::CubeLocation::new(root.path(), &cube);
     check(
         matches!(
-            unlock::unlock_blocking(&location, wrong_pin),
+            unlock_admitted(&location, chain, wrong_pin),
             Ok(unlock::PinOutcome::Wrong)
         ),
         "native_wrong_pin_accepted",
     )?;
     let fingerprint = bitcoin::bip32::Fingerprint::from_str(&identity.fingerprint)
         .map_err(|_| "native_fingerprint")?;
+    if chain == ChainId::BitcoinBlake2bTestnet4 {
+        let signer = match unlock_admitted(&location, chain, new_pin)
+            .map_err(|_| "native_cold_fork_unlock")?
+        {
+            unlock::PinOutcome::Unlock(signer) => signer,
+            _ => return Err("native_cold_fork_unlock"),
+        };
+        check(
+            signer
+                .xpub_at(&bitcoin::bip32::DerivationPath::master(), &Secp256k1::new())
+                .to_string()
+                == identity.root_xpub,
+            "native_cold_root",
+        )?;
+    }
     if chain == ChainId::Testnet4 {
         let signer = crate::app::seed_source::SeedSource::encrypted_file(fingerprint, new_pin)
             .resolve(root.path(), chain.bitcoin_network(), &cube.id)
@@ -803,6 +1013,40 @@ mod tests {
         }
     }
     #[test]
+    fn admitted_fork_unlock_tests_wrong_and_correct_pin_without_changing_generic_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let chain = ChainId::BitcoinBlake2bTestnet4;
+        let secp = Secp256k1::new();
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let fp = signer.fingerprint(&secp);
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(temp.path().join(chain.dir_name())).unwrap();
+        signer
+            .store_encrypted_for_chain(temp.path(), chain, &secp, None, "1234", &id, None)
+            .unwrap();
+        let mut cube = CubeSettings::new_with_raw_id(id, "Offline fork routing".into(), chain);
+        cube.master_signer_fingerprint = Some(fp);
+        let location = unlock::CubeLocation::new(temp.path(), &cube);
+        assert!(matches!(
+            unlock::unlock_blocking(&location, "1234"),
+            Err(unlock::UnlockError::ChainUnavailable(_))
+        ));
+        assert!(matches!(
+            unlock_admitted(&location, chain, "9999"),
+            Ok(unlock::PinOutcome::Wrong)
+        ));
+        let opened = match unlock_admitted(&location, chain, "1234").unwrap() {
+            unlock::PinOutcome::Unlock(value) => value,
+            _ => panic!("correct PIN refused"),
+        };
+        assert_eq!(
+            opened.xpub_at(&bitcoin::bip32::DerivationPath::master(), &secp),
+            signer.xpub_at(&bitcoin::bip32::DerivationPath::master(), &secp)
+        );
+    }
+
+    #[test]
     fn production_networks_are_refused() {
         for chain in ChainId::ALL {
             assert_eq!(
@@ -811,13 +1055,13 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn cold_loader_refuses_missing_or_changed_persisted_vault_before_keystore() {
+    #[tokio::test]
+    async fn cold_loader_refuses_missing_or_changed_persisted_vault_before_keystore() {
         let temp = tempfile::tempdir().unwrap();
         let root = CoincubeDirectory::new(temp.path().to_owned());
         let (_, identity) = fixture(ChainId::Testnet4);
         assert!(matches!(
-            cold_load(&root, &identity, "1234", "0000"),
+            cold_load(&root, &identity, "1234", "0000", CoincubeClient::new()).await,
             Err("native_settings_read")
         ));
         // No fabricated descriptor supplied by the expected-identity record can
@@ -846,9 +1090,16 @@ mod tests {
             receive_index: 0,
             change_index: 0,
         };
-        info.history_sync.addresses_checked = 40;
-        info.history_sync.addresses_expected = 40;
-        info.history_sync.full_scan_completed_at = Some(100);
+        let cache = coincubed::commands::HistorySyncCache::default();
+        cache.begin_full_scan(40);
+        cache.branch_address_checked(false);
+        cache.branch_address_checked(true);
+        assert!(cache.snapshot().full_scan_in_progress);
+        cache.full_scan_fetched();
+        assert!(cache.snapshot().full_scan_completed_at.is_none());
+        cache.poll_succeeded(100);
+        info.history_sync = cache.snapshot();
+        assert_eq!(info.history_sync.addresses_checked, 0);
         assert!(oracle_ready(&info, &identity, 100).unwrap());
         for case in 0..8 {
             let mut bad = info.clone();

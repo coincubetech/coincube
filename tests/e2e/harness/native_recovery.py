@@ -18,6 +18,8 @@ from .native_recovery_verify import CHAINS, dependencies, verify
 
 PREREQUISITE = '9e9a1f25995b4be9a6ab188240a2bf92d5f3209b'
 IDENTITY = 'Developer ID Application: COINCUBE TECHNOLOGY LLC (8UVR249AD5)'
+ORPHAN_SOURCE = '21503b253ebc29285da651c2b43dd7c3b5a8fbb1'
+ORPHAN_HELPER = '0f039ee515d7918b288f916872272a26224bded02e89388beaf88f7a16fefaff'
 LEGACY_CAPACITY_SOURCE = '74da94d2848783951ff9b305724340afbb230ab8'
 LEGACY_CAPACITY_HELPER = 'f98dfad45951000a7538ad5fe595dcb6dddf9dc4c7b7d7f6cf31905dfa0ab48f'
 ACTIONS = ('create_export', 'wipe_original', 'restore', 'reopen_sign')
@@ -148,7 +150,7 @@ def checked_process(cfg, binding, executable, receipt, request, directory, *, ac
 
 def process(executable, request, directory, *, access_token=None):
     """Wait on fresh process; sample kernel start before providing any action."""
-    modes = {'admit_create': '--admit-create', 'observe_cleanup': '--observe-cleanup', 'begin_cleanup': '--begin-cleanup', 'audit_capacity_abandonment': '--audit-capacity-abandonment', 'bind_auth': '--bind-auth'}
+    modes = {'admit_create': '--admit-create', 'observe_cleanup': '--observe-cleanup', 'begin_cleanup': '--begin-cleanup', 'audit_capacity_abandonment': '--audit-capacity-abandonment', 'bind_auth': '--bind-auth', 'refresh_auth': '--refresh-auth', 'retire_orphan_215': '--retire-orphan-215'}
     require(access_token is None or request['action'] in modes, 'AUTH_ROLE')
     argv = [str(executable)] + ([modes[request['action']]] if access_token is not None else [])
     env = dict(os.environ, COINCUBE_API_URL='https://api.coincube.io')
@@ -156,23 +158,49 @@ def process(executable, request, directory, *, access_token=None):
     env.pop('COINCUBE_NATIVE_RECOVERY_SOURCE', None); env.pop('COINCUBE_NATIVE_RECOVERY_PREREQUISITE', None)
     try:
         with (directory / 'native-stderr.log').open('ab') as errors:
+            process_dir = directory / 'native-processes'
+            process_dir.mkdir(mode=0o700, exist_ok=True)
+            require(not process_dir.is_symlink() and process_dir.stat().st_uid == os.getuid()
+                    and process_dir.stat().st_mode & 0o077 == 0, 'PROCESS_DIRECTORY')
+            record_path = process_dir / (str(uuid.uuid4()) + '.json')
+            identity = {'version': 1, 'pid': None, 'start_id': None, 'action': request['action'],
+                        'config_sha256': digest(request['config']), 'payload_sent': False, 'exited': False}
             child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
                                      env=env, start_new_session=True)
             try:
+                identity['pid'] = child.pid
+                atomic_write(record_path, json.dumps(identity).encode())
                 start = subprocess.check_output(['/bin/ps', '-p', str(child.pid), '-o', 'lstart=']).decode().strip()
                 require(bool(start), 'KERNEL_PROCESS')
+                identity['start_id'] = start
+                atomic_write(record_path, json.dumps(identity).encode())
                 payload = dict(request)
                 if access_token is not None:
                     payload = {'config': request['config'], 'access_token': access_token}
-                    if request['action'] == 'audit_capacity_abandonment':
+                    if request['action'] in ('audit_capacity_abandonment', 'retire_orphan_215'):
                         payload['old_directory'] = request['old_directory']
-                output, _ = child.communicate(json.dumps(payload).encode(), timeout=300)
+                    if request['action'] == 'retire_orphan_215':
+                        payload['old_checkpoint_sha256'] = request['old_checkpoint_sha256']
+                        payload['old_state_sha256'] = request['old_state_sha256']
+                identity['payload_sent'] = True
+                atomic_write(record_path, json.dumps(identity).encode())
+                output, _ = child.communicate(json.dumps(payload).encode(), timeout=660)
+                identity.update(exited=True, returncode=child.returncode)
+                atomic_write(record_path, json.dumps(identity).encode())
             except BaseException:
-                child.kill(); child.wait(); raise
+                child.kill(); child.wait()
+                identity.update(exited=True, returncode=child.returncode)
+                try:
+                    atomic_write(record_path, json.dumps(identity).encode())
+                except OSError:
+                    pass  # Preserve the original failure after reaping the child.
+                raise
     except (OSError, subprocess.TimeoutExpired):
         raise Blocked('NATIVE_RECOVERY_PROCESS', 'Native process unavailable or timed out; retain uncertain fixture evidence.') from None
     require(len(output) < 4096, 'PROTOCOL_SIZE')
     reply = json.loads(output)
+    if isinstance(reply.get('code'), str) and re.fullmatch('[A-Za-z0-9_]{1,96}', reply['code']):
+        identity['code'] = reply['code']; atomic_write(record_path, json.dumps(identity).encode())
     if child.returncode or reply.get('ok') is not True:
         code = reply.get('code')
         require(isinstance(code, str) and re.fullmatch('[A-Za-z0-9_]{1,96}', code), 'PROTOCOL')
@@ -240,7 +268,7 @@ class NativeCleanupContext:
         # admission or a previously selected retirement actually needs tools.
         self.tools = None
 
-    def observe(self):
+    def verify_protection_view(self):
         require(source(self.suite.config) == self.suite.binding, 'SOURCE_CHANGED')
         require(digest(self.config) == self.config_binding, 'CLEANUP_CONFIG_CHANGED')
         if self.parent is not None:
@@ -250,13 +278,15 @@ class NativeCleanupContext:
             self.parent.strict.observe()
         else:
             require(private_read(self.workstation) == self.workstation_raw, 'CLEANUP_CONFIG_CHANGED')
+        cache = json.loads(private_read(self.profile / 'testnet4/connect.json'))
+        matches = [a for a in cache['accounts'] if a.get('email') == cache.get('active_email') == self.account['email']]
+        require(matches == [self.account], 'CLEANUP_ACCOUNT')
+    def observe(self):
+        self.verify_protection_view()
         if self.tools is None:
             from .provisioning import Provision
             self.provision_binary, self.signing_binary, self.tools = legacy_tools(self.suite.config, self.suite.binding)
             self.provision = Provision(self.provision_binary, self.profile, self.journal.directory, self.run_id)
-        cache = json.loads(private_read(self.profile / 'testnet4/connect.json'))
-        matches = [a for a in cache['accounts'] if a.get('email') == cache.get('active_email') == self.account['email']]
-        require(matches == [self.account], 'CLEANUP_ACCOUNT')
         require(self.tools['head'] == self.suite.binding['head']
                 and hashlib.sha256(self.provision_binary.read_bytes()).hexdigest() == self.tools['provision_sha256']
                 and hashlib.sha256(Path(self.signing_binary).read_bytes()).hexdigest() == self.tools['signing_sha256'], 'CLEANUP_BUILD_CHANGED')
@@ -364,6 +394,70 @@ class NativeRecovery:
             self.journal.artifact('capacity_abandonment', {'binding': marker, 'observer': observed})
         return marker
 
+    def retire_orphan_215(self, account, owner_id, old_directory, archived_helper, workstation):
+        """Exact215 remote metadata only. Old lifecycle stays BLOCKED/intact."""
+        from . import qa_cleanup, qa_funding
+        context = NativeCleanupContext(self, account, owner_id, workstation=workstation)
+        context.verify_protection_view()  # Real configured/global QA protections.
+        old = Path(old_directory)
+        require(old.is_absolute() and old.resolve() == old and not self.directory.is_relative_to(old)
+                and not old.is_relative_to(self.directory), 'ORPHAN_DIRECTORY')
+        archive = Path(archived_helper)
+        require(archive.is_absolute() and archive.name == 'recovery_kit_native'
+                and hashlib.sha256(archive.read_bytes()).hexdigest() == ORPHAN_HELPER, 'ORPHAN_HELPER')
+        signed_identity(Path(self.config['checkout']), archive)
+        require(subprocess.run(['git','merge-base','--is-ancestor',ORPHAN_SOURCE,self.binding['head']],
+                              cwd=self.config['checkout'],capture_output=True).returncode == 0, 'ORPHAN_SOURCE')
+        cp_raw = private_read(old/'checkpoint.json'); cp = json.loads(cp_raw)
+        artifacts = cp['artifacts']
+        scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/'+str(old)+'/testnet4'))
+        old_case = old/scope; raw = private_read(old_case/'state.json'); state = json.loads(raw)
+        config = state['config']
+        require(artifacts['build']['source']['head'] == ORPHAN_SOURCE and artifacts['build']['sha256'] == ORPHAN_HELPER
+                and set(artifacts.get('testnet4',{})) == {'preflight','bind_auth','create_export'}
+                and 'bitcoin-blake2b-testnet4' not in artifacts and 'native_recovery_acceptance' not in artifacts
+                and artifacts['pending_native_action'] == {'chain':'testnet4','action':'wipe_original','config_sha256':digest(config)}
+                and config['case_root'] == str(old_case) and config['run_id'] == scope and config['source_head'] == ORPHAN_SOURCE
+                and config['owner_id'] == owner_id and config['chain'] == 'testnet4'
+                and artifacts['account_identity'] == digest({'email':account['email'].casefold(),'user_id':owner_id}), 'ORPHAN_ORIGIN')
+        remote = state['identity']['remote_cube_id']
+        require(type(remote) is int and remote > 0, 'ORPHAN_ORIGIN')
+        executable, receipt = build(self.config,self.binding)
+        operation = str(uuid.uuid5(uuid.NAMESPACE_URL,'native-orphan-215/'+str(self.directory.resolve())+'/'+scope))
+        root = self.directory/operation
+        current = {'version':1,'case_root':str(root),'run_id':operation,'chain':'testnet4','owner_id':owner_id,
+                   'source_head':self.binding['head'],
+                   'auth_account':hashlib.sha256(f'recovery-native-v1:{root}:{operation}:testnet4:auth'.encode()).hexdigest()}
+        request = {'action':'retire_orphan_215','config':current,'old_directory':str(old),
+                   'old_checkpoint_sha256':hashlib.sha256(cp_raw).hexdigest(),'old_state_sha256':hashlib.sha256(raw).hexdigest()}
+        with qa_funding.pool() as data:
+            # Hold the actual funding registry lease through the signed audit,
+            # oracle and DELETE so no managed source can be selected concurrently.
+            context.verify_protection_view()
+            require(remote not in qa_cleanup.protected_ids(context,data), 'ORPHAN_PROTECTED')
+            self.journal.artifact('pending_orphan_remote', {'request_sha256':digest(request),'helper_sha256':receipt['sha256']})
+            observed = checked_process(self.config,self.binding,executable,receipt,request,self.directory,
+                                       access_token=account['tokens']['access_token'])
+            context.verify_protection_view()
+            require(remote not in qa_cleanup.protected_ids(context,data)
+                    and private_read(old/'checkpoint.json') == cp_raw and private_read(old_case/'state.json') == raw,
+                    'ORPHAN_RETAINED_CHANGED')
+            result = json.loads(private_read(root/'orphan.json'))
+            require(result['config'] == current and result['phase'] == 'complete' and result['remote_id'] == remote
+                    and result['old_checkpoint_sha256'] == request['old_checkpoint_sha256']
+                    and result['old_state_sha256'] == request['old_state_sha256'], 'ORPHAN_RESULT')
+            outcome = {'version':1,'origin_source':ORPHAN_SOURCE,'origin_helper_sha256':ORPHAN_HELPER,
+                       'executor_source':self.binding,'executor_helper_sha256':receipt['sha256'],
+                       'remote_id':remote,'origin_uuid':scope,'old_checkpoint_sha256':request['old_checkpoint_sha256'],
+                       'old_state_sha256':request['old_state_sha256'],'operation':operation,'observer':observed,
+                       'remote_metadata_retired':True,'local_recovery_retained':True,'old_flow':'BLOCKED',
+                       'native_acceptance':False,'gui':False,'funded':False,'broadcast':False}
+            data.setdefault('native_orphan_retirements',{})[digest({'source':ORPHAN_SOURCE,'uuid':scope,'remote':remote})] = outcome
+            qa_funding.save_pool(data)
+            self.journal.artifact('orphan_remote_retirement',outcome)
+            del self.journal.data['artifacts']['pending_orphan_remote']; self.journal.save()
+        return outcome
+
     def execute(self, account, owner_id, *, cleanup_runner=None, cleanup_workstation=None):
         require(type(owner_id) is int and owner_id > 0, 'ACCOUNT')
         executable, receipt = build(self.config, self.binding)
@@ -410,6 +504,9 @@ class NativeRecovery:
                 if self.journal.data['artifacts'].get('pending_native_action'):
                     raise Blocked('NATIVE_RECOVERY_UNCERTAIN', 'A native action has uncertain outcome; preserve the sealed fixture and reconcile it.')
                 require(source(self.config) == self.binding and hashlib.sha256(executable.read_bytes()).hexdigest() == receipt['sha256'], 'BUILD_CHANGED')
+                if action in ('wipe_original', 'restore', 'reopen_sign'):
+                    checked_process(self.config, self.binding, executable, receipt, {'action': 'refresh_auth', 'config': config}, self.directory,
+                                    access_token=account['tokens']['access_token'])
                 self.journal.artifact('pending_native_action', {'chain': chain, 'action': action, 'config_sha256': digest(config)})
                 record = checked_process(self.config, self.binding, executable, receipt, {'action': action, 'config': config}, self.directory,
                                  access_token=account['tokens']['access_token'] if action == 'bind_auth' else None)
@@ -434,6 +531,8 @@ class NativeRecovery:
             records['proof'] = proof; records['state_sha256'] = hashlib.sha256(private_read(case / 'state.json')).hexdigest()
             self.journal.save()
             if 'retire_remote' not in records:
+                checked_process(self.config, self.binding, executable, receipt, {'action': 'refresh_auth', 'config': config}, self.directory,
+                                access_token=account['tokens']['access_token'])
                 self.journal.artifact('pending_native_action', {'chain': chain, 'action': 'retire_remote', 'config_sha256': digest(config)})
                 records['retire_remote'] = checked_process(self.config, self.binding, executable, receipt, {'action': 'retire_remote', 'config': config}, self.directory)
                 retired = json.loads(private_read(case / 'state.json'))
