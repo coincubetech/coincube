@@ -28,7 +28,7 @@ use coincube_ui::{
 use iced::widget::text::IntoFragment;
 use iced::{
     advanced::widget::Id,
-    widget::{container, scrollable, QRCode},
+    widget::{container, scrollable},
     Alignment, Length,
 };
 
@@ -36,9 +36,9 @@ use crate::{
     app::{
         menu::ConnectSubMenu,
         state::connect::{
-            duress_gate_blocked, duress_tier1_gate_blocked, AvatarFlowStep, CheckoutPhase,
-            ConnectAccountPanel, ConnectCubePanel, ConnectFlowStep, ConnectPanel,
-            CubeBackupCompleteness, DuressContactsStep, DuressCube, DuressGateStatus,
+            duress_gate_blocked, duress_tier1_gate_blocked, AvatarFlowStep, ConnectAccountPanel,
+            ConnectCubePanel, ConnectFlowStep, ConnectPanel, CubeBackupCompleteness,
+            DuressContactsStep, DuressCube, DuressGateStatus,
         },
         view::{AvatarMessage, ConnectAccountMessage, ConnectCubeMessage, DuressMessage},
     },
@@ -1634,183 +1634,6 @@ fn launch_feature_copy(feature: &str) -> Option<(String, billing::FeatureValue)>
     Some((trimmed.to_string(), FeatureValue::Included))
 }
 
-// ── Checkout / payment view ─────────────────────────────────────────────────
-
-fn checkout_ux<'a>(
-    checkout_state: &'a crate::app::state::connect::CheckoutState,
-) -> Element<'a, ConnectAccountMessage> {
-    let mut col = Column::new()
-        .push(text::h4_bold("Checkout").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
-
-    match &checkout_state.phase {
-        // Review has its own view (`billing::review_ux`).
-        CheckoutPhase::Review => {}
-        CheckoutPhase::Creating => {
-            col = col
-                .push(text::p1_regular(localized_copy("Creating invoice…")).color(color::GREY_3));
-        }
-
-        CheckoutPhase::AwaitingPayment | CheckoutPhase::Processing => {
-            if let Some(ref resp) = checkout_state.checkout {
-                let amount_line = format!(
-                    "{} {} ({} sats)",
-                    resp.amount_fiat, resp.fiat_currency, resp.amount_sats
-                );
-                let plan_line = format!("Upgrade to {} ({})", resp.plan, resp.billing_cycle);
-
-                col = col
-                    .push(text::p1_bold(plan_line).style(theme::text::primary))
-                    .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                    .push(text::p1_regular(amount_line).color(color::ORANGE))
-                    .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
-
-                // Lightning QR
-                if let Some(ref qr) = checkout_state.lightning_qr {
-                    col = col.push(
-                        container(QRCode::new(qr).cell_size(6))
-                            .width(Length::Fill)
-                            .center_x(Length::Fill),
-                    );
-                    col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-                }
-
-                // Lightning invoice (truncated) + copy
-                let invoice_display = if resp.lightning_invoice.len() > 40 {
-                    format!("{}…", &resp.lightning_invoice[..40])
-                } else {
-                    resp.lightning_invoice.clone()
-                };
-                col = col.push(
-                    Row::new()
-                        .push(
-                            text::p2_regular(invoice_display)
-                                .color(color::GREY_3)
-                                .width(Length::Fill),
-                        )
-                        .push(
-                            button::secondary(None, localized_copy("Copy"))
-                                .on_press(ConnectAccountMessage::CopyToClipboard(
-                                    resp.lightning_invoice.clone(),
-                                ))
-                                .width(Length::Shrink),
-                        )
-                        .align_y(Alignment::Center)
-                        .spacing(8),
-                );
-
-                col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
-
-                // On-chain address + copy
-                col = col.push(
-                    Row::new()
-                        .push(
-                            text::p2_regular(format!("On-chain: {}", resp.on_chain_address))
-                                .color(color::GREY_3)
-                                .width(Length::Fill),
-                        )
-                        .push(
-                            button::secondary(None, localized_copy("Copy"))
-                                .on_press(ConnectAccountMessage::CopyToClipboard(
-                                    resp.on_chain_address.clone(),
-                                ))
-                                .width(Length::Shrink),
-                        )
-                        .align_y(Alignment::Center)
-                        .spacing(8),
-                );
-
-                col = col.push(iced::widget::Space::new().height(Length::Fixed(12.0)));
-
-                // Open in browser
-                col = col.push(
-                    button::secondary(None, localized_copy("Open in Browser"))
-                        .on_press(ConnectAccountMessage::OpenCheckoutUrl(
-                            resp.checkout_url.clone(),
-                        ))
-                        .width(Length::Fill),
-                );
-
-                col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
-
-                // Expires
-                col = col.push(
-                    text::p2_regular(localized_format!(
-                        "Expires: {}",
-                        "Vence: {}",
-                        format_datetime(&resp.expires_at)
-                    ))
-                    .style(theme::text::secondary),
-                );
-
-                if matches!(checkout_state.phase, CheckoutPhase::Processing) {
-                    col = col
-                        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(
-                            text::p2_regular(localized_copy("Payment detected, confirming…"))
-                                .color(color::ORANGE),
-                        );
-                }
-            }
-
-            col = col
-                .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-                .push(
-                    button::secondary(None, localized_copy("Cancel"))
-                        .on_press(ConnectAccountMessage::DismissCheckout)
-                        .width(Length::Fill),
-                );
-        }
-
-        CheckoutPhase::Paid => {
-            let plan_name = checkout_state
-                .checkout
-                .as_ref()
-                .map(|c| c.plan.to_string())
-                .unwrap_or_else(|| "your new plan".to_string());
-            col = col
-                .push(
-                    text::p1_bold(localized_format!(
-                        "Payment confirmed! Upgraded to {}.",
-                        "Pago confirmado! Actualizado a {}.",
-                        plan_name
-                    ))
-                    .color(color::ORANGE),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-                .push(
-                    button::primary(None, localized_copy("Done"))
-                        .on_press(ConnectAccountMessage::DismissCheckout)
-                        .width(Length::Fill),
-                );
-        }
-
-        CheckoutPhase::Expired => {
-            col = col
-                .push(text::p1_regular(localized_copy("Invoice expired.")).color(color::RED))
-                .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-                .push(
-                    button::primary(None, localized_copy("Try Again"))
-                        .on_press(ConnectAccountMessage::DismissCheckout)
-                        .width(Length::Fill),
-                );
-        }
-
-        CheckoutPhase::Failed(msg) => {
-            col = col
-                .push(text::p1_regular(format!("Error: {}", msg)).color(color::RED))
-                .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-                .push(
-                    button::primary(None, localized_copy("Try Again"))
-                        .on_press(ConnectAccountMessage::DismissCheckout)
-                        .width(Length::Fill),
-                );
-        }
-    }
-
-    col.spacing(0).width(Length::Fill).into()
-}
-
 // ── Billing history view ────────────────────────────────────────────────────
 
 fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
@@ -1854,6 +1677,7 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
                     crate::services::coincube::ChargeStatus::Processing => "Processing",
                     crate::services::coincube::ChargeStatus::Paid => "Paid",
                     crate::services::coincube::ChargeStatus::Expired => "Expired",
+                    crate::services::coincube::ChargeStatus::Unknown => "Pending",
                 };
                 let amount_label = format!(
                     "{} {} ({} sats)",
@@ -3064,7 +2888,7 @@ mod renewal_banner_tests {
     //! `Option<Element>` and its `style`/`on_press` closures are deferred,
     //! so we can construct it headless and assert only Some/None.
     use super::*;
-    use crate::app::state::connect::PlanLifecycle;
+    use crate::app::state::connect::{CheckoutPhase, PlanLifecycle};
     use crate::services::coincube::{BillingCycle, PlanTier};
     use crate::user_error::UserError;
     use crate::{
@@ -3612,7 +3436,8 @@ mod renewal_banner_tests {
             plan: PlanTier::Pro,
             billing_cycle: BillingCycle::Annual,
             checkout_url: "https://checkout.example/charge-1".to_string(),
-            expires_at: "2026-08-01T00:00:00Z".to_string(),
+            expires_at: Some("2026-08-01T00:00:00Z".to_string()),
+            starts_at: None,
         }
     }
 
@@ -3627,6 +3452,10 @@ mod renewal_banner_tests {
             status,
             created_at: "2026-07-01T12:00:00Z".to_string(),
             paid_at: Some("2026-07-02T12:00:00Z".to_string()),
+            state: None,
+            invoice_id: None,
+            amount_received_sats: 0,
+            overpaid_sats: 0,
         }
     }
 
@@ -4234,14 +4063,7 @@ mod renewal_banner_tests {
         );
         p.billing_cycle = Some(BillingCycle::Annual);
         account.plan = Some(p);
-        let checkout = |tier, cycle| CheckoutState {
-            tier,
-            cycle,
-            phase: CheckoutPhase::Review,
-            checkout: None,
-            lightning_qr: None,
-            poll_errors: 0,
-        };
+        let checkout = |tier, cycle| CheckoutState::new(1, tier, cycle);
 
         // Upgrade starts now.
         let up = billing::review_facts(
@@ -4552,6 +4374,202 @@ mod renewal_banner_tests {
         capture_billing_sheet(&account, "3-review-free", (1040, 860)).await;
     }
 
+    /// Every BTCPay board (B1–B10) renders its copy, and the invoice is
+    /// shown in full (no 40-character truncation).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn btcpay_phase_boards_render_and_capture() {
+        use crate::app::state::connect::account::PaymentNetwork;
+        use iced::advanced::renderer::Headless;
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        account.features = Some(billing_v2_features());
+        let mut p = plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2027-03-14T00:00:00Z"),
+        );
+        p.billing_cycle = Some(BillingCycle::Annual);
+        account.plan = Some(p);
+        let mut resp = checkout_response();
+        resp.plan = PlanTier::Estate;
+        resp.amount_fiat = 200.0;
+        resp.amount_sats = 210_000;
+        resp.lightning_invoice = format!("lnbc2100u1p{}", "q".repeat(180));
+        resp.expires_at = Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
+        let status = |json: &str| -> crate::services::coincube::ChargeStatusResponse {
+            serde_json::from_str(json).unwrap()
+        };
+        type Case<'s> = (
+            &'s str,
+            CheckoutPhase,
+            PaymentNetwork,
+            Option<&'s str>,
+            &'s [&'s str],
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "b01-creating",
+                CheckoutPhase::Creating,
+                PaymentNetwork::Lightning,
+                None,
+                &["Pay for Estate", "Creating invoice…"],
+            ),
+            (
+                "b02-lightning",
+                CheckoutPhase::AwaitingPayment,
+                PaymentNetwork::Lightning,
+                None,
+                &[
+                    "Lightning invoice",
+                    "Pay on the BTCPay page instead",
+                    "Lightning",
+                    "On-chain",
+                ],
+            ),
+            (
+                "b03-onchain",
+                CheckoutPhase::AwaitingPayment,
+                PaymentNetwork::OnChain,
+                None,
+                &[
+                    "Bitcoin address",
+                    "Send exactly 210,000 sats. Estate turns on after the payment confirms.",
+                ],
+            ),
+            (
+                "b04-browser",
+                CheckoutPhase::PayingInBrowser,
+                PaymentNetwork::Lightning,
+                None,
+                &[
+                    "Finish paying on the BTCPay page",
+                    "Reopen checkout page",
+                    "Show the QR code here instead",
+                ],
+            ),
+            (
+                "b05-partial",
+                CheckoutPhase::PartlyPaid {
+                    received_sats: 130_200,
+                    due_sats: 79_800,
+                },
+                PaymentNetwork::OnChain,
+                None,
+                &[
+                    "Send the rest on-chain",
+                    "130,200 of 210,000 sats received · 79,800 sats left to pay",
+                    "Same Bitcoin address · send 79,800 sats more",
+                ],
+            ),
+            (
+                "b06-confirming",
+                CheckoutPhase::Processing,
+                PaymentNetwork::OnChain,
+                None,
+                &[
+                    "Payment seen, waiting for confirmation",
+                    "Payment seen · confirming",
+                ],
+            ),
+            (
+                "b07-paid",
+                CheckoutPhase::Paid { overpaid_sats: 0 },
+                PaymentNetwork::Lightning,
+                None,
+                &["Plan changed", "You're on Estate", "Done", "Paid"],
+            ),
+            (
+                "b07-paid-overpaid",
+                CheckoutPhase::Paid {
+                    overpaid_sats: 1_500,
+                },
+                PaymentNetwork::Lightning,
+                None,
+                &["You're on Estate"],
+            ),
+            (
+                "b08-expired",
+                CheckoutPhase::Expired,
+                PaymentNetwork::Lightning,
+                None,
+                &[
+                    "This invoice expired",
+                    "Create new invoice",
+                    "Expired · nothing received",
+                ],
+            ),
+            (
+                "b09-needs-support",
+                CheckoutPhase::NeedsSupport {
+                    invoice_id: "Q7xWqv3kP1".into(),
+                    received_sats: 210_000,
+                },
+                PaymentNetwork::Lightning,
+                Some(
+                    r#"{"chargeId":"charge-1","invoiceId":"Q7xWqv3kP1","status":"expired","state":"needs_support","plan":"estate","additionalStatus":"PaidLate","amountReceivedSats":210000}"#,
+                ),
+                &[
+                    "Payment arrived after the invoice expired",
+                    "Invoice ID",
+                    "Q7xWqv3kP1",
+                    "Needs support",
+                ],
+            ),
+            (
+                "b10-failed",
+                CheckoutPhase::Failed("Connect returned 502".into()),
+                PaymentNetwork::Lightning,
+                None,
+                &["Couldn’t create the invoice", "Try again", "Not invoiced"],
+            ),
+            (
+                "b10-poll-failed",
+                CheckoutPhase::PollFailed("timeout".into()),
+                PaymentNetwork::Lightning,
+                None,
+                &["Couldn’t check the payment", "Check again"],
+            ),
+        ];
+        for (name, phase, network, last, expected) in cases {
+            let mut cs = CheckoutState::new(7, PlanTier::Estate, BillingCycle::Annual);
+            if phase != CheckoutPhase::Creating && !matches!(phase, CheckoutPhase::Failed(_)) {
+                cs.checkout = Some(resp.clone());
+                cs.lightning_qr = iced::widget::qr_code::Data::new(&resp.lightning_invoice).ok();
+                cs.onchain_qr = iced::widget::qr_code::Data::new(
+                    crate::app::state::connect::account::bip21_uri(&resp.on_chain_address, 79_800),
+                )
+                .ok();
+            }
+            cs.phase = phase;
+            cs.network = network;
+            cs.last_status = last.map(status);
+            account.checkout = Some(cs);
+            let labels = visible_labels(plan_billing_ux(&account), &renderer);
+            for text in expected {
+                assert!(
+                    labels.iter().any(|l| l == text),
+                    "{}: missing {:?} in {:?}",
+                    name,
+                    text,
+                    labels
+                );
+            }
+            if network == PaymentNetwork::Lightning && name == "b02-lightning" {
+                assert!(
+                    labels.iter().any(|l| l == &resp.lightning_invoice),
+                    "full invoice shown"
+                );
+            }
+            capture_billing_sheet(&account, name, (1040, 1000)).await;
+        }
+    }
+
     #[test]
     fn plan_billing_checkout_and_history_views_build_for_branch_states() {
         let mut account = dashboard_panel();
@@ -4599,18 +4617,14 @@ mod renewal_banner_tests {
             CheckoutPhase::Creating,
             CheckoutPhase::AwaitingPayment,
             CheckoutPhase::Processing,
-            CheckoutPhase::Paid,
+            CheckoutPhase::Paid { overpaid_sats: 0 },
             CheckoutPhase::Expired,
             CheckoutPhase::Failed("invoice failed".to_string()),
         ] {
-            account.checkout = Some(CheckoutState {
-                tier: PlanTier::Pro,
-                cycle: BillingCycle::Annual,
-                phase,
-                checkout: Some(checkout_response()),
-                lightning_qr: None,
-                poll_errors: 0,
-            });
+            let mut cs = CheckoutState::new(1, PlanTier::Pro, BillingCycle::Annual);
+            cs.phase = phase;
+            cs.checkout = Some(checkout_response());
+            account.checkout = Some(cs);
             let _ = plan_billing_ux(&account);
         }
     }
@@ -5030,14 +5044,11 @@ mod renewal_banner_tests {
                             panel.review_device_removal = Some(9);
                         }
                         if section == "checkout" {
-                            panel.checkout = Some(CheckoutState {
-                                tier: PlanTier::Pro,
-                                cycle: BillingCycle::Monthly,
-                                phase: CheckoutPhase::AwaitingPayment,
-                                checkout: Some(checkout_response()),
-                                lightning_qr: None,
-                                poll_errors: 0,
-                            });
+                            let mut cs =
+                                CheckoutState::new(1, PlanTier::Pro, BillingCycle::Monthly);
+                            cs.phase = CheckoutPhase::AwaitingPayment;
+                            cs.checkout = Some(checkout_response());
+                            panel.checkout = Some(cs);
                         }
                     }
                 }

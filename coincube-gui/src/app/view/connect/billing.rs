@@ -32,11 +32,14 @@ use super::{
 use crate::{
     app::{
         settings::global::AccountTier,
-        state::connect::{CheckoutPhase, CheckoutState, ConnectAccountPanel, PlanLifecycle},
+        state::connect::{
+            account::PaymentNetwork, CheckoutPhase, CheckoutState, ConnectAccountPanel,
+            PlanLifecycle,
+        },
         view::ConnectAccountMessage,
     },
     services::coincube::{
-        BillingCycle, BillingHistoryEntry, ChargeStatus, ConnectPlan, PlanEntitlements,
+        BillingCycle, BillingHistoryEntry, ChargeState, ConnectPlan, PlanEntitlements,
         PlanFeatureInfo, PlanStatus, PlanTier,
     },
 };
@@ -255,7 +258,7 @@ pub(super) fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a,
     if let Some(checkout_state) = &state.checkout {
         return match checkout_state.phase {
             CheckoutPhase::Review => review_ux(state, checkout_state),
-            _ => super::checkout_ux(checkout_state),
+            _ => checkout_phase_ux(state, checkout_state),
         };
     }
     if state.show_billing_history {
@@ -630,6 +633,19 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Msg>
     col.into()
 }
 
+/// History status text and tone for a charge state.
+pub(super) fn history_status(state: ChargeState) -> (&'static str, Tone) {
+    match state {
+        ChargeState::Paid => ("Paid", Tone::Good),
+        ChargeState::Processing => ("Confirming", Tone::Warn),
+        ChargeState::PartiallyPaid => ("Partly paid", Tone::Warn),
+        ChargeState::NeedsSupport => ("Needs support", Tone::Bad),
+        ChargeState::Unpaid => ("Unpaid", Tone::Muted),
+        ChargeState::Expired => ("Expired", Tone::Muted),
+        ChargeState::Unknown => ("Pending", Tone::Muted),
+    }
+}
+
 /// Date, item, amount and status of one history entry (board 1 / D4).
 pub(super) fn history_row_parts(
     entry: &BillingHistoryEntry,
@@ -648,12 +664,7 @@ pub(super) fn history_row_parts(
         format_usd(entry.amount_fiat),
         group_sats(entry.amount_sats)
     );
-    let (status, tone) = match entry.status {
-        ChargeStatus::Paid => ("Paid", Tone::Good),
-        ChargeStatus::Processing => ("Confirming", Tone::Warn),
-        ChargeStatus::Unpaid => ("Unpaid", Tone::Muted),
-        ChargeStatus::Expired => ("Expired", Tone::Muted),
-    };
+    let (status, tone) = history_status(entry.charge_state());
     (format_date(date), item, amount, status, tone)
 }
 
@@ -1412,5 +1423,563 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
             "Creates a BTCPay invoice you can pay with Lightning or on-chain. It shows when it \
              expires.",
         )))
+        .into()
+}
+
+// ── Pay (boards B1–B10) ──────────────────────────────────────────────────────
+
+/// "16:42" in local time for an RFC 3339 instant.
+fn local_time(iso: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
+    Some(at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+}
+
+/// The Status row for a checkout: text and tone (board 3 `st` table).
+pub(super) fn checkout_status(checkout: &CheckoutState) -> (String, Tone) {
+    let expires = checkout
+        .last_status
+        .as_ref()
+        .and_then(|s| s.expires_at.as_deref())
+        .or_else(|| checkout.checkout.as_ref()?.expires_at.as_deref())
+        .and_then(local_time);
+    let waiting = |label: &str| match &expires {
+        Some(time) => format!("{label} · expires {time}"),
+        None => label.to_string(),
+    };
+    match &checkout.phase {
+        CheckoutPhase::Review => ("Not invoiced yet".to_string(), Tone::Muted),
+        CheckoutPhase::Creating => ("Creating invoice…".to_string(), Tone::Muted),
+        CheckoutPhase::AwaitingPayment | CheckoutPhase::PayingInBrowser => {
+            (waiting("Waiting for payment"), Tone::Warn)
+        }
+        CheckoutPhase::PartlyPaid { .. } => (waiting("Partly paid"), Tone::Warn),
+        CheckoutPhase::Processing => ("Payment seen · confirming".to_string(), Tone::Warn),
+        CheckoutPhase::Paid { .. } => ("Paid".to_string(), Tone::Good),
+        CheckoutPhase::Expired => ("Expired · nothing received".to_string(), Tone::Muted),
+        CheckoutPhase::NeedsSupport { .. } => ("Needs support".to_string(), Tone::Bad),
+        CheckoutPhase::Failed(_) => ("Not invoiced".to_string(), Tone::Bad),
+        CheckoutPhase::PollFailed(_) => ("Couldn’t check the payment".to_string(), Tone::Warn),
+    }
+}
+
+fn qr_box<'a>(qr: Option<&'a iced::widget::qr_code::Data>) -> Element<'a, Msg> {
+    let frame = |t: &theme::Theme| container::Style {
+        background: Some(iced::Background::Color(t.colors.shell.background)),
+        border: iced::Border {
+            color: t.colors.shell.line,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    };
+    match qr {
+        Some(qr) => container(iced::widget::QRCode::<theme::Theme>::new(qr).total_size(184.0))
+            .padding(8)
+            .style(frame)
+            .into(),
+        None => container(iced::widget::Space::new())
+            .width(Length::Fixed(200.0))
+            .height(Length::Fixed(200.0))
+            .style(frame)
+            .into(),
+    }
+}
+
+/// "62% received" meter (B5).
+fn meter<'a>(received: u64, total: u64) -> Element<'a, Msg> {
+    let pct = received
+        .saturating_mul(100)
+        .checked_div(total)
+        .map_or(0, |p| p.min(100) as u16);
+    let bar = |portion: u16, filled: bool| {
+        container(iced::widget::Space::new())
+            .width(Length::FillPortion(portion.max(1)))
+            .height(Length::Fixed(6.0))
+            .style(move |t: &theme::Theme| container::Style {
+                background: Some(iced::Background::Color(if filled {
+                    t.colors.shell.accent
+                } else {
+                    t.colors.shell.line
+                })),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+    };
+    let mut row = Row::new().spacing(2).width(Length::Fill);
+    if pct > 0 {
+        row = row.push(bar(pct, true));
+    }
+    if pct < 100 {
+        row = row.push(bar(100 - pct, false));
+    }
+    row.into()
+}
+
+fn back_to_billing<'a>() -> Element<'a, Msg> {
+    sheet_button(
+        localized_copy("Back to Plan & billing"),
+        ActionKind::Secondary,
+        true,
+    )
+    .on_press(Msg::DismissCheckout)
+    .into()
+}
+
+/// A labelled value that wraps across lines (a BOLT11 invoice, an address)
+/// beside a Copy button, with a hint under it.
+fn wrapped_copy_field<'a>(label: String, value: &'a str, hint: String) -> Element<'a, Msg> {
+    Column::new()
+        .spacing(6)
+        .push(
+            tenshu_text::body(label)
+                .size(13)
+                .font(coincube_ui::font::SEMIBOLD),
+        )
+        .push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Start)
+                .push(
+                    container(
+                        tenshu_text::mono(value)
+                            .size(13)
+                            .wrapping(iced::widget::text::Wrapping::Glyph),
+                    )
+                    .padding([8, 12])
+                    .width(Length::Fill)
+                    .style(|t: &theme::Theme| container::Style {
+                        background: Some(iced::Background::Color(t.colors.shell.background)),
+                        border: iced::Border {
+                            color: t.colors.shell.line,
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                )
+                .push(
+                    sheet_button(localized_copy("Copy"), ActionKind::Secondary, false)
+                        .on_press(Msg::CopyToClipboard(value.to_string())),
+                ),
+        )
+        .push(lead(hint))
+        .into()
+}
+
+/// The pay block for Awaiting payment and Partly paid (B2, B3, B5).
+fn pay_block<'a>(checkout: &'a CheckoutState) -> Element<'a, Msg> {
+    let Some(resp) = checkout.checkout.as_ref() else {
+        return lead(localized_copy("Waiting for the invoice…")).into();
+    };
+    let partial = match checkout.phase {
+        CheckoutPhase::PartlyPaid {
+            received_sats,
+            due_sats,
+        } => Some((received_sats, due_sats)),
+        _ => None,
+    };
+    let expires = resp.expires_at.as_deref().and_then(local_time);
+    let lightning = partial.is_none() && checkout.network == PaymentNetwork::Lightning;
+    let mut head = Row::new().align_y(Alignment::Center).push(
+        group_title(if partial.is_some() {
+            localized_copy("Send the rest on-chain")
+        } else {
+            localized_copy("Pay with")
+        })
+        .width(Length::Fill),
+    );
+    if partial.is_none() {
+        head = head.push(
+            tenshu::segmented(
+                [
+                    tenshu::segment(
+                        "tenshu.connect.billing.network.lightning",
+                        PaymentNetwork::Lightning,
+                        localized_copy("Lightning"),
+                    ),
+                    tenshu::segment(
+                        "tenshu.connect.billing.network.onchain",
+                        PaymentNetwork::OnChain,
+                        localized_copy("On-chain"),
+                    ),
+                ],
+                Some(checkout.network),
+                Msg::FocusAction,
+            )
+            .size(tenshu::SegmentSize::Compact)
+            .plain()
+            .on_select(Msg::SelectPaymentNetwork),
+        );
+    }
+    let mut col = Column::new().spacing(8).push(head);
+    if let Some((received, due)) = partial {
+        let total = received + due;
+        col = col.push(meter(received, total)).push(lead(format!(
+            "{} of {} sats received · {} sats left to pay",
+            group_sats(received),
+            group_sats(total),
+            group_sats(due)
+        )));
+    }
+    let (label, value, hint) = if lightning {
+        (
+            "Lightning invoice".to_string(),
+            resp.lightning_invoice.as_str(),
+            "The amount is already in the invoice. Lightning settles in seconds.".to_string(),
+        )
+    } else if let Some((_, due)) = partial {
+        (
+            format!("Same Bitcoin address · send {} sats more", group_sats(due)),
+            resp.on_chain_address.as_str(),
+            match &expires {
+                Some(time) => format!(
+                    "Send the remaining amount before {time}. If the invoice expires first, \
+                     contact support with the invoice ID."
+                ),
+                None => "Send the remaining amount before the invoice expires. If it expires \
+                         first, contact support with the invoice ID."
+                    .to_string(),
+            },
+        )
+    } else {
+        (
+            "Bitcoin address".to_string(),
+            resp.on_chain_address.as_str(),
+            format!(
+                "Send exactly {} sats. {} turns on after the payment confirms.",
+                group_sats(resp.amount_sats),
+                checkout.tier
+            ),
+        )
+    };
+    let qr = if lightning {
+        checkout.lightning_qr.as_ref()
+    } else {
+        checkout.onchain_qr.as_ref()
+    };
+    // The full invoice or address, wrapped and never truncated; Copy copies
+    // the whole value.
+    let field = wrapped_copy_field(label, value, hint);
+    let links = actions_row(vec![
+        sheet_link(localized_copy("Pay on the BTCPay page instead"))
+            .on_press(Msg::OpenCheckoutUrl(resp.checkout_url.clone()))
+            .into(),
+        sheet_link(localized_copy("Cancel"))
+            .on_press(Msg::DismissCheckout)
+            .into(),
+    ]);
+    col.push(space(8.0))
+        .push(
+            Row::new()
+                .spacing(24)
+                .align_y(Alignment::Start)
+                .push(qr_box(qr))
+                .push(
+                    Column::new()
+                        .spacing(16)
+                        .width(Length::Fill)
+                        .push(field)
+                        .push(links),
+                ),
+        )
+        .into()
+}
+
+/// A checkout past Review: header, the summary list and the phase body.
+fn checkout_phase_ux<'a>(
+    state: &'a ConnectAccountPanel,
+    checkout: &'a CheckoutState,
+) -> Element<'a, Msg> {
+    let facts = review_facts(state, checkout, chrono::Utc::now());
+    let tier = &checkout.tier;
+    let starts = checkout
+        .checkout
+        .as_ref()
+        .and_then(|r| r.starts_at.as_deref())
+        .map(format_date);
+    let (heading, lead_text) = match &checkout.phase {
+        CheckoutPhase::Creating => (
+            format!("Pay for {tier}"),
+            "Preparing a Bitcoin invoice for the amount above.".to_string(),
+        ),
+        CheckoutPhase::Paid { .. } => match &starts {
+            Some(date) => (
+                "Plan change scheduled".to_string(),
+                format!("{tier} starts on {date}, when your current period ends."),
+            ),
+            None => (
+                "Plan changed".to_string(),
+                "Your new plan is active on this account.".to_string(),
+            ),
+        },
+        CheckoutPhase::NeedsSupport { .. } => (
+            format!("Pay for {tier}"),
+            "There is a problem with this payment.".to_string(),
+        ),
+        CheckoutPhase::Failed(_) => (
+            "Review plan change".to_string(),
+            "The invoice couldn’t be created.".to_string(),
+        ),
+        _ => (
+            format!("Pay for {tier}"),
+            "Pay from any Bitcoin wallet. This screen updates by itself when the payment arrives."
+                .to_string(),
+        ),
+    };
+
+    let resp = checkout.checkout.as_ref();
+    let amount_main = match resp {
+        Some(r) => format!("${} {}", format_usd(r.amount_fiat), r.fiat_currency),
+        None => facts.amount.clone().unwrap_or_default(),
+    };
+    let amount_sub = match resp {
+        Some(r) => format!(
+            "{} sats at today’s rate, fixed for this invoice",
+            group_sats(r.amount_sats)
+        ),
+        None => "In sats at today’s rate, fixed for this invoice".to_string(),
+    };
+    let mut plan_main = Column::new().push(tenshu_text::label(facts.plan.clone()));
+    if let Some(replaces) = facts.replaces.clone() {
+        plan_main = plan_main.push(lead(match &facts.starts {
+            Some(date) => format!("{replaces} from {date}"),
+            None => replaces,
+        }));
+    }
+    let mut covers = Column::new().push(tenshu_text::label(
+        facts.covers.clone().unwrap_or_else(|| "—".to_string()),
+    ));
+    if let Some(date) = starts.clone().or(facts.starts.clone()) {
+        covers = covers.push(lead(format!("Starts {date}")));
+    }
+    let invoice_id = match &checkout.phase {
+        CheckoutPhase::Creating | CheckoutPhase::Failed(_) => None,
+        _ => checkout
+            .last_status
+            .as_ref()
+            .and_then(|s| s.invoice_id.clone())
+            .filter(|id| !id.is_empty())
+            .or_else(|| resp.map(|r| r.charge_id.clone())),
+    };
+    let (status_text, tone) = checkout_status(checkout);
+    let status_main: Element<'a, Msg> = match &invoice_id {
+        Some(id) => tenshu_text::mono(format!("Invoice {id}"))
+            .size(12)
+            .style(theme::tenshu::text::muted)
+            .into(),
+        None => iced::widget::Space::new().into(),
+    };
+    let list = ruled_list([
+        summary_row(localized_copy("Plan"), plan_main.into(), None),
+        summary_row(
+            localized_copy("Amount"),
+            Column::new()
+                .push(tenshu_text::label(amount_main))
+                .push(lead(amount_sub))
+                .into(),
+            None,
+        ),
+        summary_row(localized_copy("Covers"), covers.into(), None),
+        summary_row(
+            localized_copy("Status"),
+            status_main,
+            Some(status_line(status_icon(tone), status_text, tone)),
+        ),
+    ]);
+
+    let body: Element<'a, Msg> = match &checkout.phase {
+        CheckoutPhase::Review => iced::widget::Space::new().into(),
+        CheckoutPhase::Creating => Row::new()
+            .spacing(24)
+            .align_y(Alignment::Start)
+            .push(qr_box(None))
+            .push(lead(localized_copy(
+                "Asking BTCPay for an invoice. This usually takes a few seconds.",
+            )))
+            .into(),
+        CheckoutPhase::AwaitingPayment | CheckoutPhase::PartlyPaid { .. } => pay_block(checkout),
+        CheckoutPhase::PayingInBrowser => billing_notice(
+            clock_icon(),
+            Tone::Warn,
+            localized_copy("Finish paying on the BTCPay page"),
+            localized_copy(
+                "The BTCPay checkout page is open in your browser. Keep this screen open or come \
+                 back later; it updates when the payment arrives.",
+            ),
+            Some(actions_row({
+                let mut items: Vec<Element<'a, Msg>> = Vec::new();
+                if let Some(r) = resp {
+                    items.push(
+                        sheet_button(
+                            localized_copy("Reopen checkout page"),
+                            ActionKind::Secondary,
+                            true,
+                        )
+                        .on_press(Msg::OpenCheckoutUrl(r.checkout_url.clone()))
+                        .into(),
+                    );
+                }
+                items.push(
+                    sheet_link(localized_copy("Show the QR code here instead"))
+                        .on_press(Msg::ShowInvoiceHere)
+                        .into(),
+                );
+                items.push(
+                    sheet_link(localized_copy("Cancel"))
+                        .on_press(Msg::DismissCheckout)
+                        .into(),
+                );
+                items
+            })),
+        ),
+        CheckoutPhase::Processing => billing_notice(
+            clock_icon(),
+            Tone::Warn,
+            localized_copy("Payment seen, waiting for confirmation"),
+            format!(
+                "BTCPay has seen your payment. {tier} turns on once it confirms. You can close \
+                 this; your plan updates either way."
+            ),
+            Some(back_to_billing()),
+        ),
+        CheckoutPhase::Paid { overpaid_sats } => {
+            let mut body = match (&starts, facts.covers.as_deref()) {
+                (Some(date), _) => format!(
+                    "{tier} starts on {date}. Until then you keep your current plan. The receipt \
+                     is in your billing history."
+                ),
+                (None, Some(covers)) => {
+                    format!("Covers {covers}. The receipt is in your billing history.")
+                }
+                (None, None) => "The receipt is in your billing history.".to_string(),
+            };
+            if *overpaid_sats > 0 {
+                body.push_str(&format!(
+                    " You overpaid by {} sats; contact support for the difference.",
+                    group_sats(*overpaid_sats)
+                ));
+            }
+            billing_notice(
+                check_circle_icon(),
+                Tone::Good,
+                match &starts {
+                    Some(_) => format!("{tier} is paid for"),
+                    None => format!("You're on {tier}"),
+                },
+                body,
+                Some(
+                    sheet_button(localized_copy("Done"), ActionKind::Primary, true)
+                        .on_press(Msg::DismissCheckout)
+                        .into(),
+                ),
+            )
+        }
+        CheckoutPhase::Expired => billing_notice(
+            dash_circle_icon(),
+            Tone::Muted,
+            localized_copy("This invoice expired"),
+            localized_copy(
+                "No payment was received, so nothing was charged. A new invoice uses the current \
+                 bitcoin rate.",
+            ),
+            Some(actions_row(vec![
+                // Re-issues the same tier and cycle (a new checkout
+                // generation), not a dismiss.
+                sheet_button(
+                    localized_copy("Create new invoice"),
+                    ActionKind::Primary,
+                    true,
+                )
+                .on_press(Msg::StartCheckout(tier.clone()))
+                .into(),
+                back_to_billing(),
+            ])),
+        ),
+        CheckoutPhase::NeedsSupport {
+            invoice_id,
+            received_sats,
+        } => {
+            let late = checkout
+                .last_status
+                .as_ref()
+                .and_then(|s| s.additional_status.as_deref())
+                .is_some_and(|a| a.eq_ignore_ascii_case("PaidLate"));
+            let received = if *received_sats > 0 {
+                format!("BTCPay received {} sats", group_sats(*received_sats))
+            } else {
+                "BTCPay received a payment".to_string()
+            };
+            billing_notice(
+                exclamation_circle_icon(),
+                Tone::Bad,
+                if late {
+                    localized_copy("Payment arrived after the invoice expired")
+                } else {
+                    localized_copy("This payment needs support")
+                },
+                format!(
+                    "{received}, but it can’t be applied to your plan automatically. Your plan \
+                     hasn't changed. Contact support with the invoice ID below."
+                ),
+                Some(
+                    Column::new()
+                        .spacing(12)
+                        .push(
+                            tenshu::copy_field(
+                                "tenshu.connect.billing.copy.invoice-id",
+                                localized_copy("Invoice ID"),
+                                invoice_id.as_str(),
+                                Msg::FocusAction,
+                            )
+                            .on_copy(Msg::CopyToClipboard(invoice_id.clone())),
+                        )
+                        .push(back_to_billing())
+                        .into(),
+                ),
+            )
+        }
+        CheckoutPhase::Failed(error) => billing_notice(
+            exclamation_circle_icon(),
+            Tone::Bad,
+            localized_copy("Couldn’t create the invoice"),
+            format!(
+                "Connect or BTCPay didn’t respond. Nothing was charged. Check your connection \
+                 and try again. ({error})"
+            ),
+            Some(actions_row(vec![
+                sheet_button(localized_copy("Try again"), ActionKind::Primary, true)
+                    .on_press(Msg::StartCheckout(tier.clone()))
+                    .into(),
+                back_to_billing(),
+            ])),
+        ),
+        CheckoutPhase::PollFailed(_) => billing_notice(
+            exclamation_circle_icon(),
+            Tone::Warn,
+            localized_copy("Couldn’t check the payment"),
+            localized_copy(
+                "Connect didn’t answer. If you already paid, your plan updates once Connect sees \
+                 the payment. Check again, or come back later.",
+            ),
+            Some(actions_row(vec![
+                sheet_button(localized_copy("Check again"), ActionKind::Primary, true)
+                    .on_press(Msg::ResumeChargePolling)
+                    .into(),
+                back_to_billing(),
+            ])),
+        ),
+    };
+
+    Column::new()
+        .width(Length::Fill)
+        .push(sheet_title(heading))
+        .push(lead(lead_text))
+        .push(space(20.0))
+        .push(list)
+        .push(space(24.0))
+        .push(body)
         .into()
 }

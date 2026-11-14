@@ -10,8 +10,8 @@ use crate::{
         },
     },
     services::coincube::{
-        BillingCycle, BillingHistoryEntry, ChargeStatus, CheckoutRequest, CheckoutResponse,
-        CoincubeClient, ConnectPlan, Contact, ContactCube, ContactRole,
+        BillingCycle, BillingHistoryEntry, ChargeState, ChargeStatusResponse, CheckoutRequest,
+        CheckoutResponse, CoincubeClient, ConnectPlan, Contact, ContactCube, ContactRole,
         CreateDuressAlertContactRequest, CreateInviteRequest, CubeResponse, DuressAlertContact,
         DuressCheckOutcome, FeaturesResponse, Invite, LoginActivity, LoginResponse, OtpRequest,
         OtpVerifyRequest, PlanStatus, PlanTier, ReceivedInvite, RecoveryKitStatus,
@@ -98,27 +98,133 @@ pub fn read_session_for_integration(namespace: &str) -> Result<LoginResponse, &'
 
 // ── Checkout state machine ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+/// Where a checkout is, one variant per BTCPay board (B1–B10).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutPhase {
     /// Review step (board 3): plan, amount, dates covered and how to pay.
     /// Nothing has been sent to Connect yet.
     Review,
-    /// Waiting for POST /checkout response.
+    /// Waiting for POST /checkout response (B1).
     Creating,
-    /// Invoice received, awaiting payment.
+    /// Invoice received, awaiting payment (B2, B3). Lightning or on-chain is
+    /// [`CheckoutState::network`].
     AwaitingPayment,
-    /// Server reported "processing" (mempool confirmation pending).
+    /// The BTCPay page is open in the browser (B4). Polling keeps running.
+    PayingInBrowser,
+    /// Some sats arrived; the rest is due on the same address (B5).
+    PartlyPaid { received_sats: u64, due_sats: u64 },
+    /// Payment seen, waiting for confirmation (B6).
     Processing,
-    /// Payment confirmed.
-    Paid,
-    /// Invoice expired before payment.
+    /// Paid (B7). An overpayment activates too, with a support note
+    /// (decision 14).
+    Paid { overpaid_sats: u64 },
+    /// Expired with nothing received (B8).
     Expired,
-    /// API error during checkout creation or polling.
+    /// Money arrived but can't be applied automatically: paid late, partly
+    /// paid then expired, or invalid (B9, decision 13).
+    NeedsSupport {
+        invoice_id: String,
+        received_sats: u64,
+    },
+    /// The invoice couldn't be created (B10). No invoice exists.
     Failed(String),
+    /// Polling stopped after errors. The invoice may still be paid; "Check
+    /// again" resumes polling the same invoice instead of creating another.
+    PollFailed(String),
+}
+
+impl CheckoutPhase {
+    /// Phases in which the poll chain keeps running.
+    pub fn polls(&self) -> bool {
+        matches!(
+            self,
+            CheckoutPhase::AwaitingPayment
+                | CheckoutPhase::PayingInBrowser
+                | CheckoutPhase::PartlyPaid { .. }
+                | CheckoutPhase::Processing
+        )
+    }
+}
+
+/// Lightning or on-chain on the Awaiting payment board (view state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaymentNetwork {
+    #[default]
+    Lightning,
+    OnChain,
+}
+
+/// `bitcoin:` URI for `sats` to `address` (BIP 21), for the on-chain QR.
+pub fn bip21_uri(address: &str, sats: u64) -> String {
+    let whole = sats / 100_000_000;
+    let frac = sats % 100_000_000;
+    if frac == 0 {
+        return format!("bitcoin:{address}?amount={whole}");
+    }
+    let frac = format!("{frac:08}");
+    format!(
+        "bitcoin:{address}?amount={whole}.{}",
+        frac.trim_end_matches('0')
+    )
+}
+
+/// The phase a charge-status poll moves a checkout to, whether the poll
+/// chain continues, and whether the plan was paid. Pure, so every BTCPay
+/// outcome is unit-testable.
+pub fn next_checkout_phase(
+    current: &CheckoutPhase,
+    status: &ChargeStatusResponse,
+) -> (CheckoutPhase, bool, bool) {
+    match status.charge_state() {
+        ChargeState::PartiallyPaid => (
+            CheckoutPhase::PartlyPaid {
+                received_sats: status.amount_received_sats,
+                due_sats: status.amount_due_sats,
+            },
+            true,
+            false,
+        ),
+        ChargeState::Processing => (CheckoutPhase::Processing, true, false),
+        ChargeState::Paid => (
+            CheckoutPhase::Paid {
+                overpaid_sats: status.overpaid_sats,
+            },
+            false,
+            true,
+        ),
+        ChargeState::Expired => (CheckoutPhase::Expired, false, false),
+        ChargeState::NeedsSupport => (
+            CheckoutPhase::NeedsSupport {
+                invoice_id: status
+                    .invoice_id
+                    .clone()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| status.charge_id.clone()),
+                received_sats: status.amount_received_sats,
+            },
+            false,
+            false,
+        ),
+        // Unpaid, or a state this build doesn't know: keep waiting, and
+        // keep the page the user is on (browser or QR).
+        ChargeState::Unpaid | ChargeState::Unknown => (
+            match current {
+                CheckoutPhase::PayingInBrowser
+                | CheckoutPhase::PartlyPaid { .. }
+                | CheckoutPhase::Processing => current.clone(),
+                _ => CheckoutPhase::AwaitingPayment,
+            },
+            true,
+            false,
+        ),
+    }
 }
 
 #[derive(Debug)]
 pub struct CheckoutState {
+    /// This checkout's generation. Every create and poll result carries it,
+    /// so a result from a dismissed or replaced checkout is dropped.
+    pub id: u64,
     /// The tier being bought (or reviewed).
     pub tier: PlanTier,
     /// The billing cycle snapshotted when Review opened; every invoice for
@@ -127,7 +233,30 @@ pub struct CheckoutState {
     pub phase: CheckoutPhase,
     pub checkout: Option<CheckoutResponse>,
     pub lightning_qr: Option<qr_code::Data>,
+    /// The on-chain QR: the full amount, or what is left once partly paid.
+    pub onchain_qr: Option<qr_code::Data>,
+    pub network: PaymentNetwork,
+    /// The last charge status Connect returned (amounts, invoice id).
+    pub last_status: Option<ChargeStatusResponse>,
     pub poll_errors: u8,
+}
+
+impl CheckoutState {
+    /// A checkout at the Review step.
+    pub fn new(id: u64, tier: PlanTier, cycle: BillingCycle) -> Self {
+        Self {
+            id,
+            tier,
+            cycle,
+            phase: CheckoutPhase::Review,
+            checkout: None,
+            lightning_qr: None,
+            onchain_qr: None,
+            network: PaymentNetwork::Lightning,
+            last_status: None,
+            poll_errors: 0,
+        }
+    }
 }
 
 // ── Campaign code redemption (v2 campaign engine) ───────────────────────────
@@ -1014,6 +1143,8 @@ pub struct ConnectAccountPanel {
     pub selected_plan_tier: Option<PlanTier>,
     /// Active checkout flow (None when no checkout in progress).
     pub checkout: Option<CheckoutState>,
+    /// Last checkout generation handed out (see [`CheckoutState::id`]).
+    checkout_seq: u64,
     /// Billing history entries.
     pub billing_history: Option<Vec<BillingHistoryEntry>>,
     /// Whether the billing history sub-view is shown.
@@ -1104,6 +1235,7 @@ impl ConnectAccountPanel {
             selected_billing_cycle: BillingCycle::Monthly,
             selected_plan_tier: None,
             checkout: None,
+            checkout_seq: 0,
             billing_history: None,
             show_billing_history: false,
             show_plan_comparison: false,
@@ -2549,14 +2681,12 @@ impl ConnectAccountPanel {
                 self.show_plan_comparison = false;
                 // Back from Review lands on the same picked row.
                 self.selected_plan_tier = Some(tier.clone());
-                self.checkout = Some(CheckoutState {
+                self.checkout_seq += 1;
+                self.checkout = Some(CheckoutState::new(
+                    self.checkout_seq,
                     tier,
-                    cycle: self.selected_billing_cycle,
-                    phase: CheckoutPhase::Review,
-                    checkout: None,
-                    lightning_qr: None,
-                    poll_errors: 0,
-                });
+                    self.selected_billing_cycle,
+                ));
             }
 
             ConnectAccountMessage::StartCheckout(tier) => {
@@ -2578,14 +2708,14 @@ impl ConnectAccountPanel {
                     .filter(|cs| cs.tier == tier)
                     .map(|cs| cs.cycle)
                     .unwrap_or(self.selected_billing_cycle);
-                self.checkout = Some(CheckoutState {
-                    tier: tier.clone(),
-                    cycle,
-                    phase: CheckoutPhase::Creating,
-                    checkout: None,
-                    lightning_qr: None,
-                    poll_errors: 0,
-                });
+                // A new generation: anything still in flight for the
+                // previous invoice (an expired one, a failed create) is
+                // dropped when it lands.
+                self.checkout_seq += 1;
+                let id = self.checkout_seq;
+                let mut checkout = CheckoutState::new(id, tier.clone(), cycle);
+                checkout.phase = CheckoutPhase::Creating;
+                self.checkout = Some(checkout);
                 let gen = self.session_generation;
                 let client = self.client.clone();
                 let req = CheckoutRequest {
@@ -2596,26 +2726,30 @@ impl ConnectAccountPanel {
                     async move { client.create_checkout(req).await.map_err(|e| e.to_string()) },
                     move |result| {
                         Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::CheckoutCreated(result, gen),
+                            ConnectAccountMessage::CheckoutCreated(result, gen, id),
                         ))
                     },
                 );
             }
 
-            ConnectAccountMessage::CheckoutCreated(result, gen) => {
-                if gen != self.session_generation || self.checkout.is_none() {
+            ConnectAccountMessage::CheckoutCreated(result, gen, id) => {
+                if gen != self.session_generation || !self.is_current_checkout(id) {
                     return iced::Task::none();
                 }
                 match result {
                     Ok(resp) => {
                         let qr = qr_code::Data::new(&resp.lightning_invoice).ok();
+                        let onchain =
+                            qr_code::Data::new(bip21_uri(&resp.on_chain_address, resp.amount_sats))
+                                .ok();
                         let cs = self.checkout.as_mut().expect("checked above");
                         cs.phase = CheckoutPhase::AwaitingPayment;
                         cs.checkout = Some(resp);
                         cs.lightning_qr = qr;
+                        cs.onchain_qr = onchain;
                         cs.poll_errors = 0;
                         return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::PollChargeStatus,
+                            ConnectAccountMessage::PollChargeStatus(id),
                         )));
                     }
                     Err(e) => {
@@ -2626,17 +2760,11 @@ impl ConnectAccountPanel {
                 }
             }
 
-            ConnectAccountMessage::PollChargeStatus => {
+            ConnectAccountMessage::PollChargeStatus(id) => {
                 let should_poll = self
                     .checkout
                     .as_ref()
-                    .map(|cs| {
-                        matches!(
-                            cs.phase,
-                            CheckoutPhase::AwaitingPayment | CheckoutPhase::Processing
-                        )
-                    })
-                    .unwrap_or(false);
+                    .is_some_and(|cs| cs.id == id && cs.phase.polls());
                 if !should_poll {
                     return iced::Task::none();
                 }
@@ -2666,63 +2794,68 @@ impl ConnectAccountPanel {
                     },
                     move |result| {
                         Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::ChargeStatusUpdated(result, gen),
+                            ConnectAccountMessage::ChargeStatusUpdated(result, gen, id),
                         ))
                     },
                 );
             }
 
-            ConnectAccountMessage::ChargeStatusUpdated(result, gen) => {
-                if gen != self.session_generation || self.checkout.is_none() {
+            ConnectAccountMessage::ChargeStatusUpdated(result, gen, id) => {
+                // Only the current checkout's poll chain may move it: a poll
+                // in flight from a dismissed or replaced invoice is dropped.
+                if gen != self.session_generation || !self.is_current_checkout(id) {
+                    return iced::Task::none();
+                }
+                let poll = iced::Task::done(Message::View(view::Message::ConnectAccount(
+                    ConnectAccountMessage::PollChargeStatus(id),
+                )));
+                let cs = self.checkout.as_mut().expect("checked above");
+                if !cs.phase.polls() {
                     return iced::Task::none();
                 }
                 match result {
                     Ok(status) => {
-                        let cs = self.checkout.as_mut().unwrap();
                         cs.poll_errors = 0;
-                        match status.status {
-                            ChargeStatus::Unpaid => {
-                                // Keep polling
-                                return iced::Task::done(Message::View(
-                                    view::Message::ConnectAccount(
-                                        ConnectAccountMessage::PollChargeStatus,
-                                    ),
-                                ));
+                        let (phase, keep_polling, paid) = next_checkout_phase(&cs.phase, &status);
+                        if let CheckoutPhase::PartlyPaid { due_sats, .. } = &phase {
+                            // Same address, the remaining amount.
+                            if let Some(resp) = cs.checkout.as_ref() {
+                                cs.onchain_qr = qr_code::Data::new(bip21_uri(
+                                    &resp.on_chain_address,
+                                    *due_sats,
+                                ))
+                                .ok();
                             }
-                            ChargeStatus::Processing => {
-                                cs.phase = CheckoutPhase::Processing;
-                                return iced::Task::done(Message::View(
-                                    view::Message::ConnectAccount(
-                                        ConnectAccountMessage::PollChargeStatus,
-                                    ),
-                                ));
-                            }
-                            ChargeStatus::Paid => {
-                                cs.phase = CheckoutPhase::Paid;
-                                // Invalidate cached billing history so next view fetches fresh data
-                                self.billing_history = None;
-                                // Refresh plan
-                                let g = self.session_generation;
-                                let c = self.client.clone();
-                                return iced::Task::perform(
+                            cs.network = PaymentNetwork::OnChain;
+                        }
+                        cs.phase = phase;
+                        cs.last_status = Some(status);
+                        if paid {
+                            // Refresh the plan and the history the receipt
+                            // lands in.
+                            self.billing_history = None;
+                            let g = self.session_generation;
+                            let c = self.client.clone();
+                            return iced::Task::batch([
+                                iced::Task::perform(
                                     async move { (c.get_connect_plan().await.ok(), g) },
                                     |(plan, g)| {
                                         Message::View(view::Message::ConnectAccount(
                                             ConnectAccountMessage::PlanLoaded(plan, g),
                                         ))
                                     },
-                                );
-                            }
-                            ChargeStatus::Expired => {
-                                cs.phase = CheckoutPhase::Expired;
-                            }
+                                ),
+                                self.reload_billing_history(),
+                            ]);
+                        }
+                        if keep_polling {
+                            return poll;
                         }
                     }
                     Err((e, terminal)) => {
-                        let cs = self.checkout.as_mut().unwrap();
                         if terminal {
                             log::error!("[CONNECT] Charge poll terminal error: {}", e);
-                            cs.phase = CheckoutPhase::Failed(e);
+                            cs.phase = CheckoutPhase::PollFailed(e);
                         } else {
                             cs.poll_errors += 1;
                             if cs.poll_errors >= 3 {
@@ -2731,21 +2864,48 @@ impl ConnectAccountPanel {
                                     cs.poll_errors,
                                     e
                                 );
-                                cs.phase = CheckoutPhase::Failed(e);
+                                cs.phase = CheckoutPhase::PollFailed(e);
                             } else {
                                 log::warn!(
                                     "[CONNECT] Charge poll error ({}/3): {}",
                                     cs.poll_errors,
                                     e
                                 );
-                                return iced::Task::done(Message::View(
-                                    view::Message::ConnectAccount(
-                                        ConnectAccountMessage::PollChargeStatus,
-                                    ),
-                                ));
+                                return poll;
                             }
                         }
                     }
+                }
+            }
+
+            ConnectAccountMessage::SelectPaymentNetwork(network) => {
+                if let Some(cs) = self.checkout.as_mut() {
+                    cs.network = network;
+                }
+            }
+
+            ConnectAccountMessage::ShowInvoiceHere => {
+                if let Some(cs) = self
+                    .checkout
+                    .as_mut()
+                    .filter(|cs| cs.phase == CheckoutPhase::PayingInBrowser)
+                {
+                    cs.phase = CheckoutPhase::AwaitingPayment;
+                }
+            }
+
+            ConnectAccountMessage::ResumeChargePolling => {
+                if let Some(cs) = self
+                    .checkout
+                    .as_mut()
+                    .filter(|cs| matches!(cs.phase, CheckoutPhase::PollFailed(_)))
+                {
+                    cs.phase = CheckoutPhase::AwaitingPayment;
+                    cs.poll_errors = 0;
+                    let id = cs.id;
+                    return iced::Task::done(Message::View(view::Message::ConnectAccount(
+                        ConnectAccountMessage::PollChargeStatus(id),
+                    )));
                 }
             }
 
@@ -2754,6 +2914,15 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::OpenCheckoutUrl(url) => {
+                // B4: the BTCPay page is open. The poll chain keeps running
+                // (PayingInBrowser polls), so this screen still updates.
+                if let Some(cs) = self
+                    .checkout
+                    .as_mut()
+                    .filter(|cs| cs.phase == CheckoutPhase::AwaitingPayment)
+                {
+                    cs.phase = CheckoutPhase::PayingInBrowser;
+                }
                 return iced::Task::done(Message::View(view::Message::OpenUrl(url)));
             }
 
@@ -5091,6 +5260,11 @@ impl Default for ConnectAccountPanel {
 
 // ── Plan lifecycle / pricing-schema helpers (D1 / D3 / D4) ──────────────────
 impl ConnectAccountPanel {
+    /// Whether checkout generation `id` is the one on screen.
+    fn is_current_checkout(&self, id: u64) -> bool {
+        self.checkout.as_ref().is_some_and(|cs| cs.id == id)
+    }
+
     /// Fetch `GET /connect/billing/history` for Plan & billing's inline
     /// list and the full history page. Tagged with the session generation.
     pub fn reload_billing_history(&self) -> iced::Task<Message> {
@@ -8348,6 +8522,341 @@ mod plan_lifecycle_tests {
         let cs = panel.checkout.as_ref().unwrap();
         assert!(matches!(cs.phase, CheckoutPhase::Review));
         assert_eq!(cs.cycle, BillingCycle::Annual);
+    }
+
+    // ── Billing v2 D3: BTCPay phases and the per-checkout poll guard ──
+
+    fn charge_status(json: &str) -> ChargeStatusResponse {
+        serde_json::from_str(json).expect("charge status parses")
+    }
+
+    fn checkout_resp() -> CheckoutResponse {
+        serde_json::from_str(
+            r#"{"chargeId":"inv-1","lightningInvoice":"lnbc1fullinvoice","onChainAddress":"bc1qaddr",
+                "amountSats":100000,"amountFiat":100,"fiatCurrency":"USD","plan":"pro",
+                "billingCycle":"annual","checkoutUrl":"https://pay.example/i/inv-1","expiresAt":null}"#,
+        )
+        .expect("checkout parses with a null expiresAt")
+    }
+
+    /// A panel with an invoice out for payment (checkout generation `id`).
+    fn awaiting_panel() -> (ConnectAccountPanel, u64, u64) {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let id = panel.checkout.as_ref().unwrap().id;
+        let gen = panel.session_generation;
+        let _ = panel.update_message(ConnectAccountMessage::CheckoutCreated(
+            Ok(checkout_resp()),
+            gen,
+            id,
+        ));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::AwaitingPayment
+        );
+        (panel, gen, id)
+    }
+
+    #[test]
+    fn charge_states_map_to_btcpay_phases() {
+        use CheckoutPhase as P;
+        let awaiting = P::AwaitingPayment;
+        let cases = [
+            (
+                r#"{"chargeId":"c","status":"unpaid","plan":"pro"}"#,
+                P::AwaitingPayment,
+                true,
+                false,
+            ),
+            (
+                r#"{"chargeId":"c","status":"processing","plan":"pro"}"#,
+                P::Processing,
+                true,
+                false,
+            ),
+            (
+                r#"{"chargeId":"c","status":"paid","plan":"pro"}"#,
+                P::Paid { overpaid_sats: 0 },
+                false,
+                true,
+            ),
+            (
+                r#"{"chargeId":"c","status":"expired","plan":"pro"}"#,
+                P::Expired,
+                false,
+                false,
+            ),
+            (
+                r#"{"chargeId":"c","status":"unpaid","state":"partially_paid","plan":"pro",
+                    "amountReceivedSats":62000,"amountDueSats":38000}"#,
+                P::PartlyPaid {
+                    received_sats: 62_000,
+                    due_sats: 38_000,
+                },
+                true,
+                false,
+            ),
+            (
+                r#"{"chargeId":"c","invoiceId":"INV9","status":"expired","state":"needs_support",
+                    "plan":"pro","amountReceivedSats":5000,"additionalStatus":"PaidLate"}"#,
+                P::NeedsSupport {
+                    invoice_id: "INV9".into(),
+                    received_sats: 5_000,
+                },
+                false,
+                false,
+            ),
+            (
+                r#"{"chargeId":"c","status":"paid","state":"paid","plan":"pro","overpaidSats":1200}"#,
+                P::Paid {
+                    overpaid_sats: 1_200,
+                },
+                false,
+                true,
+            ),
+            // Unknown values keep waiting instead of failing the poll.
+            (
+                r#"{"chargeId":"c","status":"refunding","state":"refunding","plan":"pro"}"#,
+                P::AwaitingPayment,
+                true,
+                false,
+            ),
+        ];
+        for (json, phase, polls, paid) in cases {
+            let status = charge_status(json);
+            assert_eq!(
+                next_checkout_phase(&awaiting, &status),
+                (phase, polls, paid),
+                "{}",
+                json
+            );
+        }
+        // Waiting on the BTCPay page stays there while unpaid.
+        let unpaid = charge_status(r#"{"chargeId":"c","status":"unpaid","plan":"pro"}"#);
+        assert_eq!(
+            next_checkout_phase(&P::PayingInBrowser, &unpaid).0,
+            P::PayingInBrowser
+        );
+        // Needs support falls back to the charge id when there is no invoice id.
+        let support = charge_status(
+            r#"{"chargeId":"c7","status":"expired","state":"needs_support","plan":"pro"}"#,
+        );
+        assert_eq!(
+            next_checkout_phase(&awaiting, &support).0,
+            P::NeedsSupport {
+                invoice_id: "c7".into(),
+                received_sats: 0
+            }
+        );
+    }
+
+    #[test]
+    fn polling_continues_after_opening_the_btcpay_page() {
+        let (mut panel, gen, id) = awaiting_panel();
+        let _ = panel.update_message(ConnectAccountMessage::OpenCheckoutUrl(
+            "https://pay.example/i/inv-1".into(),
+        ));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.phase, CheckoutPhase::PayingInBrowser);
+        assert!(
+            cs.phase.polls(),
+            "the poll chain keeps running in the browser phase"
+        );
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"processing","plan":"pro"}"#,
+            )),
+            gen,
+            id,
+        ));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Processing
+        );
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"paid","plan":"pro"}"#,
+            )),
+            gen,
+            id,
+        ));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Paid { overpaid_sats: 0 }
+        );
+    }
+
+    #[test]
+    fn a_stale_checkout_poll_never_updates_a_new_checkout() {
+        let (mut panel, gen, old_id) = awaiting_panel();
+        let _ = panel.update_message(ConnectAccountMessage::DismissCheckout);
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let new_id = panel.checkout.as_ref().unwrap().id;
+        assert_ne!(old_id, new_id);
+        // The dismissed invoice's poll and create results land late.
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"paid","plan":"pro"}"#,
+            )),
+            gen,
+            old_id,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::CheckoutCreated(
+            Ok(checkout_resp()),
+            gen,
+            old_id,
+        ));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.phase, CheckoutPhase::Creating);
+        assert!(cs.checkout.is_none());
+    }
+
+    #[test]
+    fn three_transient_poll_errors_stop_polling_and_check_again_resumes() {
+        let (mut panel, gen, id) = awaiting_panel();
+        for _ in 0..2 {
+            let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+                Err(("timeout".into(), false)),
+                gen,
+                id,
+            ));
+            assert_eq!(
+                panel.checkout.as_ref().unwrap().phase,
+                CheckoutPhase::AwaitingPayment
+            );
+        }
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Err(("timeout".into(), false)),
+            gen,
+            id,
+        ));
+        assert!(matches!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::PollFailed(_)
+        ));
+        // Check again resumes the same invoice; it never creates another.
+        let _ = panel.update_message(ConnectAccountMessage::ResumeChargePolling);
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.phase, CheckoutPhase::AwaitingPayment);
+        assert_eq!(cs.id, id);
+        assert_eq!(cs.poll_errors, 0);
+        // A terminal (4xx) error stops at once.
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Err(("not found".into(), true)),
+            gen,
+            id,
+        ));
+        assert!(matches!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::PollFailed(_)
+        ));
+    }
+
+    #[test]
+    fn expired_create_new_invoice_issues_a_new_checkout_for_the_same_plan() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(features_with_purchasing(None, Some(true)));
+        panel.selected_billing_cycle = BillingCycle::Annual;
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let id = panel.checkout.as_ref().unwrap().id;
+        let gen = panel.session_generation;
+        let _ = panel.update_message(ConnectAccountMessage::CheckoutCreated(
+            Ok(checkout_resp()),
+            gen,
+            id,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"expired","plan":"pro"}"#,
+            )),
+            gen,
+            id,
+        ));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Expired
+        );
+        panel.selected_billing_cycle = BillingCycle::Monthly;
+        let _ = panel.update_message(ConnectAccountMessage::StartCheckout(PlanTier::Pro));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.phase, CheckoutPhase::Creating);
+        assert!(cs.id > id);
+        assert_eq!(cs.cycle, BillingCycle::Annual);
+    }
+
+    #[test]
+    fn partly_paid_switches_to_on_chain_for_the_remaining_amount() {
+        let (mut panel, gen, id) = awaiting_panel();
+        let _ = panel.update_message(ConnectAccountMessage::ChargeStatusUpdated(
+            Ok(charge_status(
+                r#"{"chargeId":"inv-1","status":"unpaid","state":"partially_paid","plan":"pro",
+                    "amountReceivedSats":62000,"amountDueSats":38000}"#,
+            )),
+            gen,
+            id,
+        ));
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(
+            cs.phase,
+            CheckoutPhase::PartlyPaid {
+                received_sats: 62_000,
+                due_sats: 38_000
+            }
+        );
+        assert_eq!(cs.network, PaymentNetwork::OnChain);
+        assert!(cs.onchain_qr.is_some());
+        assert_eq!(
+            bip21_uri("bc1qaddr", 38_000),
+            "bitcoin:bc1qaddr?amount=0.00038"
+        );
+        assert_eq!(
+            bip21_uri("bc1qaddr", 100_000_000),
+            "bitcoin:bc1qaddr?amount=1"
+        );
+    }
+
+    #[test]
+    fn billing_wire_types_parse_old_and_new_api_shapes() {
+        use crate::services::coincube::{BillingHistoryEntry, ChargeStatus};
+        // Old checkout: expiresAt null, no startsAt.
+        let old = checkout_resp();
+        assert_eq!(old.expires_at, None);
+        assert_eq!(old.starts_at, None);
+        // New checkout (A4 buy-ahead).
+        let new: CheckoutResponse = serde_json::from_str(
+            r#"{"chargeId":"i","lightningInvoice":"ln","onChainAddress":"bc1","amountSats":1,
+                "amountFiat":10,"fiatCurrency":"USD","plan":"pro","billingCycle":"monthly",
+                "checkoutUrl":"u","expiresAt":"2026-11-14T16:42:00Z","startsAt":"2027-03-14T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(new.starts_at.as_deref(), Some("2027-03-14T00:00:00Z"));
+        // Old status: status only.
+        let old = charge_status(r#"{"chargeId":"c","status":"processing","plan":"pro"}"#);
+        assert_eq!(old.charge_state(), ChargeState::Processing);
+        assert_eq!(old.amount_due_sats, 0);
+        // Unknown legacy status.
+        let odd = charge_status(r#"{"chargeId":"c","status":"underpaid","plan":"pro"}"#);
+        assert_eq!(odd.status, ChargeStatus::Unknown);
+        // Old history row: no chargeId, no state.
+        let row: BillingHistoryEntry = serde_json::from_str(
+            r#"{"plan":"pro","billingCycle":"annual","amountSats":100000,"amountFiat":100,
+                "fiatCurrency":"USD","status":"paid","createdAt":"2026-07-01T00:00:00Z","paidAt":null}"#,
+        )
+        .unwrap();
+        assert_eq!(row.charge_id, "");
+        assert_eq!(row.charge_state(), ChargeState::Paid);
+        // New history row.
+        let row: BillingHistoryEntry = serde_json::from_str(
+            r#"{"id":4,"chargeId":"c4","invoiceId":"c4","plan":"estate","billingCycle":"annual",
+                "amountSats":200000,"amountFiat":200,"fiatCurrency":"USD","status":"expired",
+                "state":"needs_support","amountReceivedSats":40000,"amountDueSats":0,"overpaidSats":0,
+                "checkoutUrl":"u","expiresAt":null,"paidAt":null,"createdAt":"2026-11-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(row.charge_id, "c4");
+        assert_eq!(row.charge_state(), ChargeState::NeedsSupport);
     }
 
     #[test]

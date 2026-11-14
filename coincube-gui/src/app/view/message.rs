@@ -1850,15 +1850,26 @@ pub enum ConnectAccountMessage {
     /// selected billing cycle. Nothing is charged until "Create invoice".
     ReviewPlanChange(crate::services::coincube::PlanTier),
     StartCheckout(crate::services::coincube::PlanTier),
+    /// Create result: session generation, then checkout generation.
     CheckoutCreated(
         Result<crate::services::coincube::CheckoutResponse, String>,
         u64,
+        u64,
     ),
-    PollChargeStatus,
+    /// Poll the charge of checkout generation `u64`.
+    PollChargeStatus(u64),
+    /// Poll result: session generation, then checkout generation.
     ChargeStatusUpdated(
         Result<crate::services::coincube::ChargeStatusResponse, (String, bool)>,
         u64,
+        u64,
     ),
+    /// Awaiting payment: show the Lightning invoice or the on-chain address.
+    SelectPaymentNetwork(crate::app::state::connect::account::PaymentNetwork),
+    /// Paying in browser → back to the QR code here.
+    ShowInvoiceHere,
+    /// Polling stopped after errors: check the same invoice again.
+    ResumeChargePolling,
     DismissCheckout,
     OpenCheckoutUrl(String),
     /// User dismissed the pre-expiry renewal banner for this session (D1).
