@@ -603,7 +603,16 @@ impl SparkSideshiftReceiveFlow {
             Msg::PollStatus => self.poll_shift_status(),
 
             Msg::StatusUpdated(result) => {
-                if let Ok(status) = result {
+                // An answer for another shift (one polled before "Get a new
+                // address" or "Start over" and answered after) must not touch
+                // this one: an old `expired` would mark the new shift expired
+                // and clear its stored record.
+                let current = self.shift.as_ref().map(|shift| shift.id.as_str());
+                if let Some(status) = result
+                    .as_ref()
+                    .ok()
+                    .filter(|s| Some(s.id.as_str()) == current)
+                {
                     let kind = ShiftStatusKind::from(status.status.as_str());
                     let settled = kind == ShiftStatusKind::Settled
                         && self.shift_status.as_ref() != Some(&ShiftStatusKind::Settled);
@@ -1340,5 +1349,37 @@ mod tests {
         // record for the next restore; it is only the on-screen page reset.
         let _ = flow.update(&Msg::Reset);
         assert_eq!(flow.phase(), &SparkShiftPhase::Setup);
+    }
+
+    /// A poll answered after the page was reset (or for any other shift)
+    /// leaves the current flow alone.
+    #[test]
+    fn a_status_for_another_shift_is_ignored() {
+        let mut record = PendingSparkShift::sample();
+        record.shift.expires_at = Some("2020-01-01T00:00:00.000Z".to_string());
+        let mut flow = SparkSideshiftReceiveFlow::restored(backend(), &record).unwrap();
+        let _ = flow.update(&Msg::Reset);
+        assert_eq!(flow.shift(), None);
+
+        // The old shift's poll lands after the reset.
+        let _ = flow.update(&status("expired", None));
+        assert_eq!(flow.shift_status(), None);
+        assert_eq!(flow.phase(), &SparkShiftPhase::Setup);
+
+        // On a live shift, an answer carrying another id changes nothing.
+        let mut live = restored_flow();
+        let _ = live.update(&Msg::StatusUpdated(Ok(
+            crate::services::sideshift::ShiftStatus {
+                id: "someone-else".to_string(),
+                status: "expired".to_string(),
+                deposit_address: None,
+                deposit_amount: None,
+                settle_amount: None,
+                expires_at: None,
+                settle_hash: None,
+            },
+        )));
+        assert_eq!(live.shift_status(), Some(&ShiftStatusKind::Waiting));
+        assert!(live.restored);
     }
 }
