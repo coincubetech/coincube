@@ -268,7 +268,8 @@ pub(super) fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a,
             | CheckoutPhase::ChangeApplying
             | CheckoutPhase::ChangeInBrowser
             | CheckoutPhase::ChangeDone { .. }
-            | CheckoutPhase::ChangeFailed { .. } => card_phase_ux(state, checkout_state),
+            | CheckoutPhase::ChangeFailed { .. }
+            | CheckoutPhase::ChangeUnconfirmed(_) => card_phase_ux(state, checkout_state),
             CheckoutPhase::PollFailed(_)
                 if checkout_state.card_session.is_some() || checkout_state.action_url.is_some() =>
             {
@@ -1286,7 +1287,7 @@ pub(super) fn change_plan_cta(
         let higher = rank(selected) > rank(&current);
         // A card that starts after a paid period (trialing; the API sends no
         // cycle then) can't change until it starts.
-        if card.billing_cycle.is_none() && renews {
+        if card.billing_cycle.is_none() && (renews || higher) {
             return blocked(
                 "Continue to review".to_string(),
                 "Your card subscription starts when your paid period ends; the plan can change \
@@ -1351,6 +1352,17 @@ pub(super) fn change_plan_cta(
         // Buying the current tier again adds a period after this one (the
         // API stacks same-tier purchases), whatever the cycle.
         let until = paid_until(plan).map(short_date);
+        let in_grace = plan.is_some_and(|p| matches!(p.status, PlanStatus::PastDue));
+        if in_grace {
+            return (
+                format!("Review renewal · {selected} · {}", cycle_label(cycle)),
+                format!(
+                    "Pays for a new {} period starting today. {sats_note}",
+                    cycle_label(cycle).to_lowercase()
+                ),
+                true,
+            );
+        }
         return (
             format!("Review renewal · {selected} · {}", cycle_label(cycle)),
             match until {
@@ -1831,10 +1843,25 @@ fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) ->
             "In sats at today’s rate, fixed for this invoice",
         )));
     }
-    let mut covers_main = Column::new().push(tenshu_text::label(
-        facts.covers.clone().unwrap_or_else(|| "—".to_string()),
-    ));
-    if let (Some(date), false) = (&facts.starts, to_free) {
+    // Card dates follow the card subscription: it starts when a paid
+    // period ends (or today) and then renews.
+    let covers_text = if paying_card {
+        let start = card_start_at(checkout).unwrap_or(checkout.opened_at);
+        format!(
+            "{} – {}, then renews",
+            short_date(start),
+            short_date(add_cycle(start, checkout.cycle))
+        )
+    } else {
+        facts.covers.clone().unwrap_or_else(|| "—".to_string())
+    };
+    let mut covers_main = Column::new().push(tenshu_text::label(covers_text));
+    let starts_line = if paying_card {
+        card_start(checkout)
+    } else {
+        facts.starts.clone()
+    };
+    if let (Some(date), false) = (&starts_line, to_free) {
         covers_main = covers_main.push(lead(format!("Starts {date}")));
     }
     let list = ruled_list([
@@ -2051,12 +2078,24 @@ fn card_offered(state: &ConnectAccountPanel, checkout: &CheckoutState) -> bool {
 /// the session exists, else the end of a paid period or grant still running
 /// (the API trials the card until then, for any tier). `None` = today.
 pub(super) fn card_start(checkout: &CheckoutState) -> Option<String> {
+    card_start_at(checkout).map(short_date)
+}
+
+/// [`card_start`] as an instant. Before the session exists it mirrors the
+/// API's paid-through date: the end of a scheduled bitcoin lower tier when
+/// there is one (pendingPlanAt + its cycle), else the current period end.
+pub(super) fn card_start_at(checkout: &CheckoutState) -> Option<chrono::DateTime<chrono::Utc>> {
+    let parse = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc))
+    };
     if let Some(starts) = checkout
         .card_session
         .as_ref()
         .and_then(|s| s.starts_at.as_deref())
     {
-        return Some(format_date(starts));
+        return parse(starts);
     }
     if effective_tier(checkout.plan.as_ref()) == PlanTier::Free {
         return None;
@@ -2065,11 +2104,17 @@ pub(super) fn card_start(checkout: &CheckoutState) -> Option<String> {
     if matches!(plan.status, PlanStatus::PastDue) {
         return None;
     }
-    chrono::DateTime::parse_from_rfc3339(plan.renewal_at.as_deref()?)
-        .ok()
-        .map(|t| t.with_timezone(&chrono::Utc))
+    let pending_end = match (
+        plan.pending_plan.as_ref(),
+        plan.pending_plan_at.as_deref().and_then(parse),
+        plan.pending_billing_cycle,
+    ) {
+        (Some(_), Some(at), Some(cycle)) => Some(add_cycle(at, cycle)),
+        _ => None,
+    };
+    pending_end
+        .or_else(|| plan.renewal_at.as_deref().and_then(parse))
         .filter(|t| *t > chrono::Utc::now())
-        .map(short_date)
 }
 
 /// The Card row on Review: selectable with the charge schedule (C1), or a
@@ -2625,6 +2670,17 @@ fn card_phase_ux<'a>(
                     .into(),
             ),
         ),
+        CheckoutPhase::ChangeUnconfirmed(message) => billing_notice(
+            exclamation_circle_icon(),
+            Tone::Warn,
+            localized_copy("We couldn’t confirm the plan change"),
+            format!(
+                "{message}. The change may or may not have gone through, and your card may have \
+                 been charged. Check Plan & billing (it has just been refreshed) before trying \
+                 again."
+            ),
+            Some(back_to_billing()),
+        ),
         CheckoutPhase::ChangeFailed { message, refused } => billing_notice(
             exclamation_circle_icon(),
             Tone::Bad,
@@ -2711,6 +2767,7 @@ pub(super) fn checkout_status(checkout: &CheckoutState) -> (String, Tone) {
             ("Paid · auto-renews".to_string(), Tone::Good)
         }
         CheckoutPhase::ChangeFailed { .. } => ("Not charged".to_string(), Tone::Bad),
+        CheckoutPhase::ChangeUnconfirmed(_) => ("Not confirmed".to_string(), Tone::Warn),
     }
 }
 
@@ -3245,7 +3302,8 @@ fn checkout_phase_ux<'a>(
         | CheckoutPhase::ChangeApplying
         | CheckoutPhase::ChangeInBrowser
         | CheckoutPhase::ChangeDone { .. }
-        | CheckoutPhase::ChangeFailed { .. } => iced::widget::Space::new().into(),
+        | CheckoutPhase::ChangeFailed { .. }
+        | CheckoutPhase::ChangeUnconfirmed(_) => iced::widget::Space::new().into(),
         CheckoutPhase::PollFailed(_) => billing_notice(
             exclamation_circle_icon(),
             Tone::Warn,

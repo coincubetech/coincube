@@ -4950,6 +4950,76 @@ mod renewal_banner_tests {
         assert_eq!(facts.starts, None);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn card_dates_and_grace_copy_follow_the_api() {
+        use crate::app::state::connect::account::PayWith;
+        use iced::advanced::renderer::Headless;
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        let mut f = billing_v2_features();
+        f.card_payments_enabled = Some(true);
+        account.features = Some(f);
+        // Bitcoin Pro paid through a future date, buying Estate by card: the
+        // card covers start when the paid period ends.
+        let mut pro = plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2099-03-14T00:00:00Z"),
+        );
+        pro.billing_cycle = Some(BillingCycle::Annual);
+        account.plan = Some(pro.clone());
+        account.selected_billing_cycle = BillingCycle::Annual;
+        let _ = account.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Estate));
+        let _ = account.update_message(ConnectAccountMessage::SelectPayWith(PayWith::Card));
+        let labels = visible_labels(plan_billing_ux(&account), &renderer);
+        assert!(
+            labels
+                .iter()
+                .any(|l| l == "Mar 14, 2099 – Mar 14, 2100, then renews"),
+            "{:?}",
+            labels
+        );
+        account.checkout = None;
+
+        // A scheduled bitcoin lower tier: the card starts after it ends.
+        let mut estate = plan(
+            PlanTier::Estate,
+            PlanStatus::Active,
+            Some("2099-03-14T00:00:00Z"),
+        );
+        estate.pending_plan = Some(PlanTier::Pro);
+        estate.pending_plan_at = Some("2099-03-14T00:00:00Z".into());
+        estate.pending_billing_cycle = Some(BillingCycle::Monthly);
+        let cs = CheckoutState::new(1, PlanTier::Estate, BillingCycle::Annual, Some(estate));
+        assert_eq!(billing::card_start(&cs).as_deref(), Some("Apr 14, 2099"));
+
+        // In grace, renewing the same tier by bitcoin starts today.
+        let grace = (chrono::Utc::now() + chrono::Duration::days(5)).to_rfc3339();
+        let mut due = card_plan_fixture("estate", true, &format!(r#","graceEndsAt":"{grace}""#));
+        due.status = PlanStatus::PastDue;
+        account.plan = Some(due);
+        let (_, note, ok) =
+            billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
+        assert!(ok);
+        assert!(note.contains("starting today"), "{}", note);
+
+        // A trialing card with auto-renewal off can't upgrade by bitcoin.
+        let mut trialing = card_plan_fixture("pro", false, "");
+        trialing.billing_cycle = None;
+        account.plan = Some(trialing);
+        let (_, _, ok) =
+            billing::change_plan_cta(&account, &PlanTier::Estate, BillingCycle::Annual);
+        assert!(!ok);
+        let (_, _, ok) = billing::change_plan_cta(&account, &PlanTier::Pro, BillingCycle::Annual);
+        assert!(ok, "the same tier by bitcoin is still allowed");
+    }
+
     #[test]
     fn change_plan_cta_for_a_card_subscriber() {
         let mut account = dashboard_panel();

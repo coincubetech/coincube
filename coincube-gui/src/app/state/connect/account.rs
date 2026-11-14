@@ -176,6 +176,9 @@ pub enum CheckoutPhase {
         message: String,
         refused: bool,
     },
+    /// The change request got no clear answer (lost response, 5xx or an
+    /// unknown status): it may or may not have been applied and charged.
+    ChangeUnconfirmed(String),
 }
 
 impl CheckoutPhase {
@@ -195,6 +198,7 @@ impl CheckoutPhase {
                 | CheckoutPhase::ChangePreviewing
                 | CheckoutPhase::ChangeReview
                 | CheckoutPhase::ChangeFailed { .. }
+                | CheckoutPhase::ChangeUnconfirmed(_)
                 | CheckoutPhase::ChangeDone { .. }
         )
     }
@@ -3142,6 +3146,15 @@ impl ConnectAccountPanel {
                 {
                     cs.cycle = cycle;
                     self.selected_billing_cycle = cycle;
+                    // Monthly → annual on a card is a card upgrade even with
+                    // auto-renewal off: switch to the card change preview
+                    // instead of a bitcoin invoice the API would refuse.
+                    let tier = cs.tier.clone();
+                    if self.card_change_route(&tier, cycle) {
+                        return iced::Task::done(Message::View(view::Message::ConnectAccount(
+                            ConnectAccountMessage::ReviewPlanChange(tier),
+                        )));
+                    }
                 }
             }
 
@@ -3181,6 +3194,7 @@ impl ConnectAccountPanel {
                 cs.pay_with = PayWith::Card;
                 cs.phase = CheckoutPhase::CardOpening;
                 cs.card_session = None;
+                cs.browser_polls = 0;
                 cs.poll_errors = 0;
                 let req = PlanChangeRequest {
                     plan: cs.tier.clone(),
@@ -3328,6 +3342,7 @@ impl ConnectAccountPanel {
                     cs.phase = CheckoutPhase::Review;
                     cs.pay_with = pay_with;
                     cs.card_session = None;
+                    cs.browser_polls = 0;
                     cs.poll_errors = 0;
                 }
             }
@@ -3416,17 +3431,25 @@ impl ConnectAccountPanel {
                         }
                         other => {
                             log::warn!("[CONNECT] Unexpected plan change status {:?}", other);
-                            cs.phase = CheckoutPhase::ChangeFailed {
-                                message: "Connect returned a result this version of Tenshu \
-                                          doesn't know. Plan & billing shows your current plan"
-                                    .to_string(),
-                                refused: false,
-                            };
+                            cs.phase = CheckoutPhase::ChangeUnconfirmed(format!(
+                                "Connect returned \"{other}\", which this version of Tenshu \
+                                 doesn't know"
+                            ));
                             return self.reload_plan_billing();
                         }
                     },
-                    Err((message, refused)) => {
-                        cs.phase = CheckoutPhase::ChangeFailed { message, refused };
+                    // A refusal changed nothing. Anything else (no answer, a
+                    // 5xx) may have applied the change and charged the card:
+                    // say so and reload the plan.
+                    Err((message, true)) => {
+                        cs.phase = CheckoutPhase::ChangeFailed {
+                            message,
+                            refused: true,
+                        };
+                    }
+                    Err((message, false)) => {
+                        cs.phase = CheckoutPhase::ChangeUnconfirmed(message);
+                        return self.reload_plan_billing();
                     }
                 }
             }
@@ -10030,8 +10053,74 @@ mod plan_lifecycle_tests {
         let _ = panel.update_message(ConnectAccountMessage::PlanChangeApplied(Ok(odd), gen, 5));
         assert!(matches!(
             panel.checkout.as_ref().unwrap().phase,
-            CheckoutPhase::ChangeFailed { .. }
+            CheckoutPhase::ChangeUnconfirmed(_)
         ));
+        // No answer / 5xx: the change may have applied, so it's unconfirmed;
+        // a refusal changed nothing.
+        panel.checkout.as_mut().unwrap().phase = CheckoutPhase::ChangeApplying;
+        let _ = panel.update_message(ConnectAccountMessage::PlanChangeApplied(
+            Err(("connection reset".into(), false)),
+            gen,
+            5,
+        ));
+        assert!(matches!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::ChangeUnconfirmed(_)
+        ));
+        panel.checkout.as_mut().unwrap().phase = CheckoutPhase::ChangeApplying;
+        let _ = panel.update_message(ConnectAccountMessage::PlanChangeApplied(
+            Err(("No plan change is scheduled".into(), true)),
+            gen,
+            5,
+        ));
+        assert!(matches!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::ChangeFailed { refused: true, .. }
+        ));
+    }
+
+    #[test]
+    fn a_new_card_attempt_gets_the_full_browser_wait() {
+        let mut panel = panel_with_plan(plan(PlanTier::Free, PlanStatus::Active, None, None));
+        panel.features = Some(card_features(true));
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        let cs = panel.checkout.as_mut().unwrap();
+        cs.phase = CheckoutPhase::CardCancelled;
+        cs.browser_polls = 200;
+        let _ = panel.update_message(ConnectAccountMessage::BackToReview {
+            pay_with: PayWith::Card,
+        });
+        assert_eq!(panel.checkout.as_ref().unwrap().browser_polls, 0);
+        let cs = panel.checkout.as_mut().unwrap();
+        cs.browser_polls = 200;
+        let _ = panel.update_message(ConnectAccountMessage::StartCardCheckout);
+        let cs = panel.checkout.as_ref().unwrap();
+        assert_eq!(cs.phase, CheckoutPhase::CardOpening);
+        assert_eq!(cs.browser_polls, 0);
+    }
+
+    #[test]
+    fn changing_the_review_cycle_rechecks_the_card_route() {
+        // Pro monthly on a card with auto-renewal off: a monthly renewal is
+        // bitcoin; switching Review to Annual is a card upgrade.
+        let mut monthly = card_plan("pro", false, "");
+        monthly.billing_cycle = Some(BillingCycle::Monthly);
+        let mut panel = panel_with_plan(monthly);
+        panel.features = Some(card_features(true));
+        panel.selected_billing_cycle = BillingCycle::Monthly;
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::Review
+        );
+        let _ = panel.update_message(ConnectAccountMessage::SetReviewCycle(BillingCycle::Annual));
+        assert!(panel.card_change_route(&PlanTier::Pro, BillingCycle::Annual));
+        // The handler re-dispatches ReviewPlanChange; apply it as the runtime would.
+        let _ = panel.update_message(ConnectAccountMessage::ReviewPlanChange(PlanTier::Pro));
+        assert_eq!(
+            panel.checkout.as_ref().unwrap().phase,
+            CheckoutPhase::ChangePreviewing
+        );
     }
 
     #[test]
