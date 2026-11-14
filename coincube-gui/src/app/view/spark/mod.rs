@@ -648,6 +648,8 @@ pub enum SparkReceiveMessage {
         txid: String,
         confirmations: Option<u32>,
     },
+    /// Re-read only the swap's settle confirmations by txid (panel reload).
+    RefreshSettleConfirmations,
     Reset,
     /// The received receipt's View in Activity: [`Self::Reset`], then Activity.
     ViewActivity,
