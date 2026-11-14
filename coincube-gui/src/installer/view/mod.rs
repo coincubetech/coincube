@@ -434,6 +434,94 @@ pub fn backup_descriptor<'a>(
     )
 }
 
+fn policy_signer_names<'a>(
+    signer_keys: &[Fingerprint],
+    keys: &HashMap<Fingerprint, settings::KeySetting>,
+) -> Row<'a, Message> {
+    signer_keys
+        .iter()
+        .enumerate()
+        .fold(Row::new().spacing(5), |row, (i, k)| {
+            let content = if let Some(key) = keys.get(k) {
+                Container::new(
+                    iced_tooltip::Tooltip::new(
+                        text(key.name.clone()).bold(),
+                        text(k.to_string()),
+                        iced_tooltip::Position::Bottom,
+                    )
+                    .style(theme::card::simple),
+                )
+            } else {
+                Container::new(text(format!("[{}]", k)).bold())
+            };
+            if signer_keys.len() == 1 || i == signer_keys.len() - 1 {
+                row.push(content)
+            } else if i <= signer_keys.len() - 2 {
+                row.push(content).push(text(localized_copy("and")))
+            } else {
+                row.push(content).push(text(","))
+            }
+        })
+}
+
+fn recovery_policy_clause<'a>(
+    threshold: usize,
+    recovery_keys: &[Fingerprint],
+    sequence: &u16,
+    i: usize,
+    keys: &HashMap<Fingerprint, settings::KeySetting>,
+) -> Row<'a, Message> {
+    Row::new()
+        .spacing(5)
+        .push(
+            text(localized_format!(
+                "{} signature{}",
+                "{} firma{}",
+                threshold,
+                if threshold > 1 { "s" } else { "" }
+            ))
+            .bold(),
+        )
+        .push(if recovery_keys.len() > 1 {
+            text(localized_format!(
+                "out of {} by",
+                "de {} por",
+                recovery_keys.len()
+            ))
+        } else {
+            text(localized_copy("by"))
+        })
+        .push(policy_signer_names(recovery_keys, keys))
+        .push(text(localized_copy(
+            "can spend coins after a relative timelock of",
+        )))
+        .push(
+            text(localized_format!(
+                "{} blocks (~{})",
+                "{} bloques (~{})",
+                sequence,
+                expire_message_units(*sequence as u32).join(",")
+            ))
+            .bold(),
+        )
+        .push(text(
+            // If max timelock and all keys are from provider, then it's a safety net path.
+            if *sequence == u16::MAX
+                && recovery_keys
+                    .iter()
+                    .all(|fg| keys.get(fg).is_some_and(|k| k.provider_key.is_some()))
+            {
+                localized_copy("(Safety Net path)").to_string()
+            } else {
+                localized_format!(
+                    "(Recovery path #{})",
+                    "(Ruta de recuperación n.º {})",
+                    i + 1
+                )
+            },
+        ))
+}
+
 fn display_policy(
     policy: CoincubePolicy,
     keys: &HashMap<Fingerprint, settings::KeySetting>,
@@ -464,32 +552,7 @@ fn display_policy(
             } else {
                 text(localized_copy("by"))
             })
-            .push(
-                primary_keys
-                    .iter()
-                    .enumerate()
-                    .fold(Row::new().spacing(5), |row, (i, k)| {
-                        let content = if let Some(key) = keys.get(k) {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(key.name.clone()).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
-                                )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if primary_keys.len() == 1 || i == primary_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= primary_keys.len() - 2 {
-                            row.push(content).push(text(localized_copy("and")))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    }),
-            )
+            .push(policy_signer_names(&primary_keys, keys))
             .push(text(localized_copy(
                 "can always spend this wallet's funds (Primary path)",
             ))),
@@ -499,80 +562,13 @@ fn display_policy(
         // The iteration over an HashMap keys can have a different order at each refresh
         let mut recovery_keys: Vec<Fingerprint> = recovery_keys.into_keys().collect();
         recovery_keys.sort();
-        col = col.push(
-            Row::new()
-                .spacing(5)
-                .push(
-                    text(localized_format!(
-                        "{} signature{}",
-                        "{} firma{}",
-                        threshold,
-                        if threshold > 1 { "s" } else { "" }
-                    ))
-                    .bold(),
-                )
-                .push(if recovery_keys.len() > 1 {
-                    text(localized_format!(
-                        "out of {} by",
-                        "de {} por",
-                        recovery_keys.len()
-                    ))
-                } else {
-                    text(localized_copy("by"))
-                })
-                .push(recovery_keys.iter().enumerate().fold(
-                    Row::new().spacing(5),
-                    |row, (i, k)| {
-                        let content = if let Some(key) = keys.get(k) {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(key.name.clone()).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
-                                )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if recovery_keys.len() == 1 || i == recovery_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= recovery_keys.len() - 2 {
-                            row.push(content).push(text(localized_copy("and")))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    },
-                ))
-                .push(text(localized_copy(
-                    "can spend coins after a relative timelock of",
-                )))
-                .push(
-                    text(localized_format!(
-                        "{} blocks (~{})",
-                        "{} bloques (~{})",
-                        sequence,
-                        expire_message_units(*sequence as u32).join(",")
-                    ))
-                    .bold(),
-                )
-                .push(text(
-                    // If max timelock and all keys are from provider, then it's a safety net path.
-                    if *sequence == u16::MAX
-                        && recovery_keys
-                            .iter()
-                            .all(|fg| keys.get(fg).is_some_and(|k| k.provider_key.is_some()))
-                    {
-                        localized_copy("(Safety Net path)").to_string()
-                    } else {
-                        localized_format!(
-                            "(Recovery path #{})",
-                            "(Ruta de recuperación n.º {})",
-                            i + 1
-                        )
-                    },
-                )),
-        );
+        col = col.push(recovery_policy_clause(
+            threshold,
+            &recovery_keys,
+            sequence,
+            i,
+            keys,
+        ));
     }
     Column::new()
         .spacing(10)
