@@ -458,6 +458,36 @@ fn field_messages<'a, M: 'a>(
     column
 }
 
+fn install_input_handlers<'a, M: Clone + 'static>(
+    mut input: iced::widget::TextInput<'a, M, Theme, Renderer>,
+    magnifier: bool,
+    on_input: Option<Box<dyn Fn(String) -> M + 'a>>,
+    on_paste: Option<Box<dyn Fn(String) -> M + 'a>>,
+    on_submit: Option<M>,
+    enabled: bool,
+) -> iced::widget::TextInput<'a, M, Theme, Renderer> {
+    if magnifier {
+        input = input.icon(Icon {
+            font: BOOTSTRAP_ICONS,
+            code_point: SEARCH_CODE_POINT,
+            size: Some(size::ICON_SMALL.into()),
+            spacing: 8.0,
+            side: Side::Left,
+        });
+    }
+    if let Some(on_input) = on_input {
+        input = input.on_input(on_input);
+    }
+    if let Some(on_paste) = on_paste.filter(|_| enabled) {
+        input = input.on_paste(on_paste);
+    }
+    if let Some(on_submit) = on_submit.filter(|_| enabled) {
+        input = input.on_submit(on_submit);
+    }
+
+    input
+}
+
 impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
     fn from(field: TextField<'a, M>) -> Self {
         let TextField {
@@ -501,7 +531,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             (None, None) => size.padding_x(),
         };
         let vertical = (size.height() - LINE) / 2.0;
-        let mut input = iced::widget::TextInput::<'a, M, Theme, Renderer>::new(&placeholder, value)
+        let input = iced::widget::TextInput::<'a, M, Theme, Renderer>::new(&placeholder, value)
             .id(id.clone())
             .secure(secure)
             .font(if mono {
@@ -525,24 +555,8 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                 }
                 appearance
             });
-        if magnifier {
-            input = input.icon(Icon {
-                font: BOOTSTRAP_ICONS,
-                code_point: SEARCH_CODE_POINT,
-                size: Some(size::ICON_SMALL.into()),
-                spacing: 8.0,
-                side: Side::Left,
-            });
-        }
-        if let Some(on_input) = on_input {
-            input = input.on_input(on_input);
-        }
-        if let Some(on_paste) = on_paste.filter(|_| enabled) {
-            input = input.on_paste(on_paste);
-        }
-        if let Some(on_submit) = on_submit.filter(|_| enabled) {
-            input = input.on_submit(on_submit);
-        }
+        let input =
+            install_input_handlers(input, magnifier, on_input, on_paste, on_submit, enabled);
 
         let overlay: Option<Element<'a, M>> = match (suffix, &clear, suffix_segment_width) {
             (Some(suffix), _, Some(segment_width)) => {

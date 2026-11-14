@@ -110,30 +110,39 @@ fn pointer_colors(
             } else {
                 ink
             };
-            let fill = match (kind, shape, fill) {
-                (ActionKind::Primary, ActionShape::Pill | ActionShape::Compact, _) => {
-                    Some(if pressed {
-                        accent_pressed(theme)
-                    } else {
-                        ACCENT_HOVER
-                    })
-                }
-                (_, _, Some(base)) => {
-                    let once = over(base, shell.hover);
-                    Some(if pressed {
-                        over(once, shell.hover)
-                    } else {
-                        once
-                    })
-                }
-                (_, _, None) => Some(if pressed {
-                    stacked(shell.hover)
-                } else {
-                    shell.hover
-                }),
-            };
+            let fill = fill_for_pointer(theme, kind, shape, fill, pressed);
             (fill, ink)
         }
+    }
+}
+
+fn fill_for_pointer(
+    theme: &Theme,
+    kind: ActionKind,
+    shape: ActionShape,
+    fill: Option<Color>,
+    pressed: bool,
+) -> Option<Color> {
+    let shell = &theme.colors.shell;
+    match (kind, shape, fill) {
+        (ActionKind::Primary, ActionShape::Pill | ActionShape::Compact, _) => Some(if pressed {
+            accent_pressed(theme)
+        } else {
+            ACCENT_HOVER
+        }),
+        (_, _, Some(base)) => {
+            let once = over(base, shell.hover);
+            Some(if pressed {
+                over(once, shell.hover)
+            } else {
+                once
+            })
+        }
+        (_, _, None) => Some(if pressed {
+            stacked(shell.hover)
+        } else {
+            shell.hover
+        }),
     }
 }
 
