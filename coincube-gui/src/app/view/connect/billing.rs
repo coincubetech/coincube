@@ -1063,6 +1063,12 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Msg>
     if let Some(banner) = renewal_banner(state) {
         col = col.push(space(20.0)).push(banner);
     }
+    if state.pricing_schema_outdated() {
+        col = col.push(space(20.0)).push(schema_update_note());
+    }
+    if state.features.is_some() && !state.purchasing_enabled() {
+        col = col.push(space(20.0)).push(purchasing_unavailable_note());
+    }
 
     col = col
         .push(space(32.0))
@@ -1623,9 +1629,11 @@ fn change_plan_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Msg> {
                 PlanTier::Pro => "tenshu.connect.billing.plan.pro",
                 PlanTier::Estate => "tenshu.connect.billing.plan.estate",
             };
-            let price = match row.price {
-                Some(amount) => (format!("${amount}"), per),
-                None => ("Free".to_string(), "No payment"),
+            let price = match (row.price, &row.tier) {
+                (Some(amount), _) => (format!("${amount}"), per),
+                (None, PlanTier::Free) => ("Free".to_string(), "No payment"),
+                // A paid tier without a price in the catalog is never "Free".
+                (None, _) => ("—".to_string(), "Price unavailable"),
             };
             list = list
                 .push(choice_row(
@@ -1774,7 +1782,11 @@ pub(super) fn review_facts(
             plan: "Free".to_string(),
             replaces,
             amount: Some("Nothing to pay".to_string()),
-            covers: renewal.map(|r| format!("Free from {}", short_date(r))),
+            // With a paid lower tier scheduled, Free follows that period,
+            // whose end isn't known here.
+            covers: renewal
+                .filter(|_| pending.is_none())
+                .map(|r| format!("Free from {}", short_date(r))),
             starts: renewal.map(short_date),
             pending,
             notes,
@@ -1796,7 +1808,7 @@ pub(super) fn review_facts(
 }
 
 fn review_ux<'a>(state: &'a ConnectAccountPanel, checkout: &'a CheckoutState) -> Element<'a, Msg> {
-    let facts = review_facts(state, checkout, chrono::Utc::now());
+    let facts = review_facts(state, checkout, checkout.opened_at);
     let to_free = checkout.tier == PlanTier::Free;
     let paying_card = checkout.pay_with == PayWith::Card && card_offered(state, checkout);
     let mut plan_main = Column::new().push(tenshu_text::label(facts.plan.clone()));
@@ -2933,7 +2945,7 @@ fn checkout_phase_ux<'a>(
     state: &'a ConnectAccountPanel,
     checkout: &'a CheckoutState,
 ) -> Element<'a, Msg> {
-    let facts = review_facts(state, checkout, chrono::Utc::now());
+    let facts = review_facts(state, checkout, checkout.opened_at);
     let tier = &checkout.tier;
     // A4: the poll's startsAt wins (a renewal may have moved the period end
     // since the invoice was created), then the create response's.
@@ -2989,9 +3001,23 @@ fn checkout_phase_ux<'a>(
     if let Some(replaces) = facts.replaces.clone() {
         plan_main = plan_main.push(lead(replaces));
     }
-    let mut covers = Column::new().push(tenshu_text::label(
-        facts.covers.clone().unwrap_or_else(|| "—".to_string()),
-    ));
+    // Connect's startsAt is authoritative for a lower tier bought ahead.
+    let starts_raw = checkout
+        .last_status
+        .as_ref()
+        .and_then(|s| s.starts_at.as_deref())
+        .or_else(|| checkout.checkout.as_ref()?.starts_at.as_deref())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|s| s.with_timezone(&chrono::Utc));
+    let covers_text = match starts_raw {
+        Some(start) => format!(
+            "{} – {}",
+            short_date(start),
+            short_date(add_cycle(start, checkout.cycle))
+        ),
+        None => facts.covers.clone().unwrap_or_else(|| "—".to_string()),
+    };
+    let mut covers = Column::new().push(tenshu_text::label(covers_text));
     if let Some(date) = starts.clone().or(facts.starts.clone()) {
         covers = covers.push(lead(format!("Starts {date}")));
     }

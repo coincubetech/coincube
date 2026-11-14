@@ -4998,6 +4998,89 @@ mod renewal_banner_tests {
         assert!(!ok);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plan_billing_bot_findings_hold() {
+        use iced::advanced::renderer::Headless;
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        let mut f = billing_v2_features();
+        f.purchasing_enabled = Some(false);
+        f.pricing_schema_version = Some(SUPPORTED_PRICING_SCHEMA_VERSION + 1);
+        account.features = Some(f);
+        // Plan & billing itself shows the pause and schema notices.
+        let labels = visible_labels(plan_billing_ux(&account), &renderer);
+        assert!(
+            labels.iter().any(|l| l == "Purchasing is paused"),
+            "{:?}",
+            labels
+        );
+        assert!(labels
+            .iter()
+            .any(|l| l == "A newer pricing update is available"));
+
+        // A paid tier without a catalog price is never labelled Free.
+        let mut f = billing_v2_features();
+        f.plans[1].price = None;
+        account.features = Some(f);
+        account.show_plan_comparison = true;
+        let labels = visible_labels(plan_billing_ux(&account), &renderer);
+        assert!(
+            labels.iter().any(|l| l == "Price unavailable"),
+            "{:?}",
+            labels
+        );
+        assert_eq!(labels.iter().filter(|l| *l == "No payment").count(), 1);
+        account.show_plan_comparison = false;
+
+        // Switching to Free with a paid lower tier scheduled shows no
+        // "Free from" date.
+        let mut estate = plan(
+            PlanTier::Estate,
+            PlanStatus::Active,
+            Some("2099-03-14T00:00:00Z"),
+        );
+        estate.pending_plan = Some(PlanTier::Pro);
+        estate.pending_plan_at = Some("2099-03-14T00:00:00Z".into());
+        let cs = CheckoutState::new(1, PlanTier::Free, BillingCycle::Annual, Some(estate));
+        let facts = billing::review_facts(&account, &cs, chrono::Utc::now());
+        assert_eq!(facts.covers, None);
+
+        // Covers follows Connect's startsAt for a lower tier bought ahead.
+        account.features = Some(billing_v2_features());
+        let mut cs =
+            CheckoutState::new(2, PlanTier::Pro, BillingCycle::Annual, account.plan.clone());
+        let mut resp = checkout_response();
+        resp.starts_at = Some("2027-04-14T00:00:00Z".into());
+        cs.checkout = Some(resp);
+        cs.phase = CheckoutPhase::Paid { overpaid_sats: 0 };
+        account.checkout = Some(cs);
+        let labels = visible_labels(plan_billing_ux(&account), &renderer);
+        assert!(
+            labels.iter().any(|l| l == "Apr 14, 2027 – Apr 14, 2028"),
+            "{:?}",
+            labels
+        );
+
+        // Covers for a purchase that starts now uses when Review opened.
+        let mut cs = CheckoutState::new(
+            3,
+            PlanTier::Estate,
+            BillingCycle::Annual,
+            account.plan.clone(),
+        );
+        cs.opened_at = chrono::DateTime::parse_from_rfc3339("2026-11-13T23:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let facts = billing::review_facts(&account, &cs, cs.opened_at);
+        assert_eq!(facts.covers.as_deref(), Some("Nov 13, 2026 – Nov 13, 2027"));
+    }
+
     #[test]
     fn plan_billing_checkout_and_history_views_build_for_branch_states() {
         let mut account = dashboard_panel();
