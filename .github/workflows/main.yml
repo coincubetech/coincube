@@ -416,6 +416,10 @@ jobs:
         run: |
           cargo test -p coincube-gui --no-default-features --features integration-tests --lib installer::testnet4_seed_resume_tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p coincube-gui --no-default-features --features integration-tests --lib recovery_native::tests::oracle_diagnostic_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p coincube-gui --no-default-features --features integration-tests --lib home::integration::tests::qa_initialization_never_overwrites_existing_off_or_unknown_profile_state -- --exact
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   windows_ci_complete:
     name: Windows CI complete
