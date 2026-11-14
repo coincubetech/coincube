@@ -462,6 +462,10 @@ impl State for SparkReceive {
             // A static address left on screen from before, or picked before
             // the panel was ever shown, is (re)fetched without a button.
             self.fetch_static_address_if_due(),
+            self.settle_refresh_on_reload()
+                .map_or_else(Task::none, |msg| {
+                    Task::done(Message::View(crate::app::view::Message::SparkReceive(msg)))
+                }),
         ])
     }
 
@@ -1437,6 +1441,17 @@ impl SparkReceive {
         flow.settle_hash()
     }
 
+    /// What reloading the panel asks for, so a swap's settle count is fresh on
+    /// return rather than up to one 30s tick late: a fetch started while the
+    /// panel was off-screen answers to no one (its reply only reaches the
+    /// current panel), and the status poll fetches only when polling starts.
+    /// `reload` has no network to fetch with, so it goes through
+    /// `RefreshConfirmations`, which does.
+    fn settle_refresh_on_reload(&self) -> Option<crate::app::view::SparkReceiveMessage> {
+        self.swap_settle_txid_to_poll()
+            .map(|_| crate::app::view::SparkReceiveMessage::RefreshConfirmations)
+    }
+
     /// Read the swap's settle transaction's confirmations from Esplora, when
     /// [`Self::swap_settle_txid_to_poll`] says it's needed.
     fn settle_confirmations_task(
@@ -2403,6 +2418,21 @@ mod tests {
             )])),
         );
         assert_eq!(panel.swap_settle_confirmations(), Some(1));
+    }
+
+    /// Returning to the panel re-reads a waiting settle count at once; with
+    /// nothing to poll, reload asks for nothing extra.
+    #[test]
+    fn reload_refreshes_a_waiting_settle_count() {
+        let mut panel = panel_with_settled_swap("abc123");
+        assert!(matches!(
+            panel.settle_refresh_on_reload(),
+            Some(SparkReceiveMessage::RefreshConfirmations)
+        ));
+
+        panel.pending_deposits = vec![deposit("ABC123", 0, false)];
+        assert!(panel.settle_refresh_on_reload().is_none());
+        assert!(SparkReceive::new(None).settle_refresh_on_reload().is_none());
     }
 
     /// A deposit listed before any count is known still reads "0 of 3".
