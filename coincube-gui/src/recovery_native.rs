@@ -479,7 +479,7 @@ pub struct UnfundedProof {
     pub addresses_checked: u64,
     pub known_coin_count: u64,
 }
-fn oracle_failure_category(message: &str) -> &'static str {
+pub fn oracle_failure_category(message: &str) -> &'static str {
     // Match only known error variants/markers and emit static labels. Never
     // copy upstream bodies, URLs, addresses, credentials or numeric payloads.
     if message.contains("All Esplora providers are temporarily backing off") {
