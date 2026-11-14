@@ -235,29 +235,25 @@ impl App {
             self.authenticated_coincube_client(),
             self.panels.connect.cube.server_cube_id,
         ) {
-            (Some(client), Some(cube_id)) => {
-                return Task::perform(
-                    async move {
-                        crate::services::inheritance::enable_alerts(&client, cube_id)
-                            .await
-                            .map_err(|e| e.to_string())
-                    },
-                    move |res| {
-                        Message::View(view::Message::Settings(
-                            view::SettingsMessage::RecoveryAlerts(
-                                view::RecoveryAlertsMessage::ChangeResult(res, gen, None),
-                            ),
-                        ))
-                    },
-                );
-            }
-            _ => {
-                return Task::done(Message::View(view::Message::ShowError(
-                    "Couldn't reach your Connect account — recovery alerts weren't turned \
+            (Some(client), Some(cube_id)) => Task::perform(
+                async move {
+                    crate::services::inheritance::enable_alerts(&client, cube_id)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                move |res| {
+                    Message::View(view::Message::Settings(
+                        view::SettingsMessage::RecoveryAlerts(
+                            view::RecoveryAlertsMessage::ChangeResult(res, gen, None),
+                        ),
+                    ))
+                },
+            ),
+            _ => Task::done(Message::View(view::Message::ShowError(
+                "Couldn't reach your Connect account — recovery alerts weren't turned \
                      on. We'll ask again."
-                        .to_string(),
-                )));
-            }
+                    .to_string(),
+            ))),
         }
     }
 }
