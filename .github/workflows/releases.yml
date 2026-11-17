@@ -958,7 +958,7 @@ jobs:
 
   checksums:
     name: Generate & Sign Checksums
-    needs: [release, windows_verify]
+    needs: [release, windows_sign_msi, windows_verify]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
@@ -986,6 +986,19 @@ jobs:
           pattern: release-*
           path: artifacts
           merge-multiple: true
+
+      # Bind the published installer to the digest recorded by the signing job,
+      # so a re-uploaded release artifact cannot enter the signed checksums.
+      - name: Require the signed Windows MSI
+        env:
+          EXPECTED_DIGEST: ${{ needs.windows_sign_msi.outputs.signed_msi }}
+        run: |
+          msi="coincube-desktop-${COINCUBE_VERSION}-x86_64-pc-windows-msvc.msi"
+          actual="${msi}=$(sha256sum "artifacts/${msi}" | cut -d' ' -f1)"
+          if [ -z "$EXPECTED_DIGEST" ] || [ "$actual" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::Windows MSI does not match the signed digest: ${actual}"
+            exit 1
+          fi
 
       - name: Generate checksums file
         run: |

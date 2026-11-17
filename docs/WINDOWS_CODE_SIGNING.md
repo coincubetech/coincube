@@ -133,12 +133,16 @@ Both workflows run the same five jobs. Only jobs 2 and 4 can request an Azure to
    Re-verify the MSI, then stage it. Tagged-release checksum generation waits for
    this job as well as the Linux/macOS builds.
 
-Every handoff is bound to content, not just names: each producing job records
-the SHA-256 of every file it uploads as a job output, and the next job requires
-those exact digests before Azure login, before packaging, before extraction
-and again before staging. Other jobs in the run can upload artifacts, but cannot
-change another job's outputs. None of the jobs after the build restores a build
-cache, so nothing can overwrite a verified file between checks.
+Every handoff between the Windows jobs is bound to file digests, not just names:
+each producing job records the SHA-256 of every file it uploads as a job output,
+and the next job requires those exact digests before Azure login, before
+packaging, before extraction and again before staging. Tagged-release checksum
+generation also requires the signed MSI digest before hashing the bundle. Other
+jobs in the run can upload artifacts, but cannot change another job's outputs, so
+a file changed between checks fails the next check. None of the jobs after the
+build restores a build cache. These checks cover the files, not the runner:
+code that runs in an unprivileged job could still tamper with that job's own
+environment.
 
 Missing configuration fails the first signing job; it never falls back to
 unsigned output. Because the variables live in the signing environments, that
@@ -154,7 +158,9 @@ and the run must be restarted from the build.
 Remaining supply-chain exposure in the unprivileged jobs: `windows_build`
 installs unpinned `pillow` and `icnsutil` for the installer icon (as the
 previous workflow did), and the payload check covers executables, not every file
-in the MSI. `cargo-wix` is pinned to 0.3.9.
+in the MSI. `cargo-wix` is pinned to 0.3.9. The Linux and macOS release
+artifacts are not digest-bound between their build and checksum jobs; that is
+unchanged from the previous workflow.
 The publisher check is an exact, case-sensitive match on the certificate's
 common name `COINCUBE TECHNOLOGY LLC`, matching the Apple Developer ID name.
 Confirm the issued Azure profile uses that exact form before the first run; the

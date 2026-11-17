@@ -203,7 +203,15 @@ LOGOUT = "az logout\naz account clear\nexit 0\n"
   check.call(staged['name'] == expected_name, prefix + 'staged artifact name')
 
   if workflow == 'releases'
-    check.call(jobs.fetch('checksums').fetch('needs') == %w[release windows_verify], 'checksums must wait for verified Windows MSI')
+    checksums = jobs.fetch('checksums')
+    check.call(checksums.fetch('needs') == %w[release windows_sign_msi windows_verify], 'checksums must wait for verified Windows MSI')
+    names = checksums.fetch('steps').map { |s| s['name'] }
+    bind = names.index('Require the signed Windows MSI')
+    check.call(bind && names.index('Download staged platform artifacts') < bind && bind < names.index('Generate checksums file'),
+      'checksums must check the MSI digest before hashing the bundle')
+    bound = checksums.fetch('steps')[bind]
+    check.call(bound.fetch('env')['EXPECTED_DIGEST'] == '${{ needs.windows_sign_msi.outputs.signed_msi }}' &&
+      bound['run'].include?('[ -z "$EXPECTED_DIGEST" ]'), 'checksums MSI digest source')
   end
 end
 puts "PASS: #{checks} Windows workflow checks"
