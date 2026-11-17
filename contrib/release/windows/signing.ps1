@@ -58,6 +58,24 @@ function Assert-WindowsSignature {
     }
 }
 
+function Assert-WindowsStagedFiles {
+    # Artifacts cross job boundaries, so accept only the exact expected files.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string[]]$Names
+    )
+    $items = @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
+    foreach ($item in $items) {
+        if ($item.PSIsContainer) { throw "Unexpected directory in staged files: $($item.Name)." }
+        if ($item.LinkType) { throw "Unexpected link in staged files: $($item.Name)." }
+    }
+    $actual = @($items.Name | Sort-Object -CaseSensitive)
+    $wanted = @($Names | Sort-Object -CaseSensitive)
+    if (($actual -join "`n") -cne ($wanted -join "`n")) {
+        throw "Unexpected staged files: found [$($actual -join ', ')], expected [$($wanted -join ', ')]."
+    }
+}
+
 function Assert-WindowsMsiPayload {
     param(
         [Parameter(Mandatory)][string]$Root,

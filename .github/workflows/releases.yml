@@ -477,35 +477,20 @@ jobs:
         run: |
           rm -f cert.p12 cert.pass key.json
 
-  windows:
-    name: Build, sign and verify Windows MSI
+  windows_build:
+    name: Build unsigned Windows executables
     if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
-    timeout-minutes: 150
-    environment: windows-release-signing
+    timeout-minutes: 120
     permissions:
       contents: read
-      id-token: write
-    env:
-      WINDOWS_TARGET: x86_64-pc-windows-msvc
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-
-      - name: Require Windows signing configuration
-        shell: pwsh
-        env:
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENDPOINT: ${{ vars.AZURE_ENDPOINT }}
-          AZURE_CODE_SIGNING_NAME: ${{ vars.AZURE_CODE_SIGNING_NAME }}
-          AZURE_CERT_PROFILE_NAME: ${{ vars.AZURE_CERT_PROFILE_NAME }}
-        run: |
-          . ./contrib/release/windows/signing.ps1
-          Assert-WindowsSigningConfiguration
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -515,13 +500,15 @@ jobs:
       - name: Install common tooling
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
-          tool: cargo-wix,jaq
+          tool: jaq
 
       - name: Set Coincube version from Cargo
+        id: version
         shell: bash
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jaq -r '.packages[] | select(.name=="coincube-gui") | .version')
           echo "COINCUBE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Require release tag to match app version
         shell: pwsh
@@ -561,11 +548,67 @@ jobs:
           # cannot build it — this is the second half of `make build`.
           cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # `cargo wix --no-build` only packages files that already exist, and
-          # main.wxs sources all three binaries from $(var.CargoTargetBinDir)
-          # (target\minimal). The bridge builds into its own workspace's target
-          # dir, so copy it across before wix looks for it.
-          Copy-Item coincube-spark-bridge\target\minimal\coincube-spark-bridge.exe target\minimal\
+          New-Item -ItemType Directory -Force windows-unsigned | Out-Null
+          Copy-Item target\minimal\coincube.exe, target\minimal\coincube-mcp.exe, coincube-spark-bridge\target\minimal\coincube-spark-bridge.exe windows-unsigned\
+
+      - name: Upload unsigned Windows executables
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-unsigned-executables
+          path: windows-unsigned/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Windows installer icon
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-installer-icon
+          path: contrib/release/wix/Coincube.ico
+          if-no-files-found: error
+          retention-days: 1
+
+  # Signing jobs hold the OIDC permission, so they run only pinned actions and
+  # this repository's verification script: no package installs, Cargo builds,
+  # build caches or downloaded executables.
+  windows_sign_executables:
+    name: Sign Windows executables
+    needs: windows_build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: windows-release-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Require Windows signing configuration
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ENDPOINT: ${{ vars.AZURE_ENDPOINT }}
+          AZURE_CODE_SIGNING_NAME: ${{ vars.AZURE_CODE_SIGNING_NAME }}
+          AZURE_CERT_PROFILE_NAME: ${{ vars.AZURE_CERT_PROFILE_NAME }}
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsSigningConfiguration
+
+      - name: Download unsigned Windows executables
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: windows-unsigned-executables
+          path: windows-signing
+
+      - name: Require exact unsigned payload
+        shell: pwsh
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsStagedFiles -Root windows-signing -Names @('coincube.exe', 'coincube-spark-bridge.exe', 'coincube-mcp.exe')
 
       - name: Azure login (OIDC)
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
@@ -581,9 +624,9 @@ jobs:
           signing-account-name: ${{ vars.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE_NAME }}
           files: |
-            ${{ github.workspace }}\target\minimal\coincube.exe
-            ${{ github.workspace }}\target\minimal\coincube-spark-bridge.exe
-            ${{ github.workspace }}\target\minimal\coincube-mcp.exe
+            ${{ github.workspace }}\windows-signing\coincube.exe
+            ${{ github.workspace }}\windows-signing\coincube-spark-bridge.exe
+            ${{ github.workspace }}\windows-signing\coincube-mcp.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -591,10 +634,78 @@ jobs:
           exclude-environment-credential: true
           cache-dependencies: false
 
+      - name: Azure logout
+        if: always()
+        shell: pwsh
+        run: |
+          az logout
+          az account clear
+          exit 0
+
+      - name: Verify executable signatures
+        shell: pwsh
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsSignature -Paths @(
+            'windows-signing/coincube.exe',
+            'windows-signing/coincube-spark-bridge.exe',
+            'windows-signing/coincube-mcp.exe'
+          )
+
+      - name: Upload signed Windows executables
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-signed-executables
+          path: windows-signing/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows_package:
+    name: Package signed Windows MSI
+    needs: [windows_build, windows_sign_executables]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      COINCUBE_VERSION: ${{ needs.windows_build.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Install common tooling
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
+        with:
+          tool: cargo-wix
+
+      # main.wxs sources all three binaries from $(var.CargoTargetBinDir)
+      # (target\minimal), and `cargo wix --no-build` only packages files that
+      # already exist there.
+      - name: Download signed Windows executables
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: windows-signed-executables
+          path: target/minimal
+
+      - name: Download Windows installer icon
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: windows-installer-icon
+          path: contrib/release/wix
+
       - name: Verify executable signatures before packaging
         shell: pwsh
         run: |
           . ./contrib/release/windows/signing.ps1
+          Assert-WindowsStagedFiles -Root target/minimal -Names @('coincube.exe', 'coincube-spark-bridge.exe', 'coincube-mcp.exe')
           Assert-WindowsSignature -Paths @(
             'target/minimal/coincube.exe',
             'target/minimal/coincube-spark-bridge.exe',
@@ -607,24 +718,146 @@ jobs:
           cargo wix --package coincube-gui --no-build --profile minimal --output "target/wix/coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi" --include ./contrib/release/wix/main.wxs --nocapture -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Upload unsigned Windows MSI
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-unsigned-msi
+          path: target/wix/coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  windows_sign_msi:
+    name: Sign Windows MSI
+    needs: [windows_build, windows_package]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: windows-release-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      COINCUBE_VERSION: ${{ needs.windows_build.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Require Windows signing configuration
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ENDPOINT: ${{ vars.AZURE_ENDPOINT }}
+          AZURE_CODE_SIGNING_NAME: ${{ vars.AZURE_CODE_SIGNING_NAME }}
+          AZURE_CERT_PROFILE_NAME: ${{ vars.AZURE_CERT_PROFILE_NAME }}
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsSigningConfiguration
+
+      - name: Download unsigned Windows MSI
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: windows-unsigned-msi
+          path: windows-signing
+
+      - name: Require exact unsigned installer
+        shell: pwsh
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsStagedFiles -Root windows-signing -Names @("coincube-desktop-$env:COINCUBE_VERSION-$env:WINDOWS_TARGET.msi")
+
+      - name: Azure login (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
       - name: Sign Windows MSI
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
           endpoint: ${{ vars.AZURE_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE_NAME }}
-          files: ${{ github.workspace }}\target\wix\coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi
+          files: ${{ github.workspace }}\windows-signing\coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
           exclude-environment-credential: true
           cache-dependencies: false
 
+      - name: Azure logout
+        if: always()
+        shell: pwsh
+        run: |
+          az logout
+          az account clear
+          exit 0
+
+      - name: Verify MSI signature
+        shell: pwsh
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsSignature -Paths "windows-signing/coincube-desktop-$env:COINCUBE_VERSION-$env:WINDOWS_TARGET.msi"
+
+      - name: Upload signed Windows MSI
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-signed-msi
+          path: windows-signing/coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  windows_verify:
+    name: Verify signed Windows MSI
+    needs: [windows_build, windows_sign_msi]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      COINCUBE_VERSION: ${{ needs.windows_build.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download signed Windows MSI
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: windows-signed-msi
+          path: target/wix
+
       - name: Verify MSI signature before extraction
         shell: pwsh
         run: |
           . ./contrib/release/windows/signing.ps1
+          Assert-WindowsStagedFiles -Root target/wix -Names @("coincube-desktop-$env:COINCUBE_VERSION-$env:WINDOWS_TARGET.msi")
           Assert-WindowsSignature -Paths "target/wix/coincube-desktop-$env:COINCUBE_VERSION-$env:WINDOWS_TARGET.msi"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Cache Cargo
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'coincube-spark-bridge/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+          path: |
+            target
+            coincube-spark-bridge/target
+
+      - name: Install Windows dependencies
+        run: choco install protoc --yes --no-progress
 
       # A string grep of the .msi proves nothing — the payload is in a
       # compressed cab. An administrative install unpacks the real file table,
@@ -667,6 +900,14 @@ jobs:
           Write-Host $out
           if ($out -notmatch '"kind":"shutdown"') { Write-Host "bridge did not answer the shutdown handshake"; exit 1 }
 
+      # Smoke tests run local code after the first check, so check the exact
+      # file again immediately before it becomes a release artifact.
+      - name: Re-verify MSI before staging
+        shell: pwsh
+        run: |
+          . ./contrib/release/windows/signing.ps1
+          Assert-WindowsSignature -Paths "target/wix/coincube-desktop-$env:COINCUBE_VERSION-$env:WINDOWS_TARGET.msi"
+
       - name: Stage Windows MSI
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -677,7 +918,7 @@ jobs:
 
   checksums:
     name: Generate & Sign Checksums
-    needs: [release, windows]
+    needs: [release, windows_verify]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')

@@ -116,6 +116,23 @@ try {
     Assert-Fails { Assert-WindowsMsiPayload -Root $temp -SignTool Test-SignTool } 'exactly one coincube-mcp.exe'
     Set-Content -LiteralPath $mcp -Value 'fixture'
     Assert-Fails { Assert-WindowsMsiPayload -Root $temp -SignTool Test-SignTool } 'exactly three executables'
+
+    $stage = New-Item -ItemType Directory -Path (Join-Path $temp 'stage') -Force
+    $staged = @('coincube.exe', 'coincube-spark-bridge.exe', 'coincube-mcp.exe')
+    foreach ($name in $staged) { Set-Content -LiteralPath (Join-Path $stage.FullName $name) -Value 'fixture' }
+    Assert-Passes { Assert-WindowsStagedFiles -Root $stage.FullName -Names $staged }
+    Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names @('coincube.exe', 'coincube-mcp.exe') } 'Unexpected staged files'
+    Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names ($staged + 'extra.exe') } 'Unexpected staged files'
+    Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names @('Coincube.exe', 'coincube-spark-bridge.exe', 'coincube-mcp.exe') } 'Unexpected staged files'
+    $nested = New-Item -ItemType Directory -Path (Join-Path $stage.FullName 'nested') -Force
+    Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names $staged } 'Unexpected directory'
+    Remove-Item -LiteralPath $nested.FullName
+    $hidden = Join-Path $stage.FullName '.hidden'
+    Set-Content -LiteralPath $hidden -Value 'fixture'
+    if ($IsWindows) { (Get-Item -LiteralPath $hidden).Attributes = 'Hidden' }
+    Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names $staged } 'Unexpected staged files'
+    Remove-Item -LiteralPath $hidden -Force
+    Assert-Fails { Assert-WindowsStagedFiles -Root (Join-Path $temp 'absent') -Names $staged } 'does not exist'
     Write-Host "PASS: $script:checks offline Windows signing checks"
 } finally {
     foreach ($name in $names) {

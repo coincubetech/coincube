@@ -53,7 +53,7 @@ GitHub can otherwise auto-create an environment without the intended protections
 
 | Environment | Deployment branch/tag policy | Required approval |
 |---|---|---|
-| `windows-release-signing` | Selected **tags only**, `v*.*`; no branches | Robert must review the exact source SHA/tag before approval |
+| `windows-release-signing` | Selected **tags only**, `v*.*`; no branches | Robert must review the exact source SHA/tag before approval (twice per run: executables, then MSI) |
 | `windows-nightly-signing` | Selected **branch only**, `master`; no tags | None, to preserve unattended nightlies |
 
 Use explicit selected-ref rules, not "all branches" or an unverified
@@ -91,30 +91,63 @@ AZURE_CERT_PROFILE_NAME
 Keep the existing build variables (`COINCUBE_API_URL`, passkey settings) at their
 existing repository scope; do not move unrelated secrets into the signing environments.
 
-Only the dedicated Windows jobs get `id-token: write`; they get `contents: read`.
-`azure/login` exchanges GitHub's short-lived OIDC token. The pinned Artifact Signing
-action uses that Azure CLI session, with environment-credential fallback and
-executable dependency caching disabled. No `AZURE_CLIENT_SECRET` is used.
-OIDC removes a standing credential, but a compromised authorized job can still
-request signatures. It does not replace source review or dependency controls.
+Only the two signing jobs get `id-token: write` (with `contents: read`), and only
+they enter a signing environment. They run pinned actions and
+`contrib/release/windows/signing.ps1` only: no package installs, Cargo builds,
+build caches or execution of downloaded files. `azure/login` exchanges GitHub's
+short-lived OIDC token; the pinned Artifact Signing action uses that Azure CLI
+session, with environment-credential fallback and executable dependency caching
+disabled, and the job clears the session as soon as signing finishes. No
+`AZURE_CLIENT_SECRET` is used. OIDC removes a standing credential, but a
+compromised authorized job can still request signatures, and the signer signs
+whatever the unprivileged build produced. It does not replace source review or
+dependency controls.
+
+`azure/login` selects `AZURE_SUBSCRIPTION_ID` after login. A role assigned only at
+certificate-profile scope normally makes that subscription visible to the service
+principal; if the first run fails at login with a subscription-not-found error,
+diagnose that before widening the role. The fix is a workflow change to
+`allow-no-subscriptions: true`, not a broader role assignment.
 
 ## 3. Signing and publication gates
 
-Both workflows perform the same sequence:
+Both workflows run the same five jobs. Only jobs 2 and 4 can request an Azure token.
 
-1. Require all six configuration values before the expensive build. Missing
-   configuration fails the Windows job; it never falls back to unsigned output.
-2. Build the three executables and copy the bridge into `target/minimal/`.
-3. Sign the **explicit three-file list** with SHA-256 and an RFC 3161 timestamp.
-4. Verify each executable's Authenticode trust, exact publisher name, timestamp,
-   and `signtool verify /pa /all /v /tw` result.
-5. Run `cargo wix --no-build` so the signed bytes become the installer payload.
-6. Sign and verify the exact MSI path.
-7. Administratively extract the MSI. Require exactly one copy of each of the
-   three executables, installed as siblings, and verify their signatures again
-   **before executing** the companion smoke tests.
-8. Upload only after all gates pass. Tagged-release checksum generation waits for
-   this Windows job as well as the Linux/macOS builds.
+1. `windows_build` (no token): build the three executables and the installer
+   icon, then upload them as one-day intermediate artifacts.
+2. `windows_sign_executables` (signing environment): require all six
+   configuration values, download the artifact, require exactly the three
+   expected files, sign the **explicit three-file list** with SHA-256 and an
+   RFC 3161 timestamp, clear the Azure session, then verify each executable's
+   Authenticode trust, exact publisher name, timestamp and
+   `signtool verify /pa /all /v /tw` result.
+3. `windows_package` (no token): re-check the exact signed files and their
+   signatures, then run `cargo wix --no-build` so the signed bytes become the
+   installer payload.
+4. `windows_sign_msi` (signing environment): require exactly the expected MSI,
+   sign it, clear the session and verify it.
+5. `windows_verify` (no token): verify the MSI, administratively extract it,
+   require exactly one copy of each executable, installed as siblings, and
+   verify their signatures again **before executing** the companion smoke tests.
+   Re-verify the MSI, then stage it. Tagged-release checksum generation waits for
+   this job as well as the Linux/macOS builds.
+
+Missing configuration fails the first signing job; it never falls back to
+unsigned output. Because the variables live in the signing environments, that
+check runs after the unprivileged build. Intermediate artifact names never use
+the `release-*` or `coincube-desktop-*` prefixes, so they cannot enter the
+published bundle. Unsigned intermediates remain downloadable by repository
+readers for one day; they are build byproducts, not distributed assets.
+
+The release environment's approval therefore appears twice per tagged run.
+The publisher check is an exact, case-sensitive match on the certificate's
+common name `COINCUBE TECHNOLOGY LLC`, matching the Apple Developer ID name.
+Confirm the issued Azure profile uses that exact form before the first run; the
+check does not pin an issuing CA.
+
+**Merge impact:** after this change merges, tagged releases and nightly Windows
+artifacts fail until onboarding is complete. Nightly Linux/macOS artifacts are
+unaffected.
 
 The existing complete-release gate is preserved: a failed Windows leg prevents
 publication of the complete tagged bundle. Nightly Linux/macOS artifacts remain

@@ -80,11 +80,14 @@ secret is required. Configuration and signing failures must block Windows output
 not produce an unsigned fallback.
 
 Before approving a tagged Windows build, review its exact source SHA and tag.
-The dedicated Windows job signs and timestamps all three executables before
-`cargo wix --no-build`, then signs the MSI, verifies its signature, and verifies
-the extracted payload before companion execution and upload. The complete
-tagged-release bundle waits for this job; do not bypass its existing completeness
-gate to publish a partial release.
+The release environment gates two jobs per tag (executable signing, then MSI
+signing), so expect two approval prompts for the same run. Unsigned executables
+are built without token access, signed and verified, packaged by
+`cargo wix --no-build`, then the MSI is signed, verified, extracted and checked
+again before companion execution and upload. The complete tagged-release bundle
+waits for this verification job; do not bypass its existing completeness gate to
+publish a partial release. Until Azure onboarding is finished, every tagged
+release therefore fails at the Windows signing gate.
 
 Activation still requires an actual signed build and a clean Windows VM install:
 download through a browser, verify the MSI and installed executable publisher is
