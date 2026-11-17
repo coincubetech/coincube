@@ -95,6 +95,13 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy
+      - name: Test Windows signing failure paths (offline)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./contrib/release/windows/test-signing.ps1
+      - name: Test Windows signing workflow guards
+        if: runner.os == 'Linux'
+        run: ruby contrib/release/windows/test-workflows.rb
       - run: cargo test -p coincube-mcp --features adapter --locked
       - run: cargo test -p coincube-mcp --no-default-features --features adapter --locked
       - run: cargo test -p coincube-mcp --no-default-features --features adapter,native-proposals --locked

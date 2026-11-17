@@ -1,160 +1,183 @@
-# Windows code signing — setup runbook
+# Windows code signing — Azure setup and operations
 
-**Why:** `releases.yml` builds the MSI with `cargo wix` and uploads it with **no Authenticode signature**. `docs/USAGE.md` admits it: *"We do not yet distribute codesigned binaries for Windows at this time."*
+**Decision:** Robert selected Azure Artifact Signing (formerly Trusted Signing) for
+COIN-473 on 2026-11-17. Azure is used only for Windows signing, not application hosting.
 
-Every Windows user installing COINCUBE Desktop sees a SmartScreen warning naming an **Unknown publisher**, and has to click through it. For a Bitcoin wallet that is worse than cosmetic: it trains users to dismiss precisely the warning that would otherwise flag a trojaned installer, and it leaves us with no way to tell a real COINCUBE Desktop MSI from a hostile one.
+The signing-enabled `releases.yml` and `nightly.yml` require valid signatures on
+`coincube.exe`, `coincube-spark-bridge.exe`, `coincube-mcp.exe`, and the MSI.
+**Implementation is not proof of activation:** Microsoft must finish organization
+validation, Robert must configure Azure/GitHub permissions, and an actual Windows
+build plus clean-VM acceptance must pass before declaring signed distribution live.
 
-**Target: signed MSI before public Beta.** Lead time is the risk, not effort — start the identity validation early, because the signing wiring itself is a couple of hours.
+## 1. Owner-controlled onboarding
 
----
+Robert performs billing, legal identity submission, and live permission changes.
+Never put payment information, identity documents, passwords or private keys in
+issues, PRs, repository files, or chat.
 
-## 1. Recommendation: Azure Trusted Signing
+1. Create a **paid** Azure subscription for COINCUBE. Free, trial and sponsored
+   subscriptions cannot use this service.
+2. Register `Microsoft.CodeSigning` in the subscription's resource providers.
+   Create one Artifact Signing account, in an available region, on **Basic**.
+   Record its regional endpoint, for example `https://eus.codesigning.azure.net/`.
+3. Assign the human submitting validation the **Artifact Signing Identity Verifier**
+   role. Submit **Organization** identity validation using the registered legal
+   details of **COINCUBE TECHNOLOGY LLC**, its business identifier and website.
+   Follow Microsoft's requests for documentation and contact verification directly
+   in its portal. Do not assume approval or an expedited completion date.
+4. After validation completes, create one **Public Trust** certificate profile.
+   Confirm its validated publisher is `COINCUBE TECHNOLOGY LLC`. Do not use an
+   Individual or Private Trust profile to work around an organization mismatch.
+5. Create a single-tenant Microsoft Entra app registration/service principal for
+   GitHub signing. **Do not create a client secret or client-authentication key.**
+   Grant it **Artifact Signing Certificate Profile Signer** only on this profile:
 
-**Use [Azure Trusted Signing](https://learn.microsoft.com/en-us/azure/artifact-signing/) (recently renamed Azure Artifact Signing), not a traditional EV certificate.**
+   ```text
+   /subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.CodeSigning/codeSigningAccounts/<account>/certificateProfiles/<profile>
+   ```
 
-| | Azure Trusted Signing | Traditional EV cert |
+   Do not grant subscription Contributor, Owner, or broad resource-group signing
+   access to CI.
+
+**Cost:** Basic is **$9.99/account/month**, with **5,000 signatures/month** and
+**$0.005 per additional signature**, before tax. Billing starts when the account is
+created, not when validation finishes, and the tier charge is not prorated. Four
+files per daily build use at most 124 signatures in a 31-day month before
+releases/retries. No separate certificate purchase, VM, or Key Vault is needed.
+A budget alert is useful but is **not** a spending cap.
+
+## 2. GitHub environments and OIDC
+
+Create both environments in `coincubetech/coincube` **before** enabling federation.
+GitHub can otherwise auto-create an environment without the intended protections.
+
+| Environment | Deployment branch/tag policy | Required approval |
 |---|---|---|
-| Cost | ~**$9.99/month** (~$120/yr), Basic tier = 5,000 signatures/month | ~$287–700/yr |
-| SmartScreen reputation | Accrues over time — **not immediate**. Attaches to your *identity*, so it survives the automatic cert rotation | Accrues over time — **not immediate**. EV no longer confers instant reputation |
-| Key storage | Microsoft-managed HSM | FIPS 140-2 L2 hardware **mandatory** since June 2023 — physical token or a cloud HSM |
-| Works in GitHub Actions | **Yes, natively** — 6 secrets and an official action | Physical token: **no**, needs a self-hosted runner with the token plugged in. Cloud HSM: yes, at extra cost |
-| Cert lifetime | Short-lived, rotated automatically | 1–3 years, manual renewal |
-| Ongoing ops | None | Token custody, renewal, a second rotation runbook alongside `APPLE_CERT_ROTATION.md` |
+| `windows-release-signing` | Selected **tags only**, `v*.*`; no branches | Robert must review the exact source SHA/tag before approval |
+| `windows-nightly-signing` | Selected **branch only**, `master`; no tags | None, to preserve unattended nightlies |
 
-The deciding factor is CI. `releases.yml` is fully automated; a physical USB token would force either a self-hosted Windows runner or a manual signing step on someone's desk for every release. Trusted Signing is built for the automated case.
+Use explicit selected-ref rules, not "all branches" or an unverified
+"protected branches only" setting. Protect `master`, release-tag creation, and
+workflow changes against unreviewed writes; limit environment administrators and
+disable protection bypass where supported. Approval must cover the source code,
+workflow, dependency changes and tag target, not just the artifact name.
+A job on **any** allowed ref that declares one of these environments can request
+its token, so an environment name alone is not a workflow-specific security boundary.
 
-The cost difference is real but secondary. The operational difference — no hardware to hold, lose, or rotate — matters more given we already carry one Apple certificate-rotation burden.
-
-## 2. Eligibility — check this first
-
-**COINCUBE TECHNOLOGY LLC should qualify**, but confirm before planning around it:
-
-- **Paid Azure subscription required.** Free, trial and sponsored subscriptions are explicitly excluded — pay-as-you-go or EA only.
-- **Geography.** Public Trust certificates are available to organizations in the US, Canada, the EU, the UK, Australia, New Zealand, Japan, South Korea, Singapore, Switzerland, Norway and Israel. A US LLC is fine.
-- **Business age.** Microsoft originally required three years of verifiable legal existence. That has been relaxed — self-employed individuals can now apply — but practitioners report **inconsistent validation outcomes for newer entities**, sometimes without a clear reason. If COINCUBE TECHNOLOGY LLC is under three years old, treat approval as likely-but-not-certain and keep the EV fallback in §6 warm.
-- **Identity match.** The certificate subject is sourced from the **Azure billing account**. Legal name and address must match *exactly* what should appear on the certificate.
-
-> ⚠️ **Set the Azure billing account's legal name to `COINCUBE TECHNOLOGY LLC`** — byte-identical to the Apple Developer ID cert's subject — *before* starting validation. A mismatch produces a certificate with the wrong subject, and it cannot be edited afterwards; you re-validate.
-
-**Timeline:** Microsoft says identity validation can complete in about an hour. Reported reality ranges from ten minutes to over ten days, with one account taking a month. Delays cluster around domain-ownership verification. **Validation requests cannot be expedited.** Start now.
-
-## 3. Setup
-
-1. **Azure subscription** — pay-as-you-go, billing legal name exactly `COINCUBE TECHNOLOGY LLC`.
-2. **Register the resource provider** and create a **Trusted Signing account** (portal or CLI). Pick a region near CI; it doesn't affect trust.
-3. **Identity validation** — Organization type. Needs legal name, business address, business identifier, website URL (`coincube.io`), and two contact emails. Assign yourself the **Trusted Signing Identity Verifier** role first, or the request can't be created. Expect a domain-ownership step on `coincube.io` — you already control the DNS and the `.well-known` path from the AASA work.
-4. **Certificate profile** — Public Trust, once validation passes.
-5. **Service principal for CI** — an Entra app registration granted the **Trusted Signing Certificate Profile Signer** role on the account. **Do not create a client secret**; give it a federated credential instead (§4), so CI proves who it is with a short-lived GitHub token and there is no standing credential that can sign as COINCUBE.
-
-## 4. Wire it into `releases.yml`
-
-**Authenticate with GitHub OIDC, not a client secret.** A stored `AZURE_CLIENT_SECRET` is a standing credential that signs code as COINCUBE TECHNOLOGY LLC: anyone who can read it, or run a workflow that can, can produce an installer Windows trusts as ours. Workload identity federation replaces it with a token GitHub mints per job and Entra exchanges — nothing long-lived to leak, and nothing to rotate.
-
-### 4.1 Federated credential on the Entra app
-
-On the app registration from §3.5, add a **federated credential**:
+Add two federated credentials to the Entra app:
 
 | Field | Value |
 |---|---|
 | Issuer | `https://token.actions.githubusercontent.com` |
-| Organization / repository | `coincubetech` / `coincube` |
-| Entity type | **Environment** |
-| Environment name | `release` |
-| Subject | `repo:coincubetech/coincube:environment:release` |
 | Audience | `api://AzureADTokenExchange` |
+| Release subject | `repo:coincubetech/coincube:environment:windows-release-signing` |
+| Nightly subject | `repo:coincubetech/coincube:environment:windows-nightly-signing` |
 
-Scope it to an *environment*, not to the repository as a whole. A repo-wide subject lets any workflow on any branch reach the signing identity; an environment subject only matches jobs that declare `environment: release`, so the environment's protection rules and approvers become the gate on signing. Create the `release` environment in repo settings, and add `environment: release` to the release job — the token's subject is built from it, so without it the exchange simply fails.
+Use exact subjects, not wildcard/repository-wide trust. Both credentials use the
+same certificate profile, within Basic's one-Public-Trust-profile allowance.
 
-### 4.2 Secrets
-
-Five, down from six — the tenant, client and subscription IDs are identifiers, not credentials, and stay:
+Set these **six environment-level Actions variables** in **each** environment.
+These are identifiers/configuration, not signing credentials:
 
 ```text
 AZURE_TENANT_ID
 AZURE_CLIENT_ID
-AZURE_ENDPOINT               # e.g. https://eus.codesigning.azure.net
-AZURE_CODE_SIGNING_NAME      # the Trusted Signing account name
-AZURE_CERT_PROFILE_NAME      # the certificate profile name
+AZURE_SUBSCRIPTION_ID
+AZURE_ENDPOINT
+AZURE_CODE_SIGNING_NAME
+AZURE_CERT_PROFILE_NAME
 ```
 
-### 4.3 Workflow changes
+Keep the existing build variables (`COINCUBE_API_URL`, passkey settings) at their
+existing repository scope; do not move unrelated secrets into the signing environments.
 
-The job needs an OIDC token. `releases.yml` sets `permissions: contents: write` at the top, and naming any permission drops the rest of the defaults — so add the key rather than replacing the block:
+Only the dedicated Windows jobs get `id-token: write`; they get `contents: read`.
+`azure/login` exchanges GitHub's short-lived OIDC token. The pinned Artifact Signing
+action uses that Azure CLI session, with environment-credential fallback and
+executable dependency caching disabled. No `AZURE_CLIENT_SECRET` is used.
+OIDC removes a standing credential, but a compromised authorized job can still
+request signatures. It does not replace source review or dependency controls.
 
-```yaml
-permissions:
-  contents: write
-  id-token: write
+## 3. Signing and publication gates
+
+Both workflows perform the same sequence:
+
+1. Require all six configuration values before the expensive build. Missing
+   configuration fails the Windows job; it never falls back to unsigned output.
+2. Build the three executables and copy the bridge into `target/minimal/`.
+3. Sign the **explicit three-file list** with SHA-256 and an RFC 3161 timestamp.
+4. Verify each executable's Authenticode trust, exact publisher name, timestamp,
+   and `signtool verify /pa /all /v /tw` result.
+5. Run `cargo wix --no-build` so the signed bytes become the installer payload.
+6. Sign and verify the exact MSI path.
+7. Administratively extract the MSI. Require exactly one copy of each of the
+   three executables, installed as siblings, and verify their signatures again
+   **before executing** the companion smoke tests.
+8. Upload only after all gates pass. Tagged-release checksum generation waits for
+   this Windows job as well as the Linux/macOS builds.
+
+The existing complete-release gate is preserved: a failed Windows leg prevents
+publication of the complete tagged bundle. Nightly Linux/macOS artifacts remain
+independent. A Windows-less tagged release would need a separately approved
+change to the complete-bundle policy, not an unsigned-signing bypass.
+
+Nightly Windows signing accepts only `master`, including manual dispatch. Release
+Windows signing accepts version tags and requires the tag to match Cargo's version.
+PRs and arbitrary branch dispatches cannot enter these signing jobs.
+
+## 4. Validation and activation checklist
+
+Offline checks, with no Azure access:
+
+```sh
+pwsh -NoLogo -NoProfile -File contrib/release/windows/test-signing.ps1
+ruby contrib/release/windows/test-workflows.rb
+actionlint -shellcheck= .github/workflows/{releases,nightly,main}.yml
 ```
 
-Then log in with OIDC and let the signing action take the credential from the environment `azure/login` leaves behind, instead of passing one:
+The PowerShell tests mock OS trust APIs/SignTool to exercise failure handling;
+they do not establish that a real certificate, timestamp or Azure login works.
+They also reject a real unsigned fixture when run on Windows. Main CI runs the
+PowerShell checks on Windows and workflow checks on Linux.
 
-```yaml
-      - name: Azure login (OIDC)
-        if: matrix.platform == 'windows'
-        uses: azure/login@v2
-        with:
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          allow-no-subscriptions: true
+After onboarding, Robert authorizes an initial `master` nightly. Confirm its exact
+source SHA, successful OIDC exchange, all signatures and extracted payload checks.
+Retain the run URL and artifact hashes as activation evidence. Then on a clean,
+updated Windows VM with no repository checkout:
 
-      - name: Sign Windows MSI
-        if: matrix.platform == 'windows'
-        uses: azure/artifact-signing-action@v2
-        with:
-          # No azure-client-secret, and no azure-tenant-id/azure-client-id
-          # either: omitting them makes the action fall back to the ambient
-          # Azure credential, which is the federated token from the step above.
-          endpoint: ${{ secrets.AZURE_ENDPOINT }}
-          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
-          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
-          files-folder: target/wix
-          files-folder-filter: msi
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-```
+- Download the MSI through a browser, preserving its Internet origin.
+- Verify the release checksum/GPG signature for a tagged release, plus the MSI's
+  Digital Signatures details and publisher **COINCUBE TECHNOLOGY LLC**.
+- Install; verify all three installed executable signatures and publisher names.
+- Launch the app, exercise Spark startup and local MCP pairing/STDIO.
+- Record Windows version, artifact hash, publisher, install and launch results.
 
-The rename carried into the action: `azure/trusted-signing-action@v0` became `azure/artifact-signing-action@v2`, and `trusted-signing-account-name` became `signing-account-name`. Older snippets on the web still show the v0 form — it does not match this action's inputs.
+SmartScreen may still report an unrecognized app while reputation develops.
+**Do not promise warning-free downloads.** Unknown publisher, invalid signature,
+missing timestamp, or broken companion startup is a failed acceptance check.
 
-Pin both actions to a checked version — don't float — and confirm the ambient-credential behaviour against Microsoft's docs before merging. If the version you pin still requires explicit credentials, pass `azure-tenant-id` and `azure-client-id` — but never reintroduce `azure-client-secret`.
+## 5. Renewal, failure and incident handling
 
-**Do the same in `nightly.yml`.** Both workflows build a Windows MSI; leaving nightly unsigned means the artifact people actually test differs from the one that ships.
+Monitor identity-validation expiry notices. Microsoft sends reminders beginning
+60 days before expiry; if validation lapses, certificate renewal and new signing
+stop. Keep a named owner and renew validation before expiry. Short-lived signing
+certificates rotate automatically; correctly timestamped signatures can remain
+valid after the signing certificate expires.
 
-**Sign the `.exe`s too, not just the MSI.** `cargo wix` packages already-built binaries. Signing only the installer leaves the installed executables unsigned, so SmartScreen and any endpoint-protection tooling still flag them at *run* time. There are **two**: sign `target/minimal/coincube.exe` and `target/minimal/coincube-spark-bridge.exe` before `cargo wix`, then sign the MSI after. The second is the Spark bridge, which the workflow copies into that directory from its own workspace's `target/` before packaging — the gui spawns it as a subprocess, so an unsigned or blocked bridge takes the Spark wallet down while the app itself looks fine (see [`SPARK_WALLET.md`](./SPARK_WALLET.md#packaging)).
+For configuration, login, signing or verification failures, diagnose the failing
+gate and rerun only after fixing its cause. Do not add an unsigned fallback.
+If validation cannot complete, return to Robert for a launch/provider decision,
+including whether to hold Windows distribution.
 
-## 5. Verification
+If CI or the signing identity is compromised, Robert should disable the federated
+credentials/role assignment, stop affected publication, preserve build hashes and
+audit records, and contact Microsoft about affected signatures. Never assume
+deleting a profile revokes previously issued signatures.
 
-In CI, after signing:
+## Official references
 
-```powershell
-signtool verify /pa /v target\wix\coincube-desktop-*.msi
-```
-
-Manually, on a clean Windows VM with no prior reputation:
-
-1. Download the MSI the way a user would (browser, from the GitHub Release).
-2. Confirm SmartScreen shows **COINCUBE TECHNOLOGY LLC** as the publisher, not "Unknown publisher".
-3. Install, launch, and check for a warning at run time — that's what catches an unsigned inner `.exe`.
-
-Read step 3 by the publisher name, not by the presence of a prompt. A correctly signed build with no reputation yet still shows "unrecognized app" — but it names the publisher. "Unknown publisher" is the failure.
-
-Add the publisher-name check to the release checklist. `signtool verify` proves a signature exists; only the clean-VM install proves the user-visible outcome.
-
-## 6. Fallback if Trusted Signing validation fails
-
-If COINCUBE TECHNOLOGY LLC is rejected or stalls past the launch window, buy an **EV certificate with cloud HSM signing** — DigiCert KeyLocker, SSL.com eSigner, or Certum. Not a physical USB token: that would break CI.
-
-Expect ~$300–700/yr, EV vetting of one to three weeks, and a second certificate-rotation runbook to sit alongside `APPLE_CERT_ROTATION.md`. Choose EV over OV for the stronger identity vetting and the hardware-key requirement — **not** for SmartScreen: neither tier buys immediate reputation any more, and both accrue it from download history the same way. Whichever route you take, plan for early downloads to still hit an "unrecognized app" prompt, and don't let a launch date depend on it being gone.
-
-## 7. While you're here
-
-`docs/USAGE.md:43-50` still carries Liana upstream text: wrong artifact names (`Coincube.zip` rather than `coincube-desktop-<version>-<target>.{dmg,msi}`), a `wizardsardine.com` link, and a Wizardsardine PGP key. Anyone following it to verify a download will not find our artifacts. Fix it in the same PR that lands signing, so the install instructions and the signature story change together.
-
----
-
-## Related
-
-- `docs/APPLE_CERT_ROTATION.md` — the macOS equivalent, and the model for the rotation runbook an EV fallback would need
-- `docs/MACOS_KEYCHAIN_ENTITLEMENT.md` — the macOS signing gap
-- `company-brain/decisions/2026-08-03-passkey-macos-only-for-now.md` — why Windows passkey is deferred, which is adjacent but separate: signing the MSI does not address the RP-ID binding question
+- [Service overview](https://learn.microsoft.com/en-us/azure/artifact-signing/)
+- [Pricing and quotas](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-change-sku)
+- [FAQ: subscription, validation, billing and certificate lifecycle](https://learn.microsoft.com/en-us/azure/artifact-signing/faq)
+- [GitHub Actions OIDC](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect)
+- [Artifact Signing action](https://github.com/Azure/artifact-signing-action)
