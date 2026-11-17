@@ -65,6 +65,7 @@ function Assert-WindowsStagedFiles {
         [Parameter(Mandatory)][string[]]$Names
     )
     $items = @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
+    if ($items.Count -eq 0) { throw "Unexpected staged files: $Root is empty." }
     foreach ($item in $items) {
         if ($item.PSIsContainer) { throw "Unexpected directory in staged files: $($item.Name)." }
         if ($item.LinkType) { throw "Unexpected link in staged files: $($item.Name)." }
@@ -73,6 +74,27 @@ function Assert-WindowsStagedFiles {
     $wanted = @($Names | Sort-Object -CaseSensitive)
     if (($actual -join "`n") -cne ($wanted -join "`n")) {
         throw "Unexpected staged files: found [$($actual -join ', ')], expected [$($wanted -join ', ')]."
+    }
+}
+
+function Get-WindowsStagedDigest {
+    param([Parameter(Mandatory)][string]$Root)
+    $files = @(Get-ChildItem -LiteralPath $Root -File -Force | Sort-Object Name -CaseSensitive)
+    if ($files.Count -eq 0) { throw "No staged files in $Root." }
+    return (@($files | ForEach-Object {
+        "$($_.Name)=$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"
+    }) -join ',')
+}
+
+function Assert-WindowsStagedDigest {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [AllowEmptyString()][string]$Expected
+    )
+    if ([string]::IsNullOrWhiteSpace($Expected)) { throw 'Missing expected staged-file digest.' }
+    $actual = Get-WindowsStagedDigest -Root $Root
+    if ($actual -cne $Expected) {
+        throw "Staged file digest mismatch: found $actual, expected $Expected."
     }
 }
 

@@ -133,6 +133,22 @@ try {
     Assert-Fails { Assert-WindowsStagedFiles -Root $stage.FullName -Names $staged } 'Unexpected staged files'
     Remove-Item -LiteralPath $hidden -Force
     Assert-Fails { Assert-WindowsStagedFiles -Root (Join-Path $temp 'absent') -Names $staged } 'does not exist'
+    $empty = New-Item -ItemType Directory -Path (Join-Path $temp 'empty') -Force
+    Assert-Fails { Assert-WindowsStagedFiles -Root $empty.FullName -Names $staged } 'is empty'
+
+    $digest = Get-WindowsStagedDigest -Root $stage.FullName
+    $sha = (Get-FileHash -LiteralPath (Join-Path $stage.FullName 'coincube.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($digest -cnotmatch "^coincube-mcp\.exe=[0-9a-f]{64},coincube-spark-bridge\.exe=[0-9a-f]{64},coincube\.exe=$sha$") {
+        throw "Unexpected digest format: $digest"
+    }
+    $script:checks++
+    Assert-Passes { Assert-WindowsStagedDigest -Root $stage.FullName -Expected $digest }
+    Assert-Fails { Assert-WindowsStagedDigest -Root $stage.FullName -Expected '' } 'Missing expected'
+    Assert-Fails { Assert-WindowsStagedDigest -Root $stage.FullName -Expected ' ' } 'Missing expected'
+    Assert-Fails { Assert-WindowsStagedDigest -Root $stage.FullName -Expected $digest.ToUpperInvariant() } 'digest mismatch'
+    Set-Content -LiteralPath (Join-Path $stage.FullName 'coincube-mcp.exe') -Value 'replaced'
+    Assert-Fails { Assert-WindowsStagedDigest -Root $stage.FullName -Expected $digest } 'digest mismatch'
+    Assert-Fails { Get-WindowsStagedDigest -Root $empty.FullName } 'No staged files'
     Write-Host "PASS: $script:checks offline Windows signing checks"
 } finally {
     foreach ($name in $names) {

@@ -81,7 +81,8 @@ not produce an unsigned fallback.
 
 Before approving a tagged Windows build, review its exact source SHA and tag.
 The release environment gates two jobs per tag (executable signing, then MSI
-signing), so expect two approval prompts for the same run. Unsigned executables
+signing), so expect two approval prompts for the same run; approve both within
+seven days of the build, before its intermediate artifacts expire. Unsigned executables
 are built without token access, signed and verified, packaged by
 `cargo wix --no-build`, then the MSI is signed, verified, extracted and checked
 again before companion execution and upload. The complete tagged-release bundle

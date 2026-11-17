@@ -120,9 +120,9 @@ LOGOUT = "az logout\naz account clear\nexit 0\n"
   end
   handoffs = {
     'windows_sign_executables' => [%w[windows-unsigned-executables windows-signing]],
-    'windows_package' => [%w[windows-signed-executables target/minimal], %w[windows-installer-icon contrib/release/wix]],
+    'windows_package' => [%w[windows-signed-executables target/minimal], %w[windows-installer-icon windows-icon]],
     'windows_sign_msi' => [%w[windows-unsigned-msi windows-signing]],
-    'windows_verify' => [%w[windows-signed-msi target/wix]]
+    'windows_verify' => [%w[windows-signed-msi windows-verify]]
   }
   handoffs.each do |name, wanted|
     got = downloads.call(name).map { |s| [s.fetch('with')['name'], s.fetch('with')['path']] }
@@ -133,10 +133,51 @@ LOGOUT = "az logout\naz account clear\nexit 0\n"
     %w[windows-installer-icon windows-signed-executables windows-signed-msi windows-unsigned-executables windows-unsigned-msi],
     prefix + 'intermediate artifact names')
   intermediates.each do |s|
-    check.call(s.fetch('with')['retention-days'] == 1, prefix + "#{s['name']} must expire quickly")
+    # Long enough to survive two release approvals, short enough to stay a byproduct.
+    check.call(s.fetch('with')['retention-days'] == 7, prefix + "#{s['name']} retention")
     check.call(!s.fetch('with')['name'].start_with?('release-', 'coincube-desktop-'), prefix + "#{s['name']} could be published")
   end
   check.call(uploads.call('windows_verify').length == 1, prefix + 'verification stages exactly one artifact')
+
+  # A restored cache could overwrite downloaded files, so only the build may use one.
+  WINDOWS_JOBS.drop(1).each do |name|
+    check.call(jobs.fetch(name).fetch('steps').none? { |s| s.fetch('uses', '').start_with?('actions/cache') },
+      prefix + "#{name} restores a build cache")
+  end
+
+  # Every handoff is bound to digests in the producing job's outputs.
+  digest_outputs = {
+    'windows_build' => { 'unsigned_executables' => '${{ steps.digest.outputs.executables }}', 'icon' => '${{ steps.digest.outputs.icon }}' },
+    'windows_sign_executables' => { 'signed_executables' => '${{ steps.verify.outputs.digest }}' },
+    'windows_package' => { 'unsigned_msi' => '${{ steps.package.outputs.digest }}' },
+    'windows_sign_msi' => { 'signed_msi' => '${{ steps.verify.outputs.digest }}' }
+  }
+  digest_outputs.each do |name, outputs|
+    outputs.each { |key, value| check.call(jobs.fetch(name).fetch('outputs')[key] == value, prefix + "#{name} #{key} digest output") }
+  end
+  {
+    ['windows_sign_executables', 'Require exact unsigned payload'] => ['${{ needs.windows_build.outputs.unsigned_executables }}', 'windows-signing'],
+    ['windows_package', 'Verify executable signatures before packaging'] => ['${{ needs.windows_sign_executables.outputs.signed_executables }}', 'target/minimal'],
+    ['windows_sign_msi', 'Require exact unsigned installer'] => ['${{ needs.windows_package.outputs.unsigned_msi }}', 'windows-signing']
+  }.each do |(name, step_name), (expected, root)|
+    s = step.call(name, step_name)
+    check.call(s.fetch('env', {})['EXPECTED_DIGEST'] == expected &&
+      s['run'].include?("Assert-WindowsStagedDigest -Root #{root} -Expected $env:EXPECTED_DIGEST"), prefix + "#{name} digest check")
+  end
+  package_check = step.call('windows_package', 'Verify executable signatures before packaging')
+  check.call(package_check['env']['EXPECTED_ICON'] == '${{ needs.windows_build.outputs.icon }}' &&
+    package_check['run'].include?('Assert-WindowsStagedDigest -Root windows-icon -Expected $env:EXPECTED_ICON'), prefix + 'icon digest check')
+  check.call(jobs.fetch('windows_verify').fetch('env')['EXPECTED_DIGEST'] == '${{ needs.windows_sign_msi.outputs.signed_msi }}',
+    prefix + 'verify signed MSI digest source')
+  ['Verify MSI signature before extraction', 'Re-verify MSI before staging'].each do |name|
+    check.call(step.call('windows_verify', name)['run'].include?('Assert-WindowsStagedDigest -Root windows-verify -Expected $env:EXPECTED_DIGEST'),
+      prefix + "#{name} digest")
+  end
+  %w[windows_sign_executables windows_sign_msi].each do |name|
+    login = jobs.fetch(name).fetch('steps').index { |s| s['name'] == 'Azure login (OIDC)' }
+    checked = jobs.fetch(name).fetch('steps').index { |s| s.fetch('run', '').include?('Assert-WindowsStagedDigest') }
+    check.call(checked && checked < login, prefix + "#{name} digest checked before login")
+  end
 
   package = 'windows_package'
   order.call(package, ['Download signed Windows executables', 'Verify executable signatures before packaging', 'Package Windows MSI',
@@ -152,12 +193,12 @@ LOGOUT = "az logout\naz account clear\nexit 0\n"
   extracted = step.call('windows_verify', 'Verify Spark bridge is in the MSI')['run']
   check.call(extracted.index('Assert-WindowsMsiPayload') < extracted.index('cargo test'), prefix + 'execute before verifying extracted payload')
   first_verify = step.call('windows_verify', 'Verify MSI signature before extraction')['run']
-  check.call(first_verify.include?("Assert-WindowsStagedFiles -Root target/wix") && first_verify.include?("Assert-WindowsSignature -Paths \"target/wix/#{msi_name}\""),
+  check.call(first_verify.include?("Assert-WindowsStagedFiles -Root windows-verify") && first_verify.include?("Assert-WindowsSignature -Paths \"windows-verify/#{msi_name}\""),
     prefix + 'verify downloaded MSI before extraction')
-  check.call(step.call('windows_verify', 'Re-verify MSI before staging')['run'].include?("Assert-WindowsSignature -Paths \"target/wix/#{msi_name}\""),
+  check.call(step.call('windows_verify', 'Re-verify MSI before staging')['run'].include?("Assert-WindowsSignature -Paths \"windows-verify/#{msi_name}\""),
     prefix + 're-verify staged MSI')
   staged = step.call('windows_verify', final).fetch('with')
-  check.call(staged['path'] == 'target/wix/coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi', prefix + 'staged MSI path')
+  check.call(staged['path'] == 'windows-verify/coincube-desktop-${{ env.COINCUBE_VERSION }}-${{ env.WINDOWS_TARGET }}.msi', prefix + 'staged MSI path')
   expected_name = workflow == 'releases' ? 'release-${{ env.WINDOWS_TARGET }}' : 'coincube-desktop-nightly-${{ env.BUILD_TAG }}-${{ env.WINDOWS_TARGET }}'
   check.call(staged['name'] == expected_name, prefix + 'staged artifact name')
 

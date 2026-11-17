@@ -114,7 +114,8 @@ diagnose that before widening the role. The fix is a workflow change to
 Both workflows run the same five jobs. Only jobs 2 and 4 can request an Azure token.
 
 1. `windows_build` (no token): build the three executables and the installer
-   icon, then upload them as one-day intermediate artifacts.
+   icon, record each file's SHA-256 in job outputs, then upload them as
+   seven-day intermediate artifacts.
 2. `windows_sign_executables` (signing environment): require all six
    configuration values, download the artifact, require exactly the three
    expected files, sign the **explicit three-file list** with SHA-256 and an
@@ -132,14 +133,28 @@ Both workflows run the same five jobs. Only jobs 2 and 4 can request an Azure to
    Re-verify the MSI, then stage it. Tagged-release checksum generation waits for
    this job as well as the Linux/macOS builds.
 
+Every handoff is bound to content, not just names: each producing job records
+the SHA-256 of every file it uploads as a job output, and the next job requires
+those exact digests before Azure login, before packaging, before extraction
+and again before staging. Other jobs in the run can upload artifacts, but cannot
+change another job's outputs. None of the jobs after the build restores a build
+cache, so nothing can overwrite a verified file between checks.
+
 Missing configuration fails the first signing job; it never falls back to
 unsigned output. Because the variables live in the signing environments, that
 check runs after the unprivileged build. Intermediate artifact names never use
 the `release-*` or `coincube-desktop-*` prefixes, so they cannot enter the
 published bundle. Unsigned intermediates remain downloadable by repository
-readers for one day; they are build byproducts, not distributed assets.
+readers for seven days; they are build byproducts, not distributed assets.
 
-The release environment's approval therefore appears twice per tagged run.
+The release environment's approval therefore appears twice per tagged run. Both
+approvals must come within seven days of the build, or the intermediates expire
+and the run must be restarted from the build.
+
+Remaining supply-chain exposure in the unprivileged jobs: `windows_build`
+installs unpinned `pillow` and `icnsutil` for the installer icon (as the
+previous workflow did), and the payload check covers executables, not every file
+in the MSI. `cargo-wix` is pinned to 0.3.9.
 The publisher check is an exact, case-sensitive match on the certificate's
 common name `COINCUBE TECHNOLOGY LLC`, matching the Apple Developer ID name.
 Confirm the issued Azure profile uses that exact form before the first run; the
