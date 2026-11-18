@@ -3397,7 +3397,12 @@ pub fn merge_testnet4_integration_signatures(
     psbt: &mut Psbt,
     signed_psbt: &Psbt,
 ) -> Result<(), UnifiedFinalizeError> {
-    merge_signatures_for_chain(ChainId::from(Network::Testnet4), psbt, signed_psbt)
+    // Testnet4 is a Bitcoin-family chain: ordinary signatures, no unified adapter.
+    merge_signatures_for_chain(
+        ChainId::from(Network::Testnet4).is_blake2b(),
+        psbt,
+        signed_psbt,
+    )
 }
 
 /// Sign with the Vault's hot key, keyed on the chain: `SIGHASH_ALL` into
