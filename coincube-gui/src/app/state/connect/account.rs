@@ -1836,6 +1836,12 @@ impl ConnectAccountPanel {
         self.admitted_client = false;
         self.shared_client = false;
         self.admitted_reopen_required = false;
+        // A local fork Cube keeps no Bitcoin-family `connect.json` for the App
+        // to commit a login into first, and the App refuses that commit for
+        // the fork. Its sign-in, OTP and session restore therefore finish here,
+        // as on Home, instead of waiting on an `InAppConnectAuthReady` that
+        // never answers.
+        self.defer_auth_cache_commit = false;
     }
 
     /// Discard this tab's account memory without touching the shared keyring.

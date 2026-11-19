@@ -1,11 +1,11 @@
 # BTCB2 descriptor source gates
 
 The descriptor picker carries explicit ChainId. BTCB2 creation exposes the
-local Cube key, hardware devices, Border Wallet keys and imported/pasted
-xpubs. Keychain and provider-token (safety-net and cosigner) entry points stay
-hidden until their complete chain-bound workflow is verified. A manually
-supplied xpub is watch-only here; accepting its encoding makes no claim about
-signature capability or replay protection.
+local Cube key, hardware devices, Border Wallet keys, Keychain keys attached
+to the Cube and imported/pasted xpubs. A manually supplied xpub is watch-only
+here; accepting its encoding makes no claim about signature capability or
+replay protection. The Wizardsardine provider tokens (safety-net and
+cosigner) have been removed and are no longer a key source.
 
 ## Hardware devices and Border Wallet (HW-1, 2026-10-06)
 
@@ -35,25 +35,52 @@ their own decision.
   the unified signer (`ALL|UNIFIED`); Bitcoin keeps the legacy signer. A
   Border Wallet fingerprint is `Capable` in `signers.rs`.
 
+## Keychain keys (2026-11-19)
+
+Keychain keys were held back above until Lane B3. COINCUBE Mobile now signs
+BTCB2 with the unified signer and advertises `chain-identity-v1` and
+`btcb2-unified-v1`, and the desktop's signing client checks both before it
+prepares a BTCB2 session (`BTCB2_CONNECT_SIGNING_CLIENT.md`). This change
+re-enables the Mobile Keys card on BTCB2. The earlier gate is recorded on
+coincube #568, so this lift needs the same owner sign-off before merge.
+
+- **What the card lists.** Signed in to Connect, the card opens the keys
+  attached to this Cube (`get_cube_keys`), split into the user's own keys
+  and contacts' keys, exactly as on Bitcoin. Each key arrives as an envelope
+  sealed to the Cube's encryption key, so it can be opened only once the
+  Cube has published that key (`BTCB2_CUBE_OPEN.md`). Signed out, the card
+  asks for Connect, as on Bitcoin.
+- **Creation.** A chosen key becomes a Connect Vault member, as on Bitcoin,
+  so Keychain can find the Vault it signs for. `KeySource::replay_capable`
+  stays false for a Keychain key: the phone's capabilities are known only at
+  sign time, where a phone advertising both literals may be classified
+  replay-capable. The card's tip says the phone needs a COINCUBE Mobile
+  version with BTCB2 signing.
+- **Still separate.** Keychain LAN signing on BTCB2 stays refused
+  (`BTCB2_CONNECT_SIGNING_CLIENT.md`).
+
 **Being allowed at creation is not replay evidence.** Only verified unified
 witnesses make the replay pill say "protected"; neither the key source nor
 its capability flag does.
 
 ## Enforcement
 
-Keychain and token navigation/fetch/result messages are refused before work,
-including stale key results through `LoadKey` and existing-key selection
-through `SelectKey`, which use the same `available_for_creation` rule.
-Descriptor apply independently refuses unsupported sources, so a stale editor
-state cannot bypass the picker. The global runtime gate is unchanged.
+Every key source this picker offers is now allowed on BTCB2.
+`available_for_creation` still lists them explicitly, so a new source is
+refused on BTCB2 until it is added there. The picker refuses such a source's
+key results through `LoadKey` and existing-key selection through `SelectKey`,
+and descriptor apply independently refuses it, so stale editor state cannot
+bypass the picker. The global runtime gate is unchanged.
 
 This creation policy is distinct from `KeySource::replay_capable`: creation
 capability says which sources may build a Vault, not whether its spends are
 protected. Claim/Split, Keychain LAN and unsupported signer transports remain
 separate launch gates.
 
-Synthetic tests cover the per-chain creation rule, the picker's refused and
-allowed messages, device discovery and key fetch with a fake device, the
-grid's cards, descriptor apply, the path advice and the spend-time device
-copy. Bitcoin picker behavior stays unchanged. No live devices, funds or
+Synthetic tests cover the per-chain creation rule, the picker's Keychain,
+hardware and Border Wallet messages, listing and selecting a key attached to
+the Cube, device discovery and key fetch with a fake device, the grid's cards
+signed in and out, descriptor apply with a Keychain key (including its
+Connect Vault member), the path advice and the spend-time device copy.
+Bitcoin picker behavior stays unchanged. No live devices, phones, funds or
 existing-wallet changes are used.

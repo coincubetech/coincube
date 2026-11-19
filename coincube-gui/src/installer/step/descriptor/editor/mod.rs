@@ -1132,6 +1132,10 @@ mod tests {
         );
     }
 
+    /// Taproot stays refused on Bitcoin Blake2b, whether asked for by message
+    /// or left over in the editor's state. Every key source this enum knows is
+    /// now allowed there (see `creation_gate_on_bitcoin_blake2b_allows_every_key_source`),
+    /// so no source is left to refuse from stale state.
     #[test]
     fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
         for chain in [
@@ -1165,29 +1169,11 @@ mod tests {
             step.modal = None;
             step.use_taproot = true;
             assert!(!step.apply(&mut ctx));
-            assert!(ctx.descriptor.is_none());
-            step.use_taproot = false;
-            let xpub = step.signer.lock().unwrap().get_extended_pubkey(
-                &coincube_core::miniscript::bitcoin::bip32::DerivationPath::master(),
+            assert_eq!(
+                step.error.as_deref(),
+                Some("Descriptor chain or type is unsupported")
             );
-            step.paths[0].keys = vec![Some(Key {
-                source: KeySource::KeychainKey {
-                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
-                        primary_owner_id: 1,
-                    },
-                    key_id: 1,
-                    name: "phone".to_string(),
-                },
-                name: "phone".to_string(),
-                fingerprint: step.signer.lock().unwrap().fingerprint(),
-                key: DescriptorPublicKey::from_str(&xpub.to_string()).unwrap(),
-                account: None,
-            })];
-            assert!(!step.apply(&mut ctx));
-            assert!(step.error.as_ref().unwrap().contains("key source"));
             assert!(ctx.descriptor.is_none());
-            assert!(KeySource::Manual.available_for_creation(chain));
-            assert!(KeySource::MasterSigner.available_for_creation(chain));
         }
     }
 
@@ -1212,32 +1198,15 @@ mod tests {
         ]
     }
 
-    /// HW-1 and its Amendment A (Robert, 2026-10-06): on both Bitcoin
-    /// Blake2b chains the Cube key, xpubs, hardware devices and Border
-    /// Wallet keys may build a Vault; Keychain keys may not. Every source
-    /// stays available on every Bitcoin-family chain.
+    /// HW-1 and its Amendment A (Robert, 2026-10-06) opened hardware devices
+    /// and Border Wallet keys on both Bitcoin Blake2b chains; Keychain keys
+    /// attached to the Cube follow. Every source is available on every chain.
     #[test]
-    fn creation_gate_on_bitcoin_blake2b_refuses_only_keychain_sources() {
+    fn creation_gate_on_bitcoin_blake2b_allows_every_key_source() {
         use crate::chain::ChainId;
-        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-            for source in every_key_source() {
-                let expected = matches!(
-                    source,
-                    KeySource::MasterSigner
-                        | KeySource::Manual
-                        | KeySource::Device(..)
-                        | KeySource::BorderWallet { .. }
-                );
-                assert_eq!(
-                    source.available_for_creation(chain),
-                    expected,
-                    "{:?} {:?}",
-                    chain,
-                    source
-                );
-            }
-        }
         for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
             ChainId::Bitcoin,
             ChainId::Testnet,
             ChainId::Testnet4,
@@ -1257,10 +1226,10 @@ mod tests {
 
     /// HW-1: a Bitcoin Blake2b descriptor with a hardware device key on its
     /// primary path applies, and records that a device is used so the
-    /// registration step runs. The same descriptor with a Keychain key in
-    /// the device's place is still refused.
+    /// registration step runs. The same descriptor with a Keychain key or a
+    /// Border Wallet key in the device's place applies too.
     #[test]
-    fn fork_descriptor_applies_with_a_device_key_and_refuses_a_keychain_key() {
+    fn fork_descriptor_applies_with_device_keychain_and_border_wallet_keys() {
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
@@ -1315,7 +1284,9 @@ mod tests {
             );
             assert_eq!(ctx.bitcoin_config.chain, chain);
 
-            // A Keychain key in the device's place is still refused.
+            // A Keychain key attached to the Cube in the device's place
+            // applies too, and becomes a Connect Vault member so Keychain
+            // can find the Vault it signs for.
             let mut ctx =
                 Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut phone = device.clone();
@@ -1328,12 +1299,21 @@ mod tests {
             };
             step.keys.insert(phone.fingerprint, phone.clone());
             step.paths[0].keys = vec![Some(phone)];
-            assert!(!step.apply(&mut ctx), "{:?}", chain);
+            assert!(step.apply(&mut ctx), "{chain:?}: {:?}", step.error);
+            assert!(ctx.descriptor.is_some());
+            assert_eq!(ctx.bitcoin_config.chain, chain);
             assert_eq!(
-                step.error.as_deref(),
-                Some("This key source is not available for Bitcoin Blake2b yet")
+                ctx.keys[&device_signer.fingerprint()].keychain_key_id,
+                Some(1)
             );
-            assert!(ctx.descriptor.is_none());
+            assert_eq!(
+                ctx.connect_vault_members
+                    .iter()
+                    .map(|member| (member.fingerprint, member.key_id, member.contact_id))
+                    .collect::<Vec<_>>(),
+                vec![(device_signer.fingerprint(), 1, None)]
+            );
+            assert!(!ctx.hw_is_used);
 
             // Amendment A: a Border Wallet key in the device's place applies.
             let mut ctx =
