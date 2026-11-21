@@ -884,6 +884,33 @@ impl ConnectOwner {
     }
 }
 
+/// Whether a Cube must be hidden from the Connect account that is currently
+/// signed in on this device.
+///
+/// Cubes live in the device's `settings.json`, not in an account, so without
+/// this every account that signs in on a shared machine would list (and be
+/// able to open, rename or delete) the previous account's Cubes.
+///
+/// * No recorded owner → never hidden: ownership is unknown, not foreign.
+/// * Signed out → never hidden: Cubes must stay reachable offline, and the
+///   PIN / passkey still protects them.
+/// * Signed in, profile loaded → hidden iff the owner is another user id.
+/// * Signed in, profile not loaded yet → hidden (fail closed), so the list
+///   cannot flash the previous account's Cubes during sign-in.
+pub fn cube_hidden_from_account(
+    owner: Option<&ConnectOwner>,
+    signed_in: bool,
+    signed_in_user_id: Option<u32>,
+) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    match signed_in_user_id {
+        Some(id) => owner.user_id != id,
+        None => signed_in,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PendingLiquidToVaultTransfer {
     pub swap_id: String,
@@ -3248,6 +3275,24 @@ mod chain_identity_tests {
             Some(owner(1, "a@example.com"))
         );
         assert_eq!(find(&legacy_id).connect_owner, None);
+    }
+
+    #[test]
+    fn cubes_owned_by_another_account_are_hidden() {
+        let owner = ConnectOwner {
+            user_id: 1,
+            email: "a@example.com".to_string(),
+        };
+        // Another account signed in: hidden.
+        assert!(cube_hidden_from_account(Some(&owner), true, Some(2)));
+        // The owner, or nobody, signed in: visible.
+        assert!(!cube_hidden_from_account(Some(&owner), true, Some(1)));
+        assert!(!cube_hidden_from_account(Some(&owner), false, None));
+        // Signed in but profile not loaded yet: fail closed.
+        assert!(cube_hidden_from_account(Some(&owner), true, None));
+        // Unknown owner is never treated as foreign.
+        assert!(!cube_hidden_from_account(None, true, Some(2)));
+        assert!(!cube_hidden_from_account(None, true, None));
     }
 
     #[test]

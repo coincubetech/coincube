@@ -2322,6 +2322,9 @@ impl Home {
                 }
             },
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i))) => {
+                if self.cube_index_hidden(i) {
+                    return Task::none();
+                }
                 if let State::Cubes { cubes, .. } = &self.state {
                     if let Some(cube) = cubes.get(i) {
                         let wallet_datadir = self.datadir_path.network_directory(cube.network);
@@ -2646,6 +2649,9 @@ impl Home {
                 }
             },
             Message::View(ViewMessage::ClaimBlake2b(index)) => {
+                if self.cube_index_hidden(index) {
+                    return Task::none();
+                }
                 // Home cannot start a claim: it needs the source Cube's
                 // descriptor and master seed, and both arrive with the unlock.
                 // So record the intent and open the Cube the ordinary way; the
@@ -2664,6 +2670,9 @@ impl Home {
                 Task::done(Message::View(ViewMessage::Run(index)))
             }
             Message::View(ViewMessage::Run(index)) => {
+                if self.cube_index_hidden(index) {
+                    return Task::none();
+                }
                 if let State::Cubes { cubes, source, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
                         let source = *source;
@@ -3275,6 +3284,9 @@ impl Home {
             }
 
             Message::View(ViewMessage::RenameCube(index)) => {
+                if self.cube_index_hidden(index) {
+                    return Task::none();
+                }
                 if let State::Cubes { cubes, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
                         self.rename_cube_modal = Some((index, cube.name.clone()));
@@ -3566,9 +3578,20 @@ impl Home {
                     if let Some(client) = self.connect_account.authenticated_client() {
                         let datadir = self.datadir_path.clone();
                         let owner = self.connect_owner();
+                        // Never register a Cube another account already owns
+                        // under this one: that would hand it over (and stamp
+                        // this account as its owner) on the first sign-in.
+                        let signed_in_id = self.connect_account.user.as_ref().map(|u| u.id);
                         let unsynced: Vec<CubeSettings> = locally_stored_cubes(&datadir)
                             .into_iter()
                             .filter(|cube| !cube.remote_synced)
+                            .filter(|cube| {
+                                !settings::cube_hidden_from_account(
+                                    cube.connect_owner.as_ref(),
+                                    true,
+                                    signed_in_id,
+                                )
+                            })
                             .collect();
                         if !unsynced.is_empty() {
                             tasks.push(Task::perform(
@@ -3904,6 +3927,30 @@ impl Home {
             .user
             .as_ref()
             .map(settings::ConnectOwner::from_user)
+    }
+
+    /// Whether `cube` belongs to a different Connect account than the one
+    /// signed in, and so must not be listed or acted on. See
+    /// [`settings::cube_hidden_from_account`].
+    fn cube_hidden_from_account(&self, cube: &CubeSettings) -> bool {
+        settings::cube_hidden_from_account(
+            cube.connect_owner.as_ref(),
+            self.connect_account.authenticated_client().is_some(),
+            self.connect_account.user.as_ref().map(|u| u.id),
+        )
+    }
+
+    /// Whether the listed Cube at `index` is hidden from the signed-in account.
+    /// Row messages carry an index into the unfiltered list, so each handler
+    /// that acts on one must re-check this: hiding a row only removes the
+    /// button, not the message.
+    fn cube_index_hidden(&self, index: usize) -> bool {
+        match &self.state {
+            State::Cubes { cubes, .. } => cubes
+                .get(index)
+                .is_some_and(|cube| self.cube_hidden_from_account(cube)),
+            _ => false,
+        }
     }
 
     fn scrub_creation_seed(&mut self) {
@@ -4727,6 +4774,11 @@ impl Home {
                                             cubes.iter().enumerate().fold(
                                                 Column::new().spacing(20),
                                                 |col, (i, cube)| {
+                                                    // Keep the original index `i`: every
+                                                    // row message addresses `cubes[i]`.
+                                                    if self.cube_hidden_from_account(cube) {
+                                                        return col;
+                                                    }
                                                     col.push(cubes_list_item(
                                                         cube,
                                                         i,
