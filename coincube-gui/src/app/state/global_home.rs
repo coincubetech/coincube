@@ -521,6 +521,9 @@ pub struct GlobalHome {
     /// While `Some`, the corresponding button renders non-pressable; the
     /// other two stay clickable so the user can swap targets mid-flight.
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    /// The preset whose estimate fills `transfer_feerate`, so the picker can
+    /// draw it selected. Cleared when the user types a rate of their own.
+    transfer_feerate_preset: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     /// Which page step 1 of the transfer dialog shows.
     transfer_page: TransferPage,
     /// Unit the transfer amount is entered in, seeded from the Cube's
@@ -700,6 +703,7 @@ impl GlobalHome {
             spend_tx_fees: None,
             transfer_feerate: default_transfer_feerate(),
             transfer_feerate_loading: None,
+            transfer_feerate_preset: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
             transfer_max: None,
@@ -779,6 +783,7 @@ impl GlobalHome {
             spend_tx_fees: None,
             transfer_feerate: default_transfer_feerate(),
             transfer_feerate_loading: None,
+            transfer_feerate_preset: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
             transfer_max: None,
@@ -938,6 +943,7 @@ impl GlobalHome {
             spend_tx_fees: self.spend_tx_fees,
             transfer_feerate: &self.transfer_feerate,
             transfer_feerate_loading: self.transfer_feerate_loading,
+            transfer_feerate_preset: self.transfer_feerate_preset,
             spark_send_fee_sat: self.spark_send_fee_sat,
             pending_spark_incoming: self.pending_spark_incoming,
             vault_pending_send_sats,
@@ -1979,6 +1985,7 @@ impl GlobalHome {
                     valid: true,
                     warning: None,
                 };
+                self.transfer_feerate_preset = Some(preset);
                 // Re-preview the Vault-source PSBT at the new
                 // feerate (see `vault_transfer_preview_task`).
                 self.spend_tx_fees = None;
@@ -2018,6 +2025,8 @@ impl GlobalHome {
             valid,
             warning,
         };
+        // A typed rate is no longer any preset's estimate.
+        self.transfer_feerate_preset = None;
         // Feerate changed → any prior preview fee is now stale.
         // Clear it immediately so the confirm screen doesn't
         // show a number that no longer matches the input, then
@@ -3501,6 +3510,7 @@ impl GlobalHome {
         self.spend_tx_fees = None;
         self.transfer_feerate = default_transfer_feerate();
         self.transfer_feerate_loading = None;
+        self.transfer_feerate_preset = None;
         if self
             .pending_spark_incoming
             .map(|pending| pending.stage == TransferStage::Completed)
@@ -3735,6 +3745,7 @@ impl GlobalHome {
         // stuck loading flag) from a prior transfer doesn't leak in.
         self.transfer_feerate = default_transfer_feerate();
         self.transfer_feerate_loading = None;
+        self.transfer_feerate_preset = None;
         // One Details card: a same-Cube pair takes an amount at once;
         // another Cube waits for its pick.
         self.transfer_page = if direction.is_other_cube() {
@@ -5830,6 +5841,46 @@ mod tests {
                 home.receive_address_info.unwrap().address.to_string(),
                 "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
             );
+        }
+
+        #[test]
+        fn estimated_preset_stays_selected_until_a_rate_is_typed() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            assert_eq!(home.transfer_feerate_preset, None);
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(
+                    HomeMessage::FetchTransferFeeratePreset(FeeratePreset::Normal),
+                )),
+            ));
+            // Still fetching: nothing is selected yet.
+            assert_eq!(home.transfer_feerate_preset, None);
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferFeerateEstimated {
+                    preset: FeeratePreset::Normal,
+                    result: Ok(7),
+                })),
+            ));
+            assert_eq!(home.transfer_feerate.value, "7");
+            assert_eq!(home.transfer_feerate_preset, Some(FeeratePreset::Normal));
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                    "9".to_string(),
+                ))),
+            ));
+            assert_eq!(home.transfer_feerate_preset, None);
         }
 
         #[test]

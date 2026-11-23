@@ -1854,6 +1854,7 @@ fn review_page<'a>(
     vault_fees: Option<Amount>,
     transfer_feerate: &'a form::Value<String>,
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    transfer_feerate_preset: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     spark_send_fee_sat: Option<u64>,
 ) -> TransferScreen<'a> {
     let direction = ctx.direction;
@@ -1944,6 +1945,7 @@ fn review_page<'a>(
             .push(
                 crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
                     transfer_feerate_loading,
+                    transfer_feerate_preset,
                     |preset| Message::Home(HomeMessage::FetchTransferFeeratePreset(preset)),
                     is_tx_signed || is_sending,
                 ),
@@ -2499,6 +2501,9 @@ pub struct GlobalViewConfig<'a> {
     /// Which Fast/Normal/Slow preset is currently fetching a mempool-driven
     /// estimate. The button for the loading preset renders non-pressable.
     pub transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    /// The preset whose estimate fills the feerate input, drawn selected.
+    /// `None` once the user types a rate of their own.
+    pub transfer_feerate_preset: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     /// Spark-quoted on-chain fee for the prepared send (Spark-sourced
     /// directions only). Rendered in the Fees row on the confirm screen.
     pub spark_send_fee_sat: Option<u64>,
@@ -2593,6 +2598,7 @@ fn active_transfer<'a>(config: &GlobalViewConfig<'a>) -> Option<TransferScreen<'
         spend_tx_fees,
         transfer_feerate,
         transfer_feerate_loading,
+        transfer_feerate_preset,
         spark_send_fee_sat,
         ..
     } = *config;
@@ -2637,6 +2643,7 @@ fn active_transfer<'a>(config: &GlobalViewConfig<'a>) -> Option<TransferScreen<'
                 spend_tx_fees,
                 transfer_feerate,
                 transfer_feerate_loading,
+                transfer_feerate_preset,
                 spark_send_fee_sat,
             )),
             3 => Some(done_page(&ctx, entered_amount)),
@@ -3624,6 +3631,7 @@ mod tests {
                 spend_tx_fees: None,
                 transfer_feerate: &self.transfer_feerate,
                 transfer_feerate_loading: None,
+                transfer_feerate_preset: None,
                 spark_send_fee_sat: None,
                 pending_spark_incoming: Some(PendingTransfer {
                     amount: Amount::from_sat(31_000),
@@ -5379,6 +5387,7 @@ mod tests {
         vault_to_spark.address_expanded = true;
         vault_to_spark.spend_tx_fees = Some(Amount::from_sat(750));
         vault_to_spark.transfer_feerate_loading = Some(FeeratePreset::Fast);
+        vault_to_spark.transfer_feerate_preset = Some(FeeratePreset::Normal);
         let _ = transfer_dialog_for(vault_to_spark);
 
         let mut vault_to_spark_signed =
