@@ -4505,6 +4505,58 @@ mod tests {
         assert!(matches!(swept, Ok(CreateSpendResult::Success { .. })));
     }
 
+    /// A started daemon's poller ends the holds its control takes. A control
+    /// left with holds of its own would keep every coin out of automatic
+    /// selection for the maximum age after each broadcast.
+    #[test]
+    fn a_started_daemon_shares_its_broadcast_holds_with_its_poller() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = ms.control();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        let spend = bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: outpoint,
+                ..Default::default()
+            }],
+            output: Vec::new(),
+        };
+        {
+            let mut db_conn = control.db().lock().unwrap().connection();
+            db_conn.new_txs(&[funding, spend.clone()]);
+            db_conn.new_unspent_coins(&[Coin {
+                outpoint,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(100_000),
+                derivation_index: bip32::ChildNumber::from(13),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }]);
+            db_conn.spend_coins(&[(outpoint, spend.compute_txid())]);
+        }
+        // As a broadcast of `spend` does, once the network accepts it.
+        control
+            .broadcast_holds
+            .hold_inputs_of(&spend, time::Instant::now());
+        assert!(control.coins_held_by_a_broadcast().contains(&outpoint));
+
+        let (done, completed) = mpsc::sync_channel(0);
+        control
+            .poller_sender
+            .send(PollerMessage::PollNow(done))
+            .unwrap();
+        completed
+            .recv_timeout(time::Duration::from_secs(30))
+            .unwrap();
+        assert!(control.coins_held_by_a_broadcast().is_empty());
+        ms.shutdown();
+    }
+
     #[test]
     fn capped_vault_spend_accepts_network_dust_recipient() {
         let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
