@@ -2055,7 +2055,10 @@ mod tests {
         thread, time,
     };
 
-    fn bitcoind_config_for(wallet: coincube_core::wallet_descriptor::WalletDescriptor) -> Config {
+    fn bitcoind_config_for(
+        wallet: coincube_core::wallet_descriptor::WalletDescriptor,
+        data_dir: &path::Path,
+    ) -> Config {
         // Nothing listens here: a refusal must come before any node contact.
         let bitcoind_config = BitcoindConfig {
             addr: net::SocketAddr::from(([127, 0, 0, 1], 1)),
@@ -2069,18 +2072,12 @@ mod tests {
             Some(config::BitcoinBackend::Bitcoind(bitcoind_config)),
             log::LevelFilter::Debug,
             wallet,
-            DataDirectory::new(std::env::temp_dir().join("coincube-imported-bitcoind-refusal")),
+            DataDirectory::new(data_dir.to_path_buf()),
         )
     }
 
-    #[test]
-    fn setup_bitcoind_refuses_an_imported_wallet_before_contacting_the_node() {
-        let config = bitcoind_config_for(imported_wallet_descriptor());
-        let data_dir =
-            DataDirectory::new(std::env::temp_dir().join("coincube-imported-bitcoind-refusal"));
-        let Err(err) = setup_bitcoind(&config, &data_dir, true, None) else {
-            panic!("an imported wallet must not be set up on bitcoind");
-        };
+    /// The refusal every imported-on-bitcoind gate returns, with its text pinned.
+    fn assert_imported_on_bitcoind_refusal(err: StartupError) {
         match err {
             StartupError::Config(ConfigError::Unexpected(msg)) => assert_eq!(
                 msg,
@@ -2091,17 +2088,55 @@ mod tests {
     }
 
     #[test]
+    fn setup_bitcoind_refuses_an_imported_wallet_before_contacting_the_node() {
+        let dir = tmp_dir();
+        let config = bitcoind_config_for(imported_wallet_descriptor(), &dir);
+        let Err(err) = setup_bitcoind(&config, &DataDirectory::new(dir.clone()), true, None) else {
+            panic!("an imported wallet must not be set up on bitcoind");
+        };
+        assert_imported_on_bitcoind_refusal(err);
+    }
+
+    #[test]
+    fn startup_admission_refuses_an_imported_wallet_on_bitcoind() {
+        // PR 2 narrows this rule to "history incomplete"; update this test then.
+        let mut config = bitcoind_config_for(imported_wallet_descriptor(), &tmp_dir());
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        config
+            .check()
+            .expect("a valid imported config, so the refusal is what fails");
+        let err = check_startup_admission(&config, &None::<DummyBitcoind>, &None, |_| Ok(()))
+            .unwrap_err();
+        assert_imported_on_bitcoind_refusal(err);
+    }
+
+    #[test]
+    fn imported_storage_is_never_created_for_bitcoind() {
+        let dir = tmp_dir();
+        let config = bitcoind_config_for(imported_wallet_descriptor(), &dir.join("final"));
+        let staged = DataDirectory::new(dir.join("staged"));
+        let err = create_imported_storage(&config, &staged, 0, 20).unwrap_err();
+        assert_imported_on_bitcoind_refusal(err);
+        assert!(!staged.path().exists(), "refused before staging anything");
+    }
+
+    #[test]
     fn startup_scan_window_healing_is_vault_only() {
         // `heal_startup_scan_window` needs a live `BitcoinD`; this is the gate it
         // goes through, tested directly.
-        let imported = bitcoind_config_for(imported_wallet_descriptor());
+        let dir = tmp_dir();
+        let imported = bitcoind_config_for(imported_wallet_descriptor(), &dir);
         assert!(scan_window_wallet(&imported).is_none());
-        let vault = bitcoind_config_for(vault_wallet_descriptor(concat!(
+        let vault = bitcoind_config_for(
+            vault_wallet_descriptor(concat!(
             "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
             "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
             "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
             "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
-        )));
+            )),
+            &dir,
+        );
         assert_eq!(scan_window_wallet(&vault), Some(&vault.main_descriptor));
     }
 
