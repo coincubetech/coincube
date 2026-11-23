@@ -67,6 +67,8 @@ pub struct DummyBitcoind {
     pub sync_reorg_ancestor: Option<BlockChainTip>,
     /// When set, fallible tip reads fail instead of reporting [`Self::tip`].
     pub chain_tip_error: Option<&'static str>,
+    /// What `imported_range_end` reports: an imported wallet on a node.
+    pub imported_range_end: Option<u32>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -112,11 +114,15 @@ impl DummyBitcoind {
             sees_mempool: true,
             sync_reorg_ancestor: None,
             chain_tip_error: None,
+            imported_range_end: None,
         }
     }
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range_end
+    }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.record_replay
             .as_ref()

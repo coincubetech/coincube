@@ -193,6 +193,11 @@ fn find_staged_address_index(
     if bit.wallet_record_replay_pending().is_some() {
         end = end.max(1001);
     }
+    // An imported wallet's branches are imported over an explicit range on the
+    // node, which reports outputs anywhere in it.
+    if let Some(range_end) = bit.imported_range_end() {
+        end = end.max(range_end.saturating_add(1));
+    }
     let mut found = None;
     for index in start..end {
         let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
@@ -856,9 +861,34 @@ fn updates(
         db_conn.update_tip(&latest_tip);
         log::debug!("New tip: '{}'", latest_tip);
     }
+    keep_imported_range_ahead(db_conn, bit, descs);
 
     log::debug!("Updates done.");
     Ok(())
+}
+
+/// After the indices are updated, widen an imported wallet's range on the node
+/// if they came within the discovery target of its end. A failure leaves the
+/// poll's writes in place and is retried on the next poll.
+fn keep_imported_range_ahead(
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    bit: &mut impl BitcoinInterface,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+) {
+    if bit.imported_range_end().is_none() {
+        return;
+    }
+    let Some(history) = db_conn.imported_history() else {
+        return;
+    };
+    let highest = u32::from(db_conn.receive_index().max(db_conn.change_index()));
+    if let Err(error) = bit.keep_imported_range_ahead(descs, highest, history.discovery_target) {
+        log::warn!(
+            "Could not widen the imported wallet's descriptor range on the node: {}. \
+             Retrying on the next poll.",
+            error
+        );
+    }
 }
 
 // Read rescan state before any writes from this poll. An RPC failure is not
@@ -1702,6 +1732,48 @@ mod failure_tests {
                 poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
                 assert!(db.connection().last_poll_timestamp().is_some());
             }
+        }
+    }
+
+    #[test]
+    fn imported_range_on_the_node_extends_output_mapping_to_its_end() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for branch in [0, 1] {
+            let db = DummyDatabase::new();
+            let mut conn = db.connection();
+            let deep = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 0,
+                },
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::Address(
+                    descs[branch]
+                        .at_derivation_index(3_000)
+                        .unwrap()
+                        .address(conn.network())
+                        .unwrap()
+                        .into_unchecked(),
+                ),
+                is_immature: false,
+            };
+            let mut bit = DummyBitcoind::new();
+            bit.received = vec![deep];
+            // Without an imported range, index 3000 is past the lookahead: skipped.
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert!(staged.received.is_empty());
+            // The node watches the imported branches up to the range end.
+            bit.imported_range_end = Some(3_000);
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert_eq!(staged.received.len(), 1);
+            assert_eq!(u32::from(staged.received[0].derivation_index), 3_000);
+            assert_eq!(staged.received[0].is_change, branch == 1);
+            // One past the range end is not the node's to report.
+            bit.imported_range_end = Some(2_999);
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert!(staged.received.is_empty());
         }
     }
 
