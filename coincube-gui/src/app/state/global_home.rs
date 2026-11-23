@@ -2051,8 +2051,11 @@ impl GlobalHome {
             valid,
             warning,
         };
-        // A typed rate is no longer any preset's estimate.
+        // A typed rate is no longer any preset's estimate, and an estimate
+        // still on its way must not replace it: with nothing loading, the
+        // late result is dropped as stale.
         self.transfer_feerate_preset = None;
+        self.transfer_feerate_loading = None;
         // Feerate changed → any prior preview fee is now stale.
         // Clear it immediately so the confirm screen doesn't
         // show a number that no longer matches the input, then
@@ -5906,6 +5909,44 @@ mod tests {
                     "9".to_string(),
                 ))),
             ));
+            assert_eq!(home.transfer_feerate_preset, None);
+        }
+
+        #[test]
+        fn a_typed_rate_survives_an_estimate_that_lands_late() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(
+                    HomeMessage::FetchTransferFeeratePreset(FeeratePreset::Fast),
+                )),
+            ));
+            assert_eq!(home.transfer_feerate_loading, Some(FeeratePreset::Fast));
+
+            // The user types their own rate before the estimate is back.
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                    "9".to_string(),
+                ))),
+            ));
+            assert_eq!(home.transfer_feerate_loading, None);
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferFeerateEstimated {
+                    preset: FeeratePreset::Fast,
+                    result: Ok(40),
+                })),
+            ));
+            assert_eq!(home.transfer_feerate.value, "9", "the typed rate stays");
             assert_eq!(home.transfer_feerate_preset, None);
         }
 
