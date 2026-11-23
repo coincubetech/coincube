@@ -884,22 +884,8 @@ impl PsbtState {
             &message,
             Message::View(view::Message::Spend(view::SpendTxMessage::Sign))
         );
-        let dismissed = matches!(
-            &message,
-            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
-        );
-        let direct_signer = matches!(
-            &message,
-            Message::View(view::Message::SelectPsbtHardwareWallet(_))
-                | Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectMasterSigner
-                        | view::SpendTxMessage::SelectCubeKey(_)
-                        | view::SpendTxMessage::SelectBorderWallet(_)
-                        | view::SpendTxMessage::SelectKeychainSigner(_)
-                        | view::SpendTxMessage::RequestFromEveryone
-                        | view::SpendTxMessage::RetryKeychainSigner(_)
-                ))
-        );
+        let dismissed = SignModal::is_dismissal(&message);
+        let direct_signer = SignModal::is_signer_pick(&message);
         if direct_signer && was_picker {
             self.signer_focus_return = true;
         }
@@ -2886,6 +2872,38 @@ impl SignModal {
 
 /// Ensure any in-progress Border Wallet reconstruction state is dropped
 /// (triggering its own `Drop` zeroization) when the sign modal goes away.
+/// What a screen hosting the picker needs to know about its messages. A host
+/// forwards every message it does not consume itself to [`Modal::update`],
+/// which ignores what is not the picker's, and asks here about the two kinds
+/// it has to act on. It never names the picker's messages itself: a list kept
+/// in a host goes stale when the picker gains a row.
+impl SignModal {
+    /// The picker's Close button, or a click outside it. The picker does not
+    /// close itself: the host that opened it takes it down.
+    pub fn is_dismissal(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
+        )
+    }
+
+    /// One of the picker's rows asking its signer to sign.
+    pub fn is_signer_pick(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::View(view::Message::SelectPsbtHardwareWallet(_))
+                | Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner
+                        | view::SpendTxMessage::SelectCubeKey(_)
+                        | view::SpendTxMessage::SelectBorderWallet(_)
+                        | view::SpendTxMessage::SelectKeychainSigner(_)
+                        | view::SpendTxMessage::RequestFromEveryone
+                        | view::SpendTxMessage::RetryKeychainSigner(_)
+                ))
+        )
+    }
+}
+
 impl Drop for SignModal {
     fn drop(&mut self) {
         self.border_wallet_recon = None;

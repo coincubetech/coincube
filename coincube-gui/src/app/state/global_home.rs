@@ -1339,27 +1339,16 @@ impl State for GlobalHome {
             Message::View(view::Message::ShowQrCode(_)) => self.show_transfer_address_qr(),
             Message::View(view::Message::Close) => self.close_transfer_modal(),
             Message::Updated(result) => self.on_transfer_signing_updated(daemon, result),
+            Message::Tick => self.reconcile_pending_vault_receive(cache),
             // The signer's Close button and a click outside it. The signer
-            // itself ignores this: whoever opened it has to take it down.
-            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
-                if matches!(self.modal, Modal::Sign(_)) =>
-            {
+            // leaves this to whoever opened it.
+            message if SignModal::is_dismissal(&message) && self.signer_is_open() => {
                 self.close_transfer_modal()
             }
-            // Everything the signer's own rows and tasks send. A row's Sign
-            // button names its device by fingerprint
-            // (`SelectPsbtHardwareWallet`), and an imported wallet's stored
-            // keys arrive as `CubeKeys`.
-            Message::Signed(_, _)
-            | Message::HardwareWallets(_)
-            | Message::CubeKeys(_)
-            | Message::View(view::Message::SelectHardwareWallet(_))
-            | Message::View(view::Message::SelectPsbtHardwareWallet(_))
-            | Message::View(view::Message::Spend(_)) => {
-                self.update_transfer_signer(daemon, message)
-            }
-            Message::Tick => self.reconcile_pending_vault_receive(cache),
-            _ => Task::none(),
+            // Everything else goes to the open signer, which knows its own
+            // rows, tasks and subscription and ignores the rest. Naming its
+            // messages here instead went stale whenever it gained one.
+            message => self.update_transfer_signer(daemon, message),
         }
     }
 
@@ -2108,6 +2097,10 @@ impl GlobalHome {
             }
         }
         Task::none()
+    }
+
+    fn signer_is_open(&self) -> bool {
+        matches!(self.modal, Modal::Sign(_))
     }
 
     fn update_transfer_signer(
@@ -7501,6 +7494,35 @@ mod tests {
             );
             assert_eq!(task.units(), 1, "the signer answered");
             assert!(matches!(home.modal, Modal::Sign(_)));
+        }
+
+        /// The transfer screen names none of the signer's messages: whatever
+        /// it does not consume itself goes to the open signer. With no signer
+        /// open the same messages do nothing.
+        #[test]
+        fn unclaimed_messages_go_to_the_open_signer_and_nowhere_without_one() {
+            use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+            let cache = transfer_cache();
+            let pick = || {
+                Message::View(view::Message::SelectPsbtHardwareWallet(
+                    Fingerprint::from_str("ae27181b").unwrap(),
+                ))
+            };
+            let cancel = || Message::View(view::Message::Spend(view::SpendTxMessage::Cancel));
+            let daemon = || -> Option<Arc<dyn Daemon + Sync + Send>> {
+                Some(Arc::new(RecordingDaemon::default()))
+            };
+
+            let (mut home, _wallet) = home_on_transfer_screen();
+            home.transfer_signed = true;
+            assert_eq!(home.update(daemon(), &cache, pick()).units(), 0);
+            assert_eq!(home.update(daemon(), &cache, cancel()).units(), 0);
+            assert!(home.transfer_signed, "no signer open, nothing abandoned");
+
+            // The stored-keys result is named nowhere in this file.
+            let mut home = home_with_signer_open();
+            drain(home.update(daemon(), &cache, Message::CubeKeys(Ok(vec![]))));
+            assert_eq!(home.update(daemon(), &cache, pick()).units(), 1);
         }
     }
 }
