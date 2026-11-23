@@ -52,6 +52,14 @@ use std::{
 
 use miniscript::bitcoin::{constants::ChainHash, hashes::Hash, secp256k1, BlockHash};
 
+/// Why an imported wallet may not run on a Bitcoin Core backend yet. Shared by
+/// every refusal so the wording cannot drift.
+const IMPORTED_ON_BITCOIND_REFUSAL: &str = "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora";
+
+fn imported_on_bitcoind_refused() -> StartupError {
+    StartupError::Config(ConfigError::Unexpected(IMPORTED_ON_BITCOIND_REFUSAL.into()))
+}
+
 /// Prepare an imported wallet without starting a backend or publishing it as a
 /// Cube. `config` must already name the final data directory; `staged_dir` is
 /// where the caller builds the private database and daemon.toml before rename.
@@ -82,9 +90,7 @@ pub fn create_imported_storage(
         config.bitcoin_backend,
         Some(config::BitcoinBackend::Bitcoind(_))
     ) {
-        return Err(StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )));
+        return Err(imported_on_bitcoind_refused());
     }
     staged_dir
         .init()
@@ -914,9 +920,7 @@ fn setup_bitcoind(
     admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
     if config.main_descriptor.as_vault().is_none() {
-        return Err(StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )));
+        return Err(imported_on_bitcoind_refused());
     }
     let wallet = &config.main_descriptor;
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
@@ -1655,9 +1659,7 @@ fn check_startup_admission(
             Some(config::BitcoinBackend::Bitcoind(_))
         )
     {
-        return Err(StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )));
+        return Err(imported_on_bitcoind_refused());
     }
     if let Some(backend) = connect.as_ref() {
         if backend.chain() != config.bitcoin_config.chain
@@ -1728,11 +1730,20 @@ fn heal_startup_scan_window(
 ) {
     // A wallet whose scan window starts after the coins we already know about
     // cannot track them, and nothing else notices — see `heal_scan_window`.
-    if let Some(bitcoind) = bitcoind.as_mut() {
-        if config.main_descriptor.as_vault().is_some() {
-            heal_scan_window(bitcoind, db, &config.main_descriptor);
-        }
+    if let (Some(bitcoind), Some(wallet)) = (bitcoind.as_mut(), scan_window_wallet(config)) {
+        heal_scan_window(bitcoind, db, wallet);
     }
+}
+
+/// The wallet whose scan window the daemon heals on start-up: a Vault only.
+/// Imported wallets never run on bitcoind yet (see [`IMPORTED_ON_BITCOIND_REFUSAL`]).
+fn scan_window_wallet(
+    config: &Config,
+) -> Option<&coincube_core::wallet_descriptor::WalletDescriptor> {
+    config
+        .main_descriptor
+        .as_vault()
+        .map(|_| &config.main_descriptor)
 }
 
 #[cfg(test)]
@@ -2043,6 +2054,56 @@ mod tests {
         str::FromStr,
         thread, time,
     };
+
+    fn bitcoind_config_for(wallet: coincube_core::wallet_descriptor::WalletDescriptor) -> Config {
+        // Nothing listens here: a refusal must come before any node contact.
+        let bitcoind_config = BitcoindConfig {
+            addr: net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            rpc_auth: BitcoindRpcAuth::CookieFile(path::PathBuf::from("/nonexistent/.cookie")),
+        };
+        Config::new(
+            BitcoinConfig::new(
+                ChainId::from(bitcoin::Network::Bitcoin),
+                time::Duration::from_secs(2),
+            ),
+            Some(config::BitcoinBackend::Bitcoind(bitcoind_config)),
+            log::LevelFilter::Debug,
+            wallet,
+            DataDirectory::new(std::env::temp_dir().join("coincube-imported-bitcoind-refusal")),
+        )
+    }
+
+    #[test]
+    fn setup_bitcoind_refuses_an_imported_wallet_before_contacting_the_node() {
+        let config = bitcoind_config_for(imported_wallet_descriptor());
+        let data_dir =
+            DataDirectory::new(std::env::temp_dir().join("coincube-imported-bitcoind-refusal"));
+        let Err(err) = setup_bitcoind(&config, &data_dir, true, None) else {
+            panic!("an imported wallet must not be set up on bitcoind");
+        };
+        match err {
+            StartupError::Config(ConfigError::Unexpected(msg)) => assert_eq!(
+                msg,
+                "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora"
+            ),
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[test]
+    fn startup_scan_window_healing_is_vault_only() {
+        // `heal_startup_scan_window` needs a live `BitcoinD`; this is the gate it
+        // goes through, tested directly.
+        let imported = bitcoind_config_for(imported_wallet_descriptor());
+        assert!(scan_window_wallet(&imported).is_none());
+        let vault = bitcoind_config_for(vault_wallet_descriptor(concat!(
+            "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+            "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+            "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+            "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+        )));
+        assert_eq!(scan_window_wallet(&vault), Some(&vault.main_descriptor));
+    }
 
     // Validate one complete JSON object without waiting for the peer to close the socket.
     fn read_til_json_end(stream: &mut net::TcpStream) {
