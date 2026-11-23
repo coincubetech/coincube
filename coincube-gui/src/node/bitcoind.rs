@@ -117,7 +117,9 @@ impl std::fmt::Display for ProviderChainMismatch {
 impl std::error::Error for ProviderChainMismatch {}
 
 /// Current and previous managed Bitcoin Core versions, in order of descending version.
-pub const CORE_VERSIONS: [&str; 7] = ["29.0", "28.0", "27.1", "26.1", "26.0", "25.1", "25.0"];
+pub const CORE_VERSIONS: [&str; 8] = [
+    "31.3", "29.0", "28.0", "27.1", "26.1", "26.0", "25.1", "25.0",
+];
 
 /// Current managed Bitcoin Core version for new installations.
 pub const CORE_VERSION: &str = CORE_VERSIONS[0];
@@ -179,19 +181,19 @@ pub const KNOTS_BLAKE2B_VERSION: &str = KNOTS_BLAKE2B_VERSIONS[0];
 // platform. Knots is verified against its published `SHA256SUMS` manifest instead
 // (see `installer::step::node::bitcoind`), so it needs no pinned hash here.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-pub const CORE_SHA256SUM: &str = "5bb824fc86a15318d6a83a1b821ff4cd4b3d3d0e1ec3d162b805ccf7cae6fca8";
+pub const CORE_SHA256SUM: &str = "8b1a32bc5aa1cf37ee12ee5417b367fd34c420aadcf934994aa96396adab6187";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const CORE_SHA256SUM: &str = "34431c582a0399dd42e1276d87d25306cbdde0217f6744bd55a2945986645dda";
+pub const CORE_SHA256SUM: &str = "f932dcdf49c8ec7620551c297ea273c2a67da696c9a06743905fe0372780b7a0";
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const CORE_SHA256SUM: &str = "a681e4f6ce524c338a105f214613605bac6c33d58c31dc5135bbc02bc458bb6c";
+pub const CORE_SHA256SUM: &str = "864a06a5106e437a1b87b3c048cd7f14ee6140555262aae9d0e9e3b7bea87568";
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub const CORE_SHA256SUM: &str = "7922ac99363dd28f79e57ef7098581fd48ebd1119b412b07e73b1fd19fd0443f";
+pub const CORE_SHA256SUM: &str = "c7ea41ae5d4bd103306ca0d326f017b11bc35686d697c1d1d237a7041dba2021";
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const CORE_SHA256SUM: &str = "4c1780532031129fcacfc0e393c8430b3cea414c9f8c5e0c0c87ebe59a5ada1b";
+pub const CORE_SHA256SUM: &str = "c6f1e81aa74ada6d0c1905dd1956d2dbe9a801d9fb41dcd05ace3c930c79f92f";
 
 /// PGP key fingerprint that signs Bitcoin Knots' `SHA256SUMS.asc`.
 ///
@@ -2808,6 +2810,16 @@ impl Bitcoind {
         let mut args = vec![
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
+            // Never ask the router to map the P2P port. Bitcoin Core 30.0
+            // flipped `-natpmp` to on by default, and the managed conf leaves
+            // `listen` at its default unless inbound Tor is on, so without this
+            // a Core 31.x node behind a PCP/NAT-PMP router would open and
+            // advertise a clearnet port the user never enabled — with none of
+            // the inbound bandwidth caps, which are only written for inbound
+            // Tor. The option is known to every managed build (Core 25.0+ and
+            // the Knots pins), so it is safe to pass regardless of flavour, and
+            // a command-line value also covers a conf written before this.
+            "-natpmp=0".into(),
         ];
         if chain.is_blake2b() {
             args.extend([
@@ -5143,7 +5155,7 @@ mod tests {
         assert_eq!(NodeFlavor::from_version(KNOTS_VERSION), NodeFlavor::Knots);
         assert_eq!(NodeFlavor::from_version(CORE_VERSION), NodeFlavor::Core);
         assert_eq!(KNOTS_VERSION, "29.3.knots20260507");
-        assert_eq!(CORE_VERSION, "29.0");
+        assert_eq!(CORE_VERSION, "31.3");
         assert!(!KNOTS_VERSIONS.contains(&KNOTS_BLAKE2B_VERSION));
         assert!(!CORE_VERSIONS.contains(&KNOTS_BLAKE2B_VERSION));
         assert_eq!(NodeFlavor::KnotsBlake2b.versions(), &KNOTS_BLAKE2B_VERSIONS);
@@ -5916,6 +5928,10 @@ mod tests {
                 i,
                 argv
             );
+            // Port mapping is refused for every binary: Core 30.0+ defaults
+            // `-natpmp` to on, which would open a clearnet inbound port.
+            let natpmp: Vec<&String> = argv.iter().filter(|a| a.starts_with("-natpmp")).collect();
+            assert_eq!(natpmp, ["-natpmp=0"], "case {}: {:?}", i, argv);
             let torexecute: Vec<&String> = argv
                 .iter()
                 .filter(|a| a.starts_with("-torexecute"))
