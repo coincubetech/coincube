@@ -1134,7 +1134,8 @@ impl PsbtState {
         // Connect is ready, so keychain rows populate with friendly
         // labels by the time the user reads the picker. When Connect
         // isn't ready this is `None` and the picker shows keychain
-        // rows derived from the descriptor, disabled with a hint.
+        // rows derived from the descriptor, disabled with a hint. An
+        // imported wallet never has the flow: it has no Keychain key.
         let (keychain, kc_launch) = build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
         let modal = SignModal::new(
             self.tx.signers(),
@@ -1144,7 +1145,7 @@ impl PsbtState {
             self.saved,
             self.tx.recovery_timelock(),
             keychain,
-            !self.wallet.lacks_keychain_key(),
+            true,
         )
         .with_connect_account(ConnectAccountStatus::from_cache(cache));
         let cmd = modal.load(daemon);
@@ -1886,7 +1887,8 @@ fn keychain_connect_missing(cache: &Cache) -> Vec<&'static str> {
 /// Build and launch a nested `KeychainSignModal` when Connect is ready.
 /// Returns `(None, Task::none())` when Connect isn't ready — the unified
 /// picker still shows keychain rows (disabled, derived from the descriptor)
-/// so the user can be prompted to sign in when they click one.
+/// so the user can be prompted to sign in when they click one — and for an
+/// imported wallet, which has no Keychain key.
 fn build_keychain_if_ready(
     cache: &Cache,
     wallet: &Arc<Wallet>,
@@ -1895,10 +1897,11 @@ fn build_keychain_if_ready(
     Option<super::keychain_sign::KeychainSignModal>,
     Task<Message>,
 ) {
-    // A wallet with no Keychain key has nothing for the flow to resolve:
-    // launching it would only ask Connect about signers that cannot exist and
-    // show its refusal in the picker.
-    if wallet.lacks_keychain_key() || !keychain_connect_missing(cache).is_empty() {
+    // An imported wallet has no Keychain key, and the flow refuses it:
+    // launching it would only show that refusal in the picker. A Vault
+    // recorded with no Keychain key still launches it, because the record
+    // is a snapshot and Connect decides who the signers are.
+    if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() {
         return (None, Task::none());
     }
     let grpc_url = cache.connect_grpc_url.clone().expect("checked above");
@@ -2208,7 +2211,8 @@ pub struct SignModal {
     /// Nested multi-signer Keychain flow. `Some` when Connect was ready at
     /// picker-open time (built + launched then). `None` when Connect isn't
     /// ready — keychain rows still render (disabled, derived from the
-    /// descriptor) so the user can be prompted to sign in on click.
+    /// descriptor) so the user can be prompted to sign in on click — and
+    /// always `None` for an imported wallet.
     keychain: Option<super::keychain_sign::KeychainSignModal>,
     /// Whether this picker offers Keychain signing at all. `true` for the
     /// vault PSBT flow; `false` for contexts that sign locally only (e.g. the
@@ -4095,17 +4099,22 @@ mod tests {
         let (modal, _task) = build_keychain_if_ready(&ready, &wallet, &psbt);
         assert!(modal.is_some());
 
-        // Connect is ready, but these wallets have no Keychain key to sign
-        // with: the flow is not built, so nothing is asked of Connect.
+        // Connect is ready, but an imported wallet has no Keychain key to
+        // sign with: the flow is not built, so nothing is asked of Connect.
         use crate::services::split_test_wallets::{imported_fork_vault, imported_vault, Shape};
-        for without in [
+        for imported in [
             imported_vault(Shape::WshSortedMulti),
             imported_fork_vault(Shape::WshSortedMulti),
-            self::wallet().with_keychain_keys(HashMap::new(), true),
         ] {
-            let (modal, _task) = build_keychain_if_ready(&ready, &Arc::new(without), &psbt);
+            let (modal, _task) = build_keychain_if_ready(&ready, &Arc::new(imported), &psbt);
             assert!(modal.is_none());
         }
+
+        // A Vault recorded with no Keychain key still asks Connect: the
+        // record is a snapshot, and a key attached since would be found.
+        let recorded_empty = Arc::new(self::wallet().with_keychain_keys(HashMap::new(), true));
+        let (modal, _task) = build_keychain_if_ready(&ready, &recorded_empty, &psbt);
+        assert!(modal.is_some());
     }
 
     #[test]
@@ -4758,6 +4767,27 @@ mod tests {
             );
             assert_eq!(looking_up, row.fingerprint == phone);
         }
+
+        // A Vault with no record: any of its keys may be the phone's.
+        let unrecorded = SignModal::new(
+            HashSet::new(),
+            Arc::new(wallet()),
+            CoincubeDirectory::new(PathBuf::new()),
+            Network::Signet,
+            false,
+            None,
+            Some(super::super::keychain_sign::tests::modal_with_live_session()),
+            true,
+        )
+        .signing_paths()
+        .into_iter()
+        .find(|p| p.is_primary)
+        .unwrap()
+        .keys;
+        assert!(unrecorded.iter().all(|row| matches!(
+            &row.state,
+            SigningKeyState::Disabled(reason) if reason.contains("Looking up Mobile signers")
+        )));
     }
 
     #[test]
