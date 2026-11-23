@@ -331,6 +331,8 @@ struct DummyDbState {
     coins: HashMap<bitcoin::OutPoint, Coin>,
     txs: HashMap<bitcoin::Txid, bitcoin::Transaction>,
     spend_txs: HashMap<bitcoin::Txid, (Psbt, Option<u32>)>,
+    /// Addresses the wallet recognises as its own, as (index, is change).
+    addresses: HashMap<bitcoin::Address, (bip32::ChildNumber, bool)>,
     labels: HashMap<LabelItem, String>,
     timestamp: u32,
     rescan_timestamp: Option<u32>,
@@ -339,6 +341,8 @@ struct DummyDbState {
     chain: coincube_core::chain::ChainId,
 }
 
+/// A handle on shared state: a clone reads and writes the same database.
+#[derive(Clone)]
 pub struct DummyDatabase {
     db: sync::Arc<sync::RwLock<DummyDbState>>,
 }
@@ -396,6 +400,16 @@ impl DatabaseInterface for DummyDatabase {
 }
 
 impl DummyDatabase {
+    /// Have the wallet recognise `address` as its own. Without this no
+    /// address is, whatever the descriptor derives.
+    pub fn insert_address(&self, address: bitcoin::Address, index: u32, is_change: bool) {
+        self.db
+            .write()
+            .unwrap()
+            .addresses
+            .insert(address, (index.into(), is_change));
+    }
+
     pub fn new() -> DummyDatabase {
         let now: u32 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -412,6 +426,7 @@ impl DummyDatabase {
                 coins: HashMap::new(),
                 txs: HashMap::new(),
                 spend_txs: HashMap::new(),
+                addresses: HashMap::new(),
                 labels: HashMap::new(),
                 timestamp: now,
                 rescan_timestamp: None,
@@ -613,9 +628,9 @@ impl DatabaseConnection for DummyDatabase {
 
     fn derivation_index_by_address(
         &mut self,
-        _: &bitcoin::Address,
+        address: &bitcoin::Address,
     ) -> Option<(bip32::ChildNumber, bool)> {
-        None
+        self.db.read().unwrap().addresses.get(address).copied()
     }
 
     fn coins_by_outpoints(
@@ -640,6 +655,17 @@ impl DatabaseConnection for DummyDatabase {
             .unwrap()
             .spend_txs
             .insert(txid, (psbt.clone(), None));
+    }
+
+    fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), String> {
+        let txid = psbt.unsigned_tx.compute_txid();
+        self.db
+            .write()
+            .unwrap()
+            .spend_txs
+            .entry(txid)
+            .or_insert((psbt.clone(), None));
+        Ok(())
     }
 
     fn spend_tx(&mut self, txid: &bitcoin::Txid) -> Option<Psbt> {
