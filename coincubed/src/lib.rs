@@ -1183,6 +1183,16 @@ impl DaemonControl {
         }
     }
 
+    /// Share the poller's broadcast holds, so that it ends the ones this
+    /// handle's broadcasts take. See [`commands::BroadcastHolds`].
+    pub(crate) fn with_broadcast_holds(
+        mut self,
+        broadcast_holds: sync::Arc<commands::BroadcastHolds>,
+    ) -> DaemonControl {
+        self.broadcast_holds = broadcast_holds;
+        self
+    }
+
     /// Broadcast through this handle instead of locking the backend.
     pub(crate) fn with_detached_broadcaster(
         mut self,
@@ -1472,6 +1482,7 @@ impl DaemonHandle {
             history_sync_cache.clone(),
             tip_time_cache.clone(),
         )?;
+        let broadcast_holds = bitcoin_poller.broadcast_holds();
         let (poller_sender, poller_receiver) = mpsc::sync_channel(1);
         let poller_handle = thread::Builder::new()
             .name("Bitcoin Network poller".to_string())
@@ -1498,6 +1509,7 @@ impl DaemonHandle {
             history_sync_cache,
             tip_time_cache,
         )
+        .with_broadcast_holds(broadcast_holds)
         .with_detached_broadcaster(detached_broadcaster);
 
         if with_rpc_server {
