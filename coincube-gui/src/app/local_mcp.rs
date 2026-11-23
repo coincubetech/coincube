@@ -3227,12 +3227,57 @@ mod feature_flag_tests {
         );
         drop(startup);
         crate::app::session::open_without_pin(app.cube_settings.id.clone());
+
+        // A registry left by an earlier flag-on build: enabled, one client.
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let location =
+            pairings::Location::new(&root, crate::chain::ChainId::Bitcoin, &app.cube_settings.id)
+                .unwrap();
+        let client = {
+            let mut store =
+                pairings::Store::open(location.clone(), zeroize::Zeroizing::new([47; 32]), true)
+                    .unwrap();
+            store.set_enabled(true).unwrap();
+            store
+                .add(
+                    "stored client".into(),
+                    pairings::Scope::Read {
+                        wallet: "stored".into(),
+                        descriptor: "stored".into(),
+                        opaque: "stored".into(),
+                        capabilities: [true, false, false],
+                    },
+                )
+                .unwrap()
+        };
+        let snapshot = |dir: &std::path::Path| {
+            let mut files: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    (path, bytes)
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = snapshot(&location.directory);
+
         assert!(!app.mcp_supported(), "flag off: no Vault is served");
         drop(app.update(AppMessage::SettingsSaved));
         app.refresh_mcp_pairings();
         assert!(
-            app.local_mcp.pairing_store.is_none(),
+            app.local_mcp.pairing_location.is_none() && app.local_mcp.pairing_store.is_none(),
             "flag off: the pairing registry is never opened"
+        );
+        assert!(
+            app.local_mcp.paired.is_empty(),
+            "flag off: no client runtime"
+        );
+        assert!(
+            !location.locator(&client).exists(),
+            "flag off: no endpoint is published for a stored client"
         );
         for message in [
             Message::Enable(true),
@@ -3245,6 +3290,11 @@ mod feature_flag_tests {
         }
         assert!(!app.local_mcp.enabled, "flag off: messages are ignored");
         assert!(app.local_mcp.server.is_none(), "flag off: no endpoint");
+        assert_eq!(
+            snapshot(&location.directory),
+            before,
+            "flag off: stored pairings are left untouched"
+        );
         drop(app.update(AppMessage::View(view::Message::Menu(Menu::Cube(
             CubeSubMenu::Settings(CubeSettingsOption::AiAccess),
         )))));
@@ -3254,7 +3304,9 @@ mod feature_flag_tests {
             "flag off: a route to AI access opens General"
         );
 
-        // The same Cube with the flag on reaches the page.
+        // The same Cube with the flag on reaches the page. Drop the synthetic
+        // registry first: its wrapping key is not in the OS keystore.
+        std::fs::remove_dir_all(&location.directory).unwrap();
         let _on = crate::feature_flags::test_override::ai_access(true);
         assert!(app.mcp_supported());
         drop(app.update(AppMessage::View(view::Message::Menu(Menu::Cube(

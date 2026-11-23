@@ -30,7 +30,9 @@ With the flag off:
   and inert; they resume only in a build with the flag on, and still require
   the Cube-wide switch.
 - `coincube-mcp` is still built and packaged, and its static tool discovery
-  still works. A well-formed wallet call returns `wallet_unavailable`.
+  and `tenshu_get_capabilities` still work. They describe the companion build,
+  not whether this desktop build serves AI access. A well-formed wallet call
+  returns `wallet_unavailable`.
 
 The code is on `master`. Packaged-client interoperability, signed-artifact
 checks and independent security review remain release gates before the flag
