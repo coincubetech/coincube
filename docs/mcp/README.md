@@ -149,8 +149,10 @@ entry. The client name you entered stays in COINCUBE Desktop and is not part of
 the entry name: hosts such as Claude Code expose each tool as
 `mcp__<entry>__<tool>`, and several hosts cap that at 64 characters. With a
 17-character entry the longest tool fits (58 characters); a test bounds every
-tool name against it. To tell entries apart, match the eight characters to the
-client's locator. A legacy one-hour session grant is always named
+tool name against it. COINCUBE Desktop does not show the pairing id, so if you
+keep several entries you may rename each to a short label of your own (letters,
+digits and hyphens, at most 17 characters keeps the same bound); the entry name
+is only a label in the host. A legacy one-hour session grant is always named
 `coincube-session`, so two such grants pasted into one host still replace each
 other; pair the client persistently instead.
 

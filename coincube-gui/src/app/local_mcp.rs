@@ -1405,8 +1405,6 @@ fn project_transaction(
 const LEGACY_SESSION_KEY: &str = "coincube-session";
 /// Pairing-id characters in a host entry name.
 const SERVER_KEY_ID_CHARS: usize = 8;
-/// Longest host entry name `server_key` produces.
-const SERVER_KEY_MAX_LEN: usize = "coincube-".len() + SERVER_KEY_ID_CHARS;
 
 /// Name one paired client's entry in an MCP host's `mcpServers` object.
 ///
@@ -1439,7 +1437,11 @@ fn client_config(key: &str, server: serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod server_key_tests {
-    use super::{server_key, LEGACY_SESSION_KEY, SERVER_KEY_MAX_LEN};
+    use super::{server_key, LEGACY_SESSION_KEY, SERVER_KEY_ID_CHARS};
+
+    /// Longest host entry name `server_key` produces. coincube-mcp's
+    /// capability contract test bounds every tool name against this length.
+    const SERVER_KEY_MAX_LEN: usize = "coincube-".len() + SERVER_KEY_ID_CHARS;
 
     #[test]
     fn keys_use_the_pairing_id_prefix() {
