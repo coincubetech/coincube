@@ -1,4 +1,4 @@
-# Imported Bitcoin signing with a paired Keychain
+# Imported Bitcoin signing with a paired phone
 
 A phone can sign an imported Bitcoin wallet only when it already holds the
 exact original account key. Desktop LAN signing admits the same five validated
@@ -26,7 +26,7 @@ The pairing flow that obtains fresh user confirmation and writes that scope is
 a separate integration step; this slice alone does not enable an older phone
 pairing to sign an imported wallet.
 
-A Keychain response contributes only new `SIGHASH_ALL` partial signatures
+A phone response contributes only new `SIGHASH_ALL` partial signatures
 for the bound phone account's derived child keys. Desktop authenticates the
 original previous transactions, checks the input's branch/index and derived
 script, then verifies the combined partial PSBT with the imported-wallet core.
@@ -37,7 +37,7 @@ without changing the original PSBT. Session encryption, request AAD, timeout,
 cancellation, and replay guards retain the existing LAN path.
 
 The offline synthetic vectors were copied byte-for-byte from
-[Keychain PR #182](https://github.com/coincubetech/keychain-app/pull/182) at
+[COINCUBE Mobile PR #182](https://github.com/coincubetech/keychain-app/pull/182) at
 `67a4ab2b3c7bea1b87b5704f20482a4caecd1b4a`. The original input
 `coincube-gui/src/phone_signer/fixtures/imported_signing.json` has SHA-256
 `ef14b201a02d3c0f2f21e9a8ef98b88251a478863d9e63982654ec1798585b30`;
@@ -49,14 +49,14 @@ Desktop tests pin those hashes, require COINCUBE Desktop's exact descriptor byte
 script parity at indices 0, 1, and 7, and verify all ten signed PSBTs with
 Bitcoin 0.32.8. The sortedmulti phone child ranks first at receive 0 and
 second at change 0. The core stores sortedmulti keys in one canonical order,
-while the two frozen Keychain vectors intentionally use different textual key
+while the two frozen COINCUBE Mobile vectors intentionally use different textual key
 orders. Both verify against the same scripts; a new desktop pairing uses its
 canonical transport descriptor and pinned full SHA-256
 `6c2d38811a23ff93af86b81c84667591e674884d804843ddf35c5b9995cc1219`
 for either sortedmulti order, rather than either raw vector's display ID.
 The raw native results demonstrate offline script and signature compatibility;
 the exact canonical request, pairing commitment, frozen review and native
-signing replay is captured by [Keychain PR #183](https://github.com/coincubetech/keychain-app/pull/183)
+signing replay is captured by [COINCUBE Mobile PR #183](https://github.com/coincubetech/keychain-app/pull/183)
 at `68e6579bdec33a4639543327d8cd8baa12394035`. Its two exported requests
 retain COINCUBE Desktop's original descriptor string and share full SHA-256
 `6c2d38811a23ff93af86b81c84667591e674884d804843ddf35c5b9995cc1219`.

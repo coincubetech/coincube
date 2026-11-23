@@ -182,6 +182,6 @@ confirmation. Mode aliases are confined to the existing passive display surfaces
    desktop platforms. Validate Spanish against the same layouts when the
    locale is available.
 
-Keychain remains a separate mobile signing surface. Its prompts retain their
+COINCUBE Mobile remains a separate mobile signing surface. Its prompts retain their
 canonical chain identity. Review phone-signing handoffs from Tenshu in each
 worldview.

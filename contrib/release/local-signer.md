@@ -1,6 +1,6 @@
 # Local LAN signer — packaging and platform notes
 
-The `phone_signer` module lets a Keychain phone show up as a hardware
+The `phone_signer` module lets a phone running COINCUBE Mobile show up as a hardware
 wallet over the local Wi-Fi. It uses:
 
 - mDNS browse + advertise (`_coincube-signer._tcp.local.`)

@@ -2,7 +2,7 @@
 
 This is the bounded contract for full Bitcoin imports in #768. It does not enroll keys, persist secrets, or turn on a new signing route. The test-only signer proof in `coincube-gui/src/services/imported_signer.rs` accepts a transient synthetic imported root key, checks its **full derived account xpub and origin path** against the admitted descriptor, signs a cloned daemon draft through `bitcoin 0.32.8` `Psbt::sign<GetKey>`, and returns it only after `verify_imported_signatures` checks the original PSBT. A failed or partially successful upstream sign never returns the mutated clone. The Cube master key is never substituted for an imported key. R15b must specify and verify the production lifetime and zeroization of imported mnemonic, passphrase, seed and derived private keys before enabling this route.
 
-| Admitted script | Local imported root | Hardware policy | Existing Keychain LAN / Connect |
+| Admitted script | Local imported root | Hardware policy | Existing Mobile signing (LAN / Connect) |
 | --- | --- | --- | --- |
 | `pkh` | Synthetic sign/finalize proof | Policy accepted; device-specific restrictions apply | No generic import route |
 | `wpkh` | Synthetic sign/finalize proof | Policy accepted; device-specific restrictions apply | No generic import route |

@@ -1,7 +1,7 @@
-# Multi-signer Keychain signing flow
+# Multi-signer Mobile signing flow
 
 How a desktop user collects signatures from contacts whose private keys
-live in the Coincube Keychain app on their phones. Covers what's in the
+live in the COINCUBE Mobile app on their phones. Covers what's in the
 desktop today (Phases 1–4 of the cross-repo signing-flow rollout); the
 companion phone-app and API plans live alongside it under
 `plans/PLAN-phase-N-*.md`.
@@ -22,7 +22,7 @@ settings panel.
 │  └────────────────┘    └──────────┬───────────┘                    │
 │         ▲                         │                                │
 │         │                         ▼                                │
-│   "Sign via Keychain"        ┌──────────────────────┐              │
+│   "Sign" → "Request"         ┌──────────────────────┐              │
 │   button                     │ GrpcSessionClient    │              │
 │         │                    │ ::resolve_signers    │              │
 │         │                    │ ::create_signing_... │              │
@@ -51,7 +51,7 @@ settings panel.
                                           │ push / poll
                                           ▼
                               ┌──────────────────────┐
-                              │ Keychain phone app   │
+                              │ COINCUBE Mobile app  │
                               └──────────────────────┘
 ```
 
@@ -68,15 +68,16 @@ Three independent gRPC services on the API:
 
 ## Happy-path sequence
 
-User has a Vault with two Keychain signers (themselves on this
+User has a Vault with two Mobile signers (themselves on this
 desktop's Connect account, and one contact "Alice"). They click
-"Sign via Keychain" on a draft spend.
+"Sign" on a draft spend and then "Request" on a Mobile signer's row,
+which opens the "Sign via Mobile" modal.
 
 1. `KeychainSignModal::launch` →
    - REST `GET /connect/cubes/{cube_id}/vault` — returns the vault
      row with its `members` list.
    - REST `GET /connect/cubes/{cube_uuid}/keys` — returns every
-     Keychain key on the cube, including fingerprints.
+     Mobile key on the cube, including fingerprints.
    - REST `GET /me` — viewer user id (used to split self vs. contact
      signers).
    - In-process: `build_keychain_index()` joins members with cube keys
@@ -111,14 +112,13 @@ desktop's Connect account, and one contact "Alice"). They click
 
 6. Once every `PendingSession` is `Completed` the modal auto-closes,
    `tx.sigs` is recomputed against the merged PSBT, and the spend's
-   action buttons switch from "Sign" / "Sign via Keychain" to
-   "Broadcast". The existing `BroadcastModal` handles the rest.
+   action button switches from "Sign" to "Broadcast". The existing `BroadcastModal` handles the rest.
 
 ## Failure modes & UX
 
 | Failure                       | Surface                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| ResolveSigners `unresolved`    | Friendly per-signer message ("Alice hasn't set up the Keychain app yet…")                        |
+| ResolveSigners `unresolved`    | Friendly per-signer message ("Alice hasn't set up COINCUBE Mobile yet…")                         |
 | CreateSigningSession fails    | Per-row Failed status + Retry button; modal stays open                                            |
 | SessionRejected               | Per-row Rejected + Retry button + "Alice declined the request"                                   |
 | SessionExpired                | Per-row Expired + Retry button + "Alice didn't respond within 24h"                               |
@@ -170,7 +170,7 @@ When a user reports "I clicked sign and nothing happened":
 
 - **No push notifications yet.** The phone signer must be in the
   foreground (or open the app) for sessions to be delivered promptly.
-  Push support is in the `keychain-app` and `coincube-api` plans.
+  Push support is in the `coincube-mobile` and `coincube-api` plans.
 - **PSBTs are sent plaintext over TLS.** Per-session payload encryption
   is on the `coincube-api` roadmap (PR 3 in their plan).
 - **`subscribe_vault_ids` is best-effort.** If the cube hasn't been
@@ -183,7 +183,7 @@ When a user reports "I clicked sign and nothing happened":
 ## Related plans
 
 - `plans/PLAN-phase-1-grpc-plumbing.md` — gRPC client + stream basics.
-- `plans/PLAN-phase-2-vault-builder-audit.md` — Vault Builder Keychain
+- `plans/PLAN-phase-2-vault-builder-audit.md` — Vault Builder Mobile key
   picker (already complete on master).
 - `plans/PLAN-phase-3-signing-flow-keystone.md` — this feature's
   implementation plan.

@@ -2,7 +2,7 @@
 
 The descriptor picker carries explicit ChainId. BTCB2 creation exposes the
 local Cube key, hardware devices, Border Wallet keys and imported/pasted
-xpubs. Keychain and provider-token (safety-net and cosigner) entry points stay
+xpubs. Mobile key and provider-token (safety-net and cosigner) entry points stay
 hidden until their complete chain-bound workflow is verified. A manually
 supplied xpub is watch-only here; accepting its encoding makes no claim about
 signature capability or replay protection.
@@ -11,8 +11,8 @@ signature capability or replay protection.
 
 Robert lifted the #422 creation gate for hardware devices on 2026-10-06
 ("I'd like to lift it"), and in the same session added Border Wallet
-(Amendment A). The decision is recorded on coincube #568. Keychain keys and
-provider tokens remain gated: Keychain waits for Lane B3, and tokens need
+(Amendment A). The decision is recorded on coincube #568. Mobile keys and
+provider tokens remain gated: Mobile keys wait for Lane B3, and tokens need
 their own decision.
 
 - **Hardware devices.** The picker shows a Hardware Device card, runs device
@@ -41,7 +41,7 @@ its capability flag does.
 
 ## Enforcement
 
-Keychain and token navigation/fetch/result messages are refused before work,
+Mobile key and token navigation/fetch/result messages are refused before work,
 including stale key results through `LoadKey` and existing-key selection
 through `SelectKey`, which use the same `available_for_creation` rule.
 Descriptor apply independently refuses unsupported sources, so a stale editor
@@ -49,7 +49,7 @@ state cannot bypass the picker. The global runtime gate is unchanged.
 
 This creation policy is distinct from `KeySource::replay_capable`: creation
 capability says which sources may build a Vault, not whether its spends are
-protected. Claim/Split, Keychain LAN and unsupported signer transports remain
+protected. Claim/Split, Mobile LAN signing and unsupported signer transports remain
 separate launch gates.
 
 Synthetic tests cover the per-chain creation rule, the picker's refused and

@@ -20,7 +20,7 @@ Synchronization distinguishes unknown or incomplete history from an empty wallet
 
 Send uses the normal daemon draft lifecycle with imported-script construction and strict PSBT verification. Pasted or file-loaded partial signatures and hardware signatures must match the stored unsigned transaction, authenticated previous transactions, origins and owned change. Multisignature progress survives restart. Broadcast records the final transaction ID, including legacy inputs whose signed ID differs from the draft ID.
 
-The encrypted Recovery Kit v2 wallet payload retains both branches, chain, wallet name, birthday, initial discovery window and allocated receive/change counters. Password and owner-Keychain recovery restore the same imported wallet; inherited Vault recovery remains Vault-only. Backup fingerprints include address allocation state. A Cube-only Kit becomes incomplete after import, and updating the Kit requires the existing authenticated backup ceremony. The Cube's seed is never an imported Bitcoin signer.
+The encrypted Recovery Kit v2 wallet payload retains both branches, chain, wallet name, birthday, initial discovery window and allocated receive/change counters. Password and owner Mobile key recovery restore the same imported wallet; inherited Vault recovery remains Vault-only. Backup fingerprints include address allocation state. A Cube-only Kit becomes incomplete after import, and updating the Kit requires the existing authenticated backup ceremony. The Cube's seed is never an imported Bitcoin signer.
 
 Imported wallets do not expose inheritance, Claim, Split-destination or new Duress enrollment capabilities. Existing strict Vault descriptors and legacy Kit/config/database formats remain supported.
 
