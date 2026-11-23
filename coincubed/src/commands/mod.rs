@@ -2247,7 +2247,7 @@ impl DaemonControl {
         let timelock = timelock.unwrap_or_else(|| vault.first_timelock_value());
         let height_delta: i32 = timelock.into();
         let coins = if coins_outpoints.is_empty() {
-            let held = self.coins_held_by_a_broadcast(&mut db_conn);
+            let held = self.coins_held_by_a_broadcast();
             let mut coins = db_conn.coins(&[CoinStatus::Confirmed], &[]);
             coins.retain(|op, _| !held.contains(op));
             coins
@@ -2736,21 +2736,20 @@ impl DaemonControl {
 
     /// The coins spent by a transaction we broadcast that the poller has not
     /// recorded yet. See [`BroadcastHolds`].
-    fn coins_held_by_a_broadcast(
-        &self,
-        db: &mut Box<dyn DatabaseConnection>,
-    ) -> HashSet<bitcoin::OutPoint> {
+    ///
+    /// Call it before reading the coins from the database. The poller ends a
+    /// hold after it has marked the coin as spent, so read in this order a
+    /// coin is never seen both free of its hold and unspent.
+    fn coins_held_by_a_broadcast(&self) -> HashSet<bitcoin::OutPoint> {
         self.broadcast_holds
-            .held(time::Instant::now(), self.broadcast_hold_max_age(), || {
-                db.list_saved_txids().into_iter().collect()
-            })
+            .held(time::Instant::now(), self.broadcast_hold_max_age())
     }
 
     fn optional_regular_candidates(
         &self,
         db: &mut Box<dyn DatabaseConnection>,
     ) -> Result<Vec<CandidateCoin>, CommandError> {
-        let held = self.coins_held_by_a_broadcast(db);
+        let held = self.coins_held_by_a_broadcast();
         // From our unconfirmed coins, we only include those that are from self
         // since unconfirmed external deposits are more at risk of being dropped
         // unexpectedly from the mempool as they are beyond the user's control.
@@ -3033,7 +3032,7 @@ impl DaemonControl {
             .collect();
         // The replaced transaction's own inputs are candidates above whether or
         // not a broadcast holds them. A hold only keeps out the other coins.
-        let held = self.coins_held_by_a_broadcast(db);
+        let held = self.coins_held_by_a_broadcast();
         let confirmed_cands: Vec<CandidateCoin> = db
             .coins(&[CoinStatus::Confirmed], &[])
             .into_values()
@@ -7067,12 +7066,19 @@ mod tests {
                 self.control.db().lock().unwrap().connection()
             }
 
-            /// What a poll writes when the backend shows `tx` spending the
-            /// fixture's coin: the transaction, then the coin's spender.
+            /// What a poll does when the backend shows `tx` spending the
+            /// fixture's coin: it stores the transaction, marks the coin as
+            /// spent by it, then ends the holds the database now accounts for.
             fn poller_records(&self, tx: &Transaction) {
                 let mut conn = self.db();
                 conn.new_txs(std::slice::from_ref(tx));
                 conn.spend_coins(&[(self.coin, tx.compute_txid())]);
+                self.poll_ends();
+            }
+
+            /// The end of any poll, whatever it wrote.
+            fn poll_ends(&self) {
+                self.control.broadcast_holds.end_recorded_in(|| self.db());
             }
 
             /// Receive another confirmed coin of `sats` at receive `index`.
@@ -7233,9 +7239,110 @@ mod tests {
                 .control
                 .broadcast_spend_without_waiting(&wallet.spend_txid)
                 .unwrap();
+            wallet.poll_ends();
             assert_eq!(wallet.auto_selected(), None);
             wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
             assert_eq!(wallet.auto_selected(), None);
+        }
+
+        /// The wallet keeps a transaction it stored after the poller frees
+        /// the coin (the spend left the mempool). Broadcasting that
+        /// transaction again holds the coin again, until a poll records the
+        /// spend again.
+        #[test]
+        fn a_spend_broadcast_again_after_it_was_dropped_holds_its_coin() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            wallet.poller_records(&wallet.spend);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(wallet.sent.lock().unwrap().len(), 2);
+            // A poll in which the backend does not show the spend yet.
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+
+            wallet.poller_records(&wallet.spend);
+            assert!(wallet.db().coins(&[], &[wallet.coin])[&wallet.coin].is_spent());
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// The poller stores a transaction a few writes before it marks the
+        /// coin as spent. A coin selection that falls between the two still
+        /// leaves the coin alone.
+        #[test]
+        fn a_coin_is_held_between_the_poller_storing_its_spend_and_marking_it() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+
+            wallet.db().new_txs(std::slice::from_ref(&wallet.spend));
+            assert!(wallet.db().list_saved_txids().contains(&wallet.spend_txid));
+            assert_eq!(wallet.auto_selected(), None);
+        }
+
+        /// The poller itself ends a hold, and only once the database has the
+        /// coin as spent by the broadcast transaction.
+        #[test]
+        fn a_poll_ends_the_hold_of_a_spend_the_database_records() {
+            let mut wallet = BroadcastWallet::new();
+            let mut poller = crate::bitcoin::poller::Poller::new(
+                std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
+                wallet.control.db(),
+                wallet.control.config.main_descriptor.clone(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap();
+            wallet.control = wallet
+                .control
+                .with_broadcast_holds(poller.broadcast_holds());
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let polling = std::thread::spawn(move || {
+                poller.poll_forever(std::time::Duration::from_secs(3_600), receiver)
+            });
+            let poll = || {
+                let (done, completed) = std::sync::mpsc::sync_channel(0);
+                sender.send(PollerMessage::PollNow(done)).unwrap();
+                completed
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap();
+            };
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            let held = || wallet.control.coins_held_by_a_broadcast();
+            // A poll that finds nothing new leaves the coin held.
+            poll();
+            assert_eq!(held(), std::iter::once(wallet.coin).collect());
+
+            // The transaction stored, the coin not yet marked: still held.
+            wallet.db().new_txs(std::slice::from_ref(&wallet.spend));
+            poll();
+            assert_eq!(held(), std::iter::once(wallet.coin).collect());
+
+            wallet.db().spend_coins(&[(wallet.coin, wallet.spend_txid)]);
+            poll();
+            assert!(held().is_empty());
+
+            sender.send(PollerMessage::Shutdown).unwrap();
+            polling.join().unwrap();
         }
 
         /// A transaction the network refuses holds nothing.
