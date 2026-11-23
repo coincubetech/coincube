@@ -148,7 +148,10 @@ def test_complete_imported_wallet_runs_on_the_node(bitcoind, directory):
         # Addresses handed out but not yet used need the daemon: allocating to
         # within the discovery target of the range end makes it widen the range,
         # with the same headroom again.
-        while daemon.rpc.getnewaddress()["derivation_index"] < 1000 - LOOKAHEAD:
+        # The threshold is the range both branches cover on the node, which
+        # Core's own extensions (here 1100 and 1005) can already have moved.
+        covered = min(end for _, end in watchonly_ranges(bitcoind, daemon))
+        while daemon.rpc.getnewaddress()["derivation_index"] + LOOKAHEAD < covered:
             pass
         bitcoind.generate_block(1)
         highest = daemon.rpc.getnewaddress()["derivation_index"]

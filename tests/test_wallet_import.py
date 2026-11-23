@@ -510,19 +510,28 @@ def test_complete_import_moves_to_local_node(import_chain, tmp_path):
         )
         wait_for(lambda: snapshot(daemon) == before)
 
-        # A receive beyond Core's default range of 1000 is tracked once the
-        # allocated addresses bring the range end within the discovery target.
-        while daemon.rpc.getnewaddress()["derivation_index"] < 1000 - daemon.lookahead:
+        # A receive beyond Core's default range of 1000, and beyond what Core
+        # extends a branch to by itself (250 -> 1250 here), is tracked once the
+        # allocated addresses come within the discovery target of the range
+        # both branches cover on the node.
+        listed = [
+            entry["range"][1]
+            for entry in watchonly.listdescriptors()["descriptors"]
+        ]
+        while daemon.rpc.getnewaddress()["derivation_index"] + daemon.lookahead < min(
+            listed
+        ):
             pass
         node.generate_block(1)
         daemon.wait_for_log("Widening the imported wallet's descriptor range")
-        deep_address = node.rpc.deriveaddresses(receive, [1150, 1150])[0]
+        deep_index = max(listed) + 50
+        deep_address = node.rpc.deriveaddresses(receive, [deep_index, deep_index])[0]
         deep = node.rpc.sendtoaddress(deep_address, Decimal("0.04"))
         node.generate_block(1, wait_for_mempool=deep)
         wait_for(
             lambda: any(
                 coin["outpoint"].startswith(deep + ":")
-                and coin["derivation_index"] == 1150
+                and coin["derivation_index"] == deep_index
                 for coin in daemon.rpc.listcoins()["coins"]
             )
         )
