@@ -179,6 +179,7 @@ fn synthetic_fork_handle(config: Config, database: SqliteDb) -> DaemonHandle {
         tip_time.clone(),
     )
     .unwrap();
+    let broadcast_holds = poller.broadcast_holds();
     let (poller_sender, receiver) = mpsc::sync_channel(1);
     let poller_handle = std::thread::Builder::new()
         .name("MCP synthetic fork poller".into())
@@ -194,7 +195,8 @@ fn synthetic_fork_handle(config: Config, database: SqliteDb) -> DaemonHandle {
         reorg_alert,
         history_sync,
         tip_time,
-    );
+    )
+    .with_broadcast_holds(broadcast_holds);
     DaemonHandle::Controller {
         poller_sender,
         poller_handle,

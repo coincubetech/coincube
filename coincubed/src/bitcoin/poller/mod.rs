@@ -48,6 +48,9 @@ pub struct Poller {
     // The tip and its header time, so a new spend's locktime is set without
     // waiting for the `BitcoinInterface` mutex this poller holds across a sync.
     tip_cache: sync::Arc<crate::bitcoin::TipTimeCache>,
+    // The coins held out of coin selection for a transaction just broadcast.
+    // Each poll ends the holds the database now accounts for.
+    broadcast_holds: sync::Arc<crate::commands::BroadcastHolds>,
 }
 
 impl Poller {
@@ -83,7 +86,14 @@ impl Poller {
             reorg_alert,
             history_sync,
             tip_cache,
+            broadcast_holds: Default::default(),
         })
+    }
+
+    /// The broadcast holds this poller ends. The `DaemonControl` that
+    /// broadcasts must be given the same ones.
+    pub(crate) fn broadcast_holds(&self) -> sync::Arc<crate::commands::BroadcastHolds> {
+        self.broadcast_holds.clone()
     }
 
     /// Shared body for the immediate-poll message arms
@@ -146,6 +156,9 @@ impl Poller {
             &self.reorg_alert,
             &self.history_sync,
         );
+        // After the poll's writes: a hold ends only once its coin is marked.
+        self.broadcast_holds
+            .end_recorded_in(|| self.db.connection());
         self.publish_tip();
     }
 
