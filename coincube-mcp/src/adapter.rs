@@ -38,50 +38,50 @@ fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
 pub fn tools() -> Vec<Tool> {
     let mut tools = vec![
         tool::<Empty, Capabilities>(
-            "tenshu_get_capabilities",
+            "coincube_get_capabilities",
             "Describe implemented build capabilities only. No installed-wallet inventory or live consent. Unsupported creation/proposals are reported honestly.",
         ),
         tool::<Empty, WalletList>(
-            "tenshu_list_wallets",
+            "coincube_list_wallets",
             "List only the Vault explicitly authorized in the current desktop session.",
         ),
         tool::<WalletInput, Summary>(
-            "tenshu_get_wallet_summary",
+            "coincube_get_wallet_summary",
             "Read authorized Vault balance snapshot in satoshis; inspect sync_state for completeness.",
         ),
         tool::<HistoryInput, History>(
-            "tenshu_get_transactions",
+            "coincube_get_transactions",
             "Read at most 50 recent confirmed activities, newest first. Each row has a session activity id, coarse kind and confirmed status. Exact amounts, times, heights, chain ids, labels, addresses and scripts are omitted.",
         ),
         tool::<WalletInput, Policy>(
-            "tenshu_get_wallet_policy_summary",
+            "coincube_get_wallet_policy_summary",
             "Deterministic Vault policy analysis without keys or descriptors. Recovery delays are relative blocks, not current eligibility.",
         ),
     ];
     if cfg!(feature = "native-proposals") {
         tools.extend([
         tool::<proposal::PrepareInput, proposal::Proposal>(
-            "tenshu_prepare_wallet_proposal",
-            "Prepare a bounded session-only 3-of-5 topology draft with explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate proposal consent; keys and descriptor validation happen in Tenshu. Never creates a wallet.",
+            "coincube_prepare_wallet_proposal",
+            "Prepare a bounded session-only 3-of-5 topology draft with explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate proposal consent; keys and descriptor validation happen in COINCUBE Desktop. Never creates a wallet.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         tool::<proposal::ProposalInput, proposal::Proposal>(
-            "tenshu_get_wallet_proposal",
+            "coincube_get_wallet_proposal",
             "Read only the current preparation grant's proposal. A topology draft is not a validated descriptor or created wallet.",
         ),
         tool::<proposal::CreationInput, proposal::Proposal>(
-            "tenshu_prepare_wallet_creation",
-            "Assemble one immutable 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
+            "coincube_prepare_wallet_creation",
+            "Assemble one immutable 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate wallet-preparation pairing. COINCUBE Desktop validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in COINCUBE Desktop. Never supply seeds, private keys or PINs; never creates a wallet itself.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ]);
     }
     if cfg!(feature = "native-transactions") {
         tools.extend([
         tool::<transaction::PrepareInput, transaction::Prepared>(
-            "tenshu_prepare_transaction",
-            "Prepare an unsigned Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. The network must match the paired Vault exactly, including Bitcoin versus Bitcoin Blake2b. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in Tenshu for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
+            "coincube_prepare_transaction",
+            "Prepare an unsigned Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. The network must match the paired Vault exactly, including Bitcoin versus Bitcoin Blake2b. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in COINCUBE Desktop for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         tool::<transaction::DraftInput, transaction::Prepared>(
-            "tenshu_get_prepared_transaction",
+            "coincube_get_prepared_transaction",
             "Read only this transaction pairing's unsigned session draft summary. No raw PSBT, input identities, change address, keys or signing material. Drafts end on lock/close/revocation.",
         ),
         ]);
@@ -104,27 +104,31 @@ impl Adapter {
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, ErrorData> {
         // Like tools/list, this is public static metadata. It never touches the
         // desktop, wallet service, session or grant, even when IPC is unavailable.
-        if name == "tenshu_get_capabilities" {
+        if name == "coincube_get_capabilities" {
             parse::<Empty>(arguments)?;
             let value = serde_json::to_value(Capabilities::current())
                 .map_err(|_| ErrorData::internal_error("serialization_failed", None))?;
             return Ok(CallToolResult::structured(value));
         }
         let request = match name {
-            "tenshu_list_wallets" => crate::Request::List(parse(arguments)?),
-            "tenshu_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),
-            "tenshu_get_transactions" => crate::Request::History(parse(arguments)?),
-            "tenshu_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
+            "coincube_list_wallets" => crate::Request::List(parse(arguments)?),
+            "coincube_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),
+            "coincube_get_transactions" => crate::Request::History(parse(arguments)?),
+            "coincube_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
             #[cfg(feature = "native-proposals")]
-            "tenshu_prepare_wallet_proposal" => crate::Request::PrepareProposal(parse(arguments)?),
+            "coincube_prepare_wallet_proposal" => {
+                crate::Request::PrepareProposal(parse(arguments)?)
+            }
             #[cfg(feature = "native-proposals")]
-            "tenshu_prepare_wallet_creation" => crate::Request::PrepareCreation(parse(arguments)?),
+            "coincube_prepare_wallet_creation" => {
+                crate::Request::PrepareCreation(parse(arguments)?)
+            }
             #[cfg(feature = "native-proposals")]
-            "tenshu_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
+            "coincube_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
             #[cfg(feature = "native-transactions")]
-            "tenshu_prepare_transaction" => crate::Request::PrepareTransaction(parse(arguments)?),
+            "coincube_prepare_transaction" => crate::Request::PrepareTransaction(parse(arguments)?),
             #[cfg(feature = "native-transactions")]
-            "tenshu_get_prepared_transaction" => crate::Request::Transaction(parse(arguments)?),
+            "coincube_get_prepared_transaction" => crate::Request::Transaction(parse(arguments)?),
             _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
         };
         if !request.valid() {

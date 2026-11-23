@@ -835,10 +835,13 @@ impl Settings {
                         .ok()?
                         .parent()?
                         .join(format!("coincube-mcp{}", std::env::consts::EXE_SUFFIX));
-                    return serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"tenshu": {
-                        "command": executable,
-                        "env": {"COINCUBE_MCP_SOCKET": server.socket, "COINCUBE_MCP_CREDENTIAL": server.grant.credential()}
-                    }}})).ok();
+                    return client_config(
+                        &server_key(None, LEGACY_SESSION_KEY),
+                        serde_json::json!({
+                            "command": executable,
+                            "env": {"COINCUBE_MCP_SOCKET": server.socket, "COINCUBE_MCP_CREDENTIAL": server.grant.credential()}
+                        }),
+                    );
                 }
             }
             _ => {}
@@ -908,10 +911,13 @@ impl Settings {
             .ok()?
             .parent()?
             .join(format!("coincube-mcp{}", std::env::consts::EXE_SUFFIX));
-        let config = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"tenshu": {
-            "command": executable,
-            "env": {"COINCUBE_MCP_PAIRING": store.location.locator(&id), "COINCUBE_MCP_CREDENTIAL": client.credential}
-        }}})).ok();
+        let config = client_config(
+            &server_key(Some(&client.name), &id),
+            serde_json::json!({
+                "command": executable,
+                "env": {"COINCUBE_MCP_PAIRING": store.location.locator(&id), "COINCUBE_MCP_CREDENTIAL": client.credential}
+            }),
+        );
         if config.is_some() {
             self.copied = Some(id);
         }
@@ -1391,6 +1397,107 @@ fn project_transaction(
             wire::TransactionKind::Outgoing
         },
         status: wire::TransactionStatus::Confirmed,
+    }
+}
+
+/// Suffix that names a one-hour legacy session grant's host entry.
+const LEGACY_SESSION_KEY: &str = "session";
+/// Longest readable client-name part of a host entry key.
+const SERVER_KEY_NAME_CHARS: usize = 24;
+/// Pairing-id characters that keep two clients with the same name apart.
+const SERVER_KEY_ID_CHARS: usize = 8;
+
+/// Name one client's entry in an MCP host's `mcpServers` object.
+///
+/// Every pairing gets its own key, so a second client pasted into the same
+/// host configuration adds an entry instead of replacing the first. The key
+/// is `coincube-<name>-<id>`: the client's label lowercased to ASCII letters,
+/// digits and single hyphens (omitted when nothing remains), then the start
+/// of the pairing id. The id is already part of the private locator in the
+/// same configuration, so the key reveals nothing new. Only letters, digits
+/// and hyphens appear, which every host accepts as a server name.
+fn server_key(name: Option<&str>, id: &str) -> String {
+    let mut slug = String::new();
+    for c in name.unwrap_or_default().chars() {
+        if slug.len() >= SERVER_KEY_NAME_CHARS {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    let id: String = id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(SERVER_KEY_ID_CHARS)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if slug.is_empty() {
+        format!("coincube-{id}")
+    } else {
+        format!("coincube-{slug}-{id}")
+    }
+}
+
+/// Render one private client configuration as a complete host document.
+///
+/// The document holds a single named entry, so it can be saved as a new host
+/// configuration or that entry copied into an existing `mcpServers` object.
+fn client_config(key: &str, server: serde_json::Value) -> Option<String> {
+    let mut servers = serde_json::Map::new();
+    servers.insert(key.to_owned(), server);
+    serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": servers })).ok()
+}
+
+#[cfg(test)]
+mod server_key_tests {
+    use super::server_key;
+
+    #[test]
+    fn keys_combine_a_readable_name_with_the_pairing_id() {
+        assert_eq!(
+            server_key(Some("Claude Desktop"), "0f3a9c21d4e5b6a7"),
+            "coincube-claude-desktop-0f3a9c21"
+        );
+        assert_eq!(
+            server_key(Some("  My   AI — laptop!! "), "ABCDEF0123"),
+            "coincube-my-ai-laptop-abcdef01"
+        );
+    }
+
+    #[test]
+    fn same_name_on_two_pairings_gives_two_keys() {
+        let first = server_key(Some("Claude"), "11111111aaaa");
+        let second = server_key(Some("Claude"), "22222222bbbb");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn names_without_ascii_letters_fall_back_to_the_id() {
+        assert_eq!(
+            server_key(Some("日本語"), "deadbeef99"),
+            "coincube-deadbeef"
+        );
+        assert_eq!(server_key(None, "session"), "coincube-session");
+    }
+
+    #[test]
+    fn long_names_are_bounded_and_keys_use_only_safe_characters() {
+        let key = server_key(
+            Some(&"a very long client label ".repeat(10)),
+            "0123456789abcdef",
+        );
+        assert!(key.len() <= "coincube-".len() + 24 + 1 + 8, "{}", key);
+        assert!(!key.contains("--"), "{}", key);
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{}",
+            key
+        );
     }
 }
 
@@ -2570,7 +2677,13 @@ mod tests {
                 .id
                 .clone();
             let original = configuration(&mut settings, &first);
-            let vars = &original["mcpServers"]["tenshu"]["env"];
+            let first_key = server_key(Some("Balance client"), &first);
+            assert_eq!(
+                first_key,
+                format!("coincube-balance-client-{}", &first[..8])
+            );
+            assert_eq!(original["mcpServers"].as_object().unwrap().len(), 1);
+            let vars = &original["mcpServers"][first_key.as_str()]["env"];
             let path = std::path::PathBuf::from(vars["COINCUBE_MCP_PAIRING"].as_str().unwrap());
             let token = vars["COINCUBE_MCP_CREDENTIAL"].as_str().unwrap();
             let socket = wire::pairing::resolve(&path).unwrap();
@@ -2620,7 +2733,17 @@ mod tests {
                 .id
                 .clone();
             let second_cfg = configuration(&mut settings, &second);
-            let second_vars = &second_cfg["mcpServers"]["tenshu"]["env"];
+            let second_key = server_key(Some("History client"), &second);
+            assert_ne!(first_key, second_key);
+            // Pasting both into one host configuration keeps both clients.
+            let mut merged = original["mcpServers"].as_object().unwrap().clone();
+            merged.extend(second_cfg["mcpServers"].as_object().unwrap().clone());
+            assert_eq!(merged.len(), 2);
+            assert_eq!(
+                merged[&first_key],
+                original["mcpServers"][first_key.as_str()]
+            );
+            let second_vars = &second_cfg["mcpServers"][second_key.as_str()]["env"];
             let second_path =
                 std::path::PathBuf::from(second_vars["COINCUBE_MCP_PAIRING"].as_str().unwrap());
             let second_token = second_vars["COINCUBE_MCP_CREDENTIAL"].as_str().unwrap();
@@ -2784,7 +2907,7 @@ mod tests {
             let config: Value = serde_json::from_str(&settings.update(
                 Message::CopyConfig, None, None, true, "mcp-fixture"
             ).unwrap()).unwrap();
-            let environment = config["mcpServers"]["tenshu"]["env"].as_object().unwrap();
+            let environment = config["mcpServers"]["coincube-session"]["env"].as_object().unwrap();
             let executable = std::env::var_os("COINCUBE_MCP_TEST_ADAPTER")
                 .expect("set COINCUBE_MCP_TEST_ADAPTER to the built adapter");
             let mut child = tokio::process::Command::new(executable)
@@ -2825,19 +2948,19 @@ mod tests {
             // workflows. This read-only pairing must still deny every write.
             assert_eq!(tools.len(), 10);
             assert_eq!(names, std::collections::BTreeSet::from([
-                "tenshu_get_capabilities", "tenshu_list_wallets",
-                "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
-                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
-                "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
+                "coincube_get_capabilities", "coincube_list_wallets",
+                "coincube_get_wallet_summary", "coincube_get_transactions",
+                "coincube_get_wallet_policy_summary", "coincube_prepare_wallet_proposal",
+                "coincube_get_wallet_proposal", "coincube_prepare_wallet_creation",
+                "coincube_prepare_transaction", "coincube_get_prepared_transaction",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
-            let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
+            let listed = response(&mut stdin, &mut stdout, call(3, "coincube_list_wallets", json!({}))).await;
             assert_eq!(listed["structuredContent"]["wallets"][0]["network"], "bitcoin");
             let id = listed["structuredContent"]["wallets"][0]["wallet_id"].as_str().unwrap();
-            let summary = response(&mut stdin, &mut stdout, call(4, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
+            let summary = response(&mut stdin, &mut stdout, call(4, "coincube_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
-            let history = response(&mut stdin, &mut stdout, call(5, "tenshu_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
+            let history = response(&mut stdin, &mut stdout, call(5, "coincube_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
             let row = history["structuredContent"]["transactions"][0].as_object().unwrap();
             assert_eq!(row["kind"], "incoming");
             assert_eq!(row["status"], "confirmed");
@@ -2845,12 +2968,12 @@ mod tests {
             for key in ["incoming_sats", "outgoing_sats", "timestamp", "height", "txid"] {
                 assert!(!row.contains_key(key));
             }
-            let policy = response(&mut stdin, &mut stdout, call(6, "tenshu_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
+            let policy = response(&mut stdin, &mut stdout, call(6, "coincube_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
             assert_eq!(policy["structuredContent"]["recovery"][0]["relative_delay_blocks"], 144);
-            let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
+            let denied = response(&mut stdin, &mut stdout, call(7, "coincube_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
-            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
+            let setup_denied = response(&mut stdin, &mut stdout, call(10, "coincube_prepare_wallet_creation", json!({
                 "network":"bitcoin", "request_id":"read-grant-must-not-prepare",
                 "topology":{
                     "primary":{"threshold":3,"key_count":5},
@@ -2860,20 +2983,20 @@ mod tests {
             }))).await;
             assert_eq!(setup_denied["isError"], true);
             assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
+            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "coincube_prepare_transaction", json!({
                 "network":"bitcoin", "wallet_id": id, "request_id": "read-grant-must-not-prepare",
                 "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
                 "fee_rate_sat_vb": 2, "max_fee_sats": 1000
             }))).await;
             assert_eq!(transaction_denied["isError"], true);
             assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
+            let draft_denied = response(&mut stdin, &mut stdout, call(12, "coincube_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
             assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
-            let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
+            let locked = response(&mut stdin, &mut stdout, call(8, "coincube_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
             settings.update(Message::Revoke, None, None, true, "mcp-fixture");
-            let revoked = response(&mut stdin, &mut stdout, call(9, "tenshu_list_wallets", json!({}))).await;
+            let revoked = response(&mut stdin, &mut stdout, call(9, "coincube_list_wallets", json!({}))).await;
             assert_eq!(revoked["isError"], true);
             assert!(revoked["structuredContent"].get("wallets").is_none());
             drop(stdin);

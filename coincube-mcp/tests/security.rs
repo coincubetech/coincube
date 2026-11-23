@@ -415,18 +415,18 @@ mod protocol {
         assert!(listed.iter().all(|t| t.output_schema.is_some()
             && t.annotations.as_ref().unwrap().read_only_hint
                 == Some(
-                    t.name != "tenshu_prepare_wallet_proposal"
-                        && t.name != "tenshu_prepare_wallet_creation"
-                        && t.name != "tenshu_prepare_transaction"
+                    t.name != "coincube_prepare_wallet_proposal"
+                        && t.name != "coincube_prepare_wallet_creation"
+                        && t.name != "coincube_prepare_transaction"
                 )));
         let result = client
-            .call_tool(CallToolRequestParams::new("tenshu_list_wallets"))
+            .call_tool(CallToolRequestParams::new("coincube_list_wallets"))
             .await
             .unwrap();
         let json = serde_json::to_value(result).unwrap();
         assert!(json.to_string().contains("fixture-wallet"));
         // Prompt-like metadata is merely text; it cannot grant summary access elsewhere.
-        let request = CallToolRequestParams::new("tenshu_get_wallet_summary").with_arguments(
+        let request = CallToolRequestParams::new("coincube_get_wallet_summary").with_arguments(
             serde_json::json!({"wallet_id":"other"})
                 .as_object()
                 .unwrap()
@@ -449,23 +449,23 @@ mod protocol {
             credential: "x".repeat(64),
         };
         let mut expected = vec![
-            "tenshu_get_capabilities",
-            "tenshu_list_wallets",
-            "tenshu_get_wallet_summary",
-            "tenshu_get_transactions",
-            "tenshu_get_wallet_policy_summary",
+            "coincube_get_capabilities",
+            "coincube_list_wallets",
+            "coincube_get_wallet_summary",
+            "coincube_get_transactions",
+            "coincube_get_wallet_policy_summary",
         ];
         if cfg!(feature = "native-proposals") {
             expected.extend([
-                "tenshu_prepare_wallet_proposal",
-                "tenshu_get_wallet_proposal",
-                "tenshu_prepare_wallet_creation",
+                "coincube_prepare_wallet_proposal",
+                "coincube_get_wallet_proposal",
+                "coincube_prepare_wallet_creation",
             ]);
         }
         if cfg!(feature = "native-transactions") {
             expected.extend([
-                "tenshu_prepare_transaction",
-                "tenshu_get_prepared_transaction",
+                "coincube_prepare_transaction",
+                "coincube_get_prepared_transaction",
             ]);
         }
         assert_eq!(
@@ -479,20 +479,23 @@ mod protocol {
             "unlock",
             "read_file",
             "execute",
-            "tenshu_create_wallet",
+            "coincube_create_wallet",
         ] {
             assert!(adapter.invoke(name, serde_json::json!({})).await.is_err());
         }
         assert!(
             adapter
-                .invoke("tenshu_list_wallets", serde_json::json!({"credential":"x"}))
+                .invoke(
+                    "coincube_list_wallets",
+                    serde_json::json!({"credential":"x"})
+                )
                 .await
                 .is_err()
         );
         assert!(
             adapter
                 .invoke(
-                    "tenshu_get_wallet_summary",
+                    "coincube_get_wallet_summary",
                     serde_json::json!({"wallet_id":"x".repeat(65)})
                 )
                 .await
@@ -500,7 +503,7 @@ mod protocol {
         );
         let result = adapter
             .invoke(
-                "tenshu_get_wallet_summary",
+                "coincube_get_wallet_summary",
                 serde_json::json!({"wallet_id":"wallet"}),
             )
             .await
@@ -521,7 +524,7 @@ async fn capability_discovery_is_static_without_desktop_access() {
         credential: "not-a-grant".into(),
     };
     let result = adapter
-        .invoke("tenshu_get_capabilities", serde_json::json!({}))
+        .invoke("coincube_get_capabilities", serde_json::json!({}))
         .await
         .unwrap();
     let json = serde_json::to_value(result).unwrap();
@@ -554,7 +557,7 @@ async fn capability_discovery_is_static_without_desktop_access() {
     ] {
         assert!(
             adapter
-                .invoke("tenshu_get_capabilities", arguments)
+                .invoke("coincube_get_capabilities", arguments)
                 .await
                 .is_err()
         );
@@ -601,7 +604,7 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(value["result"]["serverInfo"]["name"], "coincube-mcp");
-    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_get_capabilities\",\"arguments\":{}}}\n").await.unwrap();
+    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"coincube_get_capabilities\",\"arguments\":{}}}\n").await.unwrap();
     let response = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
         .await
         .unwrap()
@@ -615,7 +618,7 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
         cfg!(feature = "native-proposals")
     );
     assert_eq!(server.grant.successful_calls.load(Ordering::Relaxed), 0);
-    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_list_wallets\",\"arguments\":{}}}\n").await.unwrap();
+    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"coincube_list_wallets\",\"arguments\":{}}}\n").await.unwrap();
     let response = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
         .await
         .unwrap()
@@ -631,23 +634,23 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
     // Feature-disabled names are unknown even when called directly over STDIO.
     for (index, (name, enabled)) in [
         (
-            "tenshu_prepare_wallet_proposal",
+            "coincube_prepare_wallet_proposal",
             cfg!(feature = "native-proposals"),
         ),
         (
-            "tenshu_get_wallet_proposal",
+            "coincube_get_wallet_proposal",
             cfg!(feature = "native-proposals"),
         ),
         (
-            "tenshu_prepare_wallet_creation",
+            "coincube_prepare_wallet_creation",
             cfg!(feature = "native-proposals"),
         ),
         (
-            "tenshu_prepare_transaction",
+            "coincube_prepare_transaction",
             cfg!(feature = "native-transactions"),
         ),
         (
-            "tenshu_get_prepared_transaction",
+            "coincube_get_prepared_transaction",
             cfg!(feature = "native-transactions"),
         ),
     ]

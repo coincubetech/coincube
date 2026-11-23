@@ -56,7 +56,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     };
     assert_ne!(
         adapter
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .is_error,
@@ -65,7 +65,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     session.store(2, Ordering::SeqCst);
     assert_eq!(
         adapter
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .structured_content
@@ -75,7 +75,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     drop(first);
     assert_eq!(
         adapter
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .structured_content
@@ -86,7 +86,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     pairing::publish(&locator, &second.socket).unwrap();
     assert_ne!(
         adapter
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .is_error,
@@ -99,7 +99,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     };
     assert_eq!(
         wrong
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .structured_content
@@ -109,7 +109,7 @@ async fn same_running_adapter_reconnects_after_lock_and_server_replacement() {
     second.grant.revoke();
     assert_eq!(
         adapter
-            .invoke("tenshu_list_wallets", serde_json::json!({}))
+            .invoke("coincube_list_wallets", serde_json::json!({}))
             .await
             .unwrap()
             .structured_content
