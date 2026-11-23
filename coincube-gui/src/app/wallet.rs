@@ -558,6 +558,15 @@ impl Wallet {
         self.is_imported() || (self.keychain_keys_recorded && self.keychain_key_ids.is_empty())
     }
 
+    /// Whether `fingerprint` could be a key held in the COINCUBE Keychain,
+    /// and so reachable through Connect. Certain once the Vault recorded
+    /// which keys came from it; a Vault without that record may still hold
+    /// one, so any of its keys could be. An imported wallet never has one.
+    pub fn may_hold_keychain_key(&self, fingerprint: &Fingerprint) -> bool {
+        !self.is_imported()
+            && (!self.keychain_keys_recorded || self.keychain_key_ids.contains_key(fingerprint))
+    }
+
     /// Record which keys came from the COINCUBE Keychain, and whether that
     /// record is complete for this Vault.
     pub fn with_keychain_keys(
