@@ -1,9 +1,13 @@
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
-    component::{button, form, text::*},
+    component::{form, text::*},
+    font, theme,
     widget::*,
 };
-use iced::Length;
+use iced::{
+    widget::button::{Status as ButtonStatus, Style as ButtonStyle},
+    Alignment, Background, Length,
+};
 
 /// Priority tier for the mempool-driven feerate presets. Canonical definition
 /// — `view/message.rs` imports it for the `FetchTransferFeeratePreset` and
@@ -44,14 +48,21 @@ where
     form.size(P1_SIZE).padding(10).into()
 }
 
+/// Wide enough for the longest label ("Normal (~1h)") on one line, so the
+/// three presets are the same size and none wraps.
+const PRESET_WIDTH: f32 = 140.0;
+
 /// Three mempool-driven feerate presets, rendered left-to-right as
 /// Slow / Normal / Fast (ascending priority). The button
 /// corresponding to `loading` is rendered non-pressable to indicate an
-/// estimate is in flight; the on_select message fires for the others. When
-/// `disabled`, every button is non-pressable — see `feerate_input` for the
-/// reason this matters on the Vault transfer confirm screen.
+/// estimate is in flight; the on_select message fires for the others. The
+/// `selected` preset — the one whose estimate currently fills the input — is
+/// drawn with the accent border and selected fill. When `disabled`, every
+/// button is non-pressable — see `feerate_input` for the reason this matters
+/// on the Vault transfer confirm screen.
 pub fn feerate_presets_row<'a, M>(
     loading: Option<FeeratePreset>,
+    selected: Option<FeeratePreset>,
     on_select: impl Fn(FeeratePreset) -> M + 'static,
     disabled: bool,
 ) -> Element<'a, M>
@@ -61,10 +72,24 @@ where
     let make_button =
         |label: &'static str, preset: FeeratePreset, on_select: M| -> Element<'a, M> {
             let is_loading = loading == Some(preset);
-            button::secondary(None, if is_loading { "…" } else { label })
-                .width(Length::Fixed(110.0))
-                .on_press_maybe((!is_loading && !disabled).then_some(on_select))
-                .into()
+            let is_selected = selected == Some(preset);
+            let label = text(if is_loading { "…" } else { label })
+                .font(if is_selected {
+                    font::SEMIBOLD
+                } else {
+                    font::MEDIUM
+                })
+                .wrapping(iced::widget::text::Wrapping::None);
+            Button::new(
+                Container::new(label)
+                    .center_x(Length::Fill)
+                    .align_y(Alignment::Center)
+                    .padding(5),
+            )
+            .width(Length::Fixed(PRESET_WIDTH))
+            .style(move |theme, status| preset_style(theme, status, is_selected))
+            .on_press_maybe((!is_loading && !disabled).then_some(on_select))
+            .into()
         };
 
     Row::new()
@@ -85,4 +110,18 @@ where
             on_select(FeeratePreset::Fast),
         ))
         .into()
+}
+
+/// The secondary button, with the selected preset picked out by the accent
+/// border, the shell's selected fill and full-strength ink.
+fn preset_style(theme: &theme::Theme, status: ButtonStatus, selected: bool) -> ButtonStyle {
+    let mut style = theme::button::secondary(theme, status);
+    if selected {
+        let shell = &theme.colors.shell;
+        style.background = Some(Background::Color(shell.selected));
+        style.text_color = shell.ink;
+        style.border.color = shell.accent;
+        style.border.width = 1.0;
+    }
+    style
 }
