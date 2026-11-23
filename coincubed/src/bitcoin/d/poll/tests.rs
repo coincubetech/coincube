@@ -26,6 +26,7 @@ fn backend(addr: SocketAddr) -> BitcoinD {
         retries: BITCOIND_RETRY_LIMIT,
         config,
         record_replay: Default::default(),
+        imported_range_end: None,
     };
     bit.record_replay.acknowledge(1);
     bit

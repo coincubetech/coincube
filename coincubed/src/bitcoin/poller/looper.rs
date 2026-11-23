@@ -65,6 +65,10 @@ struct ReceiveIndices {
     receive_index: bitcoin::bip32::ChildNumber,
     change_index: bitcoin::bip32::ChildNumber,
     initial_highest: u32,
+    /// How many addresses past the highest index the database's address table
+    /// holds: `LOOK_AHEAD_LIMIT` for a Vault, the initial lookahead for an
+    /// imported wallet. Indices past that window are only found by derivation.
+    stored_lookahead: u32,
 }
 
 enum ReceivedDerivation {
@@ -91,11 +95,17 @@ fn update_coins(
     let receive_index = db_conn.receive_index();
     let change_index = db_conn.change_index();
     let initial_highest = u32::from(receive_index.max(change_index));
+    let stored_lookahead = db_conn
+        .imported_history()
+        .map_or(crate::database::sqlite::LOOK_AHEAD_LIMIT, |history| {
+            history.initial_lookahead
+        });
     log::debug!("Current coins: {:?}", curr_coins);
     let mut indices = ReceiveIndices {
         receive_index,
         change_index,
         initial_highest,
+        stored_lookahead,
     };
 
     let received = discover_received_coins(
@@ -183,15 +193,22 @@ fn find_staged_address_index(
 ) -> Result<Option<(bitcoin::bip32::ChildNumber, bool)>, String> {
     let highest = u32::from(indices.receive_index.max(indices.change_index));
     let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
+    // Start right after the address table's window, so no index between it and
+    // the derivation search is skipped.
     let start = indices
         .initial_highest
-        .checked_add(gap)
+        .checked_add(indices.stored_lookahead)
         .ok_or("Derivation range overflow")?;
     let mut end = highest
         .checked_add(gap)
         .ok_or("Derivation range overflow")?;
     if bit.wallet_record_replay_pending().is_some() {
         end = end.max(1001);
+    }
+    // An imported wallet's branches are imported over an explicit range on the
+    // node, which reports outputs anywhere in it.
+    if let Some(range_end) = bit.imported_range_end() {
+        end = end.max(range_end.saturating_add(1));
     }
     let mut found = None;
     for index in start..end {
@@ -856,9 +873,34 @@ fn updates(
         db_conn.update_tip(&latest_tip);
         log::debug!("New tip: '{}'", latest_tip);
     }
+    keep_imported_range_ahead(db_conn, bit, descs);
 
     log::debug!("Updates done.");
     Ok(())
+}
+
+/// After the indices are updated, widen an imported wallet's range on the node
+/// if they came within the discovery target of its end. A failure leaves the
+/// poll's writes in place and is retried on the next poll.
+fn keep_imported_range_ahead(
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    bit: &mut impl BitcoinInterface,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+) {
+    if bit.imported_range_end().is_none() {
+        return;
+    }
+    let Some(history) = db_conn.imported_history() else {
+        return;
+    };
+    let highest = u32::from(db_conn.receive_index().max(db_conn.change_index()));
+    if let Err(error) = bit.keep_imported_range_ahead(descs, highest, history.discovery_target) {
+        log::warn!(
+            "Could not widen the imported wallet's descriptor range on the node: {}. \
+             Retrying on the next poll.",
+            error
+        );
+    }
 }
 
 // Read rescan state before any writes from this poll. An RPC failure is not
@@ -1702,6 +1744,106 @@ mod failure_tests {
                 poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
                 assert!(db.connection().last_poll_timestamp().is_some());
             }
+        }
+    }
+
+    #[test]
+    fn imported_range_on_the_node_extends_output_mapping_to_its_end() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for branch in [0, 1] {
+            let db = DummyDatabase::new();
+            let mut conn = db.connection();
+            let deep = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 0,
+                },
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::Address(
+                    descs[branch]
+                        .at_derivation_index(3_000)
+                        .unwrap()
+                        .address(conn.network())
+                        .unwrap()
+                        .into_unchecked(),
+                ),
+                is_immature: false,
+            };
+            let mut bit = DummyBitcoind::new();
+            bit.received = vec![deep];
+            // Without an imported range, index 3000 is past the lookahead: skipped.
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert!(staged.received.is_empty());
+            // The node watches the imported branches up to the range end.
+            bit.imported_range_end = Some(3_000);
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert_eq!(staged.received.len(), 1);
+            assert_eq!(u32::from(staged.received[0].derivation_index), 3_000);
+            assert_eq!(staged.received[0].is_change, branch == 1);
+            // One past the range end is not the node's to report.
+            bit.imported_range_end = Some(2_999);
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert!(staged.received.is_empty());
+        }
+    }
+
+    #[test]
+    fn imported_mapping_searches_right_after_the_stored_lookahead() {
+        // An imported wallet's address table holds only its initial lookahead
+        // past the highest index (20 here), not LOOK_AHEAD_LIMIT (200). The
+        // indices in between must still map, on the node and off it.
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for (branch, range_end) in [(0, None), (1, None), (0, Some(1_000)), (1, Some(1_000))] {
+            let mut db = DummyDatabase::new();
+            db.set_imported_history(crate::database::ImportedHistory {
+                birthday: 0,
+                initial_lookahead: 20,
+                discovery_target: 20,
+                receive_scanned: 20,
+                change_scanned: 20,
+                history_complete: true,
+            });
+            let mut conn = db.connection();
+            let mut bit = DummyBitcoind::new();
+            bit.imported_range_end = range_end;
+            bit.received = [20, 150]
+                .iter()
+                .enumerate()
+                .map(|(vout, index)| UTxO {
+                    outpoint: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::all_zeros(),
+                        vout: vout as u32,
+                    },
+                    amount: bitcoin::Amount::from_sat(100_000),
+                    block_height: Some(99),
+                    address: UTxOAddress::Address(
+                        descs[branch]
+                            .at_derivation_index(*index)
+                            .unwrap()
+                            .address(conn.network())
+                            .unwrap()
+                            .into_unchecked(),
+                    ),
+                    is_immature: false,
+                })
+                .collect();
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            let mut indexes: Vec<_> = staged
+                .received
+                .iter()
+                .map(|coin| u32::from(coin.derivation_index))
+                .collect();
+            indexes.sort_unstable();
+            assert_eq!(
+                indexes,
+                vec![20, 150],
+                "branch {}, range {:?}",
+                branch,
+                range_end
+            );
         }
     }
 

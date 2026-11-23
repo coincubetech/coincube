@@ -626,6 +626,23 @@ impl WalletRecordReplay {
 }
 
 pub trait BitcoinInterface: Send {
+    /// For an imported wallet on a Bitcoin Core/Knots backend, the end of the
+    /// derivation range its branches are imported with. Outputs the node reports
+    /// can belong to any index up to here, so mapping them must look this far.
+    fn imported_range_end(&self) -> Option<u32> {
+        None
+    }
+    /// Keep an imported wallet's imported range ahead of its allocated indices.
+    /// Only a Bitcoin Core/Knots backend has a range to keep; Core does not top
+    /// up inactive descriptors itself.
+    fn keep_imported_range_ahead(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        _highest_index: u32,
+        _discovery_target: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         Err("Wallet record replay requires a regular Bitcoin Core/Knots backend".into())
     }
@@ -972,6 +989,21 @@ fn legacy_confirmed_conflicting_spender(
 }
 
 impl BitcoinInterface for d::BitcoinD {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range_end
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.widen_imported_range((receive, change), highest_index, discovery_target)
+            .map_err(|e| e.to_string())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         if self.local_fork_chain.is_some() {
             return Err("Wallet record replay is available for regular Bitcoin only".into());
@@ -1860,6 +1892,19 @@ impl BitcoinInterface for esplora::Esplora {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.lock().unwrap().imported_range_end()
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        self.lock()
+            .unwrap()
+            .keep_imported_range_ahead(descs, highest_index, discovery_target)
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         self.lock().unwrap().request_wallet_record_replay()
     }
