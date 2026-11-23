@@ -4061,6 +4061,11 @@ mod tests {
     /// A real funding transaction paying the given coins at the given vouts, so
     /// spend creation can authenticate each selected input against it (P2-A).
     /// Unused vouts are filled with unrelated outputs.
+    ///
+    /// It spends an ordinary (made-up) outpoint, so it is not a coinbase: these
+    /// tests store it next to an unconfirmed coin in a daemon whose poller is
+    /// running, and a poll would return an unconfirmed coinbase deposit to the
+    /// immature state, failing whichever spend the test creates next.
     fn funding_tx(
         control: &DaemonControl,
         coins: &[(
@@ -4094,13 +4099,48 @@ mod tests {
             version: TxVersion::TWO,
             lock_time: absolute::LockTime::Blocks(absolute::Height::ZERO),
             input: vec![bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint::null(),
+                previous_output: bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_str(
+                        "617eab1fc0b03ee7f82ba70166725291783461f1a0e7975eaf8b5f8f674234f3",
+                    )
+                    .unwrap(),
+                    0,
+                ),
                 script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
                 sequence: bitcoin::Sequence::MAX,
                 witness: bitcoin::Witness::default(),
             }],
             output,
         }
+    }
+
+    /// The poller holds back coinbase deposits. A funding fixture that is one
+    /// makes every test storing it depend on whether a poll ran first.
+    #[test]
+    fn funding_tx_is_not_a_coinbase() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let op = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        assert!(!funding.is_coinbase());
+
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint: op,
+            is_immature: false,
+            block_info: None,
+            amount: bitcoin::Amount::from_sat(100_000),
+            derivation_index: bip32::ChildNumber::from(13),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        // What the running poller reads to decide which coins to hold back.
+        assert!(db_conn.coinbase_txids().is_empty());
+
+        ms.shutdown();
     }
 
     fn funded_conflict_control(
