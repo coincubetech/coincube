@@ -810,6 +810,18 @@ fn updates(
         Err(e) => return Err(e),
     };
 
+    // An imported wallet on the node: map outputs as far as the node watches now,
+    // which Core may have extended by itself since the last poll.
+    if bit.imported_range_end().is_some() {
+        if let Err(error) = bit.refresh_imported_range(descs) {
+            log::warn!(
+                "Could not read the imported wallet's descriptor ranges from the node: {}. \
+                 Mapping outputs with the last known ranges.",
+                error
+            );
+        }
+    }
+
     // Then check the state of our coins. Do it even if the tip did not change since last poll, as
     // we may have unconfirmed transactions.
     let mut updated_coins = update_coins(bit, db_conn, &current_tip, descs, secp)?;
@@ -1697,6 +1709,85 @@ mod failure_tests {
         );
         assert_eq!(state.lock().unwrap().pending(), Some(2));
         assert!(db.connection().last_poll_timestamp().is_some());
+    }
+
+    #[test]
+    fn poll_maps_outputs_on_a_branch_the_node_extended_past_the_cached_range() {
+        // Core extends a branch by itself past an index it sees used. The poll
+        // re-reads the node's ranges before mapping, so an output past the last
+        // range we imported (1000) but inside the node's (3000) still maps.
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for (branch, node_range_end, mapped) in [
+            (0, None, false),
+            (0, Some(3_000), true),
+            (1, Some(3_000), true),
+        ] {
+            let mut backend = DummyBitcoind::new();
+            backend.imported_range_end = Some(1_000);
+            backend.node_range_end = node_range_end;
+            let mut database = DummyDatabase::new();
+            database.set_imported_history(crate::database::ImportedHistory {
+                birthday: 0,
+                initial_lookahead: 20,
+                discovery_target: 20,
+                receive_scanned: 20,
+                change_scanned: 20,
+                history_complete: true,
+            });
+            database.connection().update_tip(&backend.tip);
+            let address = descs[branch]
+                .at_derivation_index(2_500)
+                .unwrap()
+                .address(database.connection().network())
+                .unwrap();
+            let funding = bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn::default()],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(100_000),
+                    script_pubkey: address.script_pubkey(),
+                }],
+            };
+            let txid = funding.compute_txid();
+            let block = crate::bitcoin::Block {
+                hash: backend.tip.hash,
+                height: 99,
+                time: 1,
+            };
+            backend.txs.insert(txid, (funding, Some(block)));
+            backend.received = vec![UTxO {
+                outpoint: bitcoin::OutPoint::new(txid, 0),
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::Address(address.into_unchecked()),
+                is_immature: false,
+            }];
+            let mut bit: sync::Arc<sync::Mutex<dyn BitcoinInterface>> =
+                sync::Arc::new(sync::Mutex::new(backend));
+            let db: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+                sync::Arc::new(sync::Mutex::new(database));
+            poll(
+                &mut bit,
+                &db,
+                &secp,
+                &descs,
+                &Default::default(),
+                &Default::default(),
+            );
+            let coins = db.connection().coins(&[], &[]);
+            assert_eq!(
+                coins
+                    .values()
+                    .any(|coin| u32::from(coin.derivation_index) == 2_500
+                        && coin.is_change == (branch == 1)),
+                mapped,
+                "branch {}, node range {:?}",
+                branch,
+                node_range_end
+            );
+        }
     }
 
     #[test]

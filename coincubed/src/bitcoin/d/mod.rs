@@ -344,12 +344,10 @@ pub struct BitcoinD {
     /// Exact-chain admission for a local Blake2b wallet; never inferred from encoding.
     pub(super) local_fork_chain: Option<coincube_core::chain::ChainId>,
     pub(super) record_replay: crate::bitcoin::WalletRecordReplay,
-    /// For an imported wallet, the derivation range end both of its branches are
-    /// known to be imported with. Core extends an inactive descriptor only once it
-    /// sees an index used on chain, not for addresses Coincube has handed out, so
-    /// the poller widens this as addresses are allocated. `None` for a Vault, whose
-    /// descriptors keep Core's default range handling.
-    pub(super) imported_range_end: Option<u32>,
+    /// For an imported wallet, the derivation ranges its branches are imported
+    /// with on the node. `None` for a Vault, whose descriptors keep Core's
+    /// default range handling.
+    pub(super) imported_range: Option<ImportedRange>,
 }
 
 macro_rules! params {
@@ -441,7 +439,7 @@ impl BitcoinD {
             retries: 0,
             local_fork_chain: None,
             record_replay: Default::default(),
-            imported_range_end: None,
+            imported_range: None,
         };
         log::info!("Checking the connection to bitcoind.");
         dummy_bitcoind.check_connection()?;
@@ -485,7 +483,7 @@ impl BitcoinD {
             retries: BITCOIND_RETRY_LIMIT,
             local_fork_chain: None,
             record_replay: Default::default(),
-            imported_range_end: None,
+            imported_range: None,
         })
     }
 
@@ -975,20 +973,32 @@ impl BitcoinD {
 
     // Import the wallet's receive and change branch descriptors to bitcoind.
     fn import_descriptor(&self, desc: &WalletDescriptor) -> Option<String> {
-        let request = match desc {
-            WalletDescriptor::Vault(_) => initial_import_request(desc.branches_public()),
-            WalletDescriptor::Imported(_) => imported_import_request(
-                desc.branches_public(),
-                self.imported_range_end.unwrap_or(MIN_IMPORTED_RANGE_END),
-            ),
-        };
-        self.import_request_failure(request)
+        match desc {
+            WalletDescriptor::Vault(_) => {
+                self.import_request_failure(initial_import_request(desc.branches_public()))
+            }
+            WalletDescriptor::Imported(_) => self
+                .try_import_request(imported_import_request(
+                    desc.branches_public(),
+                    self.imported_range
+                        .map_or(MIN_IMPORTED_RANGE_END, |range| range.covered),
+                ))
+                .unwrap_or_else(|error| Some(error.to_string())),
+        }
     }
 
     /// Send an `importdescriptors` request; `Some(response)` unless every
     /// descriptor in it was imported successfully.
     fn import_request_failure(&self, request: Json) -> Option<String> {
-        let res = self.make_wallet_request("importdescriptors", params!(request));
+        self.try_import_request(request)
+            .expect("We must not fail to make a request for more than a minute")
+    }
+
+    /// [`Self::import_request_failure`] for callers that must survive an
+    /// unreachable node: a transport failure is an `Err`, a refused import is
+    /// `Ok(Some(response))`.
+    fn try_import_request(&self, request: Json) -> Result<Option<String>, BitcoindError> {
+        let res = self.make_faillible_wallet_request("importdescriptors", params!(request))?;
         let all_succeeded = res
             .as_array()
             .map(|results| {
@@ -997,11 +1007,11 @@ impl BitcoinD {
                     .all(|res| res.get("success").and_then(Json::as_bool).unwrap_or(false))
             })
             .unwrap_or(false);
-        if all_succeeded {
+        Ok(if all_succeeded {
             None
         } else {
             Some(res.to_string())
-        }
+        })
     }
 
     /// Does the watchonly wallet actually hold this transaction?
@@ -1172,7 +1182,11 @@ impl BitcoinD {
     /// seeded with that range; [`Self::ensure_imported_range`] then widens an
     /// existing wallet's range if it falls short.
     pub fn set_imported_range(&mut self, highest_index: u32, discovery_target: u32) {
-        self.imported_range_end = Some(imported_range_end(highest_index, discovery_target));
+        let end = imported_range_end(highest_index, discovery_target);
+        self.imported_range = Some(ImportedRange {
+            covered: end,
+            watched: end,
+        });
     }
 
     /// Make sure the loaded watch-only wallet imports the imported wallet's
@@ -1185,10 +1199,28 @@ impl BitcoinD {
         discovery_target: u32,
     ) -> Result<(), BitcoindError> {
         let (receive, change) = desc.branches_public();
-        let [receive_end, change_end] = self.listed_range_ends((receive, change))?;
-        // The range both branches are known to cover.
-        self.imported_range_end = Some(receive_end.min(change_end));
+        self.imported_range = Some(ImportedRange::from_listed(
+            self.listed_range_ends((receive, change))?,
+        ));
         self.widen_imported_range((receive, change), highest_index, discovery_target)
+    }
+
+    /// Re-read the ranges the node lists for the imported branches. Core extends
+    /// a branch by itself past an index it sees used, so the node can report
+    /// outputs beyond what we last imported; mapping must look that far.
+    pub fn refresh_imported_range(
+        &mut self,
+        branches: (
+            &Descriptor<DescriptorPublicKey>,
+            &Descriptor<DescriptorPublicKey>,
+        ),
+    ) -> Result<(), BitcoindError> {
+        if self.imported_range.is_some() {
+            self.imported_range = Some(ImportedRange::from_listed(
+                self.listed_range_ends(branches)?,
+            ));
+        }
+        Ok(())
     }
 
     /// The range end the watch-only wallet currently lists for each branch (0 if
@@ -1231,7 +1263,7 @@ impl BitcoinD {
         highest_index: u32,
         discovery_target: u32,
     ) -> Result<(), BitcoindError> {
-        let Some(current_end) = self.imported_range_end else {
+        let Some(current_end) = self.imported_range.map(|range| range.covered) else {
             return Ok(());
         };
         let Some(new_end) = imported_range_widening(current_end, highest_index, discovery_target)
@@ -1240,8 +1272,10 @@ impl BitcoinD {
         };
         // Core refuses a re-import whose range does not include a branch's current
         // range, and it may have extended a branch by itself since we last looked.
-        let [receive_end, change_end] = self.listed_range_ends((receive, change))?;
-        let new_end = new_end.max(receive_end).max(change_end);
+        let listed = self.listed_range_ends((receive, change))?;
+        // Until the re-import succeeds, map with what the node lists now.
+        self.imported_range = Some(ImportedRange::from_listed(listed));
+        let new_end = new_end.max(listed[0]).max(listed[1]);
         log::info!(
             "Widening the imported wallet's descriptor range on bitcoind from {} to {} \
              (highest used index {}, discovery target {}).",
@@ -1251,14 +1285,18 @@ impl BitcoinD {
             discovery_target
         );
         if let Some(err) =
-            self.import_request_failure(imported_import_request((receive, change), new_end))
+            self.try_import_request(imported_import_request((receive, change), new_end))?
         {
+            // One branch may have been widened; the next refresh picks it up.
             return Err(BitcoindError::Wallet(
                 self.watchonly_wallet_path.clone(),
                 WalletError::ImportingDescriptor(err),
             ));
         }
-        self.imported_range_end = Some(new_end);
+        self.imported_range = Some(ImportedRange {
+            covered: new_end,
+            watched: new_end,
+        });
         Ok(())
     }
 
@@ -2513,6 +2551,29 @@ fn initial_import_request(
     )
 }
 
+/// The derivation ranges an imported wallet's two branches are imported with on
+/// the node, which can differ: Core extends each branch by itself past an index
+/// it sees used, and a re-import may succeed for one branch only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportedRange {
+    /// The range end both branches are known to cover. Widening is decided
+    /// from this, so neither branch is left short of handed-out addresses.
+    pub covered: u32,
+    /// The furthest range end of either branch: the node can report outputs up
+    /// to here, so output mapping must search both branches this far.
+    pub watched: u32,
+}
+
+impl ImportedRange {
+    /// From the `[receive, change]` range ends the node lists.
+    pub fn from_listed([receive, change]: [u32; 2]) -> Self {
+        Self {
+            covered: receive.min(change),
+            watched: receive.max(change),
+        }
+    }
+}
+
 /// Core's default range for a ranged descriptor, and the smallest range end an
 /// imported wallet's branches are given.
 pub const MIN_IMPORTED_RANGE_END: u32 = 1_000;
@@ -2998,6 +3059,28 @@ mod tests {
         for (highest, target) in [(0, 20), (999, 1), (5_000, 10_000), (70_000, 30)] {
             assert!(imported_range_end(highest, target) >= highest + target);
         }
+    }
+
+    #[test]
+    fn imported_range_tracks_both_branches_separately() {
+        // Widening is decided from the shorter branch; mapping searches as far
+        // as the longer one, which Core may have extended by itself.
+        assert_eq!(
+            ImportedRange::from_listed([1_900, 1_000]),
+            ImportedRange {
+                covered: 1_000,
+                watched: 1_900
+            }
+        );
+        assert_eq!(
+            ImportedRange::from_listed([1_000, 2_100]),
+            ImportedRange {
+                covered: 1_000,
+                watched: 2_100
+            }
+        );
+        // A branch the node does not list covers nothing.
+        assert_eq!(ImportedRange::from_listed([0, 1_000]).covered, 0);
     }
 
     #[test]

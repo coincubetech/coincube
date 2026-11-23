@@ -72,6 +72,8 @@ pub struct DummyBitcoind {
     pub chain_tip_error: Option<&'static str>,
     /// What `imported_range_end` reports: an imported wallet on a node.
     pub imported_range_end: Option<u32>,
+    /// The range end the node lists now; `refresh_imported_range` adopts it.
+    pub node_range_end: Option<u32>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -119,6 +121,7 @@ impl DummyBitcoind {
             sync_reorg_ancestor: None,
             chain_tip_error: None,
             imported_range_end: None,
+            node_range_end: None,
         }
     }
 }
@@ -126,6 +129,17 @@ impl DummyBitcoind {
 impl BitcoinInterface for DummyBitcoind {
     fn imported_range_end(&self) -> Option<u32> {
         self.imported_range_end
+    }
+    fn refresh_imported_range(
+        &mut self,
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        if self.imported_range_end.is_some() {
+            if let Some(end) = self.node_range_end {
+                self.imported_range_end = Some(end);
+            }
+        }
+        Ok(())
     }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.record_replay

@@ -631,11 +631,20 @@ pub type DetachedBroadcaster =
     sync::Arc<dyn Fn(&bitcoin::Transaction) -> Result<(), String> + Send + Sync>;
 
 pub trait BitcoinInterface: Send {
-    /// For an imported wallet on a Bitcoin Core/Knots backend, the end of the
-    /// derivation range its branches are imported with. Outputs the node reports
-    /// can belong to any index up to here, so mapping them must look this far.
+    /// For an imported wallet on a Bitcoin Core/Knots backend, the furthest
+    /// derivation range end of either branch on the node. Outputs the node
+    /// reports can belong to any index up to here, on either branch, so mapping
+    /// them must look this far.
     fn imported_range_end(&self) -> Option<u32> {
         None
+    }
+    /// Re-read the imported range from the node before mapping its outputs.
+    /// Only a Bitcoin Core/Knots backend has one; see [`Self::imported_range_end`].
+    fn refresh_imported_range(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        Ok(())
     }
     /// Keep an imported wallet's imported range ahead of its allocated indices.
     /// Only a Bitcoin Core/Knots backend has a range to keep; Core does not top
@@ -1010,7 +1019,17 @@ fn legacy_confirmed_conflicting_spender(
 
 impl BitcoinInterface for d::BitcoinD {
     fn imported_range_end(&self) -> Option<u32> {
-        self.imported_range_end
+        self.imported_range.map(|range| range.watched)
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.refresh_imported_range((receive, change))
+            .map_err(|e| e.to_string())
     }
     fn keep_imported_range_ahead(
         &mut self,
@@ -1923,6 +1942,12 @@ impl BitcoinInterface for esplora::Esplora {
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
     fn imported_range_end(&self) -> Option<u32> {
         self.lock().unwrap().imported_range_end()
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        self.lock().unwrap().refresh_imported_range(descs)
     }
     fn keep_imported_range_ahead(
         &mut self,

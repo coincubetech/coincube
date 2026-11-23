@@ -238,6 +238,30 @@ def test_node_maps_outputs_past_a_small_stored_lookahead(bitcoind, directory):
             }
 
         wait_for(lambda: mapped() == expected)
+
+        # Core extends the receive branch by itself past an index it sees used
+        # (500 -> 1500) while the daemon last imported 1000 and has no reason to
+        # widen (500 + 20 is far from it). An output in Core's extension still
+        # maps, because each poll re-reads the node's ranges.
+        used = bitcoind.rpc.sendtoaddress(
+            bitcoind.rpc.deriveaddresses(receive, [500, 500])[0], Decimal("0.01")
+        )
+        bitcoind.generate_block(1, wait_for_mempool=used)
+        wait_for(
+            lambda: max(end for _, end in watchonly_ranges(bitcoind, daemon)) >= 1_500
+        )
+        assert not daemon.is_in_log("Widening the imported wallet's descriptor range")
+        extended = bitcoind.rpc.sendtoaddress(
+            bitcoind.rpc.deriveaddresses(receive, [1_200, 1_200])[0], Decimal("0.01")
+        )
+        bitcoind.generate_block(1, wait_for_mempool=extended)
+        wait_for(
+            lambda: any(
+                coin["outpoint"].startswith(extended + ":")
+                and coin["derivation_index"] == 1_200
+                for coin in daemon.rpc.listcoins()["coins"]
+            )
+        )
     finally:
         if daemon.proc is not None and daemon.proc.poll() is None:
             daemon.cleanup()
