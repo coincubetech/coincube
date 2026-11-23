@@ -7,7 +7,7 @@ use crate::{
     bitcoin::{Block, BlockChainTip},
     config,
 };
-use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 use utils::{block_before_date, roundup_progress};
 
 use std::{
@@ -965,20 +965,10 @@ impl BitcoinD {
         Ok(())
     }
 
-    // Import the receive and change descriptors from the multipath descriptor to bitcoind.
-    fn import_descriptor(&self, desc: &CoincubeDescriptor) -> Option<String> {
-        let descriptors = [desc.receive_descriptor(), desc.change_descriptor()]
-            .iter()
-            .map(|desc| {
-                serde_json::json!({
-                    "desc": desc.to_string(),
-                    "timestamp": "now",
-                    "liquid": false,
-                })
-            })
-            .collect();
-
-        let res = self.make_wallet_request("importdescriptors", params!(Json::Array(descriptors)));
+    // Import the wallet's receive and change branch descriptors to bitcoind.
+    fn import_descriptor(&self, desc: &WalletDescriptor) -> Option<String> {
+        let res =
+            self.make_wallet_request("importdescriptors", params!(initial_import_request(desc)));
         let all_succeeded = res
             .as_array()
             .map(|results| {
@@ -1130,10 +1120,10 @@ impl BitcoinD {
         }
     }
 
-    /// Create the watchonly wallet on bitcoind, and import it the main descriptor.
+    /// Create the watchonly wallet on bitcoind, and import it the wallet's branch descriptors.
     pub fn create_watchonly_wallet(
         &self,
-        main_descriptor: &CoincubeDescriptor,
+        main_descriptor: &WalletDescriptor,
     ) -> Result<(), BitcoindError> {
         // Remove any leftover. This can happen if we delete the watchonly wallet but don't restart
         // bitcoind.
@@ -1228,7 +1218,7 @@ impl BitcoinD {
     /// Perform various sanity checks of our watchonly wallet.
     pub fn wallet_sanity_checks(
         &self,
-        main_descriptor: &CoincubeDescriptor,
+        main_descriptor: &WalletDescriptor,
     ) -> Result<(), BitcoindError> {
         // Check our watchonly wallet is loaded
         if self
@@ -1244,9 +1234,7 @@ impl BitcoinD {
             ));
         }
 
-        // Check our main descriptor is imported in this wallet.
-        let receive_desc = main_descriptor.receive_descriptor();
-        let change_desc = main_descriptor.change_descriptor();
+        // Check the wallet's branch descriptors are imported in this wallet.
         let desc_list: Vec<_> = self
             .list_descriptors()
             .into_iter()
@@ -1266,9 +1254,7 @@ impl BitcoinD {
                 }
             })
             .collect();
-        if !desc_list.iter().any(|desc| *receive_desc == *desc)
-            || !desc_list.iter().any(|desc| *change_desc == *desc)
-        {
+        if !branches_imported(&desc_list, main_descriptor) {
             return Err(BitcoindError::Wallet(
                 self.watchonly_wallet_path.clone(),
                 WalletError::MissingDescriptor,
@@ -1918,7 +1904,7 @@ impl BitcoinD {
 
     pub fn start_rescan(
         &mut self,
-        desc: &CoincubeDescriptor,
+        desc: &WalletDescriptor,
         timestamp: u32,
     ) -> Result<(), BitcoindError> {
         // Re-import the receive and change descriptors to the watchonly wallet for the purpose of
@@ -1933,21 +1919,9 @@ impl BitcoinD {
             .fold(1_000, |range, entry| {
                 cmp::max(range, entry.range.map(|r| r[1]).unwrap_or(0))
             });
-        let descs = [
-            desc.receive_descriptor().as_descriptor_public_key(),
-            desc.change_descriptor().as_descriptor_public_key(),
-        ];
-        let desc_json: Vec<Json> = descs
-            .iter()
-            .map(|desc| {
-                serde_json::json!({
-                    "desc": desc.to_string(),
-                    "timestamp": timestamp,
-                    "liquid": false,
-                    "range": max_range,
-                })
-            })
-            .collect();
+        let (receive, change) = desc.branches_public();
+        let descs = [receive, change];
+        let desc_json = rescan_import_request(desc, timestamp, max_range);
 
         // Have we pruned the blocks necessary to rescan down to this timestamp?
         // This check is necessary racy since bitcoind may prune these blocks in-between the check
@@ -2396,6 +2370,55 @@ pub struct ListDescEntry {
     pub timestamp: u32,
 }
 
+/// The `importdescriptors` parameter that seeds a freshly created watch-only
+/// wallet with the wallet's receive and change branches, stamped "now".
+///
+/// A Vault's request must stay byte-identical to the one built from its
+/// `CoincubeDescriptor` before this took a [`WalletDescriptor`] (see the golden
+/// tests).
+fn initial_import_request(desc: &WalletDescriptor) -> Json {
+    let (receive, change) = desc.branches_public();
+    Json::Array(
+        [receive, change]
+            .iter()
+            .map(|desc| {
+                serde_json::json!({
+                    "desc": desc.to_string(),
+                    "timestamp": "now",
+                    "liquid": false,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The `importdescriptors` parameter that re-imports the wallet's receive and
+/// change branches at `timestamp` to make bitcoind rescan from there.
+fn rescan_import_request(desc: &WalletDescriptor, timestamp: u32, max_range: u32) -> Vec<Json> {
+    let (receive, change) = desc.branches_public();
+    [receive, change]
+        .iter()
+        .map(|desc| {
+            serde_json::json!({
+                "desc": desc.to_string(),
+                "timestamp": timestamp,
+                "liquid": false,
+                "range": max_range,
+            })
+        })
+        .collect()
+}
+
+/// Whether both of the wallet's branch descriptors are among `imported`, the
+/// descriptors `listdescriptors` reports for the watch-only wallet.
+fn branches_imported(
+    imported: &[Descriptor<DescriptorPublicKey>],
+    desc: &WalletDescriptor,
+) -> bool {
+    let (receive, change) = desc.branches_public();
+    imported.iter().any(|desc| desc == receive) && imported.iter().any(|desc| desc == change)
+}
+
 /// Whether `current_descs` contain the descriptor `desc` at `timestamp`.
 ///
 /// Any descriptors in `current_descs` that cannot be parsed as
@@ -2738,6 +2761,90 @@ pub struct MempoolEntryFees {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coincube_core::descriptors::CoincubeDescriptor;
+
+    // Golden strings for invariant I3: a Vault's `importdescriptors` requests and
+    // wallet checks are byte-identical to those built from its
+    // `CoincubeDescriptor` before the bitcoind wallet API took a
+    // `WalletDescriptor`. They were captured from `master` at 6043754da.
+    const GOLDEN_P2WSH_VAULT: &str = "wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))";
+    const GOLDEN_P2WSH_INIT: &str = r#"[{"desc":"wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/0/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/0/*)))#h0ky94u4","liquid":false,"timestamp":"now"},{"desc":"wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/1/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/1/*)))#kl0ct6lr","liquid":false,"timestamp":"now"}]"#;
+    const GOLDEN_P2WSH_RESCAN: &str = r#"[{"desc":"wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/0/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/0/*)))#h0ky94u4","liquid":false,"range":1000,"timestamp":1700000000},{"desc":"wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/1/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/1/*)))#kl0ct6lr","liquid":false,"range":1000,"timestamp":1700000000}]"#;
+    const GOLDEN_TAPROOT_VAULT: &str = "tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/<0;1>/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/<2;3>/*),older(65535)))";
+    const GOLDEN_TAPROOT_INIT: &str = r#"[{"desc":"tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/0/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/2/*),older(65535)))#xhrh0cvn","liquid":false,"timestamp":"now"},{"desc":"tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/1/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/3/*),older(65535)))#6yyu2dsu","liquid":false,"timestamp":"now"}]"#;
+    const GOLDEN_TAPROOT_RESCAN: &str = r#"[{"desc":"tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/0/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/2/*),older(65535)))#xhrh0cvn","liquid":false,"range":1000,"timestamp":1700000000},{"desc":"tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/1/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/3/*),older(65535)))#6yyu2dsu","liquid":false,"range":1000,"timestamp":1700000000}]"#;
+    /// A Liana-era single-key P2WSH Vault, loaded the way an existing
+    /// installation loads it: from the legacy `{multi_desc, receive_desc,
+    /// change_desc}` record.
+    const GOLDEN_LEGACY_RECORD: &str = r#"{"multi_desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560))))#g7vk9r5l","receive_desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/0/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/0/*),older(52560))))#8udu74zs","change_desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/1/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/1/*),older(52560))))#e6phjj2v"}"#;
+    const GOLDEN_LEGACY_INIT: &str = r#"[{"desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/0/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/0/*),older(52560))))#8udu74zs","liquid":false,"timestamp":"now"},{"desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/1/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/1/*),older(52560))))#e6phjj2v","liquid":false,"timestamp":"now"}]"#;
+    const GOLDEN_LEGACY_RESCAN: &str = r#"[{"desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/0/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/0/*),older(52560))))#8udu74zs","liquid":false,"range":1000,"timestamp":1700000000},{"desc":"wsh(or_d(pk([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/1/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/1/*),older(52560))))#e6phjj2v","liquid":false,"range":1000,"timestamp":1700000000}]"#;
+
+    fn vault(desc: &str) -> WalletDescriptor {
+        CoincubeDescriptor::from_str(desc).unwrap().into()
+    }
+
+    fn golden_vaults() -> [(WalletDescriptor, &'static str, &'static str, bool); 3] {
+        let legacy: WalletDescriptor = serde_json::from_str(GOLDEN_LEGACY_RECORD).unwrap();
+        assert!(legacy.as_vault().is_some());
+        [
+            (
+                vault(GOLDEN_P2WSH_VAULT),
+                GOLDEN_P2WSH_INIT,
+                GOLDEN_P2WSH_RESCAN,
+                false,
+            ),
+            (
+                vault(GOLDEN_TAPROOT_VAULT),
+                GOLDEN_TAPROOT_INIT,
+                GOLDEN_TAPROOT_RESCAN,
+                true,
+            ),
+            (legacy, GOLDEN_LEGACY_INIT, GOLDEN_LEGACY_RESCAN, false),
+        ]
+    }
+
+    #[test]
+    fn vault_importdescriptors_requests_are_byte_identical() {
+        for (wallet, init, rescan, _) in golden_vaults() {
+            assert_eq!(initial_import_request(&wallet).to_string(), init);
+            assert_eq!(
+                Json::Array(rescan_import_request(&wallet, 1_700_000_000, 1_000)).to_string(),
+                rescan
+            );
+        }
+    }
+
+    #[test]
+    fn vault_taproot_flag_matches_the_vault() {
+        for (wallet, _, _, taproot) in golden_vaults() {
+            assert_eq!(wallet.is_taproot(), taproot);
+            assert_eq!(wallet.as_vault().unwrap().is_taproot(), taproot);
+        }
+    }
+
+    #[test]
+    fn vault_wallet_check_accepts_exactly_the_golden_branches() {
+        for (wallet, init, _, _) in golden_vaults() {
+            // What `listdescriptors` returns for a wallet seeded by `init`.
+            let imported: Vec<Descriptor<DescriptorPublicKey>> =
+                serde_json::from_str::<Vec<Json>>(init)
+                    .unwrap()
+                    .iter()
+                    .map(|entry| Descriptor::from_str(entry["desc"].as_str().unwrap()).unwrap())
+                    .collect();
+            assert!(branches_imported(&imported, &wallet));
+            // Either branch missing fails the check, as before.
+            assert!(!branches_imported(&imported[..1], &wallet));
+            assert!(!branches_imported(&imported[1..], &wallet));
+            // So do another wallet's branches.
+            for (other, other_init, _, _) in golden_vaults() {
+                if other_init != init {
+                    assert!(!branches_imported(&imported, &other));
+                }
+            }
+        }
+    }
 
     #[test]
     fn malformed_mempool_entries_are_errors_not_panics() {

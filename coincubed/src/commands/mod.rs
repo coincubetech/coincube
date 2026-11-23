@@ -2078,14 +2078,13 @@ impl DaemonControl {
         // TODO: there is a race with the above check for whether the backend is already
         // rescanning. This could make us crash with the bitcoind backend if someone triggered a
         // rescan of the wallet just after we checked above and did now.
+        // Imported wallets have no recovery capability (I5): refuse before
+        // touching the backend.
+        if self.config.main_descriptor.as_vault().is_none() {
+            return Err(CommandError::RecoveryNotAvailable);
+        }
         self.bitcoin
-            .start_rescan(
-                self.config
-                    .main_descriptor
-                    .as_vault()
-                    .ok_or(CommandError::RecoveryNotAvailable)?,
-                timestamp,
-            )
+            .start_rescan(&self.config.main_descriptor, timestamp)
             .map_err(CommandError::RescanTrigger)?;
         db_conn.set_rescan(timestamp);
 

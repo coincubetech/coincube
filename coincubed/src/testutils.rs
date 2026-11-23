@@ -11,6 +11,7 @@ use crate::{
     DaemonControl, DaemonHandle,
 };
 use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 use std::convert::TryInto;
 use std::{
@@ -271,11 +272,7 @@ impl BitcoinInterface for DummyBitcoind {
         }
     }
 
-    fn start_rescan(
-        &mut self,
-        _: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.rescan_requests.push(timestamp);
         Ok(())
     }

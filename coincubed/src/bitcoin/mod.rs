@@ -9,7 +9,7 @@ pub mod maturity;
 pub mod poller;
 
 use crate::bitcoin::d::{BitcoindError, CachedTxGetter, LSBlockEntry};
-use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 pub use d::{MempoolEntry, MempoolEntryFees, SyncProgress};
 
 use std::{collections::HashMap, fmt, net, sync};
@@ -849,11 +849,7 @@ pub trait BitcoinInterface: Send {
 
     /// Trigger a rescan of the block chain for transactions related to this descriptor since
     /// the given date.
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String>;
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String>;
 
     /// Rescan progress percentage. Between 0 and 1.
     fn rescan_progress(&self) -> Option<f64>;
@@ -1377,11 +1373,7 @@ impl BitcoinInterface for d::BitcoinD {
         }
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         // FIXME: in theory i think this could potentially fail to actually start the rescan.
         self.start_rescan(desc, timestamp)
             .map_err(|e| e.to_string())
@@ -1698,11 +1690,7 @@ impl BitcoinInterface for electrum::Electrum {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -1847,11 +1835,7 @@ impl BitcoinInterface for esplora::Esplora {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -2037,11 +2021,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().request_eager_sync();
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.lock().unwrap().start_rescan(desc, timestamp)
     }
 
