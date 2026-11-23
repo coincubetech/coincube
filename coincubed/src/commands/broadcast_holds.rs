@@ -30,7 +30,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, MutexGuard, PoisonError,
+    },
     time::{Duration, Instant},
 };
 
@@ -47,12 +50,18 @@ struct Hold {
     /// it, and has had it so at every look since. Such a record predates the
     /// broadcast and does not end the hold.
     record_predates_broadcast: bool,
+    /// Which broadcast took this hold. A look at the wallet tells only of the
+    /// holds there when it began, and a broadcast made during it replaces or
+    /// adds one.
+    broadcast: u64,
 }
 
 /// The coins currently held, by outpoint.
 #[derive(Debug, Default)]
 pub(crate) struct BroadcastHolds {
     held: Mutex<HashMap<OutPoint, Hold>>,
+    /// The number of broadcasts held so far. Written under the lock.
+    broadcasts: AtomicU64,
 }
 
 impl BroadcastHolds {
@@ -110,6 +119,7 @@ impl BroadcastHolds {
             .filter(|earlier| *earlier != spender)
             .collect();
         held.retain(|_, hold| !replaced.contains(&hold.spender));
+        let broadcast = self.broadcasts.fetch_add(1, Ordering::Relaxed);
         for txin in &tx.input {
             held.insert(
                 txin.previous_output,
@@ -117,6 +127,7 @@ impl BroadcastHolds {
                     spender,
                     since: now,
                     record_predates_broadcast: recorded_before.contains(&txin.previous_output),
+                    broadcast,
                 },
             );
         }
@@ -178,12 +189,24 @@ impl BroadcastHolds {
         spender_of: impl FnOnce(&[OutPoint]) -> HashMap<OutPoint, Txid>,
     ) {
         // The wallet is read without the lock, which a broadcast needs.
-        let outpoints: Vec<OutPoint> = self.lock().keys().copied().collect();
-        if outpoints.is_empty() {
+        let looked_at: HashMap<OutPoint, u64> = self
+            .lock()
+            .iter()
+            .map(|(outpoint, hold)| (*outpoint, hold.broadcast))
+            .collect();
+        if looked_at.is_empty() {
             return;
         }
+        let outpoints: Vec<OutPoint> = looked_at.keys().copied().collect();
         let recorded = spender_of(&outpoints);
         self.lock().retain(|outpoint, hold| {
+            // A hold taken during the read is left as it is. The read did not
+            // ask about its coin, or asked for the hold it replaced, so it
+            // shows neither the coin recorded nor the wallet without a record
+            // left from before.
+            if looked_at.get(outpoint) != Some(&hold.broadcast) {
+                return true;
+            }
             if recorded.get(outpoint) != Some(&hold.spender) {
                 hold.record_predates_broadcast = false;
                 return true;
@@ -450,6 +473,31 @@ mod tests {
             std::iter::once((a, first.compute_txid())).collect()
         });
         assert_eq!(holds.held(now, MAX_AGE), set(&[a, b]));
+    }
+
+    /// A transaction broadcast again during the wallet read, its coin still
+    /// recorded from before, is not taken for one the wallet was seen without
+    /// a record of: the read did not cover its hold. That holds for a coin the
+    /// read did not ask about and for one whose earlier hold it did.
+    #[test]
+    fn a_broadcast_during_the_wallet_read_keeps_its_record_left_from_before() {
+        let (a, b) = (outpoint(1), outpoint(2));
+        let holds = BroadcastHolds::default();
+        let now = Instant::now();
+        let (spend_a, spend_b) = (spend_of(&[a], 0), spend_of(&[b], 0));
+        holds.hold_inputs_of(&spend_a, now);
+        holds.end_recorded(|_| {
+            holds.hold_broadcast(&spend_a, &set(&[a]), now);
+            holds.hold_broadcast(&spend_b, &set(&[b]), now);
+            HashMap::new()
+        });
+        // The record left from before ends neither hold.
+        holds.end_recorded(recorded(&[&spend_a, &spend_b]));
+        assert_eq!(holds.held(now, MAX_AGE), set(&[a, b]));
+
+        holds.end_recorded(recorded(&[]));
+        holds.end_recorded(recorded(&[&spend_a, &spend_b]));
+        assert!(holds.held(now, MAX_AGE).is_empty());
     }
 
     #[test]
