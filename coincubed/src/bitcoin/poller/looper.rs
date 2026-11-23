@@ -65,6 +65,10 @@ struct ReceiveIndices {
     receive_index: bitcoin::bip32::ChildNumber,
     change_index: bitcoin::bip32::ChildNumber,
     initial_highest: u32,
+    /// How many addresses past the highest index the database's address table
+    /// holds: `LOOK_AHEAD_LIMIT` for a Vault, the initial lookahead for an
+    /// imported wallet. Indices past that window are only found by derivation.
+    stored_lookahead: u32,
 }
 
 enum ReceivedDerivation {
@@ -91,11 +95,17 @@ fn update_coins(
     let receive_index = db_conn.receive_index();
     let change_index = db_conn.change_index();
     let initial_highest = u32::from(receive_index.max(change_index));
+    let stored_lookahead = db_conn
+        .imported_history()
+        .map_or(crate::database::sqlite::LOOK_AHEAD_LIMIT, |history| {
+            history.initial_lookahead
+        });
     log::debug!("Current coins: {:?}", curr_coins);
     let mut indices = ReceiveIndices {
         receive_index,
         change_index,
         initial_highest,
+        stored_lookahead,
     };
 
     let received = discover_received_coins(
@@ -183,9 +193,11 @@ fn find_staged_address_index(
 ) -> Result<Option<(bitcoin::bip32::ChildNumber, bool)>, String> {
     let highest = u32::from(indices.receive_index.max(indices.change_index));
     let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
+    // Start right after the address table's window, so no index between it and
+    // the derivation search is skipped.
     let start = indices
         .initial_highest
-        .checked_add(gap)
+        .checked_add(indices.stored_lookahead)
         .ok_or("Derivation range overflow")?;
     let mut end = highest
         .checked_add(gap)
@@ -1774,6 +1786,64 @@ mod failure_tests {
             bit.imported_range_end = Some(2_999);
             let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
             assert!(staged.received.is_empty());
+        }
+    }
+
+    #[test]
+    fn imported_mapping_searches_right_after_the_stored_lookahead() {
+        // An imported wallet's address table holds only its initial lookahead
+        // past the highest index (20 here), not LOOK_AHEAD_LIMIT (200). The
+        // indices in between must still map, on the node and off it.
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for (branch, range_end) in [(0, None), (1, None), (0, Some(1_000)), (1, Some(1_000))] {
+            let mut db = DummyDatabase::new();
+            db.set_imported_history(crate::database::ImportedHistory {
+                birthday: 0,
+                initial_lookahead: 20,
+                discovery_target: 20,
+                receive_scanned: 20,
+                change_scanned: 20,
+                history_complete: true,
+            });
+            let mut conn = db.connection();
+            let mut bit = DummyBitcoind::new();
+            bit.imported_range_end = range_end;
+            bit.received = [20, 150]
+                .iter()
+                .enumerate()
+                .map(|(vout, index)| UTxO {
+                    outpoint: bitcoin::OutPoint {
+                        txid: bitcoin::Txid::all_zeros(),
+                        vout: vout as u32,
+                    },
+                    amount: bitcoin::Amount::from_sat(100_000),
+                    block_height: Some(99),
+                    address: UTxOAddress::Address(
+                        descs[branch]
+                            .at_derivation_index(*index)
+                            .unwrap()
+                            .address(conn.network())
+                            .unwrap()
+                            .into_unchecked(),
+                    ),
+                    is_immature: false,
+                })
+                .collect();
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            let mut indexes: Vec<_> = staged
+                .received
+                .iter()
+                .map(|coin| u32::from(coin.derivation_index))
+                .collect();
+            indexes.sort_unstable();
+            assert_eq!(
+                indexes,
+                vec![20, 150],
+                "branch {}, range {:?}",
+                branch,
+                range_end
+            );
         }
     }
 

@@ -59,7 +59,7 @@ def mark_history_complete(db_path):
         )
 
 
-def imported_daemon(bitcoind, directory, seed_offset):
+def imported_daemon(bitcoind, directory, seed_offset, lookahead=LOOKAHEAD):
     required_binary(COINCUBED_PATH, "COINCUBED_PATH")
     receive = checked_descriptor(
         bitcoind, descriptor_keys("wpkh", 0, seed_offset=seed_offset)
@@ -73,7 +73,7 @@ def imported_daemon(bitcoind, directory, seed_offset):
         change,
         UNREACHABLE_ESPLORA,
         "esplora",
-        lookahead=LOOKAHEAD,
+        lookahead=lookahead,
     )
     return daemon, receive, change
 
@@ -205,6 +205,39 @@ def test_start_rescan_stays_unavailable_for_imported_on_the_node(
         daemon.wait_ready_on_node(bitcoind.rpc.getblockcount())
         with pytest.raises(Exception, match="(?i)recovery"):
             daemon.rpc.startrescan(1296688602)
+    finally:
+        if daemon.proc is not None and daemon.proc.poll() is None:
+            daemon.cleanup()
+
+
+def test_node_maps_outputs_past_a_small_stored_lookahead(bitcoind, directory):
+    """The GUI's default lookahead is 20, so the address table ends 20 past the
+    highest index; outputs between there and the node's range end still map."""
+    daemon, receive, change = imported_daemon(
+        bitcoind, directory, seed_offset=104, lookahead=20
+    )
+    try:
+        mark_history_complete(create_imported_storage(daemon))
+        daemon.use_backend("bitcoind", bitcoind)
+        daemon.start()
+        daemon.wait_ready_on_node(bitcoind.rpc.getblockcount())
+        expected = {
+            bitcoind.rpc.deriveaddresses(receive, [50, 50])[0]: (50, False),
+            bitcoind.rpc.deriveaddresses(change, [120, 120])[0]: (120, True),
+        }
+        funding = bitcoind.rpc.sendmany(
+            "", {address: Decimal("0.01") for address in expected}
+        )
+        bitcoind.generate_block(1, wait_for_mempool=funding)
+
+        def mapped():
+            return {
+                coin["address"]: (coin["derivation_index"], coin["is_change"])
+                for coin in daemon.rpc.listcoins()["coins"]
+                if coin["outpoint"].startswith(funding + ":")
+            }
+
+        wait_for(lambda: mapped() == expected)
     finally:
         if daemon.proc is not None and daemon.proc.poll() is None:
             daemon.cleanup()

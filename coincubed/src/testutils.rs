@@ -328,6 +328,7 @@ struct DummyDbState {
     last_poll_timestamp: Option<u32>,
     rollbacks: Vec<BlockChainTip>,
     chain: coincube_core::chain::ChainId,
+    imported_history: Option<crate::database::ImportedHistory>,
 }
 
 pub struct DummyDatabase {
@@ -409,8 +410,14 @@ impl DummyDatabase {
                 last_poll_timestamp: None,
                 rollbacks: Vec::new(),
                 chain: coincube_core::chain::ChainId::Bitcoin,
+                imported_history: None,
             })),
         }
+    }
+
+    /// Make `imported_history()` report an imported wallet's scan state.
+    pub fn set_imported_history(&mut self, history: crate::database::ImportedHistory) {
+        self.db.write().unwrap().imported_history = Some(history);
     }
 
     /// Set the chain identity `chain()` reports (Bitcoin by default).
@@ -437,6 +444,10 @@ impl DummyDatabase {
 }
 
 impl DatabaseConnection for DummyDatabase {
+    fn imported_history(&mut self) -> Option<crate::database::ImportedHistory> {
+        self.db.read().unwrap().imported_history.clone()
+    }
+
     fn network(&mut self) -> bitcoin::Network {
         self.db.read().unwrap().chain.bitcoin_network()
     }
