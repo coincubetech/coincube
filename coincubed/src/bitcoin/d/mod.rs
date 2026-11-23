@@ -344,6 +344,10 @@ pub struct BitcoinD {
     /// Exact-chain admission for a local Blake2b wallet; never inferred from encoding.
     pub(super) local_fork_chain: Option<coincube_core::chain::ChainId>,
     pub(super) record_replay: crate::bitcoin::WalletRecordReplay,
+    /// For an imported wallet, the derivation ranges its branches are imported
+    /// with on the node. `None` for a Vault, whose descriptors keep Core's
+    /// default range handling.
+    pub(super) imported_range: Option<ImportedRange>,
 }
 
 macro_rules! params {
@@ -435,6 +439,7 @@ impl BitcoinD {
             retries: 0,
             local_fork_chain: None,
             record_replay: Default::default(),
+            imported_range: None,
         };
         log::info!("Checking the connection to bitcoind.");
         dummy_bitcoind.check_connection()?;
@@ -478,6 +483,7 @@ impl BitcoinD {
             retries: BITCOIND_RETRY_LIMIT,
             local_fork_chain: None,
             record_replay: Default::default(),
+            imported_range: None,
         })
     }
 
@@ -967,10 +973,32 @@ impl BitcoinD {
 
     // Import the wallet's receive and change branch descriptors to bitcoind.
     fn import_descriptor(&self, desc: &WalletDescriptor) -> Option<String> {
-        let res = self.make_wallet_request(
-            "importdescriptors",
-            params!(initial_import_request(desc.branches_public())),
-        );
+        match desc {
+            WalletDescriptor::Vault(_) => {
+                self.import_request_failure(initial_import_request(desc.branches_public()))
+            }
+            WalletDescriptor::Imported(_) => self
+                .try_import_request(imported_import_request(
+                    desc.branches_public(),
+                    self.imported_range
+                        .map_or(MIN_IMPORTED_RANGE_END, |range| range.covered),
+                ))
+                .unwrap_or_else(|error| Some(error.to_string())),
+        }
+    }
+
+    /// Send an `importdescriptors` request; `Some(response)` unless every
+    /// descriptor in it was imported successfully.
+    fn import_request_failure(&self, request: Json) -> Option<String> {
+        self.try_import_request(request)
+            .expect("We must not fail to make a request for more than a minute")
+    }
+
+    /// [`Self::import_request_failure`] for callers that must survive an
+    /// unreachable node: a transport failure is an `Err`, a refused import is
+    /// `Ok(Some(response))`.
+    fn try_import_request(&self, request: Json) -> Result<Option<String>, BitcoindError> {
+        let res = self.make_faillible_wallet_request("importdescriptors", params!(request))?;
         let all_succeeded = res
             .as_array()
             .map(|results| {
@@ -979,11 +1007,11 @@ impl BitcoinD {
                     .all(|res| res.get("success").and_then(Json::as_bool).unwrap_or(false))
             })
             .unwrap_or(false);
-        if all_succeeded {
+        Ok(if all_succeeded {
             None
         } else {
             Some(res.to_string())
-        }
+        })
     }
 
     /// Does the watchonly wallet actually hold this transaction?
@@ -1144,6 +1172,131 @@ impl BitcoinD {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Give an imported wallet's branches a range that covers `highest_index`
+    /// plus `discovery_target`, the window its Connect scan established.
+    ///
+    /// Call before [`Self::create_watchonly_wallet`] so a new watch-only wallet is
+    /// seeded with that range; [`Self::ensure_imported_range`] then widens an
+    /// existing wallet's range if it falls short.
+    pub fn set_imported_range(&mut self, highest_index: u32, discovery_target: u32) {
+        let end = imported_range_end(highest_index, discovery_target);
+        self.imported_range = Some(ImportedRange {
+            covered: end,
+            watched: end,
+        });
+    }
+
+    /// Make sure the loaded watch-only wallet imports the imported wallet's
+    /// branches over a range covering `highest_index + discovery_target`, and
+    /// remember the range end the poller widens from.
+    pub fn ensure_imported_range(
+        &mut self,
+        desc: &WalletDescriptor,
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), BitcoindError> {
+        let (receive, change) = desc.branches_public();
+        self.imported_range = Some(ImportedRange::from_listed(
+            self.listed_range_ends((receive, change))?,
+        ));
+        self.widen_imported_range((receive, change), highest_index, discovery_target)
+    }
+
+    /// Re-read the ranges the node lists for the imported branches. Core extends
+    /// a branch by itself past an index it sees used, so the node can report
+    /// outputs beyond what we last imported; mapping must look that far.
+    pub fn refresh_imported_range(
+        &mut self,
+        branches: (
+            &Descriptor<DescriptorPublicKey>,
+            &Descriptor<DescriptorPublicKey>,
+        ),
+    ) -> Result<(), BitcoindError> {
+        if self.imported_range.is_some() {
+            self.imported_range = Some(ImportedRange::from_listed(
+                self.listed_range_ends(branches)?,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The range end the watch-only wallet currently lists for each branch (0 if
+    /// absent). Core extends an inactive ranged descriptor by itself once it sees
+    /// one of its indices used, so these can be ahead of what we imported.
+    fn listed_range_ends(
+        &self,
+        (receive, change): (
+            &Descriptor<DescriptorPublicKey>,
+            &Descriptor<DescriptorPublicKey>,
+        ),
+    ) -> Result<[u32; 2], BitcoindError> {
+        let entries = self.list_descriptors_result()?;
+        Ok([receive, change].map(|branch| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    Descriptor::<DescriptorPublicKey>::from_str(&entry.desc)
+                        .is_ok_and(|listed| listed == *branch)
+                })
+                .filter_map(|entry| entry.range.map(|r| r[1]))
+                .max()
+                .unwrap_or(0)
+        }))
+    }
+
+    /// Re-import the imported wallet's branches over a wider range once the
+    /// allocated indices come within `discovery_target` of the current range end.
+    ///
+    /// The re-import uses `timestamp: "now"`. Core rescans from the request's
+    /// timestamp on every `importdescriptors`, including a re-import that only
+    /// widens the range, and an older timestamp fails on a pruned node. History
+    /// comes from the transferred records, not from these imports.
+    pub fn widen_imported_range(
+        &mut self,
+        (receive, change): (
+            &Descriptor<DescriptorPublicKey>,
+            &Descriptor<DescriptorPublicKey>,
+        ),
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), BitcoindError> {
+        let Some(current_end) = self.imported_range.map(|range| range.covered) else {
+            return Ok(());
+        };
+        let Some(new_end) = imported_range_widening(current_end, highest_index, discovery_target)
+        else {
+            return Ok(());
+        };
+        // Core refuses a re-import whose range does not include a branch's current
+        // range, and it may have extended a branch by itself since we last looked.
+        let listed = self.listed_range_ends((receive, change))?;
+        // Until the re-import succeeds, map with what the node lists now.
+        self.imported_range = Some(ImportedRange::from_listed(listed));
+        let new_end = new_end.max(listed[0]).max(listed[1]);
+        log::info!(
+            "Widening the imported wallet's descriptor range on bitcoind from {} to {} \
+             (highest used index {}, discovery target {}).",
+            current_end,
+            new_end,
+            highest_index,
+            discovery_target
+        );
+        if let Some(err) =
+            self.try_import_request(imported_import_request((receive, change), new_end))?
+        {
+            // One branch may have been widened; the next refresh picks it up.
+            return Err(BitcoindError::Wallet(
+                self.watchonly_wallet_path.clone(),
+                WalletError::ImportingDescriptor(err),
+            ));
+        }
+        self.imported_range = Some(ImportedRange {
+            covered: new_end,
+            watched: new_end,
+        });
         Ok(())
     }
 
@@ -2398,6 +2551,83 @@ fn initial_import_request(
     )
 }
 
+/// The derivation ranges an imported wallet's two branches are imported with on
+/// the node, which can differ: Core extends each branch by itself past an index
+/// it sees used, and a re-import may succeed for one branch only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportedRange {
+    /// The range end both branches are known to cover. Widening is decided
+    /// from this, so neither branch is left short of handed-out addresses.
+    pub covered: u32,
+    /// The furthest range end of either branch: the node can report outputs up
+    /// to here, so output mapping must search both branches this far.
+    pub watched: u32,
+}
+
+impl ImportedRange {
+    /// From the `[receive, change]` range ends the node lists.
+    pub fn from_listed([receive, change]: [u32; 2]) -> Self {
+        Self {
+            covered: receive.min(change),
+            watched: receive.max(change),
+        }
+    }
+}
+
+/// Core's default range for a ranged descriptor, and the smallest range end an
+/// imported wallet's branches are given.
+pub const MIN_IMPORTED_RANGE_END: u32 = 1_000;
+
+/// The range end to import an imported wallet's branches with: every allocated
+/// index plus the discovery target (the window the Connect scan established),
+/// plus one more discovery target of headroom so the range is widened once per
+/// `discovery_target` new addresses rather than on every new address. At least
+/// [`MIN_IMPORTED_RANGE_END`].
+pub fn imported_range_end(highest_index: u32, discovery_target: u32) -> u32 {
+    highest_index
+        .saturating_add(discovery_target.saturating_mul(2))
+        .max(MIN_IMPORTED_RANGE_END)
+}
+
+/// The wider range end to re-import with once `highest_index` comes within
+/// `discovery_target` of `current_end`; `None` while the range is far enough
+/// ahead (or cannot grow any further).
+pub fn imported_range_widening(
+    current_end: u32,
+    highest_index: u32,
+    discovery_target: u32,
+) -> Option<u32> {
+    if highest_index.saturating_add(discovery_target) < current_end {
+        return None;
+    }
+    let new_end = imported_range_end(highest_index, discovery_target);
+    (new_end > current_end).then_some(new_end)
+}
+
+/// The `importdescriptors` parameter importing an imported wallet's receive and
+/// change branches over the explicit range `[0, range_end]`, stamped "now".
+fn imported_import_request(
+    (receive, change): (
+        &Descriptor<DescriptorPublicKey>,
+        &Descriptor<DescriptorPublicKey>,
+    ),
+    range_end: u32,
+) -> Json {
+    Json::Array(
+        [receive, change]
+            .iter()
+            .map(|desc| {
+                serde_json::json!({
+                    "desc": desc.to_string(),
+                    "timestamp": "now",
+                    "liquid": false,
+                    "range": [0, range_end],
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The `importdescriptors` parameter that re-imports the wallet's receive and
 /// change branches at `timestamp` to make bitcoind rescan from there.
 fn rescan_import_request(
@@ -2814,6 +3044,77 @@ mod tests {
             ),
             (legacy, GOLDEN_LEGACY_INIT, GOLDEN_LEGACY_RESCAN, false),
         ]
+    }
+
+    #[test]
+    fn imported_range_covers_the_scanned_window_with_headroom() {
+        // At least Core's default.
+        assert_eq!(imported_range_end(0, 20), MIN_IMPORTED_RANGE_END);
+        assert_eq!(imported_range_end(500, 200), MIN_IMPORTED_RANGE_END);
+        // The import's 10,000 target cap is above that default.
+        assert_eq!(imported_range_end(0, 10_000), 20_000);
+        assert_eq!(imported_range_end(1_234, 10_000), 21_234);
+        // Never overflows.
+        assert_eq!(imported_range_end(u32::MAX - 1, 10_000), u32::MAX);
+        for (highest, target) in [(0, 20), (999, 1), (5_000, 10_000), (70_000, 30)] {
+            assert!(imported_range_end(highest, target) >= highest + target);
+        }
+    }
+
+    #[test]
+    fn imported_range_tracks_both_branches_separately() {
+        // Widening is decided from the shorter branch; mapping searches as far
+        // as the longer one, which Core may have extended by itself.
+        assert_eq!(
+            ImportedRange::from_listed([1_900, 1_000]),
+            ImportedRange {
+                covered: 1_000,
+                watched: 1_900
+            }
+        );
+        assert_eq!(
+            ImportedRange::from_listed([1_000, 2_100]),
+            ImportedRange {
+                covered: 1_000,
+                watched: 2_100
+            }
+        );
+        // A branch the node does not list covers nothing.
+        assert_eq!(ImportedRange::from_listed([0, 1_000]).covered, 0);
+    }
+
+    #[test]
+    fn imported_range_widens_once_indices_near_its_end() {
+        // Far from the end: nothing to do.
+        assert_eq!(imported_range_widening(1_000, 0, 20), None);
+        assert_eq!(imported_range_widening(1_000, 979, 20), None);
+        // Within the discovery target of the end: widen, with headroom again.
+        assert_eq!(imported_range_widening(1_000, 980, 20), Some(1_020));
+        assert_eq!(imported_range_widening(1_000, 1_500, 20), Some(1_540));
+        assert_eq!(
+            imported_range_widening(20_000, 10_000, 10_000),
+            Some(30_000)
+        );
+        // After widening, the next few addresses do not re-import.
+        let widened = imported_range_widening(1_000, 980, 20).unwrap();
+        assert_eq!(imported_range_widening(widened, 981, 20), None);
+        assert_eq!(imported_range_widening(widened, 999, 20), None);
+        // An existing range that is already wider is kept, never shrunk.
+        assert_eq!(imported_range_widening(50_000, 980, 20), None);
+        // A range that cannot grow is not re-imported forever.
+        assert_eq!(imported_range_widening(u32::MAX, u32::MAX, 20), None);
+    }
+
+    #[test]
+    fn imported_import_request_has_an_explicit_range_at_now() {
+        let imported = crate::testutils::imported_wallet_descriptor();
+        let (receive, change) = imported.branches_public();
+        let request = imported_import_request(imported.branches_public(), 1_040);
+        let expected = serde_json::json!([
+            {"desc": receive.to_string(), "timestamp": "now", "liquid": false, "range": [0, 1_040]},
+            {"desc": change.to_string(), "timestamp": "now", "liquid": false, "range": [0, 1_040]},
+        ]);
+        assert_eq!(request, expected);
     }
 
     #[test]

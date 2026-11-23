@@ -34,6 +34,9 @@ pub struct DummyBitcoind {
     pub poll_failure: Option<&'static str>,
     pub received: Vec<UTxO>,
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
+    /// When set, this backend offers a detached broadcaster that records here
+    /// instead of in `broadcasted`.
+    pub detached_broadcasts: Option<sync::Arc<sync::Mutex<Vec<bitcoin::Txid>>>>,
     pub broadcast_error: Option<String>,
     pub rescan_requests: Vec<u32>,
     pub tip_timestamp: Option<u32>,
@@ -67,6 +70,10 @@ pub struct DummyBitcoind {
     pub sync_reorg_ancestor: Option<BlockChainTip>,
     /// When set, fallible tip reads fail instead of reporting [`Self::tip`].
     pub chain_tip_error: Option<&'static str>,
+    /// What `imported_range_end` reports: an imported wallet on a node.
+    pub imported_range_end: Option<u32>,
+    /// The range end the node lists now; `refresh_imported_range` adopts it.
+    pub node_range_end: Option<u32>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -96,6 +103,7 @@ impl DummyBitcoind {
             poll_failure: None,
             received: Vec::new(),
             broadcasted: sync::Mutex::new(Vec::new()),
+            detached_broadcasts: None,
             broadcast_error: None,
             rescan_requests: Vec::new(),
             genesis_error: None,
@@ -112,11 +120,27 @@ impl DummyBitcoind {
             sees_mempool: true,
             sync_reorg_ancestor: None,
             chain_tip_error: None,
+            imported_range_end: None,
+            node_range_end: None,
         }
     }
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range_end
+    }
+    fn refresh_imported_range(
+        &mut self,
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        if self.imported_range_end.is_some() {
+            if let Some(end) = self.node_range_end {
+                self.imported_range_end = Some(end);
+            }
+        }
+        Ok(())
+    }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.record_replay
             .as_ref()
@@ -272,6 +296,14 @@ impl BitcoinInterface for DummyBitcoind {
         }
     }
 
+    fn detached_broadcaster(&self) -> Option<crate::bitcoin::DetachedBroadcaster> {
+        let sent = self.detached_broadcasts.clone()?;
+        Some(sync::Arc::new(move |tx: &bitcoin::Transaction| {
+            sent.lock().unwrap().push(tx.compute_txid());
+            Ok(())
+        }))
+    }
+
     fn start_rescan(&mut self, _: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.rescan_requests.push(timestamp);
         Ok(())
@@ -316,14 +348,19 @@ struct DummyDbState {
     coins: HashMap<bitcoin::OutPoint, Coin>,
     txs: HashMap<bitcoin::Txid, bitcoin::Transaction>,
     spend_txs: HashMap<bitcoin::Txid, (Psbt, Option<u32>)>,
+    /// Addresses the wallet recognises as its own, as (index, is change).
+    addresses: HashMap<bitcoin::Address, (bip32::ChildNumber, bool)>,
     labels: HashMap<LabelItem, String>,
     timestamp: u32,
     rescan_timestamp: Option<u32>,
     last_poll_timestamp: Option<u32>,
     rollbacks: Vec<BlockChainTip>,
     chain: coincube_core::chain::ChainId,
+    imported_history: Option<crate::database::ImportedHistory>,
 }
 
+/// A handle on shared state: a clone reads and writes the same database.
+#[derive(Clone)]
 pub struct DummyDatabase {
     db: sync::Arc<sync::RwLock<DummyDbState>>,
 }
@@ -381,6 +418,16 @@ impl DatabaseInterface for DummyDatabase {
 }
 
 impl DummyDatabase {
+    /// Have the wallet recognise `address` as its own. Without this no
+    /// address is, whatever the descriptor derives.
+    pub fn insert_address(&self, address: bitcoin::Address, index: u32, is_change: bool) {
+        self.db
+            .write()
+            .unwrap()
+            .addresses
+            .insert(address, (index.into(), is_change));
+    }
+
     pub fn new() -> DummyDatabase {
         let now: u32 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -397,14 +444,21 @@ impl DummyDatabase {
                 coins: HashMap::new(),
                 txs: HashMap::new(),
                 spend_txs: HashMap::new(),
+                addresses: HashMap::new(),
                 labels: HashMap::new(),
                 timestamp: now,
                 rescan_timestamp: None,
                 last_poll_timestamp: None,
                 rollbacks: Vec::new(),
                 chain: coincube_core::chain::ChainId::Bitcoin,
+                imported_history: None,
             })),
         }
+    }
+
+    /// Make `imported_history()` report an imported wallet's scan state.
+    pub fn set_imported_history(&mut self, history: crate::database::ImportedHistory) {
+        self.db.write().unwrap().imported_history = Some(history);
     }
 
     /// Set the chain identity `chain()` reports (Bitcoin by default).
@@ -431,6 +485,10 @@ impl DummyDatabase {
 }
 
 impl DatabaseConnection for DummyDatabase {
+    fn imported_history(&mut self) -> Option<crate::database::ImportedHistory> {
+        self.db.read().unwrap().imported_history.clone()
+    }
+
     fn network(&mut self) -> bitcoin::Network {
         self.db.read().unwrap().chain.bitcoin_network()
     }
@@ -598,9 +656,9 @@ impl DatabaseConnection for DummyDatabase {
 
     fn derivation_index_by_address(
         &mut self,
-        _: &bitcoin::Address,
+        address: &bitcoin::Address,
     ) -> Option<(bip32::ChildNumber, bool)> {
-        None
+        self.db.read().unwrap().addresses.get(address).copied()
     }
 
     fn coins_by_outpoints(
@@ -625,6 +683,17 @@ impl DatabaseConnection for DummyDatabase {
             .unwrap()
             .spend_txs
             .insert(txid, (psbt.clone(), None));
+    }
+
+    fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), String> {
+        let txid = psbt.unsigned_tx.compute_txid();
+        self.db
+            .write()
+            .unwrap()
+            .spend_txs
+            .entry(txid)
+            .or_insert((psbt.clone(), None));
+        Ok(())
     }
 
     fn spend_tx(&mut self, txid: &bitcoin::Txid) -> Option<Psbt> {

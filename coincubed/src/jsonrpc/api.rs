@@ -5,8 +5,8 @@ use crate::{
 
 mod spend;
 use spend::{
-    broadcast_spend, create_recovery, create_spend, delete_spend, list_spendtxs, rbf_psbt,
-    update_spend,
+    broadcast_spend, create_recovery, create_spend, delete_spend, list_spendtxs, preview_spend,
+    rbf_psbt, update_spend,
 };
 mod labels;
 use labels::{get_labels, get_labels_bip329, update_labels};
@@ -38,6 +38,14 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
                 )
             })?;
             create_spend(control, params)?
+        }
+        "previewspend" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params(
+                    "Missing 'outpoints', 'destinations', 'feerate' and 'change_address' parameters.",
+                )
+            })?;
+            preview_spend(control, params)?
         }
         "delspendtx" => {
             let params = req
