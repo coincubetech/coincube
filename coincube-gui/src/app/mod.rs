@@ -5106,9 +5106,7 @@ impl App {
         menu: &Menu,
         option: &menu::CubeSettingsOption,
     ) -> Task<Message> {
-        if *option == menu::CubeSettingsOption::AiAccess
-            && !crate::feature_flags::ai_access_enabled()
-        {
+        if *option == menu::CubeSettingsOption::AiAccess && !self.cache.ai_access_enabled() {
             // A restored or deep-linked route to a hidden page opens General.
             let general = menu::CubeSettingsOption::General;
             return self.open_cube_settings_page(
@@ -6045,7 +6043,7 @@ impl App {
     }
 
     fn route_local_mcp(&mut self, message: local_mcp::Message) -> Task<Message> {
-        if !crate::feature_flags::ai_access_enabled() {
+        if !self.cache.ai_access_enabled() {
             return Task::none();
         }
         let focus_after = match &message {
@@ -6162,7 +6160,43 @@ impl App {
         // A pre-dispatch sync would miss those same-call mutations
         // and leave view layers one full message cycle behind.
         self.sync_panel_derived_cache_fields();
-        task
+        // Batch only when the gate has work, so an update with nothing to do
+        // still returns an empty task.
+        match self.enforce_ai_access_flag() {
+            Some(leave_page) => Task::batch([task, leave_page]),
+            None => task,
+        }
+    }
+
+    /// Applies the AI access gate after the flag may have changed. The
+    /// account flag is fetched once per Connect session (sign-in, app start
+    /// with a restored session, opening a Cube), so within a session it
+    /// turns off on sign-out or an account change; a grant withdrawn by an
+    /// admin applies at the next session. While AI access is off, stop every
+    /// AI client this session started and release the pairing registry
+    /// ([`local_mcp::Settings::suspend`]), without revoking or deleting
+    /// stored pairings and keeping any storage-failure lock, and leave the
+    /// AI access page if it is open. Turning the flag back on resumes stored
+    /// pairings through the normal refresh, still behind the Cube-wide switch.
+    fn enforce_ai_access_flag(&mut self) -> Option<Task<Message>> {
+        if self.cache.ai_access_enabled() {
+            return None;
+        }
+        if !self.local_mcp.is_dormant() {
+            self.local_mcp.suspend();
+        }
+        let general = menu::CubeSettingsOption::General;
+        if self.panels.current
+            == Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess,
+            ))
+        {
+            return Some(self.open_cube_settings_page(
+                &Menu::Cube(menu::CubeSubMenu::Settings(general)),
+                &general,
+            ));
+        }
+        None
     }
 
     /// Mirrors panel-owned state into `Cache` for cheap read access
@@ -6184,6 +6218,12 @@ impl App {
         // Connect" and "Sign with Connect" — never see a stale value after
         // a launch-time session restore.
         self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+
+        // The account's AI access flag, every tick: features load after
+        // sign-in, and logout or a revoked grant must reach the gate on
+        // the next render. See `enforce_ai_access_flag`.
+        self.cache.ai_access_server_enabled =
+            self.panels.connect.account.ai_access_server_enabled();
 
         // The side panel's wallet names follow the Cube settings and the
         // loaded Vault, whichever message changed them (a Vault created or
@@ -9627,7 +9667,7 @@ impl App {
             .is_some();
         match &self.panels.current {
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess))
-                if crate::feature_flags::ai_access_enabled() =>
+                if self.cache.ai_access_enabled() =>
             {
                 Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
             }
@@ -9688,7 +9728,7 @@ impl App {
 
     pub(crate) fn mcp_proposals_supported(&self) -> bool {
         cfg!(feature = "mcp-proposals")
-            && crate::feature_flags::ai_access_enabled()
+            && self.cache.ai_access_enabled()
             && self
                 .cube_settings
                 .network
@@ -9704,7 +9744,7 @@ impl App {
     }
 
     fn refresh_mcp_pairings(&mut self) {
-        if !crate::feature_flags::ai_access_enabled() {
+        if !self.cache.ai_access_enabled() {
             // Never open the registry or publish an endpoint: stored
             // pairings stay on disk, inert, for a build with the flag on.
             return;
@@ -9741,7 +9781,7 @@ impl App {
     }
 
     fn mcp_supported(&self) -> bool {
-        crate::feature_flags::ai_access_enabled()
+        self.cache.ai_access_enabled()
             && self.wallet.as_ref().is_some_and(|wallet| {
                 wallet.chain == self.cube_settings.network
                     && wallet.main_descriptor.as_vault().is_some()
@@ -9848,7 +9888,7 @@ impl App {
                 &self.cache,
                 self.received_celebration_view(),
             )
-        } else if crate::feature_flags::ai_access_enabled()
+        } else if self.cache.ai_access_enabled()
             && matches!(
                 self.panels.current,
                 Menu::Cube(menu::CubeSubMenu::Settings(

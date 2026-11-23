@@ -319,6 +319,12 @@ pub struct Cache {
     /// [`crate::app::features::claim_blake2b`]. Fails closed until
     /// `/connect/features` answers, like every other server-controlled gate.
     pub btcb2_server_enabled: bool,
+    /// The signed-in account's AI access flag (`aiAccessEnabled` from
+    /// `/connect/features`), mirrored from the Connect account after every
+    /// update. Fails closed until features load and after logout. Read it
+    /// through [`Self::ai_access_enabled`], which also applies the developer
+    /// build override.
+    pub ai_access_server_enabled: bool,
     /// Whether a Bitcoin Blake2b Cube on this device already reuses this
     /// Cube's Vault descriptor — i.e. this Cube has already been claimed.
     ///
@@ -550,6 +556,7 @@ impl std::default::Default for Cache {
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
+            ai_access_server_enabled: false,
             btcb2_already_claimed: false,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
@@ -590,6 +597,13 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// Whether AI access (local MCP) is available in this Cube right now:
+    /// the signed-in account's `aiAccessEnabled`, or the developer build
+    /// override. See [`crate::app::features::ai_access_enabled`].
+    pub fn ai_access_enabled(&self) -> bool {
+        crate::app::features::ai_access_enabled(self.ai_access_server_enabled)
+    }
+
     /// A Vault with recovery paths (inheritance, recovery alerts), not an
     /// imported Vault.
     pub fn has_inheritance_vault(&self) -> bool {

@@ -12886,6 +12886,7 @@ mod tests {
             duress_enabled: Some(false),
             bitcoin_blake2b_enabled: None,
             card_payments_enabled: None,
+            ai_access_enabled: None,
         }
     }
 

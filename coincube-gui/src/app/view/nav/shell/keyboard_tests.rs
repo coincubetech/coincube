@@ -17,6 +17,7 @@ fn fixture_context() -> NavContext<'static> {
         network: ChainId::Bitcoin,
         p2p_test_coordinator: false,
         marketplace_flags: features::MarketplaceServerFlags::OFF,
+        ai_access: false,
         cube_name: "Synthetic QA Cube",
         // Wallet names in the labels; the row IDs stay `…nav.Spark` and
         // `…nav.Vault`.

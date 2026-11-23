@@ -8034,6 +8034,19 @@ impl ConnectAccountPanel {
             .unwrap_or(false)
     }
 
+    /// The account-scoped AI access flag from `GET /connect/features`
+    /// (`aiAccessEnabled`). Fails closed while features are unloaded and
+    /// when the flag is absent, and reverts on logout because
+    /// `clear_session` drops `features`. Mirrored into
+    /// [`crate::app::cache::Cache::ai_access_server_enabled`]; see
+    /// [`crate::app::features::ai_access_enabled`] for the full gate.
+    pub fn ai_access_server_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.ai_access_enabled)
+            .unwrap_or(false)
+    }
+
     pub fn purchasing_enabled(&self) -> bool {
         match &self.features {
             None => false,
@@ -10512,6 +10525,7 @@ mod plan_lifecycle_tests {
             duress_enabled: None,
             bitcoin_blake2b_enabled: None,
             card_payments_enabled: None,
+            ai_access_enabled: None,
         }
     }
 
@@ -10966,6 +10980,25 @@ mod plan_lifecycle_tests {
         let mut p = plan(PlanTier::Pro, PlanStatus::Active, None, None);
         p.entitlements.duress = true;
         p
+    }
+
+    #[test]
+    fn ai_access_flag_fails_closed_and_mirrors_the_response() {
+        let mut panel = ConnectAccountPanel::new();
+        // Unloaded (in flight, failed, never signed in) → off.
+        assert!(!panel.ai_access_server_enabled());
+        // Loaded but absent (older backend) → off.
+        panel.features = Some(features(None));
+        assert!(!panel.ai_access_server_enabled());
+        panel.features.as_mut().unwrap().ai_access_enabled = Some(true);
+        assert!(panel.ai_access_server_enabled());
+        panel.features.as_mut().unwrap().ai_access_enabled = Some(false);
+        assert!(!panel.ai_access_server_enabled());
+        // The wire field name the API serves.
+        let wire: FeaturesResponse =
+            serde_json::from_value(serde_json::json!({"plans": [], "aiAccessEnabled": true}))
+                .unwrap();
+        assert_eq!(wire.ai_access_enabled, Some(true));
     }
 
     #[test]
