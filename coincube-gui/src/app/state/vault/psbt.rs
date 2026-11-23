@@ -2870,8 +2870,6 @@ impl SignModal {
     }
 }
 
-/// Ensure any in-progress Border Wallet reconstruction state is dropped
-/// (triggering its own `Drop` zeroization) when the sign modal goes away.
 /// What a screen hosting the picker needs to know about its messages. A host
 /// forwards every message it does not consume itself to [`Modal::update`],
 /// which ignores what is not the picker's, and asks here about the two kinds
@@ -2904,6 +2902,8 @@ impl SignModal {
     }
 }
 
+/// Ensure any in-progress Border Wallet reconstruction state is dropped
+/// (triggering its own `Drop` zeroization) when the sign modal goes away.
 impl Drop for SignModal {
     fn drop(&mut self) {
         self.border_wallet_recon = None;
