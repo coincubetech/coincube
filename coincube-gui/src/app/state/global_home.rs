@@ -1289,14 +1289,27 @@ impl State for GlobalHome {
                         amount_sat,
                         feerate_vb,
                         result,
-                    } => self.on_transfer_psbt_ready(
-                        cache,
-                        (request_id, generation, direction),
-                        destination,
-                        amount_sat,
-                        feerate_vb,
-                        result,
-                    ),
+                    } => {
+                        let had_signer = matches!(self.modal, Modal::Sign(_));
+                        let task = self.on_transfer_psbt_ready(
+                            cache,
+                            (request_id, generation, direction),
+                            destination,
+                            amount_sat,
+                            feerate_vb,
+                            result,
+                        );
+                        // An imported wallet's keys stored in this Cube are
+                        // read as the signer opens, as on the Vault's own
+                        // PSBT page.
+                        match (&self.modal, daemon) {
+                            (Modal::Sign(sign_modal), Some(daemon)) if !had_signer => {
+                                use crate::app::state::vault::psbt::Modal as PsbtModalTrait;
+                                Task::batch([task, sign_modal.load(daemon)])
+                            }
+                            _ => task,
+                        }
+                    }
                     HomeMessage::TransferSigningComplete {
                         request_id,
                         generation,
@@ -1326,14 +1339,16 @@ impl State for GlobalHome {
             Message::View(view::Message::ShowQrCode(_)) => self.show_transfer_address_qr(),
             Message::View(view::Message::Close) => self.close_transfer_modal(),
             Message::Updated(result) => self.on_transfer_signing_updated(daemon, result),
-            Message::Signed(_, _)
-            | Message::HardwareWallets(_)
-            | Message::View(view::Message::SelectHardwareWallet(_))
-            | Message::View(view::Message::Spend(_)) => {
-                self.update_transfer_signer(daemon, message)
-            }
             Message::Tick => self.reconcile_pending_vault_receive(cache),
-            _ => Task::none(),
+            // The signer's Close button and a click outside it. The signer
+            // leaves this to whoever opened it.
+            message if SignModal::is_dismissal(&message) && self.signer_is_open() => {
+                self.close_transfer_modal()
+            }
+            // Everything else goes to the open signer, which knows its own
+            // rows, tasks and subscription and ignores the rest. Naming its
+            // messages here instead went stale whenever it gained one.
+            message => self.update_transfer_signer(daemon, message),
         }
     }
 
@@ -2025,8 +2040,11 @@ impl GlobalHome {
             valid,
             warning,
         };
-        // A typed rate is no longer any preset's estimate.
+        // A typed rate is no longer any preset's estimate, and an estimate
+        // still on its way must not replace it: with nothing loading, the
+        // late result is dropped as stale.
         self.transfer_feerate_preset = None;
+        self.transfer_feerate_loading = None;
         // Feerate changed → any prior preview fee is now stale.
         // Clear it immediately so the confirm screen doesn't
         // show a number that no longer matches the input, then
@@ -2079,6 +2097,10 @@ impl GlobalHome {
             }
         }
         Task::none()
+    }
+
+    fn signer_is_open(&self) -> bool {
+        matches!(self.modal, Modal::Sign(_))
     }
 
     fn update_transfer_signer(
@@ -5852,7 +5874,9 @@ mod tests {
             };
             assert_eq!(home.transfer_feerate_preset, None);
 
-            drain(home.update(
+            // Only the loading state matters here: the fetch itself is
+            // dropped unrun, and its result is injected below.
+            drop(home.update(
                 None,
                 &cache,
                 Message::View(view::Message::Home(
@@ -5880,6 +5904,46 @@ mod tests {
                     "9".to_string(),
                 ))),
             ));
+            assert_eq!(home.transfer_feerate_preset, None);
+        }
+
+        #[test]
+        fn a_typed_rate_survives_an_estimate_that_lands_late() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            // Only the loading state matters here: the fetch itself is
+            // dropped unrun, and its result is injected below.
+            drop(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(
+                    HomeMessage::FetchTransferFeeratePreset(FeeratePreset::Fast),
+                )),
+            ));
+            assert_eq!(home.transfer_feerate_loading, Some(FeeratePreset::Fast));
+
+            // The user types their own rate before the estimate is back.
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                    "9".to_string(),
+                ))),
+            ));
+            assert_eq!(home.transfer_feerate_loading, None);
+
+            drain(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::TransferFeerateEstimated {
+                    preset: FeeratePreset::Fast,
+                    result: Ok(40),
+                })),
+            ));
+            assert_eq!(home.transfer_feerate.value, "9", "the typed rate stays");
             assert_eq!(home.transfer_feerate_preset, None);
         }
 
@@ -7372,6 +7436,93 @@ mod tests {
             assert!(matches!(home.modal, Modal::None));
             assert!(home.transfer_signed, "Confirm & Broadcast stays available");
             assert!(home.transfer_psbt_ready_for.is_some());
+        }
+
+        /// A home with the signer open over Review, as `TransferPsbtReady`
+        /// leaves it.
+        fn home_with_signer_open() -> GlobalHome {
+            use crate::app::state::vault::psbts::tests::{spend_tx, spend_wallet};
+            let (mut home, _wallet) = home_on_transfer_screen();
+            home.transfer_spend_tx = Some(spend_tx());
+            home.transfer_psbt_ready_for = Some((1, 0, TransferDirection::VaultToSpark));
+            home.modal = Modal::Sign(Box::new(SignModal::new(
+                std::collections::HashSet::new(),
+                spend_wallet(),
+                CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+                coincube_core::miniscript::bitcoin::Network::Signet,
+                true,
+                None,
+                None,
+                false,
+            )));
+            home
+        }
+
+        /// The signer's Close button (and a click outside it) sends
+        /// `Spend(Cancel)`, which the signer leaves to whoever opened it.
+        #[test]
+        fn the_signers_close_button_closes_it_and_abandons_the_spend() {
+            let mut home = home_with_signer_open();
+            let cache = transfer_cache();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(RecordingDaemon::default());
+            drain(home.update(
+                Some(daemon),
+                &cache,
+                Message::View(view::Message::Spend(view::SpendTxMessage::Cancel)),
+            ));
+            assert!(matches!(home.modal, Modal::None));
+            assert!(home.transfer_spend_tx.is_none());
+            assert!(home.transfer_psbt_ready_for.is_none());
+            assert!(!home.transfer_signed);
+        }
+
+        /// A device row's Sign button names its device by fingerprint. With
+        /// no such device plugged in the signer answers with its "reconnect
+        /// or unlock" notice, which shows the request reached it.
+        #[test]
+        fn a_device_rows_sign_button_reaches_the_signer() {
+            use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+            let mut home = home_with_signer_open();
+            let cache = transfer_cache();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(RecordingDaemon::default());
+            let task = home.update(
+                Some(daemon),
+                &cache,
+                Message::View(view::Message::SelectPsbtHardwareWallet(
+                    Fingerprint::from_str("ae27181b").unwrap(),
+                )),
+            );
+            assert_eq!(task.units(), 1, "the signer answered");
+            assert!(matches!(home.modal, Modal::Sign(_)));
+        }
+
+        /// The transfer screen names none of the signer's messages: whatever
+        /// it does not consume itself goes to the open signer. With no signer
+        /// open the same messages do nothing.
+        #[test]
+        fn unclaimed_messages_go_to_the_open_signer_and_nowhere_without_one() {
+            use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+            let cache = transfer_cache();
+            let pick = || {
+                Message::View(view::Message::SelectPsbtHardwareWallet(
+                    Fingerprint::from_str("ae27181b").unwrap(),
+                ))
+            };
+            let cancel = || Message::View(view::Message::Spend(view::SpendTxMessage::Cancel));
+            let daemon = || -> Option<Arc<dyn Daemon + Sync + Send>> {
+                Some(Arc::new(RecordingDaemon::default()))
+            };
+
+            let (mut home, _wallet) = home_on_transfer_screen();
+            home.transfer_signed = true;
+            assert_eq!(home.update(daemon(), &cache, pick()).units(), 0);
+            assert_eq!(home.update(daemon(), &cache, cancel()).units(), 0);
+            assert!(home.transfer_signed, "no signer open, nothing abandoned");
+
+            // The stored-keys result is named nowhere in this file.
+            let mut home = home_with_signer_open();
+            drain(home.update(daemon(), &cache, Message::CubeKeys(Ok(vec![]))));
+            assert_eq!(home.update(daemon(), &cache, pick()).units(), 1);
         }
     }
 }

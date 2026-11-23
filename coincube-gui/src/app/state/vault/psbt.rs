@@ -884,22 +884,8 @@ impl PsbtState {
             &message,
             Message::View(view::Message::Spend(view::SpendTxMessage::Sign))
         );
-        let dismissed = matches!(
-            &message,
-            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
-        );
-        let direct_signer = matches!(
-            &message,
-            Message::View(view::Message::SelectPsbtHardwareWallet(_))
-                | Message::View(view::Message::Spend(
-                    view::SpendTxMessage::SelectMasterSigner
-                        | view::SpendTxMessage::SelectCubeKey(_)
-                        | view::SpendTxMessage::SelectBorderWallet(_)
-                        | view::SpendTxMessage::SelectKeychainSigner(_)
-                        | view::SpendTxMessage::RequestFromEveryone
-                        | view::SpendTxMessage::RetryKeychainSigner(_)
-                ))
-        );
+        let dismissed = SignModal::is_dismissal(&message);
+        let direct_signer = SignModal::is_signer_pick(&message);
         if direct_signer && was_picker {
             self.signer_focus_return = true;
         }
@@ -2884,6 +2870,38 @@ impl SignModal {
     }
 }
 
+/// What a screen hosting the picker needs to know about its messages. A host
+/// forwards every message it does not consume itself to [`Modal::update`],
+/// which ignores what is not the picker's, and asks here about the two kinds
+/// it has to act on. It never names the picker's messages itself: a list kept
+/// in a host goes stale when the picker gains a row.
+impl SignModal {
+    /// The picker's Close button, or a click outside it. The picker does not
+    /// close itself: the host that opened it takes it down.
+    pub fn is_dismissal(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Cancel))
+        )
+    }
+
+    /// One of the picker's rows asking its signer to sign.
+    pub fn is_signer_pick(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::View(view::Message::SelectPsbtHardwareWallet(_))
+                | Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner
+                        | view::SpendTxMessage::SelectCubeKey(_)
+                        | view::SpendTxMessage::SelectBorderWallet(_)
+                        | view::SpendTxMessage::SelectKeychainSigner(_)
+                        | view::SpendTxMessage::RequestFromEveryone
+                        | view::SpendTxMessage::RetryKeychainSigner(_)
+                ))
+        )
+    }
+}
+
 /// Ensure any in-progress Border Wallet reconstruction state is dropped
 /// (triggering its own `Drop` zeroization) when the sign modal goes away.
 impl Drop for SignModal {
@@ -3332,6 +3350,14 @@ impl Modal for SignModal {
                 return self.update_border_reconstruction(msg, tx)
             }
             Message::Signed(fingerprint, res) => {
+                // A result for another transaction — one whose signer was
+                // closed while its device was still signing — is not this
+                // one's. It changes nothing here: the device stays "signing"
+                // if this transaction is out to it, it is not marked as
+                // signed, and nothing is saved.
+                if matches!(&res, Ok(psbt) if psbt.unsigned_tx != tx.psbt.unsigned_tx) {
+                    return Task::none();
+                }
                 self.signing.remove(&fingerprint);
                 let over_lan = self.lan_signing.remove(&fingerprint);
                 return match res {
@@ -4837,6 +4863,31 @@ mod tests {
             device("ledger-usb-1", fingerprint(USB_FP)),
         ];
         modal
+    }
+
+    #[test]
+    fn a_result_for_another_transaction_marks_no_device_as_signed() {
+        let mut modal = picker_with_phone(None);
+        let (daemon, mut tx) = update_args();
+        let before = tx.psbt.clone();
+        let mut other = tx.psbt.clone();
+        other.unsigned_tx.lock_time =
+            coincube_core::miniscript::bitcoin::absolute::LockTime::from_consensus(
+                other.unsigned_tx.lock_time.to_consensus_u32() + 1,
+            );
+        // This transaction is out to the same device, over both transports.
+        modal.signing.insert(fingerprint(USB_FP));
+        modal.lan_signing.insert(fingerprint(USB_FP));
+        let task = modal.update(
+            daemon,
+            Message::Signed(fingerprint(USB_FP), Ok(other)),
+            &mut tx,
+        );
+        assert_eq!(task.units(), 0, "nothing is saved or shown");
+        assert!(modal.signing.contains(&fingerprint(USB_FP)));
+        assert!(modal.lan_signing.contains(&fingerprint(USB_FP)));
+        assert!(!modal.signed.contains(&fingerprint(USB_FP)));
+        assert_eq!(tx.psbt, before);
     }
 
     #[test]
