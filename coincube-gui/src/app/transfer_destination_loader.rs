@@ -17,7 +17,9 @@ use zeroize::Zeroizing;
 use super::{
     cache::AppGeneration,
     settings::{CubeSettings, Settings, WalletId, WalletSettings},
-    transfer_destination::{OwnedDestinationResource, Source, WalletIdentity},
+    transfer_destination::{
+        vault_cross_cube_chain, OwnedDestinationResource, Source, WalletIdentity,
+    },
     wallet::{descriptor_id_fingerprint, Wallet},
 };
 use crate::{
@@ -91,17 +93,18 @@ impl Refusal {
 /// backend call; no caller-provided Cube label or address is trusted.
 fn selected(
     root: &CoincubeDirectory,
+    chain: ChainId,
     cube_id: &str,
     wallet_id: Option<&WalletId>,
 ) -> Result<(CubeSettings, Option<WalletSettings>), Refusal> {
-    let settings = Settings::from_file(&root.network_directory(ChainId::Bitcoin))
+    let settings = Settings::from_file(&root.network_directory(chain))
         .map_err(|_| Refusal::BackendUnavailable)?;
     let cube = settings
         .cubes
         .into_iter()
         .find(|cube| cube.id == cube_id)
         .ok_or(Refusal::IdentityChanged)?;
-    if cube.network != ChainId::Bitcoin || cube.master_signer_fingerprint.is_none() {
+    if cube.network != chain || cube.master_signer_fingerprint.is_none() {
         return Err(Refusal::Unsupported);
     }
     let Some(wallet_id) = wallet_id else {
@@ -264,16 +267,16 @@ impl ScopedDestination {
         destination_cube_id: &str,
         wallet_id: impl Into<Option<WalletId>>,
     ) -> Result<Self, Refusal> {
-        if source.cube_id == destination_cube_id
-            || source.chain != ChainId::Bitcoin
-            || !matches!(
-                &source.wallet,
-                WalletIdentity::Vault(_) | WalletIdentity::Spark(_)
-            )
-        {
+        let wallet_id = wallet_id.into();
+        // Spark is on Bitcoin mainnet only; elsewhere the one route is a
+        // Vault paying another Cube's Vault on the same chain.
+        let vault_to_vault =
+            matches!(&source.wallet, WalletIdentity::Vault(_)) && wallet_id.is_some();
+        let chain_supported = source.chain == ChainId::Bitcoin
+            || (vault_to_vault && vault_cross_cube_chain(source.chain));
+        if source.cube_id == destination_cube_id || !chain_supported {
             return Err(Refusal::Unsupported);
         }
-        let wallet_id = wallet_id.into();
         if let Some(id) = &wallet_id {
             let destination_wallet = WalletIdentity::Vault(id.clone());
             if source.wallet == destination_wallet
@@ -282,7 +285,7 @@ impl ScopedDestination {
                 return Err(Refusal::SameWallet);
             }
         }
-        let (cube, _) = selected(&root, destination_cube_id, wallet_id.as_ref())?;
+        let (cube, _) = selected(&root, source.chain, destination_cube_id, wallet_id.as_ref())?;
         Ok(Self {
             root,
             source,
@@ -311,7 +314,12 @@ impl ScopedDestination {
         ) {
             return Err(Refusal::Stale);
         }
-        let (cube, _) = selected(&self.root, &self.cube.id, self.wallet_id.as_ref())?;
+        let (cube, _) = selected(
+            &self.root,
+            self.source.chain,
+            &self.cube.id,
+            self.wallet_id.as_ref(),
+        )?;
         if !same_selection(&self.cube, &cube) {
             return Err(Refusal::IdentityChanged);
         }
@@ -448,7 +456,7 @@ impl ScopedDestination {
         self.ceremony = None;
         Some(match outcome {
             NativeOutcome::Authenticated { prf_output } => {
-                MasterSigner::from_prf_output(Network::Bitcoin, &prf_output)
+                MasterSigner::from_prf_output(self.source.chain.bitcoin_network(), &prf_output)
                     .map_err(|_| Refusal::WrongCredential)
                     .and_then(|signer| self.accept_signer(source, signer))
             }
@@ -636,11 +644,16 @@ impl PinRequest {
             let loc = unlock::CubeLocation::new(self.root.path(), &self.cube);
             let metadata_changed = std::cell::Cell::new(false);
             let validate = || {
-                let (current, _) = selected(&self.root, &self.cube.id, self.wallet_id.as_ref())
-                    .map_err(|_| {
-                        metadata_changed.set(true);
-                        unlock::UnlockError::Io("Destination Cube changed".into())
-                    })?;
+                let (current, _) = selected(
+                    &self.root,
+                    self.origin.chain,
+                    &self.cube.id,
+                    self.wallet_id.as_ref(),
+                )
+                .map_err(|_| {
+                    metadata_changed.set(true);
+                    unlock::UnlockError::Io("Destination Cube changed".into())
+                })?;
                 if same_selection(&self.cube, &current) && !self.cancelled.load(Ordering::Acquire) {
                     Ok(())
                 } else {
@@ -713,7 +726,9 @@ impl BackendRequest {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Refusal::Stale);
         }
-        let (current, wallet) = selected(&self.root, &self.cube.id, Some(&self.wallet_id))?;
+        // `selected` holds the Cube to this chain on every re-read.
+        let chain = self.cube.network;
+        let (current, wallet) = selected(&self.root, chain, &self.cube.id, Some(&self.wallet_id))?;
         if !same_selection(&self.cube, &current) {
             return Err(Refusal::IdentityChanged);
         }
@@ -722,13 +737,13 @@ impl BackendRequest {
         // here and stopped when this operation ends. Never use A's socket.
         let data_dir = self
             .root
-            .network_directory(ChainId::Bitcoin)
+            .network_directory(chain)
             .coincubed_data_directory(&self.wallet_id);
         let config = Config::from_file(Some(data_dir.path().join("daemon.toml")))
             .map_err(|_| Refusal::BackendUnavailable)?;
         let expected_dir =
             std::path::absolute(data_dir.path()).map_err(|_| Refusal::BackendUnavailable)?;
-        if config.bitcoin_config.chain != ChainId::Bitcoin
+        if config.bitcoin_config.chain != chain
             || config
                 .data_directory()
                 .is_none_or(|dir| !crate::chain::same_path(dir.path(), &expected_dir))
@@ -744,13 +759,16 @@ impl BackendRequest {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Refusal::Stale);
         }
-        let (latest, latest_wallet) = selected(&self.root, &self.cube.id, Some(&self.wallet_id))?;
+        let (latest, latest_wallet) =
+            selected(&self.root, chain, &self.cube.id, Some(&self.wallet_id))?;
         let wallet = wallet.ok_or(Refusal::Unsupported)?;
         let latest_wallet = latest_wallet.ok_or(Refusal::Unsupported)?;
         if !same_selection(&current, &latest) || wallet.wallet_id() != latest_wallet.wallet_id() {
             return Err(Refusal::IdentityChanged);
         }
-        if info.chain_id != Some(ChainId::Bitcoin) || info.network != Network::Bitcoin {
+        // The daemon must name the chain itself: BTCB2 shares Bitcoin's
+        // address encoding, so `network` alone cannot tell the two apart.
+        if info.chain_id != Some(chain) || info.network != chain.bitcoin_network() {
             return Err(Refusal::IdentityChanged);
         }
         let descriptor = &info.descriptors.main;
@@ -784,7 +802,7 @@ impl BackendRequest {
             }
             // An imported Vault's wallet id is its descriptor's identity.
             coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported) => {
-                if WalletId::for_imported(imported, ChainId::Bitcoin)
+                if WalletId::for_imported(imported, latest.network)
                     .ok()
                     .as_ref()
                     != Some(&self.wallet_id)
@@ -1219,6 +1237,106 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Archive", ChainId::Bitcoin)]
         );
+    }
+
+    /// A Bitcoin Blake2b Vault reaches another Blake2b Cube's Vault, read
+    /// from that chain's own catalog; no Spark route opens there, and a
+    /// Bitcoin Cube with the same id is never picked up instead.
+    #[test]
+    fn a_blake2b_vault_reaches_only_a_blake2b_vault() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = CoincubeDirectory::new(directory.path().to_owned());
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+        let fingerprint = MasterSigner::generate(Network::Bitcoin)
+            .unwrap()
+            .fingerprint(&secp);
+        let wallet_id = WalletId::new("destination-id".into(), Some(2));
+        let write = |chain: ChainId, cubes: Vec<CubeSettings>| {
+            let dir = root.network_directory(chain);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(super::super::settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&Settings {
+                    cubes,
+                    wallets: vec![WalletSettings {
+                        name: "Synthetic destination".into(),
+                        alias: None,
+                        descriptor_checksum: wallet_id.descriptor_checksum.clone(),
+                        pinned_at: wallet_id.timestamp,
+                        keys: Vec::new(),
+                        hardware_wallets: Vec::new(),
+                        remote_backend_auth: None,
+                        start_internal_bitcoind: None,
+                        pending_rescan: None,
+                        keychain_keys_recorded: false,
+                    }],
+                    ..Settings::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        let cube = |chain: ChainId| {
+            let mut cube =
+                CubeSettings::new_with_raw_id("destination".into(), "Archive".into(), chain);
+            cube.master_signer_fingerprint = Some(fingerprint);
+            cube.vault_wallet_id = Some(wallet_id.clone());
+            cube.vault_fingerprint = Some("fingerprint".into());
+            cube
+        };
+        write(ChainId::BitcoinBlake2b, vec![cube(ChainId::BitcoinBlake2b)]);
+
+        let mut source = source();
+        source.chain = ChainId::BitcoinBlake2b;
+        let choices = other_cubes(&root, &source);
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].chain, ChainId::BitcoinBlake2b);
+        assert_eq!(choices[0].vault_wallet_id.as_ref(), Some(&wallet_id));
+        assert!(choices[0].refusal.is_none() && !choices[0].has_spark);
+
+        let scope = ScopedDestination::new(
+            root.clone(),
+            source.clone(),
+            "destination",
+            wallet_id.clone(),
+        )
+        .unwrap();
+        assert!(scope.current(&source).is_ok());
+        // No Spark on Blake2b, as a destination or as a source.
+        assert!(matches!(
+            ScopedDestination::new(root.clone(), source.clone(), "destination", None),
+            Err(Refusal::Unsupported)
+        ));
+        let mut spark_source = source.clone();
+        spark_source.wallet = WalletIdentity::Spark("sending-identity".into());
+        assert!(matches!(
+            ScopedDestination::new(root.clone(), spark_source, "destination", wallet_id.clone()),
+            Err(Refusal::Unsupported)
+        ));
+        // Test networks stay closed.
+        let mut testnet = source.clone();
+        testnet.chain = ChainId::BitcoinBlake2bTestnet4;
+        write(
+            ChainId::BitcoinBlake2bTestnet4,
+            vec![cube(ChainId::BitcoinBlake2bTestnet4)],
+        );
+        assert!(matches!(
+            ScopedDestination::new(root.clone(), testnet, "destination", wallet_id.clone()),
+            Err(Refusal::Unsupported)
+        ));
+        // A Bitcoin source looks only in the Bitcoin catalog.
+        assert!(matches!(
+            ScopedDestination::new(
+                root.clone(),
+                self::source(),
+                "destination",
+                wallet_id.clone()
+            ),
+            Err(Refusal::BackendUnavailable)
+        ));
+        // The Cube moving off the chain ends the open scope.
+        write(ChainId::BitcoinBlake2b, vec![cube(ChainId::Bitcoin)]);
+        assert!(matches!(scope.current(&source), Err(Refusal::Unsupported)));
     }
 
     #[tokio::test]
