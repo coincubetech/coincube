@@ -403,10 +403,11 @@ impl SplitHubPanel {
         self.working = true;
     }
 
-    /// The stage the review shows, for the App's routing test.
+    /// The stored stage, unfiltered, for the App's routing test: it must be
+    /// cleared by the result, not just hidden.
     #[cfg(test)]
     pub(crate) fn build_stage_for_test(&self) -> Option<split_coins::BuildStage> {
-        self.stage.filter(|_| self.working)
+        self.stage
     }
 
     /// `(working, error)`, for the App's routing test.

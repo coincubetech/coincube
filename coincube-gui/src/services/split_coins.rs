@@ -2110,7 +2110,7 @@ mod tests {
         }
 
         /// A self-send of exactly `inputs` into one output of the wallet.
-        fn create_spend(inputs: &[OutPoint]) -> Reply {
+        fn split_psbt(inputs: &[OutPoint]) -> Psbt {
             let mut psbt = Psbt::from_unsigned_tx(tx(inputs.to_vec(), None)).unwrap();
             psbt.outputs[0].bip32_derivation.insert(
                 coincube_core::miniscript::bitcoin::secp256k1::PublicKey::from_str(
@@ -2119,9 +2119,21 @@ mod tests {
                 .unwrap(),
                 (Default::default(), Default::default()),
             );
+            psbt
+        }
+
+        fn create_spend(psbt: &Psbt) -> Reply {
             (
                 None,
                 Ok(json!({ "psbt": psbt.to_string(), "warnings": [] })),
+            )
+        }
+
+        /// The daemon must be asked to store exactly `psbt`.
+        fn update_spend(psbt: &Psbt, reply: Result<Value, DaemonError>) -> Reply {
+            (
+                Some(json!({ "method": "updatespend", "params": [psbt.to_string()] })),
+                reply,
             )
         }
 
@@ -2156,11 +2168,12 @@ mod tests {
         #[tokio::test]
         async fn a_build_reports_its_stages_in_order() {
             let coins = shared();
+            let psbt = split_psbt(&coins);
             let (result, stages) = run(
                 vec![
                     list_coins(&coins),
-                    create_spend(&coins),
-                    (None, Ok(json!({}))),
+                    create_spend(&psbt),
+                    update_spend(&psbt, Ok(json!({}))),
                 ],
                 Method::Signature,
                 coins.to_vec(),
@@ -2168,6 +2181,27 @@ mod tests {
             )
             .await;
             assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(stages, [BuildStage::CheckingCoins, BuildStage::Building]);
+        }
+
+        /// The build stores the spend with the daemon: a store that fails
+        /// fails the build, so the request above can't go unanswered.
+        #[tokio::test]
+        async fn a_build_stores_the_spend_with_the_daemon() {
+            let coins = shared();
+            let psbt = split_psbt(&coins);
+            let (result, stages) = run(
+                vec![
+                    list_coins(&coins),
+                    create_spend(&psbt),
+                    update_spend(&psbt, Err(DaemonError::Unexpected("not stored".into()))),
+                ],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().contains("not stored"));
             assert_eq!(stages, [BuildStage::CheckingCoins, BuildStage::Building]);
         }
 
@@ -2181,6 +2215,18 @@ mod tests {
         #[tokio::test]
         async fn a_failed_step_reports_nothing_after_it() {
             let coins = shared();
+            // Reading the coins fails: "Checking the coins" was already up
+            // while the daemon was asked.
+            let (result, stages) = run(
+                vec![(None, Err(DaemonError::Unexpected("no daemon".into())))],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().contains("no daemon"));
+            assert_eq!(stages, [BuildStage::CheckingCoins]);
+
             // The coins changed: never "Building".
             let (result, stages) = run(
                 vec![list_coins(&coins[..1])],
