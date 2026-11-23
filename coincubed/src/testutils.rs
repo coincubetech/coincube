@@ -943,6 +943,38 @@ pub fn tmp_dir() -> path::PathBuf {
     ))
 }
 
+/// A Vault [`WalletDescriptor`] parsed from a multipath descriptor string.
+pub fn vault_wallet_descriptor(desc: &str) -> WalletDescriptor {
+    descriptors::CoincubeDescriptor::from_str(desc)
+        .unwrap()
+        .into()
+}
+
+/// An imported (descriptor-only) mainnet wpkh wallet.
+pub fn imported_wallet_descriptor() -> WalletDescriptor {
+    use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
+    use miniscript::bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+
+    let secp = secp256k1::Secp256k1::new();
+    let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[45; 32]).unwrap();
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+        .unwrap();
+    let key = format!(
+        "[{}/84h/0h/0h]{}",
+        master.fingerprint(&secp),
+        Xpub::from_priv(&secp, &account)
+    );
+    WalletDescriptor::Imported(
+        ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap(),
+    )
+}
+
 impl DummyCoincube {
     /// Creates a new DummyCoincube interface
     pub fn _new(
