@@ -967,8 +967,10 @@ impl BitcoinD {
 
     // Import the wallet's receive and change branch descriptors to bitcoind.
     fn import_descriptor(&self, desc: &WalletDescriptor) -> Option<String> {
-        let res =
-            self.make_wallet_request("importdescriptors", params!(initial_import_request(desc)));
+        let res = self.make_wallet_request(
+            "importdescriptors",
+            params!(initial_import_request(desc.branches_public())),
+        );
         let all_succeeded = res
             .as_array()
             .map(|results| {
@@ -1921,7 +1923,7 @@ impl BitcoinD {
             });
         let (receive, change) = desc.branches_public();
         let descs = [receive, change];
-        let desc_json = rescan_import_request(desc, timestamp, max_range);
+        let desc_json = rescan_import_request((receive, change), timestamp, max_range);
 
         // Have we pruned the blocks necessary to rescan down to this timestamp?
         // This check is necessary racy since bitcoind may prune these blocks in-between the check
@@ -2376,8 +2378,12 @@ pub struct ListDescEntry {
 /// A Vault's request must stay byte-identical to the one built from its
 /// `CoincubeDescriptor` before this took a [`WalletDescriptor`] (see the golden
 /// tests).
-fn initial_import_request(desc: &WalletDescriptor) -> Json {
-    let (receive, change) = desc.branches_public();
+fn initial_import_request(
+    (receive, change): (
+        &Descriptor<DescriptorPublicKey>,
+        &Descriptor<DescriptorPublicKey>,
+    ),
+) -> Json {
     Json::Array(
         [receive, change]
             .iter()
@@ -2394,8 +2400,14 @@ fn initial_import_request(desc: &WalletDescriptor) -> Json {
 
 /// The `importdescriptors` parameter that re-imports the wallet's receive and
 /// change branches at `timestamp` to make bitcoind rescan from there.
-fn rescan_import_request(desc: &WalletDescriptor, timestamp: u32, max_range: u32) -> Vec<Json> {
-    let (receive, change) = desc.branches_public();
+fn rescan_import_request(
+    (receive, change): (
+        &Descriptor<DescriptorPublicKey>,
+        &Descriptor<DescriptorPublicKey>,
+    ),
+    timestamp: u32,
+    max_range: u32,
+) -> Vec<Json> {
     [receive, change]
         .iter()
         .map(|desc| {
@@ -2807,9 +2819,17 @@ mod tests {
     #[test]
     fn vault_importdescriptors_requests_are_byte_identical() {
         for (wallet, init, rescan, _) in golden_vaults() {
-            assert_eq!(initial_import_request(&wallet).to_string(), init);
             assert_eq!(
-                Json::Array(rescan_import_request(&wallet, 1_700_000_000, 1_000)).to_string(),
+                initial_import_request(wallet.branches_public()).to_string(),
+                init
+            );
+            assert_eq!(
+                Json::Array(rescan_import_request(
+                    wallet.branches_public(),
+                    1_700_000_000,
+                    1_000
+                ))
+                .to_string(),
                 rescan
             );
         }
