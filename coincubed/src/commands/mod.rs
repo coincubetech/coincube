@@ -2179,6 +2179,12 @@ impl DaemonControl {
     /// the given date and the current tip.
     /// The date must be after the genesis block time and before the current tip blocktime.
     pub fn start_rescan(&mut self, timestamp: u32) -> Result<(), CommandError> {
+        // Imported wallets have no recovery capability (I5). Refuse before any
+        // backend call, so an unavailable backend never turns this into a
+        // "retry later" error.
+        if self.config.main_descriptor.as_vault().is_none() {
+            return Err(CommandError::RecoveryNotAvailable);
+        }
         let mut db_conn = self.db.connection();
         let genesis_timestamp = self
             .bitcoin
@@ -2211,13 +2217,7 @@ impl DaemonControl {
         // rescanning. This could make us crash with the bitcoind backend if someone triggered a
         // rescan of the wallet just after we checked above and did now.
         self.bitcoin
-            .start_rescan(
-                self.config
-                    .main_descriptor
-                    .as_vault()
-                    .ok_or(CommandError::RecoveryNotAvailable)?,
-                timestamp,
-            )
+            .start_rescan(&self.config.main_descriptor, timestamp)
             .map_err(CommandError::RescanTrigger)?;
         db_conn.set_rescan(timestamp);
 
@@ -3572,6 +3572,33 @@ mod tests {
         control.start_rescan(1231006506).unwrap();
         assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
         assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
+    }
+
+    #[test]
+    fn imported_wallet_rescan_is_refused_before_any_backend_call() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        control.config.main_descriptor = crate::testutils::imported_wallet_descriptor();
+
+        // A healthy backend that would accept the rescan for a Vault.
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RecoveryNotAvailable)
+        ));
+        // An unavailable backend: still the capability error, not "retry later".
+        backend.lock().unwrap().genesis_error = Some(crate::connect::AdmissionError::Unavailable);
+        backend.lock().unwrap().tip_timestamp = None;
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RecoveryNotAvailable)
+        ));
+        assert!(control.db.connection().rescan_timestamp().is_none());
+        assert!(backend.lock().unwrap().rescan_requests.is_empty());
     }
 
     #[test]

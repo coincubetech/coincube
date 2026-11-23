@@ -9,7 +9,7 @@ pub mod maturity;
 pub mod poller;
 
 use crate::bitcoin::d::{BitcoindError, CachedTxGetter, LSBlockEntry};
-use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 pub use d::{MempoolEntry, MempoolEntryFees, SyncProgress};
 
 use std::{collections::HashMap, fmt, net, sync};
@@ -631,6 +631,32 @@ pub type DetachedBroadcaster =
     sync::Arc<dyn Fn(&bitcoin::Transaction) -> Result<(), String> + Send + Sync>;
 
 pub trait BitcoinInterface: Send {
+    /// For an imported wallet on a Bitcoin Core/Knots backend, the furthest
+    /// derivation range end of either branch on the node. Outputs the node
+    /// reports can belong to any index up to here, on either branch, so mapping
+    /// them must look this far.
+    fn imported_range_end(&self) -> Option<u32> {
+        None
+    }
+    /// Re-read the imported range from the node before mapping its outputs.
+    /// Only a Bitcoin Core/Knots backend has one; see [`Self::imported_range_end`].
+    fn refresh_imported_range(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Keep an imported wallet's imported range ahead of its allocated indices.
+    /// Only a Bitcoin Core/Knots backend has a range to keep; Core does not top
+    /// up inactive descriptors itself.
+    fn keep_imported_range_ahead(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        _highest_index: u32,
+        _discovery_target: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         Err("Wallet record replay requires a regular Bitcoin Core/Knots backend".into())
     }
@@ -869,11 +895,7 @@ pub trait BitcoinInterface: Send {
 
     /// Trigger a rescan of the block chain for transactions related to this descriptor since
     /// the given date.
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String>;
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String>;
 
     /// Rescan progress percentage. Between 0 and 1.
     fn rescan_progress(&self) -> Option<f64>;
@@ -996,6 +1018,31 @@ fn legacy_confirmed_conflicting_spender(
 }
 
 impl BitcoinInterface for d::BitcoinD {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range.map(|range| range.watched)
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.refresh_imported_range((receive, change))
+            .map_err(|e| e.to_string())
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.widen_imported_range((receive, change), highest_index, discovery_target)
+            .map_err(|e| e.to_string())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         if self.local_fork_chain.is_some() {
             return Err("Wallet record replay is available for regular Bitcoin only".into());
@@ -1397,11 +1444,7 @@ impl BitcoinInterface for d::BitcoinD {
         }
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         // FIXME: in theory i think this could potentially fail to actually start the rescan.
         self.start_rescan(desc, timestamp)
             .map_err(|e| e.to_string())
@@ -1718,11 +1761,7 @@ impl BitcoinInterface for electrum::Electrum {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -1876,11 +1915,7 @@ impl BitcoinInterface for esplora::Esplora {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -1905,6 +1940,25 @@ impl BitcoinInterface for esplora::Esplora {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.lock().unwrap().imported_range_end()
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        self.lock().unwrap().refresh_imported_range(descs)
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        self.lock()
+            .unwrap()
+            .keep_imported_range_ahead(descs, highest_index, discovery_target)
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         self.lock().unwrap().request_wallet_record_replay()
     }
@@ -2070,11 +2124,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().request_eager_sync();
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.lock().unwrap().start_rescan(desc, timestamp)
     }
 

@@ -11,6 +11,7 @@ use crate::{
     DaemonControl, DaemonHandle,
 };
 use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 use std::convert::TryInto;
 use std::{
@@ -69,6 +70,10 @@ pub struct DummyBitcoind {
     pub sync_reorg_ancestor: Option<BlockChainTip>,
     /// When set, fallible tip reads fail instead of reporting [`Self::tip`].
     pub chain_tip_error: Option<&'static str>,
+    /// What `imported_range_end` reports: an imported wallet on a node.
+    pub imported_range_end: Option<u32>,
+    /// The range end the node lists now; `refresh_imported_range` adopts it.
+    pub node_range_end: Option<u32>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -115,11 +120,27 @@ impl DummyBitcoind {
             sees_mempool: true,
             sync_reorg_ancestor: None,
             chain_tip_error: None,
+            imported_range_end: None,
+            node_range_end: None,
         }
     }
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range_end
+    }
+    fn refresh_imported_range(
+        &mut self,
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        if self.imported_range_end.is_some() {
+            if let Some(end) = self.node_range_end {
+                self.imported_range_end = Some(end);
+            }
+        }
+        Ok(())
+    }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.record_replay
             .as_ref()
@@ -283,11 +304,7 @@ impl BitcoinInterface for DummyBitcoind {
         }))
     }
 
-    fn start_rescan(
-        &mut self,
-        _: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.rescan_requests.push(timestamp);
         Ok(())
     }
@@ -339,6 +356,7 @@ struct DummyDbState {
     last_poll_timestamp: Option<u32>,
     rollbacks: Vec<BlockChainTip>,
     chain: coincube_core::chain::ChainId,
+    imported_history: Option<crate::database::ImportedHistory>,
 }
 
 /// A handle on shared state: a clone reads and writes the same database.
@@ -433,8 +451,14 @@ impl DummyDatabase {
                 last_poll_timestamp: None,
                 rollbacks: Vec::new(),
                 chain: coincube_core::chain::ChainId::Bitcoin,
+                imported_history: None,
             })),
         }
+    }
+
+    /// Make `imported_history()` report an imported wallet's scan state.
+    pub fn set_imported_history(&mut self, history: crate::database::ImportedHistory) {
+        self.db.write().unwrap().imported_history = Some(history);
     }
 
     /// Set the chain identity `chain()` reports (Bitcoin by default).
@@ -461,6 +485,10 @@ impl DummyDatabase {
 }
 
 impl DatabaseConnection for DummyDatabase {
+    fn imported_history(&mut self) -> Option<crate::database::ImportedHistory> {
+        self.db.read().unwrap().imported_history.clone()
+    }
+
     fn network(&mut self) -> bitcoin::Network {
         self.db.read().unwrap().chain.bitcoin_network()
     }
@@ -982,6 +1010,38 @@ pub fn tmp_dir() -> path::PathBuf {
         thread::current().id(),
         uid(),
     ))
+}
+
+/// A Vault [`WalletDescriptor`] parsed from a multipath descriptor string.
+pub fn vault_wallet_descriptor(desc: &str) -> WalletDescriptor {
+    descriptors::CoincubeDescriptor::from_str(desc)
+        .unwrap()
+        .into()
+}
+
+/// An imported (descriptor-only) mainnet wpkh wallet.
+pub fn imported_wallet_descriptor() -> WalletDescriptor {
+    use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
+    use miniscript::bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+
+    let secp = secp256k1::Secp256k1::new();
+    let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[45; 32]).unwrap();
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+        .unwrap();
+    let key = format!(
+        "[{}/84h/0h/0h]{}",
+        master.fingerprint(&secp),
+        Xpub::from_priv(&secp, &account)
+    );
+    WalletDescriptor::Imported(
+        ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap(),
+    )
 }
 
 impl DummyCoincube {

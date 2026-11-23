@@ -141,26 +141,62 @@ class ImportedDaemon(Coincubed):
         }
         # JSON scalar strings are also TOML basic strings. Keep the imported
         # representation inline so the following scan keys remain at the root.
-        record = ", ".join(
+        self.record = ", ".join(
             f"{key} = {json.dumps(value)}" for key, value in data.items()
         )
+        self.use_backend(backend, indexer)
+
+    def use_backend(self, backend, source):
+        """(Re)write the config for `backend` on the same data directory.
+
+        `source` is the indexer for "esplora"/"electrum" and the `Bitcoind` node
+        for "bitcoind" (the local node an imported wallet moves to)."""
+        root = Path(self.datadir)
         config = (
             f"data_directory = {json.dumps(str(root / 'data'))}\n"
             'log_level = "DEBUG"\n'
-            f"main_descriptor = {{ {record} }}\n"
+            f"main_descriptor = {{ {self.record} }}\n"
             "import_birthday = 0\n"
-            f"import_initial_lookahead = {lookahead}\n"
+            f"import_initial_lookahead = {self.lookahead}\n"
             '[bitcoin_config]\nnetwork = "regtest"\npoll_interval_secs = 1\n'
         )
         if backend == "esplora":
-            config += f"[esplora_config]\naddr = {json.dumps(indexer.url)}\n"
-        else:
+            config += f"[esplora_config]\naddr = {json.dumps(source.url)}\n"
+        elif backend == "electrum":
             config += (
                 "[electrum_config]\n"
-                f'addr = "tcp://127.0.0.1:{indexer.electrum_port}"\n'
+                f'addr = "tcp://127.0.0.1:{source.electrum_port}"\n'
                 "validate_domain = false\n"
             )
+        elif backend == "bitcoind":
+            cookie = Path(source.bitcoin_dir) / "regtest" / ".cookie"
+            config += (
+                "[bitcoind_config]\n"
+                f"cookie_path = {json.dumps(str(cookie))}\n"
+                f'addr = "127.0.0.1:{source.rpcport}"\n'
+            )
+        else:
+            raise ValueError(backend)
+        self.backend = backend
         Path(self.conf_file).write_text(config)
+
+    @property
+    def watchonly_wallet(self):
+        return str(Path(self.datadir) / "data" / "coincubed_watchonly_wallet")
+
+    def wait_ready_on_node(self, height):
+        """`wait_ready` for the local node: no Connect scan runs there, so the
+        persisted history-complete state is checked instead of scan progress."""
+
+        def ready():
+            info = self.rpc.getinfo()
+            return (
+                info["block_height"] == height
+                and info.get("imported_wallet", {}).get("history_complete")
+            )
+
+        wait_for(ready, timeout=120)
+        return self.rpc.getinfo()
 
     def wait_ready(self, height):
         def ready():
@@ -415,4 +451,106 @@ def test_import_recovers_history_after_saved_scan_request(
         assert daemon.rpc.getnewaddress()["derivation_index"] > receive_index
     finally:
         if daemon.proc is not None:
+            daemon.cleanup()
+
+
+def test_complete_import_moves_to_local_node(import_chain, tmp_path):
+    """Scan on Esplora until history is complete, then run the same data
+    directory on the local node after transferring the funding records the way
+    the GUI does (importprunedfunds), and keep tracking beyond Core's range."""
+    node, indexer = import_chain
+    receive = checked_descriptor(node, descriptor_keys("wpkh", 0, seed_offset=111))
+    change = checked_descriptor(node, descriptor_keys("wpkh", 1, seed_offset=111))
+    addresses = [
+        node.rpc.deriveaddresses(receive, [0, 0])[0],
+        node.rpc.deriveaddresses(change, [5, 5])[0],
+        node.rpc.deriveaddresses(receive, [250, 250])[0],
+    ]
+    funding = node.rpc.sendmany(
+        "", dict(zip(addresses, (Decimal("0.01"), Decimal("0.02"), Decimal("0.03"))))
+    )
+    node.generate_block(1, wait_for_mempool=funding)
+    indexer.wait_for_tip(
+        node.rpc.getbestblockhash(), timeout=120, confirmed_txids=(funding,)
+    )
+
+    def snapshot(daemon):
+        return sorted(
+            (
+                coin["outpoint"],
+                coin["amount"],
+                coin["address"],
+                coin["derivation_index"],
+                coin["is_change"],
+            )
+            for coin in daemon.rpc.listcoins()["coins"]
+        )
+
+    daemon = ImportedDaemon(tmp_path / "local-node", receive, change, indexer, "esplora")
+    try:
+        daemon.start()
+        connect = daemon.wait_ready(node.rpc.getblockcount())
+        assert connect["imported_wallet"]["history_complete"]
+        before = snapshot(daemon)
+        assert {coin[2] for coin in before} == set(addresses)
+        daemon.stop()
+
+        daemon.use_backend("bitcoind", node)
+        daemon.start()
+        local = daemon.wait_ready_on_node(node.rpc.getblockcount())
+        assert (
+            local["imported_wallet"]["wallet_identity"]
+            == connect["imported_wallet"]["wallet_identity"]
+        )
+        watchonly = BitcoindRpcInterface(
+            node.bitcoin_dir, "regtest", node.rpcport, daemon.watchonly_wallet
+        )
+        watchonly.importprunedfunds(
+            node.rpc.gettransaction(funding)["hex"], node.rpc.gettxoutproof([funding])
+        )
+        wait_for(lambda: snapshot(daemon) == before)
+
+        # A receive beyond Core's default range of 1000, and beyond what Core
+        # extends a branch to by itself (250 -> 1250 here), is tracked once the
+        # allocated addresses come within the discovery target of the range
+        # both branches cover on the node.
+        listed = [
+            entry["range"][1]
+            for entry in watchonly.listdescriptors()["descriptors"]
+        ]
+        while daemon.rpc.getnewaddress()["derivation_index"] + daemon.lookahead < min(
+            listed
+        ):
+            pass
+        node.generate_block(1)
+        daemon.wait_for_log("Widening the imported wallet's descriptor range")
+        deep_index = max(listed) + 50
+        deep_address = node.rpc.deriveaddresses(receive, [deep_index, deep_index])[0]
+        deep = node.rpc.sendtoaddress(deep_address, Decimal("0.04"))
+        node.generate_block(1, wait_for_mempool=deep)
+        wait_for(
+            lambda: any(
+                coin["outpoint"].startswith(deep + ":")
+                and coin["derivation_index"] == deep_index
+                for coin in daemon.rpc.listcoins()["coins"]
+            )
+        )
+    finally:
+        if daemon.proc is not None:
+            daemon.cleanup()
+
+
+def test_incomplete_import_is_refused_on_local_node(import_chain, tmp_path):
+    node, indexer = import_chain
+    receive = checked_descriptor(node, descriptor_keys("wpkh", 0, seed_offset=112))
+    change = checked_descriptor(node, descriptor_keys("wpkh", 1, seed_offset=112))
+    daemon = ImportedDaemon(tmp_path / "incomplete", receive, change, indexer, "esplora")
+    try:
+        daemon.use_backend("bitcoind", node)
+        TailableProc.start(daemon)
+        daemon.wait_for_log("history scan is not complete")
+        assert daemon.proc.wait(30) != 0
+        assert daemon.watchonly_wallet not in node.node_rpc.listwallets()
+    finally:
+        if daemon.proc is not None and daemon.proc.poll() is None:
             daemon.cleanup()
