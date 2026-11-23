@@ -1146,7 +1146,13 @@ impl PhysicalDiscovery<'_> {
                     .await
                     .is_ok()
                 {
-                    match HardwareWallet::new(id, Arc::new(device), Some(self.keys_aliases)).await {
+                    match within_serial_discovery(HardwareWallet::new(
+                        id,
+                        Arc::new(device),
+                        Some(self.keys_aliases),
+                    ))
+                    .await
+                    {
                         Ok(hw) => hws.push(hw),
                         Err(e) => {
                             debug!("{}", e);
@@ -1179,13 +1185,13 @@ impl PhysicalDiscovery<'_> {
                 warn!("{:?}", e);
             }
             Ok(device) => {
-                match handle_jade_device(
+                match within_serial_discovery(handle_jade_device(
                     id,
                     self.network,
                     Jade::new(device).with_network(self.network),
                     self.wallet.as_ref().map(|w| w.as_ref()),
                     Some(self.keys_aliases),
-                )
+                ))
                 .await
                 {
                     Ok(hw) => {
@@ -1486,6 +1492,24 @@ fn bind_ledger_wallet<T: async_hwi::ledger::Transport + Sync + Send + 'static>(
         }
     }
     (device, registered)
+}
+
+/// How long a serial device (Jade, Specter) gets to answer the scan.
+const SERIAL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a serial device's discovery, giving up after
+/// [`SERIAL_DISCOVERY_TIMEOUT`]. A device that was just plugged in lists its
+/// serial port while it is still booting and never answers a request sent
+/// then; the serial reads have no timeout of their own, so waiting on one
+/// would stall the scan of every device until the stream is dropped. Giving
+/// up leaves the device unlisted, and the next scan asks again on a fresh
+/// port.
+async fn within_serial_discovery<T>(
+    discovery: impl std::future::Future<Output = Result<T, HWIError>>,
+) -> Result<T, HWIError> {
+    tokio::time::timeout(SERIAL_DISCOVERY_TIMEOUT, discovery)
+        .await
+        .map_err(|_| HWIError::Device("The device did not answer".to_string()))?
 }
 
 async fn handle_jade_device(
@@ -1797,6 +1821,33 @@ mod tests {
         assert_eq!(listed_registration(Some(&vault), false), Some(false));
         assert_eq!(listed_registration(Some(&vault), true), Some(true));
         assert_eq!(listed_registration(None, false), Some(false));
+    }
+
+    /// A Jade that never answers, as one probed while it boots.
+    #[derive(Debug)]
+    struct SilentJade;
+
+    #[async_trait::async_trait]
+    impl jade::Transport for SilentJade {
+        async fn request<
+            S: serde::Serialize + Send + Unpin,
+            D: serde::de::DeserializeOwned + Unpin + Send,
+        >(
+            &self,
+            _method: &str,
+            _params: Option<S>,
+        ) -> Result<jade::api::Response<D>, jade::JadeError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_jade_that_never_answers_does_not_stall_the_scan() {
+        let started = tokio::time::Instant::now();
+        let jade = Jade::new(SilentJade);
+        let res = within_serial_discovery(jade.get_info()).await;
+        assert!(matches!(res, Err(HWIError::Device(_))));
+        assert_eq!(started.elapsed(), SERIAL_DISCOVERY_TIMEOUT);
     }
 
     fn refresh_hash(wallet: Option<Arc<Wallet>>, root: &str) -> u64 {
