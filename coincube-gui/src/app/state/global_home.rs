@@ -47,6 +47,39 @@ fn vault_sweep_coins(cache: &Cache) -> (Vec<OutPoint>, Amount) {
         )
 }
 
+/// The input coins and change output indexes [`Wallet::record_broadcast`]
+/// needs for a transfer's `psbt`.
+///
+/// `None` unless the cache holds every input. A record with inputs missing
+/// would hide nothing from the next transfer, and one with no inputs at all is
+/// never reconciled away, leaving a pending row for a confirmed transaction.
+fn transfer_broadcast_record(
+    wallet: &Wallet,
+    psbt: &Psbt,
+    cache_coins: &[crate::daemon::model::Coin],
+) -> Option<(Vec<crate::daemon::model::Coin>, Vec<usize>)> {
+    use coincube_core::wallet_descriptor::SpendAnalysis;
+    let coins: Vec<_> = psbt
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| {
+            cache_coins
+                .iter()
+                .find(|coin| coin.outpoint == input.previous_output)
+                .cloned()
+        })
+        .collect::<Option<_>>()?;
+    if coins.is_empty() {
+        return None;
+    }
+    let change_indexes = wallet.main_descriptor.spend_change_indexes(
+        psbt,
+        &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+    );
+    Some((coins, change_indexes))
+}
+
 /// What `psbt` pays to `script`.
 fn paid_to(psbt: &Psbt, script: &ScriptBuf) -> Amount {
     psbt.unsigned_tx
@@ -1518,13 +1551,33 @@ impl GlobalHome {
             )));
         };
         self.is_sending = true;
+        // The daemon returns before its poller has seen the spend, so record it
+        // on the wallet as the Send dialog does: until the daemon catches up,
+        // the coin cache keeps these inputs out of the next transfer.
+        // The transfer's `SpendTx` carries no coins or change indexes, so take
+        // them from the cache and the descriptor.
+        let broadcast_record = self.wallet.clone().and_then(|wallet| {
+            let (coins, change_indexes) =
+                transfer_broadcast_record(&wallet, &spend_tx.psbt, cache.coins())?;
+            Some((
+                wallet,
+                spend_tx.psbt.unsigned_tx.clone(),
+                coins,
+                change_indexes,
+                spend_tx.network,
+            ))
+        });
 
         Task::perform(
             async move {
                 daemon_clone
                     .broadcast_spend_tx(&txid)
                     .await
-                    .map_err(|e| format!("Failed to broadcast: {}", e))
+                    .map_err(|e| format!("Failed to broadcast: {}", e))?;
+                if let Some((wallet, tx, coins, change_indexes, network)) = broadcast_record {
+                    wallet.record_broadcast(tx, coins, change_indexes, network);
+                }
+                Ok(())
             },
             move |result| Self::vault_broadcast_message(to_kind, amount_sat, result),
         )
@@ -4277,7 +4330,7 @@ impl GlobalHome {
         Task::perform(
             async move {
                 match daemon
-                    .create_spend_tx(&outpoints, &destinations, feerate_vb, Some(change))
+                    .preview_spend_tx(&outpoints, &destinations, feerate_vb, change)
                     .await
                 {
                     Ok(CreateSpendResult::Success { psbt, .. }) => {
@@ -5085,12 +5138,116 @@ mod tests {
 
         const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
 
+        /// An unsigned transaction spending the coins numbered `inputs` to an
+        /// output that is not this wallet's.
+        fn spending(inputs: &[u32]) -> Psbt {
+            use coincube_core::miniscript::bitcoin::{
+                absolute, transaction, Transaction, TxIn, TxOut,
+            };
+            Psbt::from_unsigned_tx(Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: inputs
+                    .iter()
+                    .map(|n| TxIn {
+                        previous_output: outpoint(*n),
+                        ..TxIn::default()
+                    })
+                    .collect(),
+                output: vec![TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            })
+            .unwrap()
+        }
+
+        /// The daemon answers a broadcast before its poller has seen the spend.
+        /// What a transfer records must hide its inputs from the coin cache
+        /// until then, and must clear once the daemon reports the spend.
+        #[test]
+        fn a_transfer_broadcast_hides_its_inputs_until_the_daemon_catches_up() {
+            let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
+            let cache_coins = vec![
+                coin(1, 50_000, Some(1), false, false),
+                coin(2, 70_000, Some(1), false, false),
+                coin(3, 90_000, Some(1), false, false),
+            ];
+            let psbt = spending(&[1, 2]);
+            let txid = psbt.unsigned_tx.compute_txid();
+
+            let (inputs, change_indexes) = transfer_broadcast_record(&wallet, &psbt, &cache_coins)
+                .expect("the cache holds both inputs");
+            assert_eq!(
+                inputs.iter().map(|c| c.outpoint).collect::<Vec<_>>(),
+                vec![outpoint(1), outpoint(2)]
+            );
+            assert!(change_indexes.is_empty());
+            wallet.record_broadcast(
+                psbt.unsigned_tx.clone(),
+                inputs,
+                change_indexes,
+                Network::Testnet,
+            );
+
+            let mut refreshed = cache_coins.clone();
+            wallet.apply_coin_overrides(&mut refreshed);
+            assert_eq!(
+                refreshed
+                    .iter()
+                    .map(|c| c.spend_info.as_ref().map(|info| info.txid))
+                    .collect::<Vec<_>>(),
+                vec![Some(txid), Some(txid), None]
+            );
+
+            // The daemon has caught up: a spent input is gone from its coins.
+            wallet.reconcile_with_coins(&cache_coins[1..]);
+            let mut later = cache_coins.clone();
+            wallet.apply_coin_overrides(&mut later);
+            assert!(later.iter().all(|c| c.spend_info.is_none()));
+        }
+
+        /// A record without every input would never be reconciled away.
+        #[test]
+        fn a_transfer_whose_inputs_the_cache_does_not_hold_records_nothing() {
+            let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
+            let cache_coins = vec![coin(1, 50_000, Some(1), false, false)];
+            assert!(transfer_broadcast_record(&wallet, &spending(&[1, 9]), &cache_coins).is_none());
+            assert!(transfer_broadcast_record(&wallet, &spending(&[]), &cache_coins).is_none());
+        }
+
         /// Records what the preview asks the daemon for. Everything else is off
         /// limits: a preview that touched any other daemon call would be a
         /// different bug.
         #[derive(Debug, Default)]
         struct RecordingDaemon {
             calls: Mutex<Vec<(u64, Option<Address<address::NetworkUnchecked>>)>>,
+            /// How many of `calls` asked for a spend the daemon keeps
+            /// (`create_spend_tx`) rather than a preview.
+            kept: Mutex<usize>,
+        }
+
+        impl RecordingDaemon {
+            fn record(
+                &self,
+                feerate_vb: u64,
+                change_address: Option<Address<address::NetworkUnchecked>>,
+            ) -> crate::daemon::model::CreateSpendResult {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((feerate_vb, change_address));
+                let tx = coincube_core::miniscript::bitcoin::Transaction {
+                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                    input: vec![],
+                    output: vec![],
+                };
+                crate::daemon::model::CreateSpendResult::Success {
+                    psbt: Psbt::from_unsigned_tx(tx).expect("empty unsigned tx"),
+                    warnings: vec![],
+                }
+            }
         }
 
         #[async_trait::async_trait]
@@ -5169,20 +5326,18 @@ mod tests {
                 feerate_vb: u64,
                 change_address: Option<Address<address::NetworkUnchecked>>,
             ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((feerate_vb, change_address));
-                let tx = coincube_core::miniscript::bitcoin::Transaction {
-                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
-                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
-                    input: vec![],
-                    output: vec![],
-                };
-                Ok(crate::daemon::model::CreateSpendResult::Success {
-                    psbt: Psbt::from_unsigned_tx(tx).expect("empty unsigned tx"),
-                    warnings: vec![],
-                })
+                *self.kept.lock().unwrap() += 1;
+                Ok(self.record(feerate_vb, change_address))
+            }
+
+            async fn preview_spend_tx(
+                &self,
+                _coins_outpoints: &[OutPoint],
+                _destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+                feerate_vb: u64,
+                change_address: Address<address::NetworkUnchecked>,
+            ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+                Ok(self.record(feerate_vb, Some(change_address)))
             }
 
             async fn rbf_psbt(
@@ -5332,6 +5487,14 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![2, 25, 2, 20],
                 "every valid keystroke previews once"
+            );
+            // An imported wallet stores every spend `create_spend_tx` builds
+            // and lists it as an unsigned draft, so a keystroke must only
+            // ever preview.
+            assert_eq!(
+                *daemon.kept.lock().unwrap(),
+                0,
+                "a preview asked the daemon for a spend it keeps"
             );
             let sizing = wallet.preview_change_address();
             for (feerate, change) in calls.iter() {
