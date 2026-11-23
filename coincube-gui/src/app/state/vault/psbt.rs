@@ -2704,15 +2704,18 @@ impl SignModal {
         // Keychain flow launched but still resolving — we don't yet know which
         // unidentified keys are Keychain signers, so show a neutral hint rather
         // than a misleading "connect a device" message.
-        if self.keychain.as_ref().is_some_and(|k| k.is_loading()) {
+        let may_be_keychain = self.may_be_keychain_key(fp);
+        if may_be_keychain && self.keychain.as_ref().is_some_and(|k| k.is_loading()) {
             return St::Disabled("Looking up Mobile signers…".to_string());
         }
         // Unidentified: an external key whose device isn't connected and which
         // Connect hasn't resolved. Shown disabled — never guessed as Keychain.
         // When Keychain is possible here but Connect is signed out, offer a
         // clickable "Sign in to Connect" so any Keychain signer among these
-        // rows can be resolved.
-        if self.keychain_enabled && self.keychain.is_none() {
+        // rows can be resolved. A key that cannot be held in Connect — the
+        // Vault recorded its Keychain keys and this isn't one, or the wallet
+        // was imported — is never offered Connect: signing in can't reach it.
+        if may_be_keychain && self.keychain_enabled && self.keychain.is_none() {
             match &self.connect_account {
                 // Signed out, or signed in as the owner while Keychain is
                 // still coming up: "Sign in to Connect" either routes to Home
@@ -2741,6 +2744,16 @@ impl SignModal {
             }
         }
         St::Disabled("Connect this signing device to sign.".to_string())
+    }
+
+    /// Whether `fp` could be a key held in the COINCUBE Keychain (and so
+    /// reachable through Connect). Certain once the Vault recorded which keys
+    /// came from it; a Vault from before that record may still hold one, so
+    /// any of its keys could be. An imported wallet never has one.
+    fn may_be_keychain_key(&self, fp: Fingerprint) -> bool {
+        !self.wallet.is_imported()
+            && (!self.wallet.keychain_keys_recorded
+                || self.wallet.keychain_key_ids.contains_key(&fp))
     }
 
     /// Icon kind for a descriptor key: master / border / connected-hardware /
@@ -4610,6 +4623,65 @@ mod tests {
             &row.state,
             SigningKeyState::Disabled(reason) if reason.contains("Connect this signing device")
         )));
+    }
+
+    #[test]
+    fn signing_paths_offer_connect_only_for_keys_held_in_the_keychain() {
+        use view::vault::psbt::SigningKeyState;
+
+        let phone = fingerprint("f714c228");
+        let primary_rows = |wallet: Wallet, status: ConnectAccountStatus| {
+            SignModal::new(
+                HashSet::new(),
+                Arc::new(wallet),
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Signet,
+                false,
+                None,
+                None,
+                true,
+            )
+            .with_connect_account(status)
+            .signing_paths()
+            .into_iter()
+            .find(|p| p.is_primary)
+            .unwrap()
+            .keys
+        };
+
+        for status in [
+            ConnectAccountStatus::SignedOut,
+            ConnectAccountStatus::Owner,
+            ConnectAccountStatus::OtherAccount,
+            ConnectAccountStatus::SignedInUnknownOwner,
+        ] {
+            // Recorded, and only `phone` came from the Keychain: the other
+            // keys are external devices, which Connect cannot sign for.
+            let recorded = wallet().with_keychain_keys(HashMap::from([(phone, 42)]), true);
+            let rows = primary_rows(recorded, status.clone());
+            assert!(rows.len() > 1);
+            for row in rows {
+                if row.fingerprint == phone {
+                    assert!(matches!(
+                        row.state,
+                        SigningKeyState::NeedsSignIn(_) | SigningKeyState::NeedsAccountSwitch(_)
+                    ));
+                } else {
+                    assert!(matches!(
+                        &row.state,
+                        SigningKeyState::Disabled(reason)
+                            if reason.contains("Connect this signing device")
+                    ));
+                }
+            }
+
+            // Recorded with no Keychain key at all: no row mentions Connect.
+            let none = wallet().with_keychain_keys(HashMap::new(), true);
+            assert!(primary_rows(none, status).iter().all(|row| matches!(
+                &row.state,
+                SigningKeyState::Disabled(reason) if reason.contains("Connect this signing device")
+            )));
+        }
     }
 
     #[test]
