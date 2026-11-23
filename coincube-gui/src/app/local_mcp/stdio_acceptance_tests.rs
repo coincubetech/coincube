@@ -85,8 +85,7 @@ async fn client(settings: &mut Settings, id: &str) -> stdio::Client {
     let servers = configuration["mcpServers"].as_object().unwrap();
     assert_eq!(servers.len(), 1);
     let (key, server) = servers.iter().next().unwrap();
-    assert!(key.starts_with("coincube-"), "{}", key);
-    assert!(key.ends_with(&id[..8]), "{}", key);
+    assert_eq!(key, &format!("coincube-{}", &id[..8]));
     let environment: Vec<_> = server["env"]
         .as_object()
         .unwrap()

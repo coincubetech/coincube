@@ -122,7 +122,8 @@ inputs, outputs and permissions, and each copied entry has its own name. A
 saved prompt, tool allowlist or automation that names a `tenshu_*` tool must use
 the `coincube_*` name instead; calling an old name returns `unknown_tool`. An
 existing `tenshu` host entry keeps working because the entry name is only a
-label, but copy the configuration again to get the new name.
+label. To move to the new name, copy the configuration again and replace the
+`tenshu` entry with it; keeping both lists every tool twice under one credential.
 
 ## STDIO client configuration
 
@@ -131,7 +132,7 @@ The GUI produces this shape, with actual paths and a private pairing credential:
 ```json
 {
   "mcpServers": {
-    "coincube-claude-desktop-0f3a9c21": {
+    "coincube-0f3a9c21": {
       "command": "/Applications/COINCUBE.app/Contents/MacOS/coincube-mcp",
       "env": {
         "COINCUBE_MCP_PAIRING": "/PRIVATE_DATADIR/regtest/mcp-pairings/CUBE_SCOPE/CLIENT.endpoint",
@@ -142,12 +143,16 @@ The GUI produces this shape, with actual paths and a private pairing credential:
 }
 ```
 
-The entry name is `coincube-`, the client name you entered (lowercase ASCII
-letters and digits, other characters become single hyphens, at most 24
-characters, omitted if nothing remains) and the first eight characters of the
-pairing id, which also appears in the private locator. Two clients with the same
-name therefore get different entries. A legacy one-hour session grant is named
-`coincube-session`.
+The entry name is `coincube-` and the first eight characters of the pairing id,
+which also appears in the private locator, so every paired client gets its own
+entry. The client name you entered stays in COINCUBE Desktop and is not part of
+the entry name: hosts such as Claude Code expose each tool as
+`mcp__<entry>__<tool>`, and several hosts cap that at 64 characters. With a
+17-character entry the longest tool fits (58 characters); a test bounds every
+tool name against it. To tell entries apart, match the eight characters to the
+client's locator. A legacy one-hour session grant is always named
+`coincube-session`, so two such grants pasted into one host still replace each
+other; pair the client persistently instead.
 
 To start a new host configuration file, save the copied document as it is. If
 the file already has an `mcpServers` object, copy only the named entry (the key

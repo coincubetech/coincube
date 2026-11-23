@@ -91,6 +91,9 @@ async fn dispatch_matches_discovery_and_capabilities() {
     }
 }
 
+/// Longest host entry name COINCUBE Desktop copies into a client configuration.
+const HOST_ENTRY_MAX_LEN: usize = 17;
+
 /// Tool names are part of the client contract: every advertised tool uses the
 /// product prefix, and the pre-rename `tenshu_*` names are unknown tools that
 /// never reach desktop IPC.
@@ -103,6 +106,15 @@ async fn tools_use_the_coincube_prefix_and_old_names_are_unknown() {
     assert!(!names.is_empty());
     for name in &names {
         assert!(name.starts_with("coincube_"), "{name}");
+        // Hosts expose tools as `mcp__<entry>__<tool>` and several cap that at
+        // 64 characters. COINCUBE Desktop's copied entry names are at most 17
+        // characters (`coincube-` + 8 id characters; see `server_key` in
+        // coincube-gui's local_mcp.rs), so every tool must fit beside one.
+        let qualified = "mcp__".len() + HOST_ENTRY_MAX_LEN + "__".len() + name.len();
+        assert!(
+            qualified <= 64,
+            "{name} qualifies to {qualified} characters"
+        );
     }
     let credential = "a".repeat(64);
     let reader = Arc::new(RecordingReader::default());

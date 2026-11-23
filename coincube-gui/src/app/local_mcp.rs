@@ -836,7 +836,7 @@ impl Settings {
                         .parent()?
                         .join(format!("coincube-mcp{}", std::env::consts::EXE_SUFFIX));
                     return client_config(
-                        &server_key(None, LEGACY_SESSION_KEY),
+                        LEGACY_SESSION_KEY,
                         serde_json::json!({
                             "command": executable,
                             "env": {"COINCUBE_MCP_SOCKET": server.socket, "COINCUBE_MCP_CREDENTIAL": server.grant.credential()}
@@ -912,7 +912,7 @@ impl Settings {
             .parent()?
             .join(format!("coincube-mcp{}", std::env::consts::EXE_SUFFIX));
         let config = client_config(
-            &server_key(Some(&client.name), &id),
+            &server_key(&id),
             serde_json::json!({
                 "command": executable,
                 "env": {"COINCUBE_MCP_PAIRING": store.location.locator(&id), "COINCUBE_MCP_CREDENTIAL": client.credential}
@@ -1400,46 +1400,31 @@ fn project_transaction(
     }
 }
 
-/// Suffix that names a one-hour legacy session grant's host entry.
-const LEGACY_SESSION_KEY: &str = "session";
-/// Longest readable client-name part of a host entry key.
-const SERVER_KEY_NAME_CHARS: usize = 24;
-/// Pairing-id characters that keep two clients with the same name apart.
+/// Host entry name for a one-hour legacy session grant. Those grants predate
+/// persistent pairing and expire within the hour, so a fixed name is kept.
+const LEGACY_SESSION_KEY: &str = "coincube-session";
+/// Pairing-id characters in a host entry name.
 const SERVER_KEY_ID_CHARS: usize = 8;
+/// Longest host entry name `server_key` produces.
+const SERVER_KEY_MAX_LEN: usize = "coincube-".len() + SERVER_KEY_ID_CHARS;
 
-/// Name one client's entry in an MCP host's `mcpServers` object.
+/// Name one paired client's entry in an MCP host's `mcpServers` object.
 ///
-/// Every pairing gets its own key, so a second client pasted into the same
-/// host configuration adds an entry instead of replacing the first. The key
-/// is `coincube-<name>-<id>`: the client's label lowercased to ASCII letters,
-/// digits and single hyphens (omitted when nothing remains), then the start
-/// of the pairing id. The id is already part of the private locator in the
-/// same configuration, so the key reveals nothing new. Only letters, digits
-/// and hyphens appear, which every host accepts as a server name.
-fn server_key(name: Option<&str>, id: &str) -> String {
-    let mut slug = String::new();
-    for c in name.unwrap_or_default().chars() {
-        if slug.len() >= SERVER_KEY_NAME_CHARS {
-            break;
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_end_matches('-');
+/// Every pairing gets its own name, so a second client pasted into the same
+/// host configuration adds an entry instead of replacing the first. The name
+/// is `coincube-` and the first eight characters of the pairing id, which
+/// already appears in the private locator of the same configuration. It is
+/// deliberately short: hosts expose tools as `mcp__<entry>__<tool>`, and
+/// several cap that at 64 characters (see `coincube_mcp`'s tool-name bound).
+/// The client's label stays in COINCUBE Desktop, not in the host entry.
+fn server_key(id: &str) -> String {
     let id: String = id
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .take(SERVER_KEY_ID_CHARS)
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    if slug.is_empty() {
-        format!("coincube-{id}")
-    } else {
-        format!("coincube-{slug}-{id}")
-    }
+    format!("coincube-{id}")
 }
 
 /// Render one private client configuration as a complete host document.
@@ -1454,50 +1439,37 @@ fn client_config(key: &str, server: serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod server_key_tests {
-    use super::server_key;
+    use super::{server_key, LEGACY_SESSION_KEY, SERVER_KEY_MAX_LEN};
 
     #[test]
-    fn keys_combine_a_readable_name_with_the_pairing_id() {
-        assert_eq!(
-            server_key(Some("Claude Desktop"), "0f3a9c21d4e5b6a7"),
-            "coincube-claude-desktop-0f3a9c21"
-        );
-        assert_eq!(
-            server_key(Some("  My   AI — laptop!! "), "ABCDEF0123"),
-            "coincube-my-ai-laptop-abcdef01"
-        );
+    fn keys_use_the_pairing_id_prefix() {
+        assert_eq!(server_key("0f3a9c21d4e5b6a7"), "coincube-0f3a9c21");
+        assert_eq!(server_key("ABCDEF0123456789"), "coincube-abcdef01");
     }
 
     #[test]
-    fn same_name_on_two_pairings_gives_two_keys() {
-        let first = server_key(Some("Claude"), "11111111aaaa");
-        let second = server_key(Some("Claude"), "22222222bbbb");
-        assert_ne!(first, second);
+    fn two_pairings_get_two_keys() {
+        let first = uuid::Uuid::new_v4().simple().to_string();
+        let second = uuid::Uuid::new_v4().simple().to_string();
+        assert_ne!(server_key(&first), server_key(&second));
     }
 
     #[test]
-    fn names_without_ascii_letters_fall_back_to_the_id() {
-        assert_eq!(
-            server_key(Some("日本語"), "deadbeef99"),
-            "coincube-deadbeef"
-        );
-        assert_eq!(server_key(None, "session"), "coincube-session");
-    }
-
-    #[test]
-    fn long_names_are_bounded_and_keys_use_only_safe_characters() {
-        let key = server_key(
-            Some(&"a very long client label ".repeat(10)),
-            "0123456789abcdef",
-        );
-        assert!(key.len() <= "coincube-".len() + 24 + 1 + 8, "{}", key);
-        assert!(!key.contains("--"), "{}", key);
-        assert!(
-            key.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-            "{}",
-            key
-        );
+    fn keys_are_short_and_use_only_safe_characters() {
+        for key in [
+            server_key(&uuid::Uuid::new_v4().simple().to_string()),
+            LEGACY_SESSION_KEY.to_owned(),
+        ] {
+            assert!(key.len() <= SERVER_KEY_MAX_LEN, "{}", key);
+            assert!(
+                key.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{}",
+                key
+            );
+        }
+        // The companion bounds tool names against this length.
+        assert_eq!(SERVER_KEY_MAX_LEN, 17);
     }
 }
 
@@ -2677,11 +2649,8 @@ mod tests {
                 .id
                 .clone();
             let original = configuration(&mut settings, &first);
-            let first_key = server_key(Some("Balance client"), &first);
-            assert_eq!(
-                first_key,
-                format!("coincube-balance-client-{}", &first[..8])
-            );
+            let first_key = server_key(&first);
+            assert_eq!(first_key, format!("coincube-{}", &first[..8]));
             assert_eq!(original["mcpServers"].as_object().unwrap().len(), 1);
             let vars = &original["mcpServers"][first_key.as_str()]["env"];
             let path = std::path::PathBuf::from(vars["COINCUBE_MCP_PAIRING"].as_str().unwrap());
@@ -2733,7 +2702,7 @@ mod tests {
                 .id
                 .clone();
             let second_cfg = configuration(&mut settings, &second);
-            let second_key = server_key(Some("History client"), &second);
+            let second_key = server_key(&second);
             assert_ne!(first_key, second_key);
             // Pasting both into one host configuration keeps both clients.
             let mut merged = original["mcpServers"].as_object().unwrap().clone();
