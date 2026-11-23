@@ -309,6 +309,16 @@ impl WalletDescriptor {
         PublicBranchRef(self.branches_public().1)
     }
 
+    /// Whether a node watching this wallet must understand Taproot.
+    ///
+    /// Derived from the branch descriptors, so it applies to an imported wallet
+    /// too. For a Vault it equals [`CoincubeDescriptor::is_taproot`]: both of its
+    /// branches are single-path forms of the same top-level descriptor.
+    pub fn is_taproot(&self) -> bool {
+        let (receive, change) = self.branches_public();
+        matches!(receive, Descriptor::Tr(_)) || matches!(change, Descriptor::Tr(_))
+    }
+
     pub fn branches_public(
         &self,
     ) -> (
@@ -695,6 +705,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         format!("wsh({kind}(2,{keys}))")
+    }
+
+    #[test]
+    fn taproot_flag_follows_the_branch_descriptors() {
+        let wpkh = ImportedWalletDescriptor::parse(
+            &single(0, Network::Bitcoin, true),
+            Some(&single(1, Network::Bitcoin, true)),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        // Imported wallets admit no Taproot shape today; the flag still reads
+        // the branches, so a wpkh import never demands a Taproot-capable node.
+        assert!(!WalletDescriptor::Imported(wpkh).is_taproot());
+        for (desc, taproot) in [
+            ("wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))", false),
+            ("tr([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/<0;1>/*,and_v(v:pk([1dce71b2/48'/1'/0'/2']tpubDEeP3GefjqbaDTTaVAF5JkXWhoFxFDXQ9KuhVrMBViFXXNR2B3Lvme2d2AoyiKfzRFZChq2AGMNbU1qTbkBMfNv7WGVXLt2pnYXY87gXqcs/<2;3>/*),older(65535)))", true),
+        ] {
+            let vault = CoincubeDescriptor::from_str(desc).unwrap();
+            assert_eq!(vault.is_taproot(), taproot);
+            assert_eq!(WalletDescriptor::Vault(vault).is_taproot(), taproot);
+        }
     }
 
     #[test]

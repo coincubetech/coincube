@@ -761,7 +761,7 @@ fn scan_repair_needed(
 fn heal_scan_window(
     bitcoind: &mut BitcoinD,
     db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-    descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    descriptor: &coincube_core::wallet_descriptor::WalletDescriptor,
 ) {
     // The database first, deliberately. It is a local read, and when it comes
     // back empty — every fresh install — there is no history that could fall
@@ -913,10 +913,12 @@ fn setup_bitcoind(
     fresh_data_dir: bool,
     admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
-    let vault = config.main_descriptor.as_vault().ok_or_else(||
-        StartupError::Config(ConfigError::Unexpected(
+    if config.main_descriptor.as_vault().is_none() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
             "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )))?;
+        )));
+    }
+    let wallet = &config.main_descriptor;
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = bitcoind_watchonly_wallet_path(data_dir);
 
@@ -928,15 +930,15 @@ fn setup_bitcoind(
         Some(bitcoind) => bitcoind,
         None => BitcoinD::new(bitcoind_config, wo_path_str)?,
     };
-    bitcoind.node_sanity_checks(config.bitcoin_config.network, vault.is_taproot())?;
+    bitcoind.node_sanity_checks(config.bitcoin_config.network, wallet.is_taproot())?;
     if fresh_data_dir || !wo_path.exists() {
         log::info!("Creating a new watchonly wallet on bitcoind.");
-        bitcoind.create_watchonly_wallet(vault)?;
+        bitcoind.create_watchonly_wallet(wallet)?;
         log::info!("Watchonly wallet created.");
     }
     log::info!("Loading our watchonly wallet on bitcoind.");
     bitcoind.maybe_load_watchonly_wallet()?;
-    bitcoind.wallet_sanity_checks(vault)?;
+    bitcoind.wallet_sanity_checks(wallet)?;
     log::info!("Watchonly wallet loaded on bitcoind and sanity checked.");
 
     Ok(bitcoind)
@@ -1727,8 +1729,8 @@ fn heal_startup_scan_window(
     // A wallet whose scan window starts after the coins we already know about
     // cannot track them, and nothing else notices — see `heal_scan_window`.
     if let Some(bitcoind) = bitcoind.as_mut() {
-        if let Some(vault) = config.main_descriptor.as_vault() {
-            heal_scan_window(bitcoind, db, vault);
+        if config.main_descriptor.as_vault().is_some() {
+            heal_scan_window(bitcoind, db, &config.main_descriptor);
         }
     }
 }

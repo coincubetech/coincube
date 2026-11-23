@@ -488,7 +488,10 @@ fn electrum_refused_poll_during_a_rescan_keeps_the_rescan_and_warns() {
         assert_eq!(shared.rescan_progress(), None);
 
         // The user asks for a rescan, and its first poll is refused.
-        let desc = DESCRIPTOR.parse().unwrap();
+        let desc: coincube_core::wallet_descriptor::WalletDescriptor = DESCRIPTOR
+            .parse::<coincube_core::descriptors::CoincubeDescriptor>()
+            .unwrap()
+            .into();
         shared.start_rescan(&desc, 0).unwrap();
         assert_eq!(shared.rescan_progress(), Some(0.0));
         height.store(u32::MAX as u64, Ordering::SeqCst);
