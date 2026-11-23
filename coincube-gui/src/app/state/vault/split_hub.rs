@@ -133,6 +133,13 @@ pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
         match cache.chain_status(&coin.outpoint) {
             ChainStatus::BothChains => KeyStatus::BothChains { amount },
             ChainStatus::CouldntVerify => KeyStatus::CouldntVerify { amount },
+            _ if cache
+                .chain_proofs
+                .get(&coin.outpoint)
+                .is_some_and(|entry| entry.is_waiting_to_retry()) =>
+            {
+                KeyStatus::Retrying { amount }
+            }
             _ => KeyStatus::Checking {
                 amount,
                 confirmations,
@@ -154,7 +161,7 @@ pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
     let pending = |status: &KeyStatus| {
         matches!(
             status,
-            KeyStatus::Confirming { .. } | KeyStatus::Checking { .. }
+            KeyStatus::Confirming { .. } | KeyStatus::Checking { .. } | KeyStatus::Retrying { .. }
         )
     };
     // A coin still on its way (at the address, or any new incoming one)
@@ -791,6 +798,44 @@ mod tests {
             vec![a, b]
         );
         assert_eq!(flow.copy, CopyCard::Create);
+    }
+
+    /// A split coin the Vault already holds skips step one after a restart
+    /// (its path loads as saved) and while Connect can't be read (its fresh
+    /// check fails): the build re-qualifies it, so the flow needn't wait for
+    /// the background check nor ask for another coin.
+    #[test]
+    fn a_split_coin_held_from_an_earlier_session_starts_at_review() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        assert_ne!(cache.chain_status(&key), ChainStatus::OnlyHere);
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.key, Some(Amount::from_sat(30_000)));
+
+        let failed = ProofEntry::after_check(
+            cache.chain_proofs.get(&key),
+            ProofEntry::failed(std::time::SystemTime::now()),
+        );
+        cache.chain_proofs.insert(key, failed);
+        assert_eq!(panel.flow(&cache).step, Step::Review);
+    }
+
+    /// A coin whose history check couldn't finish says so, instead of
+    /// "checking… under a minute", and still counts as the coin on its way.
+    #[test]
+    fn a_failed_check_shows_as_retrying() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::failed(std::time::SystemTime::now()));
+        assert_eq!(
+            panel.flow(&cache).step,
+            Step::Key(KeyStatus::Retrying {
+                amount: Amount::from_sat(30_000)
+            })
+        );
     }
 
     fn fee(generation: u64, rate: Option<u64>) -> Message {

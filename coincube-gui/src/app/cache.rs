@@ -758,11 +758,16 @@ impl Cache {
         crate::services::chain_status::classify(self.chain_evidence(outpoint))
     }
 
-    /// Vault coins that can serve as a split key: unspent, with a verified
-    /// ancestry path, and not spent by a pending split. A coin shown as
-    /// separated by the twin Cube's split is not one: its twin copy is gone
-    /// but it still descends from a both-chain coin. The split builder
-    /// re-qualifies the chosen key before anything is built.
+    /// Vault coins that can serve as a split key: unspent, holding an
+    /// ancestry path, and not spent by a pending split. The path is one a
+    /// check verified in this session or, after those, one kept from an
+    /// earlier session or derived from this Cube's own split (still shown as
+    /// checking): either way the split builder re-qualifies the chosen key
+    /// against both chains before anything is built, so a Vault that already
+    /// holds a split coin need not wait for the background check, nor be
+    /// sent another. A coin shown as separated by the twin Cube's split is
+    /// not one: its twin copy is gone but it still descends from a
+    /// both-chain coin.
     pub fn split_keys(
         &self,
     ) -> Vec<(
@@ -782,19 +787,21 @@ impl Cache {
                 coin.spend_info.is_none() && !coin.is_immature && coin.block_height.is_some()
             })
             .filter(|coin| !pending.contains(&coin.outpoint))
-            .filter_map(|coin| match self.chain_proofs.get(&coin.outpoint) {
-                Some(crate::services::chain_status::ProofEntry::Verified(path))
-                    if self.entanglement_of(&coin.outpoint.txid)
-                        != crate::services::entangled::Entanglement::Entangled =>
-                {
-                    Some((coin, path))
-                }
-                _ => None,
+            .filter(|coin| {
+                self.entanglement_of(&coin.outpoint.txid)
+                    != crate::services::entangled::Entanglement::Entangled
+            })
+            .filter_map(|coin| {
+                let entry = self.chain_proofs.get(&coin.outpoint)?;
+                Some((coin, entry.path()?, entry.outcome().is_none()))
             })
             .collect();
-        // The smallest key wastes the least when it is spent with the coins.
-        keys.sort_by_key(|(coin, _)| (coin.amount, coin.outpoint));
-        keys
+        // A key verified in this session first; then the smallest, which
+        // wastes the least when it is spent with the coins.
+        keys.sort_by_key(|(coin, _, unchecked)| (*unchecked, coin.amount, coin.outpoint));
+        keys.into_iter()
+            .map(|(coin, path, _)| (coin, path))
+            .collect()
     }
 
     /// The proof to re-qualify for `key` as a split key of the spend `spend`:
@@ -1202,8 +1209,8 @@ mod entangled_cache_tests {
         assert_eq!(b.chain_status(&outpoint), ChainStatus::CouldntVerify);
     }
 
-    /// Only a coin with a verified ancestry path is a split key; a coin the
-    /// twin Cube's split separated shows as one-chain but is not a key.
+    /// Only a coin holding an ancestry path is a split key; a coin the twin
+    /// Cube's split separated shows as one-chain but is not a key.
     #[test]
     fn split_keys_need_a_verified_path_not_a_separated_status() {
         use crate::services::chain_status::{ChainStatus, ProofEntry};
@@ -1271,6 +1278,39 @@ mod entangled_cache_tests {
         );
         let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
         assert_eq!(keys, vec![key]);
+
+        // A path kept from an earlier session, or one whose fresh check
+        // couldn't finish, still offers its coin (the builder re-qualifies
+        // it), after any key verified in this session. A check that found
+        // no path, or never finished without one, offers nothing.
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        let now = std::time::SystemTime::now();
+        for held in [
+            ProofEntry::Saved(path.clone()),
+            ProofEntry::after_check(
+                Some(&ProofEntry::Saved(path.clone())),
+                ProofEntry::failed(now),
+            ),
+        ] {
+            cache.chain_proofs.insert(key, held);
+            assert_ne!(cache.chain_status(&key), ChainStatus::OnlyHere);
+            let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+            assert_eq!(keys, vec![key]);
+        }
+        for none in [
+            ProofEntry::failed(now),
+            ProofEntry::NoQualifyingAncestry { checked_at: now },
+        ] {
+            cache.chain_proofs.insert(key, none);
+            assert!(cache.split_keys().is_empty());
+        }
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        cache.record_entanglement(
+            key.txid,
+            crate::services::entangled::Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+        assert!(cache.split_keys().is_empty(), "seen on both chains");
     }
 
     /// `#393`: a reply issued by App instance A, arriving after the tab has

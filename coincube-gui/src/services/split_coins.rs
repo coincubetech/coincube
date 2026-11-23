@@ -125,8 +125,9 @@ pub struct Derived {
     pub unconfirmed: HashSet<OutPoint>,
     /// Outputs of confirmed split-key splits with the key's extended path,
     /// as [`ProofEntry::Saved`]: the path is only structurally checked, so a
-    /// fresh ancestry check must qualify it before it is shown as verified or
-    /// used as a split key. Merge with [`merge_proofs`].
+    /// fresh ancestry check must qualify it before it is shown as verified,
+    /// and the split builder re-qualifies it before it is used as a split
+    /// key. Merge with [`merge_proofs`].
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Whether any record changed (its confirmations moved or it was pruned).
     pub changed: bool,
@@ -266,11 +267,19 @@ pub fn merge_proofs(
             // A check that couldn't finish is no answer: the derived path
             // fills in and keeps the failure's retry time.
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if let (ProofEntry::Failed { failed_at }, Some(path)) = (slot.get(), entry.path()) {
-                    let failed_at = *failed_at;
+                if let (
+                    ProofEntry::Failed {
+                        failed_at,
+                        attempts,
+                    },
+                    Some(path),
+                ) = (slot.get(), entry.path())
+                {
+                    let (failed_at, attempts) = (*failed_at, *attempts);
                     slot.insert(ProofEntry::SavedRetry {
                         path: path.clone(),
                         failed_at,
+                        attempts,
                     });
                     added = true;
                 }
@@ -1264,13 +1273,7 @@ mod tests {
 
         // A check that couldn't finish is no answer: the path fills in and
         // the failure's retry time stays.
-        let mut proofs: HashMap<_, _> = [(
-            output,
-            ProofEntry::Failed {
-                failed_at: UNIX_EPOCH,
-            },
-        )]
-        .into();
+        let mut proofs: HashMap<_, _> = [(output, ProofEntry::failed(UNIX_EPOCH))].into();
         assert!(merge_proofs(&mut proofs, derived()));
         assert!(matches!(
             proofs.get(&output),

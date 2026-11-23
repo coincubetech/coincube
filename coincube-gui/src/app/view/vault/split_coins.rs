@@ -234,6 +234,9 @@ pub enum KeyStatus {
     Confirming { amount: Amount },
     /// A confirmed coin whose history is being checked.
     Checking { amount: Amount, confirmations: u32 },
+    /// A confirmed coin whose history check couldn't finish and is retried
+    /// on its own.
+    Retrying { amount: Amount },
     /// Its history shows it exists on both chains: it can't be a split coin.
     BothChains { amount: Amount },
     /// Its history couldn't be checked.
@@ -611,6 +614,15 @@ fn key_step<'a>(
                     confirmations
                 )
             },
+            Tone::Busy,
+        ),
+        KeyStatus::Retrying { amount } => status_box(
+            localized_copy("Couldn't check this coin yet").to_string(),
+            localized_format!(
+                "{} · its history couldn't be read just now. This Vault tries again on its own, so there's no need to send another coin.",
+                "{} · no se pudo leer su historial por ahora. Este Vault lo vuelve a intentar por sí solo, así que no hace falta enviar otra moneda.",
+                flow.money(amount)
+            ),
             Tone::Busy,
         ),
         KeyStatus::BothChains { .. } => status_box(
@@ -1564,6 +1576,12 @@ mod tests {
                 "Checking it exists only on Bitcoin",
             ),
             (
+                KeyStatus::Retrying {
+                    amount: Amount::from_sat(25_000),
+                },
+                "Couldn't check this coin yet",
+            ),
+            (
                 KeyStatus::BothChains {
                     amount: Amount::from_sat(25_000),
                 },
@@ -1682,6 +1700,9 @@ mod tests {
             KeyStatus::Checking {
                 amount: Amount::from_sat(25_000),
                 confirmations: 2,
+            },
+            KeyStatus::Retrying {
+                amount: Amount::from_sat(25_000),
             },
             KeyStatus::BothChains {
                 amount: Amount::from_sat(25_000),
