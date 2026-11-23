@@ -1551,6 +1551,7 @@ mod tests {
 
     #[test]
     fn ai_access_revoke_dialog_retains_merged_safety_focus() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         use self::revoke_dialog_probe::{apply, apply_task, escape, focused, Probe};
         use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
         use coincube_ui::{font, theme, widget::Renderer};
@@ -1727,6 +1728,7 @@ mod tests {
     /// the round trip instead of being thrown away by iced's tree diff.
     #[test]
     fn ai_access_page_state_survives_revoke_dialog_open_and_close() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
         use coincube_ui::{font, theme, widget::Renderer};
         use iced::advanced::{
@@ -2342,6 +2344,7 @@ mod tests {
 
     #[test]
     fn ai_access_revoke_dialog_is_mounted_over_dashboard_and_confines_focus() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         use self::revoke_dialog_probe::{apply, apply_task, escape, focused, Probe};
         use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
         use coincube_ui::{font, widget::Renderer};
@@ -3133,6 +3136,7 @@ mod tests {
     fn app_preserves_grant_on_connect_refresh_but_revokes_on_backend_switch() {
         use super::super::{message::Message as AppMessage, App};
         let _session_guard = super::super::session::test_guard();
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _enter = runtime.enter();
         let (root, wallet, daemon) = fixture();
@@ -3187,6 +3191,135 @@ mod tests {
         drop(app);
         drop(daemon);
         super::super::session::close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod feature_flag_tests {
+    use super::*;
+
+    #[test]
+    /// With AI access flagged off, the app opens no registry, serves no
+    /// client, ignores AI access messages and never shows the page.
+    fn flag_off_keeps_ai_access_dark_and_stored_pairings_inert() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use crate::app::{message::Message as AppMessage, App};
+        let _session_guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = tests::fixture();
+        let _off = crate::feature_flags::test_override::ai_access(false);
+        let (mut app, startup) = App::new_inner(
+            crate::app::Cache::default(),
+            wallet,
+            None,
+            None,
+            crate::app::Config::new(false),
+            daemon.clone(),
+            crate::app::CoincubeDirectory::new(root.clone()),
+            None,
+            crate::app::settings::CubeSettings::new(
+                "MCP fixture".into(),
+                crate::chain::ChainId::Bitcoin,
+            ),
+            None,
+        );
+        drop(startup);
+        crate::app::session::open_without_pin(app.cube_settings.id.clone());
+
+        // A registry left by an earlier flag-on build: enabled, one client.
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let location =
+            pairings::Location::new(&root, crate::chain::ChainId::Bitcoin, &app.cube_settings.id)
+                .unwrap();
+        let client = {
+            let mut store =
+                pairings::Store::open(location.clone(), zeroize::Zeroizing::new([47; 32]), true)
+                    .unwrap();
+            store.set_enabled(true).unwrap();
+            store
+                .add(
+                    "stored client".into(),
+                    pairings::Scope::Read {
+                        wallet: "stored".into(),
+                        descriptor: "stored".into(),
+                        opaque: "stored".into(),
+                        capabilities: [true, false, false],
+                    },
+                )
+                .unwrap()
+        };
+        let snapshot = |dir: &std::path::Path| {
+            let mut files: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    (path, bytes)
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = snapshot(&location.directory);
+
+        assert!(!app.mcp_supported(), "flag off: no Vault is served");
+        drop(app.update(AppMessage::SettingsSaved));
+        app.refresh_mcp_pairings();
+        assert!(
+            app.local_mcp.pairing_location.is_none() && app.local_mcp.pairing_store.is_none(),
+            "flag off: the pairing registry is never opened"
+        );
+        assert!(
+            app.local_mcp.paired.is_empty(),
+            "flag off: no client runtime"
+        );
+        assert!(
+            !location.locator(&client).exists(),
+            "flag off: no endpoint is published for a stored client"
+        );
+        for message in [
+            Message::Enable(true),
+            Message::Wallet(true),
+            Message::ClientName("client".into()),
+            Message::Capability(0, true),
+            Message::Approve,
+        ] {
+            drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
+        }
+        assert!(!app.local_mcp.enabled, "flag off: messages are ignored");
+        assert!(app.local_mcp.server.is_none(), "flag off: no endpoint");
+        assert_eq!(
+            snapshot(&location.directory),
+            before,
+            "flag off: stored pairings are left untouched"
+        );
+        drop(app.update(AppMessage::View(view::Message::Menu(Menu::Cube(
+            CubeSubMenu::Settings(CubeSettingsOption::AiAccess),
+        )))));
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            "flag off: a route to AI access opens General"
+        );
+
+        // The same Cube with the flag on reaches the page. Drop the synthetic
+        // registry first: its wrapping key is not in the OS keystore.
+        std::fs::remove_dir_all(&location.directory).unwrap();
+        let _on = crate::feature_flags::test_override::ai_access(true);
+        assert!(app.mcp_supported());
+        drop(app.update(AppMessage::View(view::Message::Menu(Menu::Cube(
+            CubeSubMenu::Settings(CubeSettingsOption::AiAccess),
+        )))));
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
+        );
+        app.stop();
+        drop(app);
+        drop(daemon);
+        crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -138,7 +138,6 @@ fn cube_section_routes(menu: &Menu) -> Vec<RouteChoice> {
             "Payment checks",
             "payment-checks",
         ),
-        (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
         (
             CubeSettingsOption::Connections,
             "Connections",
@@ -146,6 +145,10 @@ fn cube_section_routes(menu: &Menu) -> Vec<RouteChoice> {
         ),
         (CubeSettingsOption::DataExports, "Data & exports", "data"),
     ];
+    if crate::feature_flags::ai_access_enabled() {
+        // Keep its place after Payment checks.
+        sections.insert(3, (CubeSettingsOption::AiAccess, "AI access", "ai-access"));
+    }
     if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
         sections.push((CubeSettingsOption::Members, "Members", "members"));
     }
@@ -436,6 +439,7 @@ mod tests {
 
     #[test]
     fn cube_settings_exposes_ai_access_in_the_rendered_route_choices() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
         let sections = section_routes(&menu, &Cache::default());
         assert!(sections.iter().any(|choice| {
@@ -513,7 +517,15 @@ mod tests {
         if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
             cube.push("Members");
         }
-        assert_eq!(labels(RouteScope::Cube.landing()), cube);
+        {
+            let _on = crate::feature_flags::test_override::ai_access(true);
+            assert_eq!(labels(RouteScope::Cube.landing()), cube);
+        }
+        {
+            let _off = crate::feature_flags::test_override::ai_access(false);
+            cube.retain(|label| *label != "AI access");
+            assert_eq!(labels(RouteScope::Cube.landing()), cube);
+        }
         assert_eq!(
             labels(RouteScope::Vault.landing()),
             [

@@ -69,17 +69,6 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Option<Element<'a, Message
 fn cube_settings_items() -> Vec<SubItem> {
     let mut items = vec![
         SubItem::new(
-            "AI access",
-            settings_icon,
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
-            |m| {
-                matches!(
-                    m,
-                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
-                )
-            },
-        ),
-        SubItem::new(
             "General",
             wrench_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
@@ -160,6 +149,23 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         ),
     ];
+
+    if crate::feature_flags::ai_access_enabled() {
+        items.insert(
+            0,
+            SubItem::new(
+                "AI access",
+                settings_icon,
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
+                |m| {
+                    matches!(
+                        m,
+                        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
+                    )
+                },
+            ),
+        );
+    }
 
     if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
         items.push(SubItem::new(
