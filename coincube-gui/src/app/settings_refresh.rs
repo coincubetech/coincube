@@ -75,22 +75,28 @@ impl App {
     }
 
     fn refresh_fiat_selection(&mut self, setting: Option<&settings::fiat::PriceSetting>) {
-        let enabled = setting.filter(|setting| setting.is_enabled);
-        let is_fork = self.cube_settings.network.is_blake2b();
-        let stale_display = self.cache.fiat_price.as_ref().is_some_and(|price| {
-            !enabled.is_some_and(|setting| {
-                setting.currency == price.currency()
-                    && (is_fork || setting.source == price.source())
+        let chain = self.cube_settings.network;
+        let matches = |request: &cache::FiatPriceRequest| {
+            setting.is_some_and(|setting| {
+                setting.matches_display_quote(chain, request.currency, request.source)
             })
-        });
+        };
+        let stale_display = self
+            .cache
+            .fiat_price
+            .as_ref()
+            .is_some_and(|price| !matches(&price.request));
 
-        if is_fork {
-            if enabled.is_none() || stale_display {
+        if chain.is_blake2b() {
+            if !setting.is_some_and(|setting| setting.is_enabled) || stale_display {
                 self.cache.clear_btcb2_fiat();
             }
-            if self.cache.btcb2_price_request.is_some_and(|request| {
-                !enabled.is_some_and(|setting| setting.currency == request.currency)
-            }) {
+            if self
+                .cache
+                .btcb2_price_request
+                .as_ref()
+                .is_some_and(|request| !matches(request))
+            {
                 self.cache.btcb2_price_request = None;
             }
         } else if stale_display {
