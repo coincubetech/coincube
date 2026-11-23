@@ -211,7 +211,7 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
     accepted and nothing was broadcast from it. The signature COINCUBE Mobile returned is for
     a different network. Pair again." / "Your signature wasn't accepted and nothing
     was broadcast from it. Update COINCUBE Mobile and pair again." when missing — canonical
-    R2.13, identical apart from the product name; desktop-side copy: the desktop discards, so the phone user
+    R2.13, byte-identical; desktop-side copy: the desktop discards, so the phone user
     may see nothing — recorded, not decided);
   - legacy row (`None`; only ever a Bitcoin-family Vault, R2.6): an **empty**
     `partial.network` is admitted — a pre-identity phone omits the field
