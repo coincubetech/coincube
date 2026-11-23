@@ -1144,7 +1144,7 @@ impl PsbtState {
             self.saved,
             self.tx.recovery_timelock(),
             keychain,
-            true,
+            !self.wallet.lacks_keychain_key(),
         )
         .with_connect_account(ConnectAccountStatus::from_cache(cache));
         let cmd = modal.load(daemon);
@@ -1895,7 +1895,10 @@ fn build_keychain_if_ready(
     Option<super::keychain_sign::KeychainSignModal>,
     Task<Message>,
 ) {
-    if !keychain_connect_missing(cache).is_empty() {
+    // A wallet with no Keychain key has nothing for the flow to resolve:
+    // launching it would only ask Connect about signers that cannot exist and
+    // show its refusal in the picker.
+    if wallet.lacks_keychain_key() || !keychain_connect_missing(cache).is_empty() {
         return (None, Task::none());
     }
     let grpc_url = cache.connect_grpc_url.clone().expect("checked above");
@@ -2701,10 +2704,10 @@ impl SignModal {
                     .to_string(),
             );
         }
-        // Keychain flow launched but still resolving — we don't yet know which
-        // unidentified keys are Keychain signers, so show a neutral hint rather
-        // than a misleading "connect a device" message.
-        let may_be_keychain = self.may_be_keychain_key(fp);
+        // Keychain flow launched but still resolving — a key that may be a
+        // Keychain signer gets a neutral hint rather than a misleading
+        // "connect a device" message until it is known.
+        let may_be_keychain = self.wallet.may_hold_keychain_key(&fp);
         if may_be_keychain && self.keychain.as_ref().is_some_and(|k| k.is_loading()) {
             return St::Disabled("Looking up Mobile signers…".to_string());
         }
@@ -2744,16 +2747,6 @@ impl SignModal {
             }
         }
         St::Disabled("Connect this signing device to sign.".to_string())
-    }
-
-    /// Whether `fp` could be a key held in the COINCUBE Keychain (and so
-    /// reachable through Connect). Certain once the Vault recorded which keys
-    /// came from it; a Vault from before that record may still hold one, so
-    /// any of its keys could be. An imported wallet never has one.
-    fn may_be_keychain_key(&self, fp: Fingerprint) -> bool {
-        !self.wallet.is_imported()
-            && (!self.wallet.keychain_keys_recorded
-                || self.wallet.keychain_key_ids.contains_key(&fp))
     }
 
     /// Icon kind for a descriptor key: master / border / connected-hardware /
@@ -4101,6 +4094,18 @@ mod tests {
         };
         let (modal, _task) = build_keychain_if_ready(&ready, &wallet, &psbt);
         assert!(modal.is_some());
+
+        // Connect is ready, but these wallets have no Keychain key to sign
+        // with: the flow is not built, so nothing is asked of Connect.
+        use crate::services::split_test_wallets::{imported_fork_vault, imported_vault, Shape};
+        for without in [
+            imported_vault(Shape::WshSortedMulti),
+            imported_fork_vault(Shape::WshSortedMulti),
+            self::wallet().with_keychain_keys(HashMap::new(), true),
+        ] {
+            let (modal, _task) = build_keychain_if_ready(&ready, &Arc::new(without), &psbt);
+            assert!(modal.is_none());
+        }
     }
 
     #[test]
@@ -4681,6 +4686,77 @@ mod tests {
                 &row.state,
                 SigningKeyState::Disabled(reason) if reason.contains("Connect this signing device")
             )));
+        }
+    }
+
+    #[test]
+    fn signing_paths_never_offer_connect_on_an_imported_wallet() {
+        use crate::services::split_test_wallets::{imported_fork_vault, imported_vault, Shape};
+        use view::vault::psbt::SigningKeyState;
+
+        for wallet in [
+            imported_vault(Shape::WshSortedMulti),
+            imported_fork_vault(Shape::WshSortedMulti),
+        ] {
+            let wallet = Arc::new(wallet);
+            for status in [
+                ConnectAccountStatus::SignedOut,
+                ConnectAccountStatus::Owner,
+                ConnectAccountStatus::OtherAccount,
+                ConnectAccountStatus::SignedInUnknownOwner,
+            ] {
+                let rows = SignModal::new(
+                    HashSet::new(),
+                    wallet.clone(),
+                    CoincubeDirectory::new(PathBuf::new()),
+                    wallet.chain.bitcoin_network(),
+                    false,
+                    None,
+                    None,
+                    true,
+                )
+                .with_connect_account(status)
+                .signing_paths()
+                .into_iter()
+                .flat_map(|path| path.keys)
+                .collect::<Vec<_>>();
+                assert!(rows.len() > 1);
+                assert!(rows.iter().all(|row| matches!(
+                    &row.state,
+                    SigningKeyState::Disabled(reason)
+                        if reason.contains("Connect this signing device")
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_possible_keychain_key_waits_on_the_mobile_signer_lookup() {
+        use view::vault::psbt::SigningKeyState;
+
+        let phone = fingerprint("f714c228");
+        let rows = SignModal::new(
+            HashSet::new(),
+            Arc::new(wallet().with_keychain_keys(HashMap::from([(phone, 42)]), true)),
+            CoincubeDirectory::new(PathBuf::new()),
+            Network::Signet,
+            false,
+            None,
+            Some(super::super::keychain_sign::tests::modal_with_live_session()),
+            true,
+        )
+        .signing_paths()
+        .into_iter()
+        .find(|p| p.is_primary)
+        .unwrap()
+        .keys;
+        assert!(rows.len() > 1);
+        for row in rows {
+            let looking_up = matches!(
+                &row.state,
+                SigningKeyState::Disabled(reason) if reason.contains("Looking up Mobile signers")
+            );
+            assert_eq!(looking_up, row.fingerprint == phone);
         }
     }
 
