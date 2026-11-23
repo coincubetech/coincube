@@ -18,7 +18,7 @@ BTCB2 targets must advertise both chain-identity-v1 and btcb2-unified-v1 before
 any PSBT preparation or sealing. Registration still advertises only this
 desktop's chain-identity capability because the desktop is not the signing
 target. A resolved phone carrying both capabilities may classify that exact
-Keychain signer as replay-capable for signer/path selection. Existing
+Mobile signer as replay-capable for signer/path selection. Existing
 cryptographic verification under Wallet.chain remains authoritative for the
 transaction's post-signing replay status; capability metadata alone never marks
 a spend replay protected.
@@ -29,13 +29,13 @@ and PhoneSigner::sign_tx refuses before inspecting or sealing a PSBT. Switching
 between same-descriptor Bitcoin/BTCB2 twins revokes an active pairing run.
 These guards remain until chain-bound pairing v3 and signer prerequisites ship. The additive protobuf fields on the pre-identity LAN constructor
 remain empty; this PR does not pretend it implements the LAN identity contract.
-No Keychain repository changes or live service changes are included.
+No COINCUBE Mobile repository changes or live service changes are included.
 
 Verification uses synthetic Vaults and encrypted fixtures: exact/missing/unknown
 network matrix, pre-seal refusals, create/fetch defensive cancellation,
 capability refusal, server error classifications, existing encrypted-return
 merge tests with explicit matching identity. Run the full GUI package and strict
 workspace lint with repository-pinned Rust; mocks are not live deployment
-acceptance. Infrastructure routing and actual Keychain compatibility remain
+acceptance. Infrastructure routing and actual COINCUBE Mobile compatibility remain
 separate launch gates. Rollback is reverting this client commit before enabling
 BTCB2 signing; never expose BTCB2 to a pre-identity desktop.

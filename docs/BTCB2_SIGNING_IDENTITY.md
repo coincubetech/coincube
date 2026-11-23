@@ -2,7 +2,7 @@
 
 Status: **frozen interface contract, v1 — documentation only; no code, proto or
 protocol change in this PR.** This is the desktop half of the cross-repository
-contract whose canonical text is `keychain-app/docs/btcb2-signing-identity-contract.md`
+contract whose canonical text is `coincube-mobile/docs/btcb2-signing-identity-contract.md`
 (parent record [keychain-app#145](https://github.com/coincubetech/keychain-app/issues/145),
 tracker [coincube-api#276](https://github.com/coincubetech/coincube-api/issues/276)).
 Read that file for the identity model, the full refusal matrix and the open product
@@ -13,7 +13,7 @@ it. Verified against `coincube` `964e6ac1d6dd04f60a4cc56999c3b3c83fa676a9`.
 
 A BTCB2 Vault is the same descriptor, xpubs and fingerprints as its Bitcoin twin
 (`docs/BTCB2_CHAIN_BINDING.md` explains why the daemon needed `ChainId`). The two
-Keychain rails inherit the ambiguity:
+Mobile signing rails inherit the ambiguity:
 
 - **Rail 1 (Connect)** — `keychain_sign.rs` sends `vault_id`, `descriptor_id` and
   `SignerTarget{device_id, key_id, key_fingerprint}` (`coincube-gui/src/app/state/vault/keychain_sign.rs:1016-1073`),
@@ -27,7 +27,7 @@ Keychain rails inherit the ambiguity:
   `vault_fingerprint = sha256(descriptor)[..4]` — equal for both twins — so a phone
   paired for a Bitcoin Vault is dialled for its BTCB2 twin.
 
-`ReplayProtection` for Keychain keys defaults to `Legacy`; after Rail 1 resolves
+`ReplayProtection` for Mobile keys defaults to `Legacy`; after Rail 1 resolves
 a target, only a BTCB2 target advertising both capability literals may classify
 that exact signer as `Capable` for signer/path selection. Transaction replay
 status still comes only from cryptographically verified retained signatures.
@@ -44,7 +44,7 @@ returns `None`).
 
 Capability strings (`RegisterDeviceRequest.capabilities`, `PairingComplete.capabilities`):
 `chain-identity-v1` = the peer implements this contract; `btcb2-unified-v1` = the
-peer can sign `ALL|UNIFIED` (B3.2). A Keychain missing either literal is outdated
+peer can sign `ALL|UNIFIED` (B3.2). A phone missing either literal is outdated
 for BTCB2 signing: the desktop must not create or present a BTCB2 session to it.
 
 ## 3. Rail 1 — desktop obligations (`keychain_sign.rs`, `coincube-gui/src/services/connect/grpc/`)
@@ -59,10 +59,10 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 |---|---|---|
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
 | after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support at coincube.io/support." — rendered as a link to `https://coincube.io/support` |
-| same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
-| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` or `btcb2-unified-v1`, or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "`<name>`'s Keychain needs updating before it can sign on Bitcoin Blake2b." (`<name>` = the signer's name in the Vault) — no session for that signer |
+| same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before COINCUBE Mobile can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
+| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` or `btcb2-unified-v1`, or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "`<name>`'s COINCUBE Mobile needs updating before it can sign on Bitcoin Blake2b." (`<name>` = the signer's name in the Vault) — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
-| create response and every fetch | `session.network` must equal `wallet.chain.api_str()`. Empty on a BTCB2 Vault ⇒ pre-identity Connect ⇒ cancel the session (defensive: the session exists and a signer may already have been notified — no "nothing was sent" promise here; that promise belongs to the resolve-time check above) | R1.11 session variant: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. The request was cancelled." Empty on a Bitcoin-family Vault is tolerated during the compatibility window (canonical §7, Q1) |
+| create response and every fetch | `session.network` must equal `wallet.chain.api_str()`. Empty on a BTCB2 Vault ⇒ pre-identity Connect ⇒ cancel the session (defensive: the session exists and a signer may already have been notified — no "nothing was sent" promise here; that promise belongs to the resolve-time check above) | R1.11 session variant: "Connect needs updating before COINCUBE Mobile can sign on Bitcoin Blake2b. The request was cancelled." Empty on a Bitcoin-family Vault is tolerated during the compatibility window (canonical §7, Q1) |
 | `SIGNATURE_SUBMITTED` merge | unchanged: the signature is verified under `wallet.chain`'s rule by the existing verifier (#392 replay model). That verification is not a substitute for the identity checks above | — |
 
 Server-side refusals the desktop must render (message prefix is the token):
@@ -91,7 +91,7 @@ each is in the canonical §8.
   (`PAIRING_PROTOCOL_VERSION` → 3). It never emits v2 for a BTCB2 Vault and no
   longer emits v2 at all; a pre-identity phone refuses `v: 3` at scan
   ("unsupported version"), which is the intended fail-closed outcome. The offer
-  screen should say: "If Keychain reports an unsupported QR version, update Keychain."
+  screen should say: "If COINCUBE Mobile reports an unsupported QR version, update COINCUBE Mobile."
 - `net` is required and must be one of the closed set, canonical spelling only (the
   phone refuses `bitcoin`). The worst-case fragment `"net":"bitcoin-blake2b-testnet4",`
   measures 33 UTF-8 bytes of raw JSON (`len('"net":"bitcoin-blake2b-testnet4",'.encode())`;
@@ -113,7 +113,7 @@ Verified with the **handshake** cert fp and the desktop's **own** `net` (never t
 phone-reported strings). `PAIRING_PROOF_DOMAIN` becomes per-version; keep
 `coincube-pair-v2` only for verifying nothing — the desktop no longer emits v2 — but
 the known-answer vector for v3 must be shared with
-`keychain-app/test/services/local_signer/pairing_qr_test.dart` ("matches the locked Rust ↔ Dart vector").
+`coincube-mobile/test/services/local_signer/pairing_qr_test.dart` ("matches the locked Rust ↔ Dart vector").
 
 ### 4.3 `grpc/local_envelope.proto` delta (byte-identical in both repos)
 
@@ -121,10 +121,10 @@ This repo's `grpc/local_envelope.proto` is the **source of truth** for the LAN
 protocol; `coincube-gui/build.rs` compiles it. There is **no** sync target for it in
 this repo's `Makefile` (only `sync-proto`, which copies `connect.proto` *from*
 `coincube-api`); the `sync-local-envelope-proto` target named in the proto's own
-header comment lives in **keychain-app**'s Makefile and copies *from* this repo
+header comment lives in **coincube-mobile**'s Makefile and copies *from* this repo
 (`make sync-local-envelope-proto COINCUBE_DESKTOP_PATH=<this checkout>` then
 `make proto-gen` there). The implementing slice edits the file here, commits, and the
-Keychain slice pulls it; byte-identity is checked by diffing the two files.
+Mobile slice pulls it; byte-identity is checked by diffing the two files.
 
 ```proto
 message SignerBinding {
@@ -161,7 +161,7 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   `complete.signer_binding.as_ref()` (`coincube-gui/src/phone_signer/pairing_listener.rs:372`) — the new field is
   `SignerBinding.network` (§4.3), **not** a field on `PairingComplete`: on a v3 offer
   `reported.network` (i.e. `complete.signer_binding.network`) must be non-empty (else
-  R2.5 "Update Keychain and pair again.") and equal `offer.net` (else R2.4 "Exact
+  R2.5 "Update COINCUBE Mobile and pair again.") and equal `offer.net` (else R2.4 "Exact
   pairing identity mismatch; pair again."). Store that value and
   `complete.capabilities` on the row — the capability list is what the BTCB2 dial
   predicate below reads; answering a v3 offer is evidence of v3 pairing, not of the
@@ -185,14 +185,14 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   `btcb2-unified-v1` may be dialled and the phone's #146 refusal applies, exactly as
   on Rail 1. Bitcoin-family Vaults require no capability. The hw refresh loop applies
   the same predicate when deciding which phones to dial for the loaded Vault.
-  - BTCB2 Vault + legacy row → not dialled; signer list: "Pair this Keychain again
+  - BTCB2 Vault + legacy row → not dialled; signer list: "Pair this phone again
     for Bitcoin Blake2b." (R2.6)
   - any Vault + legacy row, once the desktop release that closes the window has
     shipped (canonical §7) → not dialled; signer list: "This pairing predates
-    network-aware signing. Pair this Keychain again." (R2.6, closure variant — a
+    network-aware signing. Pair this phone again." (R2.6, closure variant — a
     mainnet Vault's user must never see the Bitcoin Blake2b sentence)
   - BTCB2 Vault + v3 row without the required capability → not dialled; signer list:
-    "This Keychain needs updating before it can sign on Bitcoin Blake2b." (R2.6,
+    "This phone's COINCUBE Mobile needs updating before it can sign on Bitcoin Blake2b." (R2.6,
     capability variant)
   - row on another chain → not dialled; "Paired for `<other network>`. Pair again to
     use it here." (R2.7) — `<other network>` is the **display label** from the
@@ -208,32 +208,32 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 - On `PartialSignature`, **before** the signature is verified or merged:
   - row has `network` (v3 pairing): `partial.network` is **required** and must equal
     `session.network`; empty or different → discard, R2.13 ("Your signature wasn't
-    accepted and nothing was broadcast from it. The signature Keychain returned is for
+    accepted and nothing was broadcast from it. The signature COINCUBE Mobile returned is for
     a different network. Pair again." / "Your signature wasn't accepted and nothing
-    was broadcast from it. Update Keychain and pair again." when missing — canonical
+    was broadcast from it. Update COINCUBE Mobile and pair again." when missing — canonical
     R2.13, byte-identical; desktop-side copy: the desktop discards, so the phone user
     may see nothing — recorded, not decided);
   - legacy row (`None`; only ever a Bitcoin-family Vault, R2.6): an **empty**
     `partial.network` is admitted — a pre-identity phone omits the field
-    (`keychain-app/lib/services/local_signer/local_signer_host.dart:262-270` at
+    (`coincube-mobile/lib/services/local_signer/local_signer_host.dart:262-270` at
     `5d1b1190`); a non-empty value must equal `session.network`, else R2.13.
   A phone `ErrorEnvelope` with code `network_mismatch` or `pair_again` is surfaced
   with its message.
 
 ### 4.6 Old-client matrix (Rail 2)
 
-| desktop | Keychain | outcome |
+| desktop | COINCUBE Mobile | outcome |
 |---|---|---|
 | this contract (v3 offer) | pre-identity | scan refuses `v: 3`; nothing is paired |
-| this contract, legacy `PairedPhone` row | pre-identity | **while the window is open (canonical §7)** Bitcoin-family Vaults keep working — **until that phone holds a second record with the paired xpub** (e.g. it creates the BTCB2 twin under keychain-app#146): its own pre-contract `validate` requires global xpub uniqueness (`keychain-app/lib/services/local_signer/lan_signer_binding.dart:109` at `5d1b1190`) and then refuses even a Bitcoin-family session; the remedy is a phone update and a re-pair. Before that: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
+| this contract, legacy `PairedPhone` row | pre-identity | **while the window is open (canonical §7)** Bitcoin-family Vaults keep working — **until that phone holds a second record with the paired xpub** (e.g. it creates the BTCB2 twin under keychain-app#146): its own pre-contract `validate` requires global xpub uniqueness (`coincube-mobile/lib/services/local_signer/lan_signer_binding.dart:109` at `5d1b1190`) and then refuses even a Bitcoin-family session; the remedy is a phone update and a re-pair. Before that: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
 | this contract, legacy `PairedPhone` row | new | **while the window is open (canonical §7)** Bitcoin-family Vaults keep working: the phone compares `session.network` with its record and answers with `PartialSignature.network`, which must match; after the closing desktop release the row is not dialled (R2.6, closure variant); a BTCB2 Vault never dials the row (R2.6) |
 | pre-identity (v2 offer) | new | **while the window is open (canonical §7):** the phone accepts v2 only while every local record with `key` is `verified` and none is BTCB2, **and its store is reconciled** (canonical §4.4 / R2.3); sessions carry no `network` and are admitted as the record's Bitcoin-family network. Safe only under the deployment prerequisite below — the v2 protocol cannot express or detect a BTCB2 intent |
 | this contract | new | full v3 |
 
-**Deployment prerequisite (not a protocol property).** BTCB2 Keychain signing over
+**Deployment prerequisite (not a protocol property).** BTCB2 Mobile signing over
 LAN is enabled only on desktops that implement this contract and emit v3 offers
 (LANE-B3 §B3.4: BTCB2 stays Connect-rail-only, or is refused on LAN, until
-chain-bound pairing ships). A pre-identity desktop must never have BTCB2 Keychain
+chain-bound pairing ships). A pre-identity desktop must never have BTCB2 Mobile
 signing enabled — it may load a `ChainId::BitcoinBlake2b` Vault (`coincube-core/src/chain.rs`),
 but the v2 offer (`coincube-gui/src/phone_signer/pairing.rs:65-105`) carries no
 chain, so a phone holding only the Bitcoin twin cannot tell a Bitcoin session from a
@@ -245,7 +245,7 @@ same.
 
 - v3 offer serialisation and the 2048-**encoded-character** bound with the longest
   `net` and the largest certificate the desktop can emit.
-- Proof v3 known-answer vector (shared with Keychain), plus: wrong `net`, wrong psk,
+- Proof v3 known-answer vector (shared with COINCUBE Mobile), plus: wrong `net`, wrong psk,
   swapped fps, empty — all reject.
 - Listener: v3 offer + empty `reported.network` → R2.5; `reported.network != offer.net`
   → R2.4; success stores `network` and `capabilities`.

@@ -7,7 +7,7 @@ daemon on macOS, Linux and Windows**. Supported exact chain identities are
 wallet preparation and unsigned transaction preparation. Liquid, Spark, imported
 non-Vault policies and external daemons remain unsupported. MCP starts disabled. Explicitly paired clients keep their selected scope until
 revoked; protected access pauses while the Cube is locked or COINCUBE Desktop is closed.
-No Connect API or mobile Keychain changes are needed.
+No Connect API or COINCUBE Mobile changes are needed.
 
 ## Integration and release status
 
@@ -353,7 +353,7 @@ Before production release, complete packaged-client acceptance on each platform 
 Maple and Claude, verify signed packaging, and obtain independent security review.
 Windows named-pipe and pairing-file security are included. Unsigned transaction
 preparation has a separate capability, scoped operation ID and trusted desktop
-review. Signing remains with existing user/Keychain mechanisms; read permissions
+review. Signing remains with existing user/Mobile signing mechanisms; read permissions
 cannot authorize preparation or signing.
 
 ## Native wallet proposals
@@ -410,7 +410,7 @@ process can interrupt completion, which is a recovery/inspection case, not a
 claim of rollback. Enabling this workflow in normal builds does not replace
 packaged-client, hardware and signed-release acceptance.
 
-Keychain guidance uses existing setup and verification screens. The owner's
+Mobile key guidance uses existing setup and verification screens. The owner's
 Cube Recovery Kit encryption key is not a Vault signing key. Do not label a
 manually entered key as phone-attested, or claim that a backup/recovery rehearsal
 passed because a key or descriptor exists. Phone/Connect-dependent setup is a

@@ -207,7 +207,7 @@ enrollment are not enabled by this proposal path. Review displays the exact
 chain and node address and binds them to the native approval digest.
 
 No MCP tool signs, broadcasts or asserts device/backup verification. Source-specific
-Keychain/backup verification remains human work in existing flows. Default build
+Mobile key/backup verification remains human work in existing flows. Default build
 availability does not replace packaged-client or release acceptance.
 
 ## Unsigned transaction preparation
