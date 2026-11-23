@@ -268,8 +268,9 @@ async fn vault_deposit_address(
     }
 }
 
-/// Prefer an available local pair in Vault, Spark order. A mainnet Cube with
-/// only Spark or Vault starts with Another Cube selected.
+/// Prefer an available local pair in Vault, Spark order. A Cube with only
+/// one wallet starts with Another Cube selected, where its chain has one
+/// (see `TransferDirection::to_other_wallet`).
 pub(crate) fn default_transfer_direction(
     has_vault: bool,
     has_spark: bool,
@@ -574,6 +575,9 @@ pub struct GlobalHome {
     /// handed to the Spark Receive panel this session. Once is enough: after
     /// that the panel holds the shift and keeps the record current.
     spark_shift_restore_requested: bool,
+    /// The App's admitted Connect session on a Bitcoin Blake2b Cube, kept in
+    /// step by the App: another Blake2b Cube's receive daemon starts under it.
+    fork_connect_client: Option<crate::services::coincube::CoincubeClient>,
     /// Prepared Spark send handle, populated on step 1→2 for Spark-sourced
     /// transfers (SparkToVault and to another Cube). Consumed by `ConfirmSparkSend`.
     spark_send_handle: Option<String>,
@@ -713,6 +717,7 @@ impl GlobalHome {
             pending_spark_deposit_seen: false,
             pending_spark_incoming_is_swap: false,
             spark_shift_restore_requested: false,
+            fork_connect_client: None,
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
@@ -791,6 +796,7 @@ impl GlobalHome {
             pending_spark_deposit_seen: false,
             pending_spark_incoming_is_swap: false,
             spark_shift_restore_requested: false,
+            fork_connect_client: None,
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
@@ -3788,6 +3794,14 @@ impl GlobalHome {
         Task::batch([reset, self.begin_transfer(cache, direction)])
     }
 
+    /// Follow the App's admitted fork session (`None` once it is revoked).
+    pub(crate) fn set_fork_connect_client(
+        &mut self,
+        client: Option<crate::services::coincube::CoincubeClient>,
+    ) {
+        self.fork_connect_client = client;
+    }
+
     /// The direction a wallet page's Transfer would open with.
     fn wallet_transfer_direction(
         &self,
@@ -3847,13 +3861,15 @@ impl GlobalHome {
         // receive doesn't depend on it, so a not-yet-loaded one is fine here.
         let spark = (on_mainnet && self.spark_backend.is_some())
             .then(|| WalletIdentity::Spark(self.spark_identity.clone().unwrap_or_default()));
-        let vault = (on_mainnet && self.vault_available(cache))
-            .then(|| {
-                self.wallet
-                    .as_ref()
-                    .map(|wallet| WalletIdentity::Vault(wallet.id()))
-            })
-            .flatten();
+        // Vault to Vault also runs on Bitcoin Blake2b; Spark does not.
+        let vault = (crate::app::transfer_destination::vault_cross_cube_chain(chain)
+            && self.vault_available(cache))
+        .then(|| {
+            self.wallet
+                .as_ref()
+                .map(|wallet| WalletIdentity::Vault(wallet.id()))
+        })
+        .flatten();
         self.other_cube_receivers = OtherCubeReceivers {
             spark: receives(spark),
             vault: receives(vault),
@@ -4032,7 +4048,7 @@ impl GlobalHome {
                 }
             };
         }
-        match scope.request_backend(source) {
+        match scope.request_backend(source, self.fork_connect_client.clone()) {
             Ok(request) => Task::perform(request.run_reply(), |reply| {
                 Message::View(view::Message::Home(HomeMessage::OtherCubeBackendBound(
                     reply,
@@ -4584,7 +4600,7 @@ mod tests {
     /// back to another Cube (mainnet only) and is otherwise unavailable.
     #[test]
     fn a_wallet_page_transfer_picks_a_destination_for_its_source() {
-        use crate::chain::ChainId::{Bitcoin, Regtest};
+        use crate::chain::ChainId::{Bitcoin, BitcoinBlake2b, Regtest};
         use WalletKind::{Spark, Vault};
         let from = |wallet, (vault, spark), chain, other| {
             transfer_direction_from(wallet, vault, spark, chain, other)
@@ -4607,8 +4623,15 @@ mod tests {
             from(Vault, (true, false), Bitcoin, true),
             Some(TransferDirection::VaultToOtherCube)
         );
-        // Other Cubes receive on mainnet only.
+        // Other Cubes receive on mainnet only...
         assert_eq!(from(Vault, (true, false), Regtest, true), None);
+        // ...and, Vault to Vault, on Bitcoin Blake2b, which has no Spark.
+        assert_eq!(
+            from(Vault, (true, false), BitcoinBlake2b, true),
+            Some(TransferDirection::VaultToOtherCube)
+        );
+        assert_eq!(from(Vault, (true, false), BitcoinBlake2b, false), None);
+        assert_eq!(from(Spark, (false, true), BitcoinBlake2b, true), None);
         // A wallet the Cube doesn't have has no Transfer.
         assert_eq!(from(Spark, (true, false), Bitcoin, true), None);
     }

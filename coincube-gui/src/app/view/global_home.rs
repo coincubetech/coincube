@@ -2336,8 +2336,8 @@ pub enum PickerSide {
 pub enum TransferDirection {
     VaultToSpark,
     SparkToVault,
-    /// This Cube's Vault to the Vault of another local Bitcoin mainnet Cube,
-    /// unlocked in place for this transfer only. Never built from a wallet
+    /// This Cube's Vault to the Vault of another local Cube on the same
+    /// chain (Bitcoin mainnet or Bitcoin Blake2b), unlocked in place for this transfer only. Never built from a wallet
     /// pair: the To list's "Another Cube…" row selects it.
     VaultToOtherCube,
     /// This Cube's Spark wallet to another local Bitcoin mainnet Cube's Vault.
@@ -2372,7 +2372,9 @@ impl TransferDirection {
 
     pub fn to_other_wallet(from: WalletKind, to: WalletKind, chain: ChainId) -> Option<Self> {
         match (from, to, chain) {
-            (WalletKind::Vault, WalletKind::Vault, ChainId::Bitcoin) => {
+            (WalletKind::Vault, WalletKind::Vault, chain)
+                if crate::app::transfer_destination::vault_cross_cube_chain(chain) =>
+            {
                 Some(Self::VaultToOtherCube)
             }
             (WalletKind::Spark, WalletKind::Vault, ChainId::Bitcoin) => {
@@ -4638,6 +4640,30 @@ mod tests {
 
     /// Every directed pair of distinct wallets must map to exactly one
     /// `TransferDirection`, and same-wallet pairs must map to `None`.
+    /// Bitcoin Blake2b has no Spark: the one cross-Cube route there is Vault
+    /// to Vault. Test networks have none.
+    #[test]
+    fn blake2b_offers_only_vault_to_vault_across_cubes() {
+        use WalletKind::{Spark, Vault};
+        let route = |from, to, chain| TransferDirection::to_other_wallet(from, to, chain);
+        assert_eq!(
+            route(Vault, Vault, ChainId::BitcoinBlake2b),
+            Some(TransferDirection::VaultToOtherCube)
+        );
+        for (from, to) in [(Vault, Spark), (Spark, Vault), (Spark, Spark)] {
+            assert_eq!(route(from, to, ChainId::BitcoinBlake2b), None);
+        }
+        for chain in [
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            assert_eq!(route(Vault, Vault, chain), None, "{:?}", chain);
+        }
+    }
+
     #[test]
     fn try_from_pair_is_total_over_distinct_pairs() {
         let kinds = [WalletKind::Spark, WalletKind::Vault];
