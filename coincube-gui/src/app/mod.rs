@@ -5106,6 +5106,16 @@ impl App {
         menu: &Menu,
         option: &menu::CubeSettingsOption,
     ) -> Task<Message> {
+        if *option == menu::CubeSettingsOption::AiAccess
+            && !crate::feature_flags::ai_access_enabled()
+        {
+            // A restored or deep-linked route to a hidden page opens General.
+            let general = menu::CubeSettingsOption::General;
+            return self.open_cube_settings_page(
+                &Menu::Cube(menu::CubeSubMenu::Settings(general)),
+                &general,
+            );
+        }
         self.panels.current = menu.clone();
         let section_msg = match option {
             menu::CubeSettingsOption::General => Some(view::SettingsMessage::GeneralSection),
@@ -6035,6 +6045,9 @@ impl App {
     }
 
     fn route_local_mcp(&mut self, message: local_mcp::Message) -> Task<Message> {
+        if !crate::feature_flags::ai_access_enabled() {
+            return Task::none();
+        }
         let focus_after = match &message {
             local_mcp::Message::RequestRevokePair(_) => Some(iced::advanced::widget::Id::from(
                 "tenshu.ai-access.revoke.keep",
@@ -9613,7 +9626,9 @@ impl App {
             .and_then(|la| la.lightning_address.as_ref())
             .is_some();
         match &self.panels.current {
-            Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess)) => {
+            Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess))
+                if crate::feature_flags::ai_access_enabled() =>
+            {
                 Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
             }
             Menu::Vault(menu::VaultSubMenu::Settings(Some(menu::SettingsOption::Connections))) => {
@@ -9673,6 +9688,7 @@ impl App {
 
     pub(crate) fn mcp_proposals_supported(&self) -> bool {
         cfg!(feature = "mcp-proposals")
+            && crate::feature_flags::ai_access_enabled()
             && self
                 .cube_settings
                 .network
@@ -9688,6 +9704,11 @@ impl App {
     }
 
     fn refresh_mcp_pairings(&mut self) {
+        if !crate::feature_flags::ai_access_enabled() {
+            // Never open the registry or publish an endpoint: stored
+            // pairings stay on disk, inert, for a build with the flag on.
+            return;
+        }
         let supported = self.mcp_supported();
         let proposal_supported = self.mcp_proposals_supported();
         self.local_mcp.ensure_pairings(local_mcp::PairingContext {
@@ -9720,13 +9741,15 @@ impl App {
     }
 
     fn mcp_supported(&self) -> bool {
-        self.wallet.as_ref().is_some_and(|wallet| {
-            wallet.chain == self.cube_settings.network
-                && wallet.main_descriptor.as_vault().is_some()
-        }) && self
-            .daemon
-            .as_ref()
-            .is_some_and(|daemon| daemon.backend().is_embedded())
+        crate::feature_flags::ai_access_enabled()
+            && self.wallet.as_ref().is_some_and(|wallet| {
+                wallet.chain == self.cube_settings.network
+                    && wallet.main_descriptor.as_vault().is_some()
+            })
+            && self
+                .daemon
+                .as_ref()
+                .is_some_and(|daemon| daemon.backend().is_embedded())
             && !self.daemon_switch_in_progress
     }
 
@@ -9825,12 +9848,14 @@ impl App {
                 &self.cache,
                 self.received_celebration_view(),
             )
-        } else if matches!(
-            self.panels.current,
-            Menu::Cube(menu::CubeSubMenu::Settings(
-                menu::CubeSettingsOption::AiAccess
-            ))
-        ) {
+        } else if crate::feature_flags::ai_access_enabled()
+            && matches!(
+                self.panels.current,
+                Menu::Cube(menu::CubeSubMenu::Settings(
+                    menu::CubeSettingsOption::AiAccess
+                ))
+            )
+        {
             view::dashboard(
                 &self.panels.current,
                 &self.cache,
@@ -18902,6 +18927,7 @@ mod toast_layer_tree_tests {
     /// widget state such as keyboard focus survives the tree diff.
     #[test]
     fn content_widget_state_survives_toast_show_and_dismiss() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("toast-layer-tree-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("bitcoin")).unwrap();
@@ -18957,6 +18983,7 @@ mod toast_layer_tree_tests {
     /// remount the content beneath it either.
     #[test]
     fn content_widget_state_survives_recovery_alerts_prompt() {
+        let _ai_access = crate::feature_flags::test_override::ai_access(true);
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("recovery-prompt-tree-{}", uuid::Uuid::new_v4()));

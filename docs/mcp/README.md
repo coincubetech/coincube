@@ -9,17 +9,32 @@ non-Vault policies and external daemons remain unsupported. MCP starts disabled.
 revoked; protected access pauses while the Cube is locked or COINCUBE Desktop is closed.
 No Connect API or mobile Keychain changes are needed.
 
-## Integration and release status
+## Feature flag and release status
 
-Local MCP access is integrated on `redesign`; the repository's primary branch is
-`master`. Build from the checkout containing the changes being tested. Presence
-on `redesign` does not imply inclusion in a production release. Follow-up work
-assigned to this integration targets `redesign`.
+AI access is **off by default** behind the build-time flag
+`COINCUBE_ENABLE_AI_ACCESS` (`feature_flags::AI_ACCESS_ENABLED`). It stays off
+for launch until signed-release, real-client and security acceptance pass
+(issue #1535). Build with it on by setting the variable in `.env` or the
+environment (`1`, `true` or `yes`) and rebuilding:
 
-Review and CI completion make a PR eligible for human review. Merging to
-`redesign`, promoting it to `master`, and publishing a release remain separate
-owner decisions. Packaged-client interoperability and signed-artifact checks
-remain release gates.
+```sh
+COINCUBE_ENABLE_AI_ACCESS=1 make run
+```
+
+With the flag off:
+
+- **Cube → Settings** shows no AI access tab, and a restored route to it opens
+  General instead.
+- The desktop never opens the pairing registry or publishes an endpoint, so no
+  MCP client is answered. Pairings already stored on disk are left untouched
+  and inert; they resume only in a build with the flag on, and still require
+  the Cube-wide switch.
+- `coincube-mcp` is still built and packaged, and its static tool discovery
+  still works. A well-formed wallet call returns `wallet_unavailable`.
+
+The code is on `master`. Packaged-client interoperability, signed-artifact
+checks and independent security review remain release gates before the flag
+is turned on.
 
 ## Build and install
 
