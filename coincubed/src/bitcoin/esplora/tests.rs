@@ -273,10 +273,7 @@ fn esplora_out_of_range_tip_height_fails_the_poll_and_leaves_the_wallet_tip_alon
 
             // A rescan whose first poll is refused stays a rescan: had the
             // refusal cleared it, the poller would take it for complete.
-            let desc: coincube_core::wallet_descriptor::WalletDescriptor = DESCRIPTOR
-                .parse::<coincube_core::descriptors::CoincubeDescriptor>()
-                .unwrap()
-                .into();
+            let desc = crate::testutils::vault_wallet_descriptor(DESCRIPTOR);
             shared.start_rescan(&desc, 0).unwrap();
             assert_poll_refused(&mut shared, 20);
             assert_eq!(shared.rescan_progress(), Some(0.0));
