@@ -3202,12 +3202,6 @@ impl SignModal {
         psbt: Psbt,
         tx: &mut SpendTx,
     ) -> Task<Message> {
-        // A result for another transaction — one whose signer was closed
-        // while its device was still signing — is not this one's: it marks
-        // no device as signed here and saves nothing.
-        if psbt.unsigned_tx != tx.psbt.unsigned_tx {
-            return Task::none();
-        }
         self.error = None;
         self.signer_notice = None;
         // Bring the picker back into view after a local sign
@@ -3356,6 +3350,14 @@ impl Modal for SignModal {
                 return self.update_border_reconstruction(msg, tx)
             }
             Message::Signed(fingerprint, res) => {
+                // A result for another transaction — one whose signer was
+                // closed while its device was still signing — is not this
+                // one's. It changes nothing here: the device stays "signing"
+                // if this transaction is out to it, it is not marked as
+                // signed, and nothing is saved.
+                if matches!(&res, Ok(psbt) if psbt.unsigned_tx != tx.psbt.unsigned_tx) {
+                    return Task::none();
+                }
                 self.signing.remove(&fingerprint);
                 let over_lan = self.lan_signing.remove(&fingerprint);
                 return match res {
@@ -4873,12 +4875,17 @@ mod tests {
             coincube_core::miniscript::bitcoin::absolute::LockTime::from_consensus(
                 other.unsigned_tx.lock_time.to_consensus_u32() + 1,
             );
+        // This transaction is out to the same device, over both transports.
+        modal.signing.insert(fingerprint(USB_FP));
+        modal.lan_signing.insert(fingerprint(USB_FP));
         let task = modal.update(
             daemon,
             Message::Signed(fingerprint(USB_FP), Ok(other)),
             &mut tx,
         );
         assert_eq!(task.units(), 0, "nothing is saved or shown");
+        assert!(modal.signing.contains(&fingerprint(USB_FP)));
+        assert!(modal.lan_signing.contains(&fingerprint(USB_FP)));
         assert!(!modal.signed.contains(&fingerprint(USB_FP)));
         assert_eq!(tx.psbt, before);
     }
