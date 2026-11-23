@@ -2857,6 +2857,16 @@ impl Bitcoind {
         let mut args = vec![
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
+            // Never ask the router to map the P2P port. Bitcoin Core 30.0
+            // flipped `-natpmp` to on by default, and the managed conf leaves
+            // `listen` at its default unless inbound Tor is on, so without this
+            // a Core 31.x node behind a PCP/NAT-PMP router would open and
+            // advertise a clearnet port the user never enabled — with none of
+            // the inbound bandwidth caps, which are only written for inbound
+            // Tor. The option is known to every managed build (Core 25.0+ and
+            // the Knots pins), so it is safe to pass regardless of flavour, and
+            // a command-line value also covers a conf written before this.
+            "-natpmp=0".into(),
         ];
         if chain.is_blake2b() {
             args.extend([
@@ -5890,6 +5900,10 @@ mod tests {
                 i,
                 argv
             );
+            // Port mapping is refused for every binary: Core 30.0+ defaults
+            // `-natpmp` to on, which would open a clearnet inbound port.
+            let natpmp: Vec<&String> = argv.iter().filter(|a| a.starts_with("-natpmp")).collect();
+            assert_eq!(natpmp, ["-natpmp=0"], "case {}: {:?}", i, argv);
             let torexecute: Vec<&String> = argv
                 .iter()
                 .filter(|a| a.starts_with("-torexecute"))
