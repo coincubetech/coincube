@@ -3452,6 +3452,9 @@ impl App {
         if let Some(client) = client {
             app.panels.connect.install_admitted_client(client.clone());
             app.cache.has_connect_session = true;
+            app.panels
+                .global_home
+                .set_fork_connect_client(Some(client.clone()));
             app.fork_connect_client = Some(client);
         }
         let provision = app.background_managed_node_task(true);
@@ -3860,6 +3863,9 @@ impl App {
         if let Some(client) = client.filter(|c| c.token().is_some()) {
             app.panels.connect.install_admitted_client(client.clone());
             app.cache.has_connect_session = true;
+            app.panels
+                .global_home
+                .set_fork_connect_client(Some(client.clone()));
             app.fork_connect_client = Some(client);
         }
         // Check the fork's feature now rather than at the first tick: a
@@ -9344,6 +9350,7 @@ impl App {
     pub(crate) fn revoke_local_connect_services(&mut self) {
         self.revoke_claim();
         self.fork_connect_client = None;
+        self.panels.global_home.set_fork_connect_client(None);
         self.panels.connect.account.use_local_backend();
         self.cache.has_connect_session = false;
         self.cache.lightning_address = None;
@@ -9369,6 +9376,7 @@ impl App {
                 node.stop();
             }
             self.fork_connect_client = None;
+            self.panels.global_home.set_fork_connect_client(None);
             self.panels.connect.revoke_admitted_client();
             self.cache.has_connect_session = false;
             self.cache.lightning_address = None;
@@ -11687,6 +11695,9 @@ pub(crate) mod tests {
                 email_verified: Some(true),
             });
             app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+            app.panels
+                .global_home
+                .set_fork_connect_client(Some(client.clone()));
             app.fork_connect_client = Some(client);
         }
         app
