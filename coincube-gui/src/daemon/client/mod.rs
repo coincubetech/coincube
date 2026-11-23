@@ -168,6 +168,22 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         self.call("createspend", Some(input)).await
     }
 
+    async fn preview_spend_tx(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Address<address::NetworkUnchecked>,
+    ) -> Result<CreateSpendResult, DaemonError> {
+        let input = vec![
+            json!(destinations),
+            json!(coins_outpoints),
+            json!(feerate_vb),
+            json!(change_address),
+        ];
+        self.call("previewspend", Some(input)).await
+    }
+
     async fn rbf_psbt(
         &self,
         txid: &Txid,

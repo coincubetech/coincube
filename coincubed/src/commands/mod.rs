@@ -397,6 +397,16 @@ fn validate_spend_for_chain(
     enforce_legacy_signature_policy(&unified, secp)
 }
 
+/// Whether a regular spend's side effects are kept once it is built.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpendRecord {
+    /// The spend may be signed: reserve its change index, advance the index
+    /// of a destination of ours and store an imported wallet's construction.
+    Keep,
+    /// A preview, read for its fee and inputs and thrown away.
+    Discard,
+}
+
 fn imported_construction(psbt: &Psbt) -> Psbt {
     let mut construction = psbt.clone();
     for input in &mut construction.inputs {
@@ -1652,6 +1662,54 @@ impl DaemonControl {
         change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
         max_fee_sats: Option<u64>,
     ) -> Result<CreateSpendResult, CommandError> {
+        self.build_regular_spend(
+            destinations,
+            coins_outpoints,
+            feerate_vb,
+            change_address,
+            max_fee_sats,
+            SpendRecord::Keep,
+        )
+    }
+
+    /// Build the spend [`Self::create_spend`] would, only to read its fee and
+    /// coin selection: nothing about it is recorded.
+    ///
+    /// A caller pricing a form as the user types builds one PSBT per edit and
+    /// throws each away. `create_spend` is wrong for that: it advances the
+    /// derivation index of a destination of ours, and for an imported wallet
+    /// it stores the construction, which `listspendtxs` then reports as an
+    /// unsigned draft that nobody saved. The change address is required for
+    /// the same reason: a fresh one would be reserved.
+    ///
+    /// The PSBT must not be signed. An imported wallet refuses it in
+    /// [`Self::update_spend`], having no construction to hold it to.
+    pub fn preview_spend(
+        &self,
+        destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
+        coins_outpoints: &[bitcoin::OutPoint],
+        feerate_vb: u64,
+        change_address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
+    ) -> Result<CreateSpendResult, CommandError> {
+        self.build_regular_spend(
+            destinations,
+            coins_outpoints,
+            feerate_vb,
+            Some(change_address),
+            None,
+            SpendRecord::Discard,
+        )
+    }
+
+    fn build_regular_spend(
+        &self,
+        destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
+        coins_outpoints: &[bitcoin::OutPoint],
+        feerate_vb: u64,
+        change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
+        max_fee_sats: Option<u64>,
+        record: SpendRecord,
+    ) -> Result<CreateSpendResult, CommandError> {
         let is_self_send = destinations.is_empty();
         // For self-send, the coins must be specified.
         if is_self_send && coins_outpoints.is_empty() {
@@ -1738,6 +1796,12 @@ impl DaemonControl {
                 }
             };
             self.validate_regular_fee_limits(&psbt, max_fee_sats, feerate_vb)?;
+            if record == SpendRecord::Discard {
+                return Ok(CreateSpendResult::Success {
+                    psbt,
+                    warnings: warnings.iter().map(|w| w.to_string()).collect(),
+                });
+            }
             if let Some(next_change_address) = self.next_change_on_commit_conflict(
                 &mut db_conn,
                 &change_info,
@@ -4505,6 +4569,58 @@ mod tests {
         assert!(matches!(swept, Ok(CreateSpendResult::Success { .. })));
     }
 
+    /// A started daemon's poller ends the holds its control takes. A control
+    /// left with holds of its own would keep every coin out of automatic
+    /// selection for the maximum age after each broadcast.
+    #[test]
+    fn a_started_daemon_shares_its_broadcast_holds_with_its_poller() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = ms.control();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        let spend = bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: outpoint,
+                ..Default::default()
+            }],
+            output: Vec::new(),
+        };
+        {
+            let mut db_conn = control.db().lock().unwrap().connection();
+            db_conn.new_txs(&[funding, spend.clone()]);
+            db_conn.new_unspent_coins(&[Coin {
+                outpoint,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(100_000),
+                derivation_index: bip32::ChildNumber::from(13),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }]);
+            db_conn.spend_coins(&[(outpoint, spend.compute_txid())]);
+        }
+        // As a broadcast of `spend` does, once the network accepts it.
+        control
+            .broadcast_holds
+            .hold_inputs_of(&spend, time::Instant::now());
+        assert!(control.coins_held_by_a_broadcast().contains(&outpoint));
+
+        let (done, completed) = mpsc::sync_channel(0);
+        control
+            .poller_sender
+            .send(PollerMessage::PollNow(done))
+            .unwrap();
+        completed
+            .recv_timeout(time::Duration::from_secs(30))
+            .unwrap();
+        assert!(control.coins_held_by_a_broadcast().is_empty());
+        ms.shutdown();
+    }
+
     #[test]
     fn capped_vault_spend_accepts_network_dust_recipient() {
         let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
@@ -6786,6 +6902,13 @@ mod tests {
         /// while it is dormant, but the control's own chain-keyed paths are
         /// what these tests are about.
         fn blake2b_control(descriptor: CoincubeDescriptor) -> DaemonControl {
+            blake2b_control_over(descriptor, DummyDatabase::new())
+        }
+
+        fn blake2b_control_over(
+            descriptor: CoincubeDescriptor,
+            database: DummyDatabase,
+        ) -> DaemonControl {
             let tmp = tmp_dir();
             std::fs::create_dir_all(&tmp).unwrap();
             let config = crate::config::Config::new(
@@ -6803,7 +6926,7 @@ mod tests {
                 config,
                 std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
                 poller_sender,
-                std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
+                std::sync::Arc::new(std::sync::Mutex::new(database)),
                 secp256k1::Secp256k1::verification_only(),
                 Default::default(),
                 Default::default(),
@@ -6903,6 +7026,106 @@ mod tests {
             assert!(matches!(broadcast, Err(CommandError::UnknownSpend(_))));
             let rbf = control.rbf_psbt(&txid, false, Some(1)).map(|_| ());
             assert!(!gated(&rbf), "{:?}", rbf);
+        }
+
+        /// An imported wallet stores every construction `create_spend` builds
+        /// and lists it as a draft: that is what lets it check a signature
+        /// that comes back from another signer. A spend built only to price a
+        /// form must therefore go through `preview_spend`, or every amount the
+        /// user settles on is left behind as an unsigned draft that was never
+        /// saved and outlives the transaction that was really sent.
+        #[test]
+        fn imported_preview_spend_is_not_stored_as_a_draft() {
+            const COIN_VALUE: u64 = 100_000;
+            let (signers, descriptor, _) = vault_fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let key = descriptor_key(&signers[0], 0, &secp);
+            let imported = coincube_core::wallet_descriptor::ImportedWalletDescriptor::parse(
+                &format!("wpkh({key})"),
+                None,
+                ChainId::Bitcoin,
+            )
+            .unwrap()
+            .paired_blake2b()
+            .unwrap();
+            let database = DummyDatabase::new();
+            let known = database.clone();
+            let mut control = blake2b_control_over(descriptor, database);
+            control.config.main_descriptor = WalletDescriptor::Imported(imported);
+            let mut db_conn = control.db().lock().unwrap().connection();
+            let funding = funding_tx(&control, &[(0, COIN_VALUE, 3, false)]);
+            let coin = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+            db_conn.new_txs(std::slice::from_ref(&funding));
+            db_conn.new_unspent_coins(&[Coin {
+                outpoint: coin,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(COIN_VALUE),
+                derivation_index: bip32::ChildNumber::from(3),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }]);
+            let own_address =
+                |descriptor: coincube_core::wallet_descriptor::PublicBranchRef<'_>, index: u32| {
+                    descriptor
+                        .derive(index)
+                        .unwrap()
+                        .address(control.config.bitcoin_config.network)
+                        .unwrap()
+                        .as_unchecked()
+                        .clone()
+                };
+            let sizing = own_address(control.config.main_descriptor.change_descriptor(), 0);
+            // A destination of the wallet's own, past the last revealed index:
+            // keeping the spend reveals it, pricing it must not.
+            let destination = own_address(control.config.main_descriptor.receive_descriptor(), 9);
+            known.insert_address(sizing.clone().assume_checked(), 0, true);
+            known.insert_address(destination.clone().assume_checked(), 9, false);
+            let destinations: HashMap<_, _> = std::iter::once((destination, 10_000)).collect();
+            let receive_before = db_conn.receive_index();
+            let change_before = db_conn.change_index();
+
+            // The form prices the spend again on every edit.
+            let mut preview = None;
+            for feerate in 1..=3 {
+                match control
+                    .preview_spend(&destinations, &[coin], feerate, sizing.clone())
+                    .unwrap()
+                {
+                    CreateSpendResult::Success { psbt, .. } => preview = Some(psbt),
+                    other => panic!("expected a preview, got {:?}", other),
+                }
+            }
+            assert!(control.list_spend(None).unwrap().spend_txs.is_empty());
+            assert_eq!(db_conn.receive_index(), receive_before);
+            assert_eq!(db_conn.change_index(), change_before);
+            // Nothing was kept to hold a signature to, so a preview can't be
+            // signed into a spend either.
+            let refused = control.update_spend(preview.clone().unwrap());
+            assert!(
+                matches!(&refused, Err(CommandError::ImportedSpendValidation(message))
+                    if message.contains("not created and saved")),
+                "{:?}",
+                refused
+            );
+            assert!(control.list_spend(None).unwrap().spend_txs.is_empty());
+
+            // The spend the user goes on to sign is kept, as before. Built with
+            // the same arguments, it is the very transaction the preview priced.
+            let kept = match control
+                .create_spend(&destinations, &[coin], 3, Some(sizing))
+                .unwrap()
+            {
+                CreateSpendResult::Success { psbt, .. } => psbt,
+                other => panic!("expected a spend, got {:?}", other),
+            };
+            assert_eq!(Some(&kept), preview.as_ref());
+            let listed = control.list_spend(None).unwrap().spend_txs;
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].psbt, kept);
+            assert!(db_conn.receive_index() > receive_before);
         }
 
         /// End to end on a stored, signed spend: with the backend locked as

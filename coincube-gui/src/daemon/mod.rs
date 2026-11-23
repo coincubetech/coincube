@@ -156,6 +156,31 @@ pub trait Daemon: Debug {
         feerate_vb: u64,
         change_address: Option<Address<address::NetworkUnchecked>>,
     ) -> Result<model::CreateSpendResult, DaemonError>;
+    /// The spend [`Self::create_spend_tx`] would build, for reading its fee and
+    /// coin selection only: the daemon records nothing about it.
+    ///
+    /// Use it for every PSBT that is priced and thrown away. `create_spend_tx`
+    /// makes an imported wallet store the construction, and the daemon then
+    /// lists it as an unsigned draft that nobody saved. `change_address` is
+    /// usually [`crate::app::wallet::Wallet::preview_change_address`].
+    ///
+    /// The default is for test doubles, which record nothing either way; the
+    /// two real backends override it.
+    async fn preview_spend_tx(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Address<address::NetworkUnchecked>,
+    ) -> Result<model::CreateSpendResult, DaemonError> {
+        self.create_spend_tx(
+            coins_outpoints,
+            destinations,
+            feerate_vb,
+            Some(change_address),
+        )
+        .await
+    }
     /// Same construction as [`Self::create_spend_tx`], rejecting an over-ceiling
     /// fee or measured rate before the daemon commits a change index.
     /// Backends without this check fail closed.

@@ -3,14 +3,15 @@ use super::*;
 
 impl App {
     pub(super) fn handle_fiat_price(&mut self, fiat_price: cache::FiatPrice) -> Task<Message> {
-        if self.cube_settings.network.is_blake2b() {
-            let relevant = self
-                .cube_settings
-                .fiat_price
-                .as_ref()
-                .is_some_and(|setting| {
-                    setting.is_enabled && setting.currency == fiat_price.currency()
-                });
+        let chain = self.cube_settings.network;
+        let relevant = self
+            .cube_settings
+            .fiat_price
+            .as_ref()
+            .is_some_and(|setting| {
+                setting.matches_display_quote(chain, fiat_price.currency(), fiat_price.source())
+            });
+        if chain.is_blake2b() {
             if relevant && self.cache.accept_btcb2_price(fiat_price) {
                 return Task::done(Message::CacheUpdated);
             }
@@ -23,13 +24,7 @@ impl App {
         let mut updated = self.update_btc_usd_conversion_rate(&fiat_price);
 
         // Store user's selected currency price (only when fiat display is enabled).
-        let is_relevant = self.cube_settings.fiat_price.as_ref().is_some_and(|sett| {
-            sett.is_enabled
-                && sett.source == fiat_price.source()
-                && sett.currency == fiat_price.currency()
-        });
-
-        if is_relevant
+        if relevant
             // Prefer a successful quote; compare request time only between like results.
             && !self.cache.fiat_price.as_ref().is_some_and(|cached| {
                 cached.source() == fiat_price.source()
