@@ -3184,6 +3184,12 @@ impl SignModal {
         psbt: Psbt,
         tx: &mut SpendTx,
     ) -> Task<Message> {
+        // A result for another transaction — one whose signer was closed
+        // while its device was still signing — is not this one's: it marks
+        // no device as signed here and saves nothing.
+        if psbt.unsigned_tx != tx.psbt.unsigned_tx {
+            return Task::none();
+        }
         self.error = None;
         self.signer_notice = None;
         // Bring the picker back into view after a local sign
@@ -4837,6 +4843,26 @@ mod tests {
             device("ledger-usb-1", fingerprint(USB_FP)),
         ];
         modal
+    }
+
+    #[test]
+    fn a_result_for_another_transaction_marks_no_device_as_signed() {
+        let mut modal = picker_with_phone(None);
+        let (daemon, mut tx) = update_args();
+        let before = tx.psbt.clone();
+        let mut other = tx.psbt.clone();
+        other.unsigned_tx.lock_time =
+            coincube_core::miniscript::bitcoin::absolute::LockTime::from_consensus(
+                other.unsigned_tx.lock_time.to_consensus_u32() + 1,
+            );
+        let task = modal.update(
+            daemon,
+            Message::Signed(fingerprint(USB_FP), Ok(other)),
+            &mut tx,
+        );
+        assert_eq!(task.units(), 0, "nothing is saved or shown");
+        assert!(!modal.signed.contains(&fingerprint(USB_FP)));
+        assert_eq!(tx.psbt, before);
     }
 
     #[test]

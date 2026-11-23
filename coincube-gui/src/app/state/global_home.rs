@@ -5881,7 +5881,9 @@ mod tests {
             };
             assert_eq!(home.transfer_feerate_preset, None);
 
-            drain(home.update(
+            // Only the loading state matters here: the fetch itself is
+            // dropped unrun, and its result is injected below.
+            drop(home.update(
                 None,
                 &cache,
                 Message::View(view::Message::Home(
@@ -5919,7 +5921,9 @@ mod tests {
                 has_vault: true,
                 ..Cache::default()
             };
-            drain(home.update(
+            // Only the loading state matters here: the fetch itself is
+            // dropped unrun, and its result is injected below.
+            drop(home.update(
                 None,
                 &cache,
                 Message::View(view::Message::Home(
