@@ -2029,13 +2029,17 @@ impl DaemonControl {
                 ));
             }
         }
+        // Read before the transaction is sent: a record of it the database
+        // has by now is left from an earlier broadcast, and says nothing of
+        // this one.
+        let recorded_before = BroadcastHolds::recorded_inputs_of(&final_tx, &mut db_conn);
         self.send_to_network(&final_tx)
             .map_err(CommandError::TxBroadcast)?;
-        // The database does not show these inputs as spent by this transaction
+        // The database does not show these inputs as spent by this broadcast
         // until a poll records it. Keep automatic coin selection off them
         // until then.
         self.broadcast_holds
-            .hold_inputs_of(&final_tx, time::Instant::now());
+            .hold_broadcast(&final_tx, &recorded_before, time::Instant::now());
         if self.config.main_descriptor.as_imported().is_some() {
             db_conn.record_broadcast_txid(txid, &final_tx.compute_txid()).map_err(|error|
                 CommandError::ImportedSpendValidation(format!(
@@ -7496,6 +7500,37 @@ mod tests {
 
             wallet.poller_records(&wallet.spend);
             assert!(wallet.db().coins(&[], &[wallet.coin])[&wallet.coin].is_spent());
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// The spend left the mempool and is broadcast again before a poll
+        /// frees the coin, so the database still has the coin as spent by it.
+        /// A poll that writes no coin (it failed) must not end the new hold on
+        /// that record. The next poll, whose backend does not show the spend
+        /// yet, frees the coin, and the hold is all that keeps it from being
+        /// selected again.
+        #[test]
+        fn a_spend_broadcast_again_before_the_poller_freed_its_coin_holds_it() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            wallet.poller_records(&wallet.spend);
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(wallet.sent.lock().unwrap().len(), 2);
+            // A poll that fails writes nothing.
+            wallet.poll_ends();
+            wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+
+            wallet.poller_records(&wallet.spend);
             wallet.db().unspend_coins(&[wallet.coin]);
             assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
         }
