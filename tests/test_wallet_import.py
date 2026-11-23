@@ -241,6 +241,17 @@ def test_import_history_send_and_restart(import_chain, tmp_path, shape, backend)
             coin["outpoint"] for coin in funded_coins if coin["spend_info"] is None
         ]
         recipient = node.rpc.getnewaddress()
+        # A preview prices the same spend and records nothing: it is not
+        # listed as a draft, and it can't be signed into one afterwards.
+        preview = daemon.rpc.previewspend(
+            {recipient: 100_000}, outpoints, 2, addresses[1]
+        )["psbt"]
+        assert daemon.rpc.listspendtxs()["spend_txs"] == []
+        with pytest.raises(RpcError):
+            daemon.rpc.updatespend(preview)
+        assert daemon.rpc.listspendtxs()["spend_txs"] == []
+        with pytest.raises(RpcError):
+            daemon.rpc.previewspend({recipient: 100_000}, outpoints, 2)
         first = daemon.rpc.createspend({recipient: 100_000}, outpoints, 2)["psbt"]
         # Creation must persist the exact construction before any signer sees it.
         unsigned_id = node.rpc.decodepsbt(first)["tx"]["txid"]

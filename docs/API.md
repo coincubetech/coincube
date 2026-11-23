@@ -15,6 +15,7 @@ Commands must be sent as valid JSONRPC 2.0 requests, ending with a `\n`.
 | [`listrevealedaddresses`](#listrevealedaddresses)     | List revealed addresses (both used and unused)                |
 | [`listcoins`](#listcoins)                             | List all wallet transaction outputs.                          |
 | [`createspend`](#createspend)                         | Create a new Spend transaction                                |
+| [`previewspend`](#previewspend)                       | Build a Spend transaction without recording it                |
 | [`updatespend`](#updatespend)                         | Store a created Spend transaction                             |
 | [`listspendtxs`](#listspendtxs)                       | List all stored Spend transactions                            |
 | [`delspendtx`](#delspendtx)                           | Delete a stored Spend transaction                             |
@@ -263,6 +264,34 @@ If there are insufficient funds to create the required spend, then the following
 | Field     | Type    | Description                                   |
 | --------- | ------- | --------------------------------------------- |
 | `missing` | integer | Additional sats required to create the spend. |
+
+### `previewspend`
+
+Build the transaction [`createspend`](#createspend) would, to read its fee and the coins it
+selects, without recording anything about it. Use it to price a spend that may never be signed,
+for instance on every edit of a form.
+
+`createspend` is not suited to that. It advances the derivation index of a destination that
+belongs to the wallet, reserves a fresh change address when none is given, and for an imported
+wallet stores the transaction, which [`listspendtxs`](#listspendtxs) then returns as an unsigned
+draft. `previewspend` does none of these, which is why `change_address` is required: pass an
+address the wallet already knows, or the address to sweep to.
+
+Do not sign the returned PSBT. An imported wallet refuses it in [`updatespend`](#updatespend).
+Call `createspend` for the transaction to sign.
+
+#### Request
+
+| Field            | Type           | Description                                                       |
+| ---------------- | -------------- | ----------------------------------------------------------------- |
+| `destinations`   | object         | Map from Bitcoin address to value.                                |
+| `outpoints`      | list of string | List of the coins to be spent, as `txid:vout`.                    |
+| `feerate`        | integer        | Target feerate for the transaction, in satoshis per virtual byte. |
+| `change_address` | string         | Address to be used for leftover amount, if any. Required.         |
+
+#### Response
+
+The response is the same as for [`createspend`](#createspend).
 
 ### `updatespend`
 

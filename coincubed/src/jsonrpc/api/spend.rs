@@ -9,6 +9,23 @@ pub(super) fn create_spend(
     control: &DaemonControl,
     params: Params,
 ) -> Result<serde_json::Value, Error> {
+    build_spend(control, params, false)
+}
+
+/// `previewspend`: `createspend`'s parameters with a required
+/// `change_address`, building a spend that is not recorded.
+pub(super) fn preview_spend(
+    control: &DaemonControl,
+    params: Params,
+) -> Result<serde_json::Value, Error> {
+    build_spend(control, params, true)
+}
+
+fn build_spend(
+    control: &DaemonControl,
+    params: Params,
+    preview: bool,
+) -> Result<serde_json::Value, Error> {
     let destinations = params
         .get(0, "destinations")
         .ok_or_else(|| Error::invalid_params("Missing 'destinations' parameter."))?
@@ -54,6 +71,12 @@ pub(super) fn create_spend(
         })
         .transpose()?;
 
+    if preview {
+        let change_address = change_address
+            .ok_or_else(|| Error::invalid_params("Missing 'change_address' parameter."))?;
+        let res = control.preview_spend(&destinations, &outpoints, feerate, change_address)?;
+        return Ok(serde_json::json!(&res));
+    }
     let res = control.create_spend(&destinations, &outpoints, feerate, change_address)?;
     Ok(serde_json::json!(&res))
 }

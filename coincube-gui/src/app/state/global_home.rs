@@ -4277,7 +4277,7 @@ impl GlobalHome {
         Task::perform(
             async move {
                 match daemon
-                    .create_spend_tx(&outpoints, &destinations, feerate_vb, Some(change))
+                    .preview_spend_tx(&outpoints, &destinations, feerate_vb, change)
                     .await
                 {
                     Ok(CreateSpendResult::Success { psbt, .. }) => {
@@ -5091,6 +5091,32 @@ mod tests {
         #[derive(Debug, Default)]
         struct RecordingDaemon {
             calls: Mutex<Vec<(u64, Option<Address<address::NetworkUnchecked>>)>>,
+            /// How many of `calls` asked for a spend the daemon keeps
+            /// (`create_spend_tx`) rather than a preview.
+            kept: Mutex<usize>,
+        }
+
+        impl RecordingDaemon {
+            fn record(
+                &self,
+                feerate_vb: u64,
+                change_address: Option<Address<address::NetworkUnchecked>>,
+            ) -> crate::daemon::model::CreateSpendResult {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((feerate_vb, change_address));
+                let tx = coincube_core::miniscript::bitcoin::Transaction {
+                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                    input: vec![],
+                    output: vec![],
+                };
+                crate::daemon::model::CreateSpendResult::Success {
+                    psbt: Psbt::from_unsigned_tx(tx).expect("empty unsigned tx"),
+                    warnings: vec![],
+                }
+            }
         }
 
         #[async_trait::async_trait]
@@ -5169,20 +5195,18 @@ mod tests {
                 feerate_vb: u64,
                 change_address: Option<Address<address::NetworkUnchecked>>,
             ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((feerate_vb, change_address));
-                let tx = coincube_core::miniscript::bitcoin::Transaction {
-                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
-                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
-                    input: vec![],
-                    output: vec![],
-                };
-                Ok(crate::daemon::model::CreateSpendResult::Success {
-                    psbt: Psbt::from_unsigned_tx(tx).expect("empty unsigned tx"),
-                    warnings: vec![],
-                })
+                *self.kept.lock().unwrap() += 1;
+                Ok(self.record(feerate_vb, change_address))
+            }
+
+            async fn preview_spend_tx(
+                &self,
+                _coins_outpoints: &[OutPoint],
+                _destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+                feerate_vb: u64,
+                change_address: Address<address::NetworkUnchecked>,
+            ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+                Ok(self.record(feerate_vb, Some(change_address)))
             }
 
             async fn rbf_psbt(
@@ -5332,6 +5356,14 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![2, 25, 2, 20],
                 "every valid keystroke previews once"
+            );
+            // An imported wallet stores every spend `create_spend_tx` builds
+            // and lists it as an unsigned draft, so a keystroke must only
+            // ever preview.
+            assert_eq!(
+                *daemon.kept.lock().unwrap(),
+                0,
+                "a preview asked the daemon for a spend it keeps"
             );
             let sizing = wallet.preview_change_address();
             for (feerate, change) in calls.iter() {

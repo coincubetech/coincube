@@ -1062,11 +1062,11 @@ impl DefineSpend {
                     .await
                 } else {
                     daemon
-                        .create_spend_tx(
+                        .preview_spend_tx(
                             &outpoints,
                             &destinations,
                             feerate_vb,
-                            Some(max_address.clone()),
+                            max_address.clone(),
                         )
                         .await
                         .map_err(|e| e.into())
@@ -1177,12 +1177,7 @@ impl DefineSpend {
         let mut drafted: Option<CreateSpendResult> = None;
         for _ in 0..4 {
             let result = daemon
-                .create_spend_tx(
-                    outpoints,
-                    &destinations,
-                    feerate_vb,
-                    Some(wallet_change.clone()),
-                )
+                .preview_spend_tx(outpoints, &destinations, feerate_vb, wallet_change.clone())
                 .await
                 .map_err(crate::app::error::Error::from)?;
             match result {
@@ -1218,7 +1213,7 @@ impl DefineSpend {
             }
         }
         daemon
-            .create_spend_tx(outpoints, &destinations, feerate_vb, Some(wallet_change))
+            .preview_spend_tx(outpoints, &destinations, feerate_vb, wallet_change)
             .await
             .map_err(crate::app::error::Error::from)
     }
@@ -3030,7 +3025,7 @@ mod tests {
         .unwrap();
         let daemon = Arc::new(crate::daemon::client::Coincubed::new(
             crate::utils::mock::Daemon::new(vec![(
-                Some(json!({"method": "createspend", "params": [{}, [outpoint], 2, &recipient]})),
+                Some(json!({"method": "previewspend", "params": [{}, [outpoint], 2, &recipient]})),
                 Ok(response),
             )])
             .run(),
@@ -3356,7 +3351,9 @@ mod tests {
         let daemon: Arc<dyn Daemon + Sync + Send> =
             Arc::new(crate::daemon::client::Coincubed::new(
                 crate::utils::mock::Daemon::new(vec![(
-                    Some(json!({"method": "createspend", "params": [destinations, [], 2, change]})),
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
                     Ok(draft_spending(&[(outpoint(2), 80_000)])),
                 )])
                 .run(),
@@ -3391,7 +3388,9 @@ mod tests {
         let daemon: Arc<dyn Daemon + Sync + Send> =
             Arc::new(crate::daemon::client::Coincubed::new(
                 crate::utils::mock::Daemon::new(vec![(
-                    Some(json!({"method": "createspend", "params": [destinations, [], 2, change]})),
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
                     Ok(draft_spending(&[(outpoint(2), 80_000)])),
                 )])
                 .run(),
@@ -3466,7 +3465,9 @@ mod tests {
         let daemon: Arc<dyn Daemon + Sync + Send> =
             Arc::new(crate::daemon::client::Coincubed::new(
                 crate::utils::mock::Daemon::new(vec![(
-                    Some(json!({"method": "createspend", "params": [destinations, [], 2, change]})),
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
                     Ok(draft_spending(&[(outpoint(2), 80_000)])),
                 )])
                 .run(),
