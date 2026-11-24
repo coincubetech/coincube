@@ -145,3 +145,24 @@ async fn unresponsive_server_reports_handshake_timeout() {
         first
     );
 }
+
+/// A refused bearer is reported as an ended session, not as an error string
+/// and not as trouble; every other failure stays trouble.
+#[test]
+fn a_refused_bearer_is_reported_as_an_ended_session() {
+    assert!(matches!(
+        failure_message(&tonic::Status::unauthenticated("token expired")),
+        ConnectStreamMessage::SessionEnded(reason) if reason.contains("token expired")
+    ));
+    for status in [
+        tonic::Status::unavailable("down"),
+        tonic::Status::deadline_exceeded("slow"),
+        tonic::Status::internal("boom"),
+    ] {
+        assert!(
+            matches!(failure_message(&status), ConnectStreamMessage::Trouble(_)),
+            "{:?}",
+            status.code()
+        );
+    }
+}

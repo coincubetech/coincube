@@ -11806,7 +11806,12 @@ pub(crate) mod tests {
             ),
             (M::Trouble(Trouble::Offline), ConnectionStatus::Offline),
             (
-                M::Error("Connect session expired".into()),
+                M::Error("in-stream error".into()),
+                ConnectionStatus::Reconnecting,
+            ),
+            // An ended session arrives typed, and reads as before.
+            (
+                M::SessionEnded("Connect session expired".into()),
                 ConnectionStatus::Reconnecting,
             ),
         ] {

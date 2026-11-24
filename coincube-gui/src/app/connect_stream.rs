@@ -261,10 +261,10 @@ impl App {
                     Refusal::Unexplained => self.set_connect_status(ConnectionStatus::RenewFailed),
                 }
             }
-            M::Error(err) => {
-                // An in-stream error or an expired sign-in. The REST client
-                // refreshes the shared token (or signs out if Connect
-                // refuses), and the stream retries with it.
+            // An ended session is told apart from an in-stream error by its
+            // type, and handled the same way for now: the stream retries
+            // with backoff and reads the shared token again on each attempt.
+            M::Error(err) | M::SessionEnded(err) => {
                 log::warn!("[CONNECT GRPC] Stream error: {}", err);
                 if matches!(
                     self.cache.connect_stream_status,
