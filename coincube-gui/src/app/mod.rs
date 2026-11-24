@@ -777,6 +777,11 @@ pub struct App {
     /// the hold; a sibling sign-in of anyone else meanwhile re-holds,
     /// which drops the adoption. Cleared by every hold and by the lift.
     claim_readoption: Option<u32>,
+    /// The account a dropped adoption was for. An adoption empties the
+    /// panel's user until Connect answers, so after a re-hold this is what
+    /// lets a later sign-in of that account be adopted again. Cleared by
+    /// the lift.
+    claim_readopt_account: Option<u32>,
     /// True while an off-thread daemon backend switch ([`Self::spawn_daemon_switch`])
     /// is in flight. The config isn't updated until the switch completes, so
     /// without this guard the next sync probe would keep re-firing the switch
@@ -3763,6 +3768,7 @@ impl App {
             node_history_request_epoch: 0,
             claim_session_invalidated: false,
             claim_readoption: None,
+            claim_readopt_account: None,
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
             background_node_attempt: None,
@@ -4040,6 +4046,7 @@ impl App {
                 node_history_request_epoch: 0,
                 claim_session_invalidated: false,
                 claim_readoption: None,
+                claim_readopt_account: None,
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
                 background_node_attempt: None,
@@ -4856,7 +4863,13 @@ impl App {
         self.revoke_claim();
         self.claim_hold_epoch = self.panels.connect.account.invalidate_auth();
         self.claim_session_invalidated = true;
-        self.claim_readoption = None;
+        if let Some(account) = self.claim_readoption.take() {
+            // The adoption's answer will be dropped as stale: release the
+            // panel's pending load so it can check its session again, and
+            // remember the account so a later sign-in of it still recovers.
+            self.claim_readopt_account = Some(account);
+            self.panels.connect.account.abandon_admitted_load();
+        }
     }
 
     /// The global Connect auth boundary for a log-out in any tab: hold.
@@ -4985,7 +4998,8 @@ impl App {
     }
 
     /// Whether a sibling sign-in of `user_id` may be adopted by this held
-    /// tab: the panel still shows that account, the tab is an ordinary
+    /// tab: the panel still shows that account (or, its user emptied by an
+    /// adoption a re-hold dropped, was adopting it), the tab is an ordinary
     /// Bitcoin Cube (a Bitcoin Blake2b Cube keeps its admitted credentials),
     /// and its session was not revoked for good (`requires_authenticated_reopen`
     /// is sticky and an adoption would clear it).
@@ -4993,7 +5007,15 @@ impl App {
         self.claim_session_invalidated
             && !self.cache.chain().is_blake2b()
             && !self.panels.connect.account.requires_authenticated_reopen()
-            && self.panels.connect.account.user.as_ref().map(|u| u.id) == Some(user_id)
+            && self
+                .panels
+                .connect
+                .account
+                .user
+                .as_ref()
+                .map(|u| u.id)
+                .or(self.claim_readopt_account)
+                == Some(user_id)
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -6950,6 +6972,7 @@ impl App {
         if session_epoch.is_some_and(|epoch| epoch >= self.claim_hold_epoch) {
             self.claim_session_invalidated = false;
             self.claim_readoption = None;
+            self.claim_readopt_account = None;
         }
         let claim_signed_in =
             !explicit_logout && self.panels.connect.account.bitcoin_blake2b_enabled();

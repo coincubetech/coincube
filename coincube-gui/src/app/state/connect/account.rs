@@ -3136,6 +3136,13 @@ impl ConnectAccountPanel {
         iced::Task::none()
     }
 
+    /// Forget an admitted user load whose answer will arrive stale (the
+    /// App advanced the epoch over it), so the next `Init` checks the
+    /// session again instead of waiting for that answer forever.
+    pub(crate) fn abandon_admitted_load(&mut self) {
+        self.admitted_user_loading = false;
+    }
+
     /// Whether an `AdmittedUserLoaded` spawned at `generation`/`epoch`
     /// belongs to this panel's current admitted session — the condition
     /// under which `apply_admitted_user` acts on it. The App reads it to

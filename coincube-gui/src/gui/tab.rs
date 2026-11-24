@@ -1437,6 +1437,7 @@ impl Tab {
         self.fork_save_task.take();
         self.fork_tasks.clear();
         let mut command = Task::none();
+        let mut app_command = None;
         let mut replacement = None;
         match &mut self.state {
             State::App(app) if app.cube_settings().network.is_blake2b() => {
@@ -1450,9 +1451,10 @@ impl Tab {
             // The App decides from the kind of change and who made it: see
             // `App::on_global_auth_change`.
             State::App(app) => {
-                command = app
-                    .on_global_auth_change(change.clone(), originated)
-                    .map(Message::Run);
+                // May carry network I/O (a held tab adopting a sibling's
+                // bearer asks Connect for its user): bind it to this App's
+                // generation so a reply cannot reach a later App in this tab.
+                app_command = Some(app.on_global_auth_change(change.clone(), originated));
             }
             State::Home(home) => {
                 command = Self::apply_launcher_auth_change(home, &change, originated);
@@ -1489,6 +1491,9 @@ impl Tab {
                 self.copy_owner = None;
             }
             self.state = state;
+        }
+        if let Some(task) = app_command {
+            command = self.emit_app_task(task);
         }
         command
     }

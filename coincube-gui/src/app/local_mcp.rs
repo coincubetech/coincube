@@ -3606,30 +3606,67 @@ mod feature_flag_tests {
         assert!(app.cache.ai_access_server_enabled);
         assert!(app.mcp_supported(), "AI access returns without reopening");
 
-        // Race: held again, the same account is adopted, then another
-        // account signs in before Connect answers. The re-hold drops the
-        // adoption, so its late answer lifts nothing.
+        // Races: held again, the same account is adopted, then a sibling
+        // log-out or another account's sign-in arrives before Connect
+        // answers. The re-hold drops the adoption, so its late answer lifts
+        // nothing — and the panel is not left waiting on that answer: a
+        // later sign-in of the same account is adopted and recovers.
+        let verify = |app: &mut App| {
+            let generation = app.panels.connect.account.session_generation();
+            let epoch = app.panels.connect.account.auth_epoch();
+            drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::AdmittedUserLoaded {
+                    user: Ok(user(7)),
+                    generation,
+                    epoch,
+                },
+            ))));
+        };
+        for interruption in [AuthChange::LogOut, sign_in(8, "other-bearer")] {
+            drop(app.on_global_auth_change(AuthChange::LogOut, false));
+            drop(app.on_global_auth_change(sign_in(7, "second-bearer"), false));
+            assert_eq!(app.claim_readoption, Some(7));
+            let generation = app.panels.connect.account.session_generation();
+            let epoch = app.panels.connect.account.auth_epoch();
+            drop(app.on_global_auth_change(interruption, false));
+            assert!(app.claim_session_invalidated);
+            assert_eq!(app.claim_readoption, None);
+            assert!(app.panels.connect.account.auth_epoch() > epoch);
+            drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::AdmittedUserLoaded {
+                    user: Ok(user(7)),
+                    generation,
+                    epoch,
+                },
+            ))));
+            assert!(
+                app.claim_session_invalidated,
+                "the dropped adoption lifts nothing"
+            );
+            load_features(&mut app);
+            assert!(!app.mcp_supported());
+
+            // The panel's user is still empty, yet the account is adopted
+            // again and Connect's answer for it lifts the hold.
+            assert!(app.panels.connect.account.user.is_none());
+            drop(app.on_global_auth_change(sign_in(7, "third-bearer"), false));
+            assert_eq!(app.claim_readoption, Some(7));
+            assert_eq!(panel_token(&app).as_deref(), Some("third-bearer"));
+            verify(&mut app);
+            assert!(!app.claim_session_invalidated, "recovered after the race");
+            assert_eq!(app.claim_readopt_account, None);
+            load_features(&mut app);
+            assert!(app.mcp_supported());
+        }
+
+        // A session revoked for good is never re-adopted.
         drop(app.on_global_auth_change(AuthChange::LogOut, false));
-        drop(app.on_global_auth_change(sign_in(7, "second-bearer"), false));
-        assert_eq!(app.claim_readoption, Some(7));
-        let generation = app.panels.connect.account.session_generation();
+        app.panels.connect.account.revoke_admitted_client();
         let epoch = app.panels.connect.account.auth_epoch();
-        drop(app.on_global_auth_change(sign_in(8, "other-bearer"), false));
-        assert!(app.claim_session_invalidated);
+        drop(app.on_global_auth_change(sign_in(7, "fourth-bearer"), false));
         assert_eq!(app.claim_readoption, None);
-        assert!(app.panels.connect.account.auth_epoch() > epoch);
-        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::AdmittedUserLoaded {
-                user: Ok(user(7)),
-                generation,
-                epoch,
-            },
-        ))));
-        assert!(
-            app.claim_session_invalidated,
-            "the dropped adoption lifts nothing"
-        );
-        load_features(&mut app);
+        assert_eq!(app.panels.connect.account.auth_epoch(), epoch);
+        assert!(app.claim_session_invalidated);
         assert!(!app.mcp_supported());
 
         app.stop();
