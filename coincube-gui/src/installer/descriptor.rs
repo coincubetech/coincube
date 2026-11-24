@@ -67,25 +67,33 @@ impl KeySource {
     /// Creation capability, not proof that funds are replay-protected.
     ///
     /// On Bitcoin Blake2b a Vault may be built from the Cube key, an
-    /// imported or pasted xpub, and (since Robert's HW-1 decision of
-    /// 2026-10-06) a hardware device or a Border Wallet key. A device signs
-    /// the standard Bitcoin way, so its signatures stay replayable
-    /// ([`Self::replay_capable`] is false and the path advice says so); a
-    /// Border Wallet key signs in-process with the unified signer. Keychain
-    /// keys stay gated until their own fork signing contract is verified.
+    /// imported or pasted xpub, (since Robert's HW-1 decision of
+    /// 2026-10-06) a hardware device or a Border Wallet key, and a Keychain
+    /// key attached to the Cube. A device signs the standard Bitcoin way, so
+    /// its signatures stay replayable ([`Self::replay_capable`] is false and
+    /// the path advice says so); a Border Wallet key signs in-process with
+    /// the unified signer. A Keychain key is classified at sign time from
+    /// the phone's advertised capabilities (`BTCB2_CONNECT_SIGNING_CLIENT.md`),
+    /// so creation treats it as not replay-capable. A source missing from
+    /// this list stays refused on Bitcoin Blake2b.
     pub fn available_for_creation(&self, chain: crate::chain::ChainId) -> bool {
         !chain.is_blake2b()
             || matches!(
                 self,
-                Self::MasterSigner | Self::Manual | Self::Device(..) | Self::BorderWallet { .. }
+                Self::MasterSigner
+                    | Self::Manual
+                    | Self::Device(..)
+                    | Self::BorderWallet { .. }
+                    | Self::KeychainKey { .. }
             )
     }
 
     /// Whether a key from this source can produce a Bitcoin Blake2b unified
     /// signature at creation time: only what signs in-process from a seed
     /// (the Cube key, a Border Wallet key). Devices are unmarked until the
-    /// user says otherwise after enrolment, Keychain keys are legacy until
-    /// Lane B3, and a pasted xpub cannot sign here at all.
+    /// user says otherwise after enrolment, a Keychain key is classified only
+    /// once its phone advertises unified signing at sign time, and a pasted
+    /// xpub cannot sign here at all.
     /// Mirrors `app::state::vault::signers::ReplayProtection` for the
     /// signer index a loaded Vault builds.
     pub fn replay_capable(&self) -> bool {

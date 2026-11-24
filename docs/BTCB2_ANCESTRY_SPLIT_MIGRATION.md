@@ -36,15 +36,40 @@ review says the rate is unavailable and offers Try again. A fee answer from
 an older fetch is ignored: each fetch has a generation, and a superseded one
 does not change the rate or start another retry.
 
-A saved ancestry path is not a split key. `chain-proofs.json`, next to the
-Vault's daemon data, loads as `ProofEntry::Saved`: the links fit, and a fresh
-check still has to show the chain holds them. A check that cannot finish
+A saved ancestry path is not shown as verified. `chain-proofs.json`, next to
+the Vault's daemon data, loads as `ProofEntry::Saved`: the links fit, and a
+fresh check still has to show the chain holds them. A check that cannot finish
 (Connect down, a read that times out) does not erase that path. It becomes
 `SavedRetry`, is written back, stays "checking", and is tried again after
-`FAILED_RETRY` (30 minutes). A finished answer replaces the path, including a
+`failed_retry`: 1, 2, 5 and 15 minutes after the first failures in a row, then
+every `FAILED_RETRY` (30 minutes). A coin with no path whose check cannot
+finish waits the same way, and the split-coin step says the check is being
+retried rather than that it is checking.
+
+The Split coins flow does offer a coin holding a saved path as the split coin
+(`Cache::split_keys`), after any coin verified in this session, so a Vault that
+already holds a split coin goes straight to the review after a restart or
+while the background check cannot finish. That is no fresh observation, and
+none is needed to offer it: `split_coins::prepare` re-qualifies the chosen
+key's path against both chains before anything is built, and the PSBT screen
+does so again, for the split this Cube's journal records, before it may be
+signed or sent. Until a check in this session verifies it, the review labels
+that coin "Checked when you sign" rather than as only on this chain. A read
+that cannot finish stops the build and leaves the coin on offer. An answer
+that the path no longer qualifies (its root moved in a reorg, or is now on
+both chains) stops the build and records a no-path answer for the coin
+(`Cache::split_key_rejected`), so the flow moves on to another split coin or
+back to asking for one. Once a coin's check has failed five times in a row,
+the split-coin step stops saying another coin isn't needed: some failures (a
+history too deep or too large to search) never pass.
+
+A finished answer replaces the path, including a
 completed search that found none. A failed check that was not holding a path
-is not written, so the next launch retries it. A verified path from this
-session is not replaced by a later miss or failure.
+is not written, so the next launch retries it. A background check never
+replaces a path verified in this session with a later miss or failure; only
+the split build's own rejection does. A background check already in flight
+when the build rejects a coin is older than that answer, so its result is
+dropped.
 
 ## Decision and safety invariant
 

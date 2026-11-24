@@ -234,6 +234,10 @@ pub enum KeyStatus {
     Confirming { amount: Amount },
     /// A confirmed coin whose history is being checked.
     Checking { amount: Amount, confirmations: u32 },
+    /// A confirmed coin whose history check couldn't finish and is retried
+    /// on its own. `stalled` once it has failed enough times in a row to be
+    /// down to the longest wait.
+    Retrying { amount: Amount, stalled: bool },
     /// Its history shows it exists on both chains: it can't be a split coin.
     BothChains { amount: Amount },
     /// Its history couldn't be checked.
@@ -290,6 +294,10 @@ pub struct SplitFlow {
     pub coins: Vec<ReviewCoin>,
     /// The split coin the split spends, when the method uses one.
     pub key: Option<Amount>,
+    /// Whether a check in this session verified the split coin. One offered
+    /// on a path kept from earlier is checked when the split is built, and
+    /// isn't labelled as only on this chain before that.
+    pub key_verified: bool,
     pub method: Method,
     pub signature_available: bool,
     /// The address to send a split coin to.
@@ -302,6 +310,8 @@ pub struct SplitFlow {
     pub working: bool,
     /// Where the build in flight is, once it says.
     pub stage: Option<BuildStage>,
+    /// Why the last build failed, while that still applies. Drawn on the
+    /// review and on step one.
     pub error: Option<String>,
     pub copy: CopyCard,
     /// Another split waiting to be signed, while the flow goes on with the
@@ -613,6 +623,27 @@ fn key_step<'a>(
             },
             Tone::Busy,
         ),
+        KeyStatus::Retrying {
+            amount,
+            stalled: true,
+        } => status_box(
+            localized_copy("Still couldn't check this coin").to_string(),
+            localized_format!(
+                "{} · its history still can't be read. This Vault keeps trying, but a split coin from another source may be quicker.",
+                "{} · su historial sigue sin poder leerse. Este Vault lo sigue intentando, pero una moneda separada de otro origen puede ser más rápida.",
+                flow.money(amount)
+            ),
+            Tone::Busy,
+        ),
+        KeyStatus::Retrying { amount, .. } => status_box(
+            localized_copy("Couldn't check this coin yet").to_string(),
+            localized_format!(
+                "{} · its history couldn't be read just now. This Vault tries again on its own, so there's no need to send another coin.",
+                "{} · no se pudo leer su historial por ahora. Este Vault lo vuelve a intentar por sí solo, así que no hace falta enviar otra moneda.",
+                flow.money(amount)
+            ),
+            Tone::Busy,
+        ),
         KeyStatus::BothChains { .. } => status_box(
             localized_copy("This coin exists on both chains").to_string(),
             localized_format!(
@@ -649,6 +680,9 @@ fn key_step<'a>(
             )
             .push(body)
             .push(status)
+            .push(flow.error.as_ref().map(|error| {
+                p2_regular(coincube_ui::locale::notice(error.clone())).style(theme::text::error)
+            }))
             .push(flow.signature_available.then(|| {
                 Row::new()
                     .spacing(12)
@@ -734,7 +768,11 @@ fn coin_row<'a>(flow: &SplitFlow, coin: &ReviewCoin, mark: RowMark) -> Element<'
         (
             localized_copy("Split coin").to_string(),
             localized_copy("Comes back with the split").to_string(),
-            localized_format!("Only on {}", "Solo en {}", chain_name(flow.here)),
+            if flow.key_verified {
+                localized_format!("Only on {}", "Solo en {}", chain_name(flow.here))
+            } else {
+                localized_copy("Checked when you sign").to_string()
+            },
         )
     } else {
         (
@@ -1335,6 +1373,7 @@ mod tests {
             step: Step::Review,
             coins: vec![coin(1, 100_000), coin(2, 100_000)],
             key: Some(Amount::from_sat(30_000)),
+            key_verified: true,
             method: Method::SplitKey,
             signature_available: false,
             address: Some("bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg".into()),
@@ -1360,6 +1399,30 @@ mod tests {
             "dark",
             coincube_ui::theme::Theme::dark(),
         )
+    }
+
+    /// Why the last build failed is drawn on step one as well as on the
+    /// review, in the user's language.
+    #[test]
+    fn a_build_error_shows_on_step_one_and_on_the_review() {
+        use crate::services::split_coins::{KEY_REJECTED_HISTORY, KEY_REJECTED_SEND_ANOTHER};
+        let message = format!("{KEY_REJECTED_HISTORY} {KEY_REJECTED_SEND_ANOTHER}");
+        let review = SplitFlow {
+            error: Some(message.clone()),
+            ..flow()
+        };
+        assert!(mount("vault-split-error-review", &review, (1280, 900)).contains(&message));
+        let key = SplitFlow {
+            step: Step::Key(KeyStatus::Waiting),
+            key: None,
+            ..review
+        };
+        assert!(mount("vault-split-error-key", &key, (1280, 900)).contains(&message));
+        let spanish = render_in(Language::Spanish, || {
+            mount("vault-split-error-key-es", &key, (1280, 900))
+        });
+        assert!(!spanish.contains(&message));
+        assert!(spanish.contains("Envía otra moneda separada."));
     }
 
     /// A build in flight names its stage with moving dots; the slow split
@@ -1564,6 +1627,20 @@ mod tests {
                 "Checking it exists only on Bitcoin",
             ),
             (
+                KeyStatus::Retrying {
+                    amount: Amount::from_sat(25_000),
+                    stalled: false,
+                },
+                "there's no need to send another coin",
+            ),
+            (
+                KeyStatus::Retrying {
+                    amount: Amount::from_sat(25_000),
+                    stalled: true,
+                },
+                "a split coin from another source may be quicker",
+            ),
+            (
                 KeyStatus::BothChains {
                     amount: Amount::from_sat(25_000),
                 },
@@ -1682,6 +1759,10 @@ mod tests {
             KeyStatus::Checking {
                 amount: Amount::from_sat(25_000),
                 confirmations: 2,
+            },
+            KeyStatus::Retrying {
+                amount: Amount::from_sat(25_000),
+                stalled: false,
             },
             KeyStatus::BothChains {
                 amount: Amount::from_sat(25_000),

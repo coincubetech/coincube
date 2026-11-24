@@ -348,6 +348,11 @@ pub struct Cache {
         coincube_core::miniscript::bitcoin::OutPoint,
         crate::services::chain_status::ProofEntry,
     >,
+    /// Coins whose ancestry check, in flight when the split builder rejected
+    /// them, started before that answer: its result is dropped when the
+    /// batch lands. See [`Self::split_key_rejected`].
+    pub superseded_proof_checks:
+        std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// This Vault's split records ([`crate::services::split_coins::journal`]).
     pub split_records: Vec<crate::services::split_coins::SplitRecord>,
     /// Outputs of this Vault's splits still short of their confirmations.
@@ -553,6 +558,7 @@ impl std::default::Default for Cache {
             btcb2_already_claimed: false,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
+            superseded_proof_checks: std::collections::HashSet::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             split_unconfirmed: std::collections::HashSet::new(),
@@ -758,11 +764,16 @@ impl Cache {
         crate::services::chain_status::classify(self.chain_evidence(outpoint))
     }
 
-    /// Vault coins that can serve as a split key: unspent, with a verified
-    /// ancestry path, and not spent by a pending split. A coin shown as
-    /// separated by the twin Cube's split is not one: its twin copy is gone
-    /// but it still descends from a both-chain coin. The split builder
-    /// re-qualifies the chosen key before anything is built.
+    /// Vault coins that can serve as a split key: unspent, holding an
+    /// ancestry path, and not spent by a pending split. The path is one a
+    /// check verified in this session or, after those, one kept from an
+    /// earlier session or derived from this Cube's own split (still shown as
+    /// checking): either way the split builder re-qualifies the chosen key
+    /// against both chains before anything is built, so a Vault that already
+    /// holds a split coin need not wait for the background check, nor be
+    /// sent another. A coin shown as separated by the twin Cube's split is
+    /// not one: its twin copy is gone but it still descends from a
+    /// both-chain coin.
     pub fn split_keys(
         &self,
     ) -> Vec<(
@@ -782,19 +793,60 @@ impl Cache {
                 coin.spend_info.is_none() && !coin.is_immature && coin.block_height.is_some()
             })
             .filter(|coin| !pending.contains(&coin.outpoint))
-            .filter_map(|coin| match self.chain_proofs.get(&coin.outpoint) {
-                Some(crate::services::chain_status::ProofEntry::Verified(path))
-                    if self.entanglement_of(&coin.outpoint.txid)
-                        != crate::services::entangled::Entanglement::Entangled =>
-                {
-                    Some((coin, path))
-                }
-                _ => None,
+            .filter(|coin| {
+                self.entanglement_of(&coin.outpoint.txid)
+                    != crate::services::entangled::Entanglement::Entangled
+            })
+            .filter_map(|coin| {
+                let entry = self.chain_proofs.get(&coin.outpoint)?;
+                Some((coin, entry.path()?, entry.outcome().is_none()))
             })
             .collect();
-        // The smallest key wastes the least when it is spent with the coins.
-        keys.sort_by_key(|(coin, _)| (coin.amount, coin.outpoint));
-        keys
+        // A key verified in this session first; then the smallest, which
+        // wastes the least when it is spent with the coins.
+        keys.sort_by_key(|(coin, _, unchecked)| (*unchecked, coin.amount, coin.outpoint));
+        keys.into_iter()
+            .map(|(coin, path, _)| (coin, path))
+            .collect()
+    }
+
+    /// Whether a check in this session verified `key`'s path. A split key
+    /// offered on a kept or derived path is not: the build checks it.
+    pub fn split_key_verified(&self, key: &coincube_core::miniscript::bitcoin::OutPoint) -> bool {
+        matches!(
+            self.chain_proofs.get(key),
+            Some(crate::services::chain_status::ProofEntry::Verified(_))
+        )
+    }
+
+    /// The split builder's fresh check answered that `key`'s path no longer
+    /// qualifies (a reorg moved its root, or the root is now on both
+    /// chains). That is a finished answer, so it replaces whatever was held:
+    /// the coin stops being offered as a split key, and a derived path can't
+    /// fill back in. The background check looks again when a no-path answer
+    /// is next due.
+    ///
+    /// A background check of `key` already in flight started before this
+    /// answer; the caller says so with [`Self::supersede_proof_check`].
+    pub fn split_key_rejected(
+        &mut self,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        now: std::time::SystemTime,
+    ) {
+        self.chain_proofs.insert(
+            key,
+            crate::services::chain_status::ProofEntry::NoQualifyingAncestry { checked_at: now },
+        );
+    }
+
+    /// The ancestry check of `outpoint` now in flight started before a newer
+    /// answer about it, so its result is dropped when its batch lands. A
+    /// check issued afterwards is taken as usual.
+    pub fn supersede_proof_check(
+        &mut self,
+        outpoint: coincube_core::miniscript::bitcoin::OutPoint,
+    ) {
+        self.superseded_proof_checks.insert(outpoint);
     }
 
     /// The proof to re-qualify for `key` as a split key of the spend `spend`:
@@ -850,8 +902,11 @@ impl Cache {
     /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
     /// a batch issued by this `App` instance releases its whole claim first.
     /// Unlike entanglement, a result is about one Vault's coin, so a batch
-    /// from a predecessor instance is dropped whole. A verified path is never
-    /// replaced by a later miss or failure. Returns whether the cache changed.
+    /// from a predecessor instance is dropped whole. A path verified in this
+    /// session is never replaced by a later miss or failure. A result for a
+    /// coin the split builder rejected while the batch was in flight is
+    /// dropped: it is older than that answer. Returns whether the cache
+    /// changed.
     pub fn chain_proofs_landed(
         &mut self,
         in_flight: &mut std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
@@ -866,11 +921,18 @@ impl Cache {
         if !self.issued_here(origin) {
             return false;
         }
+        let mut superseded = std::collections::HashSet::new();
         for outpoint in claimed {
             in_flight.remove(outpoint);
+            if self.superseded_proof_checks.remove(outpoint) {
+                superseded.insert(*outpoint);
+            }
         }
         let mut changed = false;
         for (outpoint, entry) in results {
+            if superseded.contains(&outpoint) {
+                continue;
+            }
             let previous = self.chain_proofs.get(&outpoint);
             if matches!(previous, Some(ProofEntry::Verified(_))) {
                 continue;
@@ -1202,10 +1264,55 @@ mod entangled_cache_tests {
         assert_eq!(b.chain_status(&outpoint), ChainStatus::CouldntVerify);
     }
 
-    /// Only a coin with a verified ancestry path is a split key; a coin the
-    /// twin Cube's split separated shows as one-chain but is not a key.
+    /// A check in flight when the split builder rejects its coin started
+    /// before that answer, so its result doesn't undo the rejection. A check
+    /// issued afterwards is taken.
     #[test]
-    fn split_keys_need_a_verified_path_not_a_separated_status() {
+    fn a_check_older_than_a_split_key_rejection_is_dropped() {
+        use crate::services::chain_status::ProofEntry;
+        use coincube_core::miniscript::bitcoin::OutPoint;
+        let mut cache = Cache::default();
+        let (key, other) = (OutPoint::new(txid(4), 0), OutPoint::new(txid(5), 0));
+        let origin = LookupOrigin {
+            app: cache.app_generation,
+            chain: ChainId::Bitcoin,
+        };
+        let now = std::time::SystemTime::now();
+        let failed = || ProofEntry::failed(now);
+        let mut in_flight: std::collections::HashSet<OutPoint> = [key, other].into();
+
+        cache.split_key_rejected(key, now);
+        cache.supersede_proof_check(key);
+        assert!(cache.chain_proofs_landed(
+            &mut in_flight,
+            origin,
+            &[key, other],
+            vec![(key, failed()), (other, failed())],
+        ));
+        assert!(matches!(
+            cache.chain_proofs.get(&key),
+            Some(ProofEntry::NoQualifyingAncestry { .. })
+        ));
+        assert!(matches!(
+            cache.chain_proofs.get(&other),
+            Some(ProofEntry::Failed { .. })
+        ));
+
+        in_flight.insert(key);
+        assert!(cache.chain_proofs_landed(&mut in_flight, origin, &[key], vec![(key, failed())],));
+        assert!(
+            matches!(
+                cache.chain_proofs.get(&key),
+                Some(ProofEntry::Failed { .. })
+            ),
+            "a check issued afterwards is taken"
+        );
+    }
+
+    /// Only a coin holding an ancestry path is a split key; a coin the twin
+    /// Cube's split separated shows as one-chain but is not a key.
+    #[test]
+    fn split_keys_need_a_path_not_a_separated_status() {
         use crate::services::chain_status::{ChainStatus, ProofEntry};
         use coincube_core::{
             claim_ancestry::{retained::RetainedPath, search::OwnedLink},
@@ -1271,6 +1378,86 @@ mod entangled_cache_tests {
         );
         let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
         assert_eq!(keys, vec![key]);
+
+        // A path kept from an earlier session, or one whose fresh check
+        // couldn't finish, still offers its coin (the builder re-qualifies
+        // it), after any key verified in this session. A check that found
+        // no path, or never finished without one, offers nothing.
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        let now = std::time::SystemTime::now();
+        for held in [
+            ProofEntry::Saved(path.clone()),
+            ProofEntry::after_check(
+                Some(&ProofEntry::Saved(path.clone())),
+                ProofEntry::failed(now),
+            ),
+        ] {
+            cache.chain_proofs.insert(key, held);
+            assert_ne!(cache.chain_status(&key), ChainStatus::OnlyHere);
+            let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+            assert_eq!(keys, vec![key]);
+        }
+        for none in [
+            ProofEntry::failed(now),
+            ProofEntry::NoQualifyingAncestry { checked_at: now },
+        ] {
+            cache.chain_proofs.insert(key, none);
+            assert!(cache.split_keys().is_empty());
+        }
+        // A key verified in this session comes before a smaller one whose
+        // path is only kept, so the build starts from the checked one.
+        let kept = Transaction {
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+            ..coinbase.clone()
+        };
+        let small = OutPoint::new(kept.compute_txid(), 0);
+        let small_path = RetainedPath::new(
+            small,
+            vec![OwnedLink {
+                transaction: serialize(&kept),
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        cache.daemon_cache.coins.push(Coin {
+            amount: Amount::from_sat(10_000),
+            ..coin(small)
+        });
+        cache
+            .chain_proofs
+            .insert(small, ProofEntry::Saved(small_path.clone()));
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::Verified(path.clone()));
+        assert!(cache.split_key_verified(&key) && !cache.split_key_verified(&small));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key, small], "verified first, despite its size");
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::Saved(path.clone()));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![small, key], "then the smallest");
+
+        // A key the build's check rejected is no longer offered, and a
+        // derived path can't bring it back.
+        cache.split_key_rejected(small, now);
+        assert!(!crate::services::split_coins::merge_proofs(
+            &mut cache.chain_proofs,
+            vec![(small, ProofEntry::Saved(small_path))]
+        ));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key]);
+        assert_eq!(cache.chain_status(&small), ChainStatus::CouldntVerify);
+
+        cache.record_entanglement(
+            key.txid,
+            crate::services::entangled::Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+        assert!(cache.split_keys().is_empty(), "seen on both chains");
     }
 
     /// `#393`: a reply issued by App instance A, arriving after the tab has

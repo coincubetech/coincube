@@ -2,8 +2,8 @@
 //! canvas, `splitflow` page). The step is derived from the Vault each time
 //! the tab is drawn: get a split coin, review and sign, confirmations, then
 //! done or the coins still left. Only the user's choices (coins left out, the
-//! method), the address to send a split coin to, the fee rate and the build in
-//! flight are kept here. Waiting for a split coin can take an hour, so the
+//! method), the address to send a split coin to, the fee rate, the build in
+//! flight and why the last build failed are kept here. Waiting for a split coin can take an hour, so the
 //! flow lives in the tab rather than a dialog: you can leave and come back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -112,6 +112,12 @@ pub fn step(facts: &FlowFacts, method: Method, continuing: bool) -> Step {
 /// for. Without it (after a restart), an unconfirmed incoming coin, or a
 /// recent confirmed one still being checked, stands in.
 pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
+    key_watch(cache, address).map_or(KeyStatus::Waiting, |(_, status)| status)
+}
+
+/// The coin step one reports on, with where it stands. `None` while nothing
+/// has arrived.
+fn key_watch(cache: &Cache, address: Option<&str>) -> Option<(OutPoint, KeyStatus)> {
     let split_txids: HashSet<Txid> = cache
         .split_records
         .iter()
@@ -133,6 +139,22 @@ pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
         match cache.chain_status(&coin.outpoint) {
             ChainStatus::BothChains => KeyStatus::BothChains { amount },
             ChainStatus::CouldntVerify => KeyStatus::CouldntVerify { amount },
+            // Only a coin with no answer yet: one a split is spending, or one
+            // already shown as on this chain only, isn't waiting on a retry.
+            ChainStatus::NotSeen | ChainStatus::NotChecked
+                if cache
+                    .chain_proofs
+                    .get(&coin.outpoint)
+                    .is_some_and(|entry| entry.is_waiting_to_retry()) =>
+            {
+                KeyStatus::Retrying {
+                    amount,
+                    stalled: cache
+                        .chain_proofs
+                        .get(&coin.outpoint)
+                        .is_some_and(|entry| entry.retries_backed_off()),
+                }
+            }
             _ => KeyStatus::Checking {
                 amount,
                 confirmations,
@@ -154,26 +176,25 @@ pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
     let pending = |status: &KeyStatus| {
         matches!(
             status,
-            KeyStatus::Confirming { .. } | KeyStatus::Checking { .. }
+            KeyStatus::Confirming { .. } | KeyStatus::Checking { .. } | KeyStatus::Retrying { .. }
         )
     };
     // A coin still on its way (at the address, or any new incoming one)
     // wins over one that failed: after "send one from another source" the
     // replacement must show, not the coin that couldn't be a split coin.
-    let statuses: Vec<KeyStatus> = candidates
+    let statuses: Vec<(OutPoint, KeyStatus)> = candidates
         .iter()
         .filter(|coin| at_address(coin) || incoming(coin))
-        .map(|coin| classify(coin))
+        .map(|coin| (coin.outpoint, classify(coin)))
         .collect();
-    if let Some(status) = statuses.iter().find(|status| pending(status)) {
-        return *status;
+    if let Some(watch) = statuses.iter().find(|(_, status)| pending(status)) {
+        return Some(*watch);
     }
     candidates
         .iter()
         .filter(at_address)
-        .map(|coin| classify(coin))
+        .map(|coin| (coin.outpoint, classify(coin)))
         .next()
-        .unwrap_or(KeyStatus::Waiting)
 }
 
 /// Tools › Split coins.
@@ -201,7 +222,37 @@ pub struct SplitHubPanel {
     working: bool,
     /// Where the build in flight is, once it says.
     stage: Option<split_coins::BuildStage>,
-    error: Option<String>,
+    error: Option<BuildError>,
+}
+
+/// Why the last build failed, with what the flow showed when it landed. The
+/// message is about that method and that step, so it goes once the method
+/// changes or the flow moves to another step. One about a rejected split coin
+/// also goes once another split coin is offered. On step one, either goes
+/// once the step reports on another coin; the same coin gaining
+/// confirmations or an answer doesn't count. The App drops it after the
+/// message that made it stale, whichever panel is showing, so it can't come
+/// back. Only the review and step one draw it, so a failure that lands on
+/// any other step isn't kept.
+#[derive(Debug, Clone)]
+struct BuildError {
+    message: String,
+    method: Method,
+    /// The split coin on offer. A rejected one has already left the offer,
+    /// so this is the coin offered next, or none on step one. Only a
+    /// rejection is held to it.
+    key: Option<OutPoint>,
+    /// The step the flow was on: the review or step one.
+    step: Step,
+    /// The coin step one was reporting on.
+    watched: Option<OutPoint>,
+    /// The build rejected its split coin.
+    rejected: bool,
+}
+
+/// The split coin a split would spend now.
+fn offered_key(cache: &Cache) -> Option<OutPoint> {
+    cache.split_keys().first().map(|(coin, _)| coin.outpoint)
 }
 
 impl SplitHubPanel {
@@ -344,6 +395,10 @@ impl SplitHubPanel {
             step,
             coins,
             key: cache.split_keys().first().map(|(coin, _)| coin.amount),
+            key_verified: cache
+                .split_keys()
+                .first()
+                .is_some_and(|(coin, _)| cache.split_key_verified(&coin.outpoint)),
             method,
             signature_available: facts.signature_available,
             address: self.address.clone(),
@@ -353,7 +408,9 @@ impl SplitHubPanel {
             vbytes,
             working: self.working,
             stage: self.stage.filter(|_| self.working),
-            error: self.error.clone(),
+            error: self
+                .error_shown(cache, step)
+                .map(|error| error.message.clone()),
             copy,
             waiting_to_sign,
             mask_amounts: cache.balance_amounts_masked(),
@@ -370,6 +427,9 @@ impl SplitHubPanel {
             }
             SplitMessage::Method(method) => {
                 if !self.working && (method == Method::SplitKey || self.signature_available()) {
+                    if method != self.method() {
+                        self.error = None;
+                    }
                     self.method = Some(method);
                 }
             }
@@ -426,7 +486,7 @@ impl SplitHubPanel {
         }
     }
 
-    fn set_result(&mut self, result: Result<Box<split_coins::SplitRecord>, String>) {
+    fn set_result(&mut self, cache: &Cache, result: Result<Box<split_coins::SplitRecord>, String>) {
         self.working = false;
         self.stage = None;
         match result {
@@ -435,7 +495,67 @@ impl SplitHubPanel {
                 self.continuing = false;
                 self.error = None;
             }
-            Err(e) => self.error = Some(e),
+            Err(message) => {
+                let step = step(&self.facts(cache), self.method(), self.continuing);
+                // No other step draws it: the Vault moved on during the build.
+                self.error = matches!(step, Step::Review | Step::Key(_)).then(|| BuildError {
+                    message,
+                    method: self.method(),
+                    key: offered_key(cache),
+                    step,
+                    watched: self.watched(cache),
+                    rejected: false,
+                });
+            }
+        }
+    }
+
+    /// The failure just reported was the build rejecting its split coin.
+    pub(crate) fn split_key_was_rejected(&mut self) {
+        if let Some(error) = self.error.as_mut() {
+            error.rejected = true;
+        }
+    }
+
+    /// The coin step one reports on.
+    fn watched(&self, cache: &Cache) -> Option<OutPoint> {
+        key_watch(cache, self.address.as_deref()).map(|(coin, _)| coin)
+    }
+
+    /// The build error, while it is still about what the flow shows.
+    fn error_shown(&self, cache: &Cache, step: Step) -> Option<&BuildError> {
+        let error = self.error.as_ref()?;
+        if self.method() != error.method {
+            return None;
+        }
+        if std::mem::discriminant(&step) != std::mem::discriminant(&error.step) {
+            return None;
+        }
+        // On step one, only until it reports on another coin: a replacement
+        // on its way isn't the coin the message is about.
+        if matches!(step, Step::Key(_)) && self.watched(cache) != error.watched {
+            return None;
+        }
+        // A failure that isn't about the split coin doesn't go because the
+        // offer moved to another one.
+        if error.rejected && offered_key(cache) != error.key {
+            return None;
+        }
+        Some(error)
+    }
+
+    /// Forget a build error that is no longer about what the flow shows.
+    /// The App calls this after every message it handles, whichever panel
+    /// is showing, so a message that went stale can't come back when the
+    /// flow happens to look the same again later. Free while no error is
+    /// held; with one, it works the step out once more.
+    pub(crate) fn drop_stale_error(&mut self, cache: &Cache) {
+        if self.error.is_none() {
+            return;
+        }
+        let step = step(&self.facts(cache), self.method(), self.continuing);
+        if self.error_shown(cache, step).is_none() {
+            self.error = None;
         }
     }
 
@@ -454,7 +574,10 @@ impl SplitHubPanel {
     /// `(working, error)`, for the App's routing test.
     #[cfg(test)]
     pub(crate) fn split_progress_for_test(&self) -> (bool, Option<String>) {
-        (self.working, self.error.clone())
+        (
+            self.working,
+            self.error.as_ref().map(|error| error.message.clone()),
+        )
     }
 }
 
@@ -481,7 +604,7 @@ impl State for SplitHubPanel {
                 return self.set_feerate(generation, rate)
             }
             Message::SplitAddress(result) => self.set_address(result),
-            Message::SplitPrepared(result) => self.set_result(result),
+            Message::SplitPrepared(result) => self.set_result(cache, result),
             Message::SplitBuildStage(stage) => {
                 if self.working {
                     self.stage = Some(stage);
@@ -784,6 +907,7 @@ mod tests {
         let (panel, cache, [a, b, _]) = fixture();
         let flow = panel.flow(&cache);
         assert_eq!(flow.step, Step::Review);
+        assert!(flow.key_verified);
         assert_eq!(flow.method, Method::SplitKey, "Bitcoin splits with a coin");
         assert_eq!(flow.key, Some(Amount::from_sat(30_000)));
         assert_eq!(
@@ -791,6 +915,264 @@ mod tests {
             vec![a, b]
         );
         assert_eq!(flow.copy, CopyCard::Create);
+    }
+
+    /// A split coin the Vault already holds skips step one after a restart
+    /// (its path loads as saved) and while Connect can't be read (its fresh
+    /// check fails): the build re-qualifies it, so the flow needn't wait for
+    /// the background check nor ask for another coin.
+    #[test]
+    fn a_split_coin_held_from_an_earlier_session_starts_at_review() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        assert_ne!(cache.chain_status(&key), ChainStatus::OnlyHere);
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.key, Some(Amount::from_sat(30_000)));
+        assert!(!flow.key_verified, "not shown as only on this chain yet");
+
+        let failed = ProofEntry::after_check(
+            cache.chain_proofs.get(&key),
+            ProofEntry::failed(std::time::SystemTime::now()),
+        );
+        cache.chain_proofs.insert(key, failed);
+        assert_eq!(panel.flow(&cache).step, Step::Review);
+    }
+
+    /// A coin whose history check couldn't finish says so, instead of
+    /// "checking… under a minute", and still counts as the coin on its way.
+    #[test]
+    fn a_failed_check_shows_as_retrying() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::failed(std::time::SystemTime::now()));
+        assert_eq!(
+            panel.flow(&cache).step,
+            Step::Key(KeyStatus::Retrying {
+                amount: Amount::from_sat(30_000),
+                stalled: false,
+            })
+        );
+        // Down to the longest wait, it stops saying another coin isn't
+        // needed: some failures never pass.
+        let now = std::time::SystemTime::now();
+        let stalled = (0..4).fold(ProofEntry::failed(now), |entry, _| {
+            ProofEntry::after_check(Some(&entry), ProofEntry::failed(now))
+        });
+        cache.chain_proofs.insert(key, stalled);
+        assert_eq!(
+            panel.flow(&cache).step,
+            Step::Key(KeyStatus::Retrying {
+                amount: Amount::from_sat(30_000),
+                stalled: true,
+            })
+        );
+    }
+
+    /// The build's fresh check rejected the split coin: it is no longer
+    /// offered, so the flow asks for one instead of failing on every Sign.
+    #[test]
+    fn a_split_coin_the_build_rejected_sends_the_flow_back_to_step_one() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        assert_eq!(panel.flow(&cache).step, Step::Review);
+        cache.split_key_rejected(key, std::time::SystemTime::now());
+        let flow = panel.flow(&cache);
+        assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
+        assert_eq!(flow.key, None);
+    }
+
+    fn reject(panel: &mut SplitHubPanel, cache: &mut Cache, key: OutPoint) {
+        // The App records the rejection before the panel hears of it.
+        cache.split_key_rejected(key, std::time::SystemTime::now());
+        let _ = panel.update(
+            None,
+            cache,
+            Message::SplitPrepared(Err("no longer usable".to_string())),
+        );
+        panel.split_key_was_rejected();
+    }
+
+    /// A second split coin. The smaller of the two is offered first.
+    fn second_key(cache: &mut Cache, sats: u64) -> OutPoint {
+        let mut coinbase = coinbase();
+        coinbase.output[0].value = Amount::from_sat(sats);
+        let key = OutPoint::new(coinbase.compute_txid(), 0);
+        cache.daemon_cache.coins.push(coin(key, sats, Some(100)));
+        cache.record_entanglement(
+            key.txid,
+            Entanglement::NotEntangled,
+            std::time::Instant::now(),
+        );
+        cache.chain_proofs.insert(key, key_proof(&coinbase, key));
+        key
+    }
+
+    /// Step one says why the split coin went. The message goes once another
+    /// split coin is offered, and doesn't come back if that one goes too.
+    #[test]
+    fn a_rejection_shows_on_step_one_until_another_split_coin_is_offered() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        reject(&mut panel, &mut cache, key);
+        let flow = panel.flow(&cache);
+        assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
+        assert_eq!(flow.error.as_deref(), Some("no longer usable"));
+
+        let other = second_key(&mut cache, 40_000);
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.error, None);
+
+        // As the App does after every message, whichever panel is showing.
+        panel.drop_stale_error(&cache);
+        cache.split_key_rejected(other, std::time::SystemTime::now());
+        let flow = panel.flow(&cache);
+        assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
+        assert_eq!(flow.error, None, "the old message doesn't come back");
+    }
+
+    /// A replacement on its way isn't the coin the message is about.
+    #[test]
+    fn a_rejection_goes_when_step_one_reports_on_another_coin() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        reject(&mut panel, &mut cache, key);
+        assert!(panel.flow(&cache).error.is_some());
+
+        cache.daemon_cache.coins.push(coin(shared(9), 50_000, None));
+        let flow = panel.flow(&cache);
+        assert!(
+            matches!(flow.step, Step::Key(KeyStatus::Confirming { .. })),
+            "{:?}",
+            flow.step
+        );
+        assert_eq!(flow.error, None);
+    }
+
+    /// With another split coin held, the review goes on with it and still
+    /// says why the build failed.
+    #[test]
+    fn a_rejection_with_another_split_coin_held_stays_on_the_review() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        second_key(&mut cache, 40_000);
+        reject(&mut panel, &mut cache, key);
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.key, Some(Amount::from_sat(40_000)));
+        assert_eq!(flow.error.as_deref(), Some("no longer usable"));
+    }
+
+    /// A failure on a review doesn't come back on a later review: the flow
+    /// left that step in between.
+    #[test]
+    fn a_build_error_goes_when_the_flow_leaves_its_step() {
+        let (mut panel, mut cache, _) = fixture();
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("couldn't build".to_string())),
+        );
+        assert!(panel.flow(&cache).error.is_some());
+        // The coins on both chains go; the split coin stays on offer.
+        let coins = cache.daemon_cache.coins.clone();
+        cache.daemon_cache.coins.clear();
+        cache.daemon_cache.coins.push(coins[2].clone());
+        assert!(panel.flow(&cache).key.is_some());
+        assert_ne!(panel.flow(&cache).step, Step::Review);
+        assert_eq!(panel.flow(&cache).error, None);
+        panel.drop_stale_error(&cache);
+        cache.daemon_cache.coins = coins;
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.error, None, "the old message doesn't come back");
+    }
+
+    /// The message stays while step one reports on the same coin, as that
+    /// coin gains confirmations, and goes when it reports on another.
+    #[test]
+    fn a_rejection_stays_while_step_one_reports_on_the_same_coin() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        // Another coin is already being checked when the rejection lands.
+        cache
+            .daemon_cache
+            .coins
+            .push(coin(shared(9), 50_000, Some(108)));
+        reject(&mut panel, &mut cache, key);
+        let before = panel.flow(&cache);
+        assert!(
+            matches!(before.step, Step::Key(KeyStatus::Checking { .. })),
+            "{:?}",
+            before.step
+        );
+        assert!(before.error.is_some());
+
+        cache.daemon_cache.blockheight += 1;
+        panel.drop_stale_error(&cache);
+        let after = panel.flow(&cache);
+        assert_ne!(after.step, before.step, "one more confirmation");
+        assert!(after.error.is_some(), "still the same coin");
+
+        cache
+            .daemon_cache
+            .coins
+            .retain(|coin| coin.outpoint != shared(9));
+        cache.daemon_cache.coins.push(coin(shared(8), 50_000, None));
+        assert_eq!(panel.flow(&cache).error, None, "another coin");
+    }
+
+    /// Only the review and step one draw the message, so one that lands on
+    /// another step isn't kept to show up later.
+    #[test]
+    fn a_build_error_that_lands_on_another_step_is_not_kept() {
+        let (mut panel, mut cache, _) = fixture();
+        let coins = std::mem::take(&mut cache.daemon_cache.coins);
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("couldn't build".to_string())),
+        );
+        assert_eq!(panel.split_progress_for_test(), (false, None));
+        cache.daemon_cache.coins = coins;
+        assert_eq!(panel.flow(&cache).error, None);
+    }
+
+    /// A rejection with nothing to mark (the error didn't land on a step
+    /// that shows it) is not an error.
+    #[test]
+    fn a_rejection_with_no_error_held_changes_nothing() {
+        let (mut panel, cache, _) = fixture();
+        panel.split_key_was_rejected();
+        assert_eq!(panel.flow(&cache).error, None);
+    }
+
+    /// The message is about the method the build used.
+    #[test]
+    fn a_build_error_goes_with_the_method_it_was_about() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        reject(&mut panel, &mut cache, key);
+        panel.error.as_mut().unwrap().method = Method::Signature;
+        assert_eq!(panel.flow(&cache).error, None);
+    }
+
+    /// A failure that isn't about the split coin stays on the review, also
+    /// when another split coin becomes the one offered.
+    #[test]
+    fn a_build_error_stays_when_the_offer_moves_to_another_split_coin() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("couldn't build".to_string())),
+        );
+        let smaller = second_key(&mut cache, 20_000);
+        assert_ne!(smaller, key);
+        panel.drop_stale_error(&cache);
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.key, Some(Amount::from_sat(20_000)), "the offer moved");
+        assert_eq!(flow.error.as_deref(), Some("couldn't build"));
     }
 
     fn fee(generation: u64, rate: Option<u64>) -> Message {

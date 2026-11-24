@@ -108,6 +108,56 @@ pub struct KeyChoice {
     pub path: RetainedPath,
 }
 
+/// Why a split could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareError {
+    pub message: String,
+    /// The split key, when the fresh check answered that its path no longer
+    /// qualifies (rather than failing to finish): the caller stops offering
+    /// it, so the flow can move on to another split coin.
+    pub rejected_key: Option<OutPoint>,
+}
+
+impl From<String> for PrepareError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            rejected_key: None,
+        }
+    }
+}
+
+impl From<&str> for PrepareError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+/// Why a split key's fresh check did not pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCheckError {
+    pub message: String,
+    /// The check finished and the path does not qualify, as opposed to a
+    /// check that could not finish and may pass later.
+    pub rejected: bool,
+}
+
+/// Whether a re-qualification error is an answer about the path: its links
+/// no longer verify, or the chains now show its root moved or on both. Any
+/// other error is a check that could not finish.
+fn path_rejected(error: &crate::services::claim_observation::http::DiscoveryError) -> bool {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    matches!(
+        error,
+        DiscoveryError::Structural(_)
+            | DiscoveryError::Observation(
+                FailureKind::AncestryRootChanged { .. }
+                    | FailureKind::AncestryRootShared { .. }
+                    | FailureKind::UnsupportedPoison
+            )
+    )
+}
+
 /// A built, stored, unsigned split ready for the PSBT screen.
 #[derive(Debug, Clone)]
 pub struct Prepared {
@@ -125,8 +175,9 @@ pub struct Derived {
     pub unconfirmed: HashSet<OutPoint>,
     /// Outputs of confirmed split-key splits with the key's extended path,
     /// as [`ProofEntry::Saved`]: the path is only structurally checked, so a
-    /// fresh ancestry check must qualify it before it is shown as verified or
-    /// used as a split key. Merge with [`merge_proofs`].
+    /// fresh ancestry check must qualify it before it is shown as verified,
+    /// and the split builder re-qualifies it before it is used as a split
+    /// key. Merge with [`merge_proofs`].
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Whether any record changed (its confirmations moved or it was pruned).
     pub changed: bool,
@@ -266,11 +317,19 @@ pub fn merge_proofs(
             // A check that couldn't finish is no answer: the derived path
             // fills in and keeps the failure's retry time.
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if let (ProofEntry::Failed { failed_at }, Some(path)) = (slot.get(), entry.path()) {
-                    let failed_at = *failed_at;
+                if let (
+                    ProofEntry::Failed {
+                        failed_at,
+                        attempts,
+                    },
+                    Some(path),
+                ) = (slot.get(), entry.path())
+                {
+                    let (failed_at, attempts) = (*failed_at, *attempts);
                     slot.insert(ProofEntry::SavedRetry {
                         path: path.clone(),
                         failed_at,
+                        attempts,
                     });
                     added = true;
                 }
@@ -767,7 +826,7 @@ pub async fn prepare(
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
     mut progress: iced_runtime::task::Sender<BuildStage>,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, PrepareError> {
     let chain = wallet.chain;
     if !crate::services::chain_status::checks_enabled(chain) {
         return Err("Splitting coins isn't available on this network.".into());
@@ -777,7 +836,7 @@ pub async fn prepare(
     }
     let key = match (method, key) {
         (Method::SplitKey, Some(key)) => Some(key),
-        (Method::SplitKey, None) => return Err("This split needs a split key.".into()),
+        (Method::SplitKey, None) => return Err("This split needs a split coin.".into()),
         (Method::Signature, _) if !chain.is_blake2b() => {
             return Err("Bitcoin can't split with a replay-protected signature.".into())
         }
@@ -785,7 +844,12 @@ pub async fn prepare(
     };
     if let Some(key) = &key {
         progress.send(BuildStage::CheckingKey).await;
-        requalify(&client, chain, key, generation, live.clone()).await?;
+        check_key(&client, chain, key, generation, live.clone())
+            .await
+            .map_err(|error| PrepareError {
+                rejected_key: error.rejected.then_some(key.outpoint),
+                message: error.message,
+            })?;
     }
     let mut requested: BTreeSet<OutPoint> = coins.iter().copied().collect();
     if requested.len() != coins.len() {
@@ -793,7 +857,7 @@ pub async fn prepare(
     }
     if let Some(key) = &key {
         if !requested.insert(key.outpoint) {
-            return Err("The split key can't also be a coin to split.".into());
+            return Err("The split coin can't also be a coin to split.".into());
         }
     }
     let requested: Vec<OutPoint> = requested.into_iter().collect();
@@ -827,10 +891,7 @@ pub async fn prepare(
     {
         CreateSpendResult::Success { psbt, .. } => psbt,
         CreateSpendResult::InsufficientFunds { missing } => {
-            return Err(format!(
-                "These coins don't cover the fee. {} sats short.",
-                missing
-            ))
+            return Err(format!("These coins don't cover the fee. {} sats short.", missing).into())
         }
     };
     check_construction(&psbt, &requested)?;
@@ -889,9 +950,57 @@ pub async fn requalify(
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
 ) -> Result<(), String> {
+    check_key(client, chain, key, generation, live)
+        .await
+        .map_err(|error| {
+            if error.rejected {
+                // The split is already built with this coin.
+                format!("{} {}", error.message, KEY_REJECTED_BUILD_AGAIN)
+            } else {
+                error.message
+            }
+        })
+}
+
+/// Why a split coin was rejected, as the user reads it. The reason in
+/// detail goes to the log. Both are in the Spanish catalogue with each of
+/// the next steps below.
+pub const KEY_REJECTED_HISTORY: &str = "The split coin for this split can no longer be used: its history no longer shows it exists on one chain only.";
+pub const KEY_REJECTED_PROOF: &str =
+    "The split coin for this split can no longer be used: its saved history is no longer valid.";
+/// What happens after a rejection, by whether another split coin is held.
+pub const KEY_REJECTED_SEND_ANOTHER: &str = "Send another split coin.";
+pub const KEY_REJECTED_USES_ANOTHER: &str = "The split now uses another split coin.";
+/// The next step where the split is already built: the PSBT screen.
+pub const KEY_REJECTED_BUILD_AGAIN: &str = "Build the split again.";
+/// The check couldn't finish, which says nothing about the split coin.
+pub const KEY_CHECK_UNFINISHED: &str = "The split coin couldn't be checked right now.";
+
+/// [`requalify`], telling a path that no longer qualifies from a check that
+/// could not finish.
+pub async fn check_key(
+    client: &crate::services::coincube::CoincubeClient,
+    chain: ChainId,
+    key: &KeyChoice,
+    generation: u64,
+    live: tokio::sync::watch::Receiver<u64>,
+) -> Result<(), KeyCheckError> {
     use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
+    let rejected = |message: &str| {
+        // Which coin, for support: at debug, like the background check.
+        tracing::debug!("split coin {} rejected", key.outpoint);
+        KeyCheckError {
+            message: message.to_string(),
+            rejected: true,
+        }
+    };
+    let unfinished = || KeyCheckError {
+        message: KEY_CHECK_UNFINISHED.to_string(),
+        rejected: false,
+    };
     if key.path.selected() != key.outpoint {
-        return Err("The split key's proof doesn't match it.".into());
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     let source = HttpObservationSource::new(
         client.clone(),
@@ -902,7 +1011,10 @@ pub async fn requalify(
             generation: live,
         },
     )
-    .map_err(|e| format!("Couldn't check the split key: {:?}", e))?;
+    .map_err(|e| {
+        tracing::info!("A split coin's check could not start: {:?}", e);
+        unfinished()
+    })?;
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
     };
@@ -911,12 +1023,22 @@ pub async fn requalify(
     } else {
         source.requalify_ancestry(&key.path, policy).await
     }
-    .map_err(|e| format!("The split key couldn't be verified right now: {:?}", e))?;
-    let path = refreshed
-        .retained_path()
-        .map_err(|e| format!("The split key's proof is invalid: {:?}", e))?;
+    .map_err(|e| {
+        if path_rejected(&e) {
+            tracing::info!("A split coin's history no longer qualifies: {:?}", e);
+            rejected(KEY_REJECTED_HISTORY)
+        } else {
+            tracing::info!("A split coin's check did not finish: {:?}", e);
+            unfinished()
+        }
+    })?;
+    let path = refreshed.retained_path().map_err(|e| {
+        tracing::info!("A split coin's refreshed history is invalid: {:?}", e);
+        rejected(KEY_REJECTED_PROOF)
+    })?;
     if path.selected() != key.outpoint {
-        return Err("The split key's proof doesn't match it.".into());
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     Ok(())
 }
@@ -1264,19 +1386,40 @@ mod tests {
 
         // A check that couldn't finish is no answer: the path fills in and
         // the failure's retry time stays.
-        let mut proofs: HashMap<_, _> = [(
-            output,
-            ProofEntry::Failed {
-                failed_at: UNIX_EPOCH,
-            },
-        )]
-        .into();
+        let mut proofs: HashMap<_, _> = [(output, ProofEntry::failed(UNIX_EPOCH))].into();
         assert!(merge_proofs(&mut proofs, derived()));
         assert!(matches!(
             proofs.get(&output),
-            Some(ProofEntry::SavedRetry { failed_at, .. }) if *failed_at == UNIX_EPOCH
+            Some(ProofEntry::SavedRetry { failed_at, attempts: 1, .. }) if *failed_at == UNIX_EPOCH
         ));
         assert!(!merge_proofs(&mut proofs, derived()), "already there");
+    }
+
+    /// Only an answer about the path stops a key being offered; a read that
+    /// didn't finish leaves it for the next try.
+    #[test]
+    fn only_an_answer_about_the_path_rejects_a_key() {
+        use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+        use coincube_core::claim_ancestry::Error;
+        for error in [
+            DiscoveryError::Structural(Error::IncompletePath),
+            DiscoveryError::Observation(FailureKind::AncestryRootChanged { observed_at: 1 }),
+            DiscoveryError::Observation(FailureKind::AncestryRootShared { observed_at: 1 }),
+            DiscoveryError::Observation(FailureKind::UnsupportedPoison),
+        ] {
+            assert!(path_rejected(&error), "{:?}", error);
+        }
+        for error in [
+            DiscoveryError::Observation(FailureKind::Http(503)),
+            DiscoveryError::Observation(FailureKind::Deadline),
+            DiscoveryError::Observation(FailureKind::Unavailable),
+            DiscoveryError::Observation(FailureKind::Stale),
+            DiscoveryError::Observation(FailureKind::Changed),
+            DiscoveryError::Observation(FailureKind::Cancelled),
+            DiscoveryError::Observation(FailureKind::CollectionLimit),
+        ] {
+            assert!(!path_rejected(&error), "{:?}", error);
+        }
     }
 
     #[test]
@@ -2190,7 +2333,8 @@ mod tests {
                 live,
                 sender.into(),
             )
-            .await;
+            .await
+            .map_err(|error| error.message);
             (result, receiver.collect().await)
         }
 
@@ -2270,8 +2414,30 @@ mod tests {
             };
             let (result, stages) =
                 run(vec![], Method::SplitKey, vec![shared()[0]], Some(key)).await;
-            assert!(result.unwrap_err().contains("doesn't match"));
+            assert_eq!(result.unwrap_err(), KEY_REJECTED_PROOF);
             assert_eq!(stages, [BuildStage::CheckingKey]);
+        }
+    }
+
+    /// Every message a key check or a rejection can show is in the Spanish
+    /// catalogue, with each next step: a reworded constant can't silently
+    /// fall back to English.
+    #[test]
+    fn key_check_messages_are_in_the_spanish_catalogue() {
+        use coincube_ui::locale::{notice, render_in, Language};
+        let mut shown = vec![KEY_CHECK_UNFINISHED.to_string()];
+        for reason in [KEY_REJECTED_HISTORY, KEY_REJECTED_PROOF] {
+            for next in [
+                KEY_REJECTED_SEND_ANOTHER,
+                KEY_REJECTED_USES_ANOTHER,
+                KEY_REJECTED_BUILD_AGAIN,
+            ] {
+                shown.push(format!("{reason} {next}"));
+            }
+        }
+        for english in shown {
+            let spanish = render_in(Language::Spanish, || notice(english.clone()));
+            assert_ne!(spanish, english);
         }
     }
 

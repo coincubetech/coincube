@@ -1025,6 +1025,15 @@ impl ConnectionStatus {
     }
 }
 
+/// Whether a Cube on this chain runs Connect's live updates. A Bitcoin
+/// Blake2b Cube never starts them: the legacy stream bootstrap is refused
+/// for the fork (`docs/BTCB2_VAULT_APP.md`), and its Mobile signing checks
+/// Connect while the signing window is open instead. Its status would read
+/// "Connecting…" for good, so the views leave it out.
+pub fn live_updates_apply(chain: crate::chain::ChainId) -> bool {
+    !chain.is_blake2b()
+}
+
 /// The notice shown when automatic renewal didn't work.
 pub const RENEW_FAILED_TITLE: &str = "Couldn’t reconnect this computer";
 
@@ -2728,6 +2737,25 @@ fn derive_cube_encryption_key(
     cube_signer.encryption_key(network)
 }
 
+/// The Connect-blinding public key the registration wave publishes for this
+/// Cube (`ConnectCubePanel::register_encryption_pubkey`).
+///
+/// A Bitcoin Cube's unlock derives it and persists it as
+/// `CubeSettings::connect_encryption_pubkey`. A Bitcoin Blake2b unlock never
+/// reaches that step: it derives the Cube encryption key directly from the
+/// signer it verified (`BTCB2_CUBE_OPEN.md`), so the public half comes from
+/// that key. Without it Connect holds no recipient key for the Cube, and
+/// COINCUBE Mobile cannot share a key with it.
+fn connect_encryption_pubkey(
+    cube_settings: &settings::CubeSettings,
+    cube_encryption_key: Option<&crate::services::connect::crypto::CubeEncryptionKey>,
+) -> Option<String> {
+    match cube_encryption_key {
+        Some(key) if cube_settings.network.is_blake2b() => Some(key.public_key_hex()),
+        _ => cube_settings.connect_encryption_pubkey.clone(),
+    }
+}
+
 /// Loads (minting on first use) this device's Connect signing-rail transport
 /// key for [`Cache::connect_transport_key`].
 ///
@@ -3608,14 +3636,18 @@ impl App {
             cache.chain().api_str().to_string(),
         );
         // Connect blinding (PR D2): hand the panel the seed-derived encryption
-        // pubkey persisted at unlock, so the registration wave can publish it.
+        // pubkey (persisted at a Bitcoin unlock, derived at a Bitcoin Blake2b
+        // one), so the registration wave can publish it.
         panels.connect.account.bitcoin_blake2b_opt_in =
             settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
                 &settings::global::GlobalSettings::path(&data_dir),
             );
         panels
             .connect
-            .set_cube_encryption_pubkey(cube_settings.connect_encryption_pubkey.clone());
+            .set_cube_encryption_pubkey(connect_encryption_pubkey(
+                &cube_settings,
+                cache.cube_encryption_key.as_deref(),
+            ));
         // The Vault's identity, for the assertion wave that fires once the
         // server cube id resolves (PLAN-vault-identity-unification D3/D4).
         // Seeded from settings here; the backfill below overwrites it on a Cube
@@ -3968,7 +4000,10 @@ impl App {
             );
         panels
             .connect
-            .set_cube_encryption_pubkey(cube_settings.connect_encryption_pubkey.clone());
+            .set_cube_encryption_pubkey(connect_encryption_pubkey(
+                &cube_settings,
+                cube_encryption_key.as_deref(),
+            ));
         panels
             .connect
             .set_vault_fingerprint(cube_settings.vault_fingerprint.clone());
@@ -5895,6 +5930,17 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_routed(message);
+        // After every message, whichever panel is showing: Split coins
+        // hears little while it isn't, and a build error that went stale
+        // must not come back.
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.drop_stale_error(&self.cache);
+        }
+        task
+    }
+
+    fn update_routed(&mut self, message: Message) -> Task<Message> {
         if self.takes_detached_psbt_delete(&message) {
             if let Some(psbts) = self.panels.psbts.as_mut() {
                 return psbts.update(self.daemon.clone(), &self.cache, message);
@@ -6413,10 +6459,38 @@ impl App {
                     | Message::ConnectStream(_)
             )
         {
-            return Task::done(Message::View(view::Message::ShowError(
-                "Connect signer bootstrap is unavailable for Bitcoin Blake2b. Reopen this Cube through authenticated Connect startup; use its local Cube key for signing."
-                    .into(),
-            )));
+            // A refused deferred commit must still answer the account panel:
+            // otherwise it waits on that commit forever and ignores every
+            // later sign-in in this Cube.
+            let answer = match &message {
+                Message::InAppConnectAuthReady { epoch, .. } => {
+                    Task::done(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::AuthCommitRejected { epoch: *epoch },
+                    )))
+                }
+                _ => Task::none(),
+            };
+            // A local fork Cube signs in directly (`use_local_backend`). Its
+            // login still asks for the legacy device and stream bootstrap
+            // afterwards, and a commit deferred before the panel went local
+            // may still arrive. Neither is something the user asked for, so
+            // both are refused without the error.
+            if !self.requires_connect()
+                && matches!(
+                    &message,
+                    Message::InAppConnectLoginCompleted { .. }
+                        | Message::InAppConnectAuthReady { .. }
+                )
+            {
+                return answer;
+            }
+            return Task::batch([
+                answer,
+                Task::done(Message::View(view::Message::ShowError(
+                    "Connect signer bootstrap is unavailable for Bitcoin Blake2b. Reopen this Cube through authenticated Connect startup; use its local Cube key for signing."
+                        .into(),
+                ))),
+            ]);
         }
         // The shared Vault Receive screen reserves an imported wallet's
         // address outside the import panel: the panel stops vouching for its
@@ -6912,6 +6986,22 @@ impl App {
         }
     }
 
+    /// The header shows the account email from `cache.connect_email`. A
+    /// Bitcoin Cube fills it from its login commit or live-updates startup;
+    /// a Bitcoin Blake2b Cube runs neither, so it mirrors the account its
+    /// panel is signed in as, and clears it once the panel has none.
+    fn sync_fork_connect_email(&mut self) {
+        if !self.cache.chain().is_blake2b() {
+            return;
+        }
+        let account = &self.panels.connect.account;
+        self.cache.connect_email = account
+            .authenticated_client()
+            .and(account.user.as_ref())
+            .map(|user| user.email.clone())
+            .filter(|email| !email.is_empty());
+    }
+
     fn sync_connect_stream_after_auth(&mut self, was_authenticated: bool) {
         // Connect logout: tear down the realtime stream. The
         // subscription is keyed on `connect_stream_config`, so
@@ -7041,7 +7131,27 @@ impl App {
             }
             committed_login = Some((login.clone(), *refreshed));
         }
-        if self.cache.chain().is_blake2b() && !self.requires_connect() {
+        // A local fork Cube's account panel is an ordinary one, except
+        // while it still holds the session the Cube was opened with
+        // (`fork_connect_client`). Resetting that here, before the
+        // first `Init`, dropped the session at every signed-in open;
+        // the bound-client check below hands the panel back to local
+        // mode once that session ends.
+        //
+        // An explicit sign-out is the exception: the panel goes local first,
+        // so `clear_session` treats the saved sign-in as this Cube's and
+        // deletes it. Left in opening-session mode it would keep the keyring
+        // entry, and the next `Init` or launch would sign the user back in.
+        let signing_out = matches!(
+            &msg,
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::LogOut
+            ))
+        );
+        if self.cache.chain().is_blake2b()
+            && !self.requires_connect()
+            && (self.fork_connect_client.is_none() || signing_out)
+        {
             self.panels.connect.account.use_local_backend();
         }
         let was_authenticated = self.cache.connect_authenticated;
@@ -7111,6 +7221,7 @@ impl App {
         self.sync_connect_claim_session(session_epoch, explicit_logout);
         self.sync_connect_sidebar(was_authenticated);
         self.sync_connect_stream_after_auth(was_authenticated);
+        self.sync_fork_connect_email();
         // Auto-return for the "Switch to Connect" flow. When the user
         // clicked it without an active session, we routed them to the
         // Connect tab and set this flag. Now that they've signed in,
@@ -7940,6 +8051,7 @@ impl App {
         };
         let generation = *self.panels.session_generation.borrow();
         let live = self.panels.session_generation.subscribe();
+        let app = self.cache.app_generation;
         Task::sip(
             iced::task::sipper(async move |progress| {
                 crate::services::split_coins::prepare(
@@ -7949,8 +8061,65 @@ impl App {
                 .await
             }),
             Message::SplitBuildStage,
-            |result| Message::SplitPrepared(result.map(|prepared| Box::new(prepared.record))),
+            move |result| Message::SplitBuilt {
+                app,
+                result: result.map(|prepared| Box::new(prepared.record)),
+            },
         )
+    }
+
+    /// A split build finished. One from another `App` (its Cube was locked
+    /// or switched meanwhile) changes nothing here: its record belongs to
+    /// that `App`'s Vault, and its failure to that `App`'s review.
+    fn route_split_built(
+        &mut self,
+        app: cache::AppGeneration,
+        result: Result<
+            Box<crate::services::split_coins::SplitRecord>,
+            crate::services::split_coins::PrepareError,
+        >,
+    ) -> Task<Message> {
+        if app != self.cache.app_generation {
+            return Task::none();
+        }
+        match result {
+            Ok(record) => self.route_split_prepared(Ok(record)),
+            Err(crate::services::split_coins::PrepareError {
+                message,
+                rejected_key: Some(key),
+            }) => self.route_split_key_rejected(key, message),
+            Err(error) => self.route_split_prepared(Err(error.message)),
+        }
+    }
+
+    /// The build's fresh check rejected its split key: stop offering that
+    /// coin (the flow falls back to another split coin, or to asking for
+    /// one), then report the failed build.
+    fn route_split_key_rejected(
+        &mut self,
+        key: bitcoin::OutPoint,
+        message: String,
+    ) -> Task<Message> {
+        self.cache
+            .split_key_rejected(key, std::time::SystemTime::now());
+        // A background check of this coin still in flight is older than
+        // this answer and must not undo it.
+        if self.chain_proofs_in_flight.contains(&key) {
+            self.cache.supersede_proof_check(key);
+        }
+        self.save_chain_proofs();
+        // What happens next depends on whether another split coin is held.
+        use crate::services::split_coins::{KEY_REJECTED_SEND_ANOTHER, KEY_REJECTED_USES_ANOTHER};
+        let next = if self.cache.split_keys().is_empty() {
+            KEY_REJECTED_SEND_ANOTHER
+        } else {
+            KEY_REJECTED_USES_ANOTHER
+        };
+        let task = self.route_split_prepared(Err(format!("{message} {next}")));
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.split_key_was_rejected();
+        }
+        task
     }
 
     fn route_split_key_check(
@@ -8923,6 +9092,9 @@ impl App {
             }
             Message::SplitPrepared(result) => {
                 return self.route_split_prepared(result);
+            }
+            Message::SplitBuilt { app, result } => {
+                return self.route_split_built(app, result);
             }
             // To Split coins whichever panel is showing, like the result.
             Message::SplitBuildStage(stage) => return self.route_split_build_stage(stage),
@@ -11827,6 +11999,300 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A Bitcoin Blake2b unlock derives the Cube encryption key directly and
+    /// never persists its public half (`CubeSettings::connect_encryption_pubkey`),
+    /// so the App hands Connect's registration wave the derived key, with or
+    /// without a Vault. Without it Connect holds no recipient key for the
+    /// Cube and COINCUBE Mobile cannot share a key with it. A Bitcoin Cube
+    /// keeps publishing the key its unlock persisted.
+    #[test]
+    fn a_fork_cube_publishes_its_derived_encryption_pubkey() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-enc-pubkey-{}", uuid::Uuid::new_v4()));
+        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let fork = settings::CubeSettings::new("Fork".into(), chain);
+        assert!(fork.connect_encryption_pubkey.is_none());
+        let (app, startup) = App::new_fork_without_wallet(
+            cek.clone(),
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            fork,
+        )
+        .unwrap();
+        drop(startup);
+        assert_eq!(
+            app.panels.connect.cube.cube_encryption_pubkey,
+            Some(cek.public_key_hex())
+        );
+
+        // With a Vault: the fork constructor hands the key to `new_inner`.
+        let vaulted = local_app(&root.join("vaulted"));
+        assert_eq!(
+            vaulted.panels.connect.cube.cube_encryption_pubkey,
+            vaulted
+                .cache
+                .cube_encryption_key
+                .as_ref()
+                .map(|key| key.public_key_hex())
+        );
+        assert!(vaulted.panels.connect.cube.cube_encryption_pubkey.is_some());
+
+        let persisted = format!("02{}", "ab".repeat(32));
+        let mut bitcoin_cube =
+            settings::CubeSettings::new("Bitcoin".into(), crate::chain::ChainId::Signet);
+        bitcoin_cube.connect_encryption_pubkey = Some(persisted.clone());
+        let (app, startup) = App::without_wallet(
+            None,
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            crate::chain::ChainId::Signet.bitcoin_network(),
+            bitcoin_cube,
+            Some(cek),
+        );
+        drop(startup);
+        assert_eq!(
+            app.panels.connect.cube.cube_encryption_pubkey,
+            Some(persisted)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Vault-less Bitcoin Blake2b Cube opened signed in, with its opening
+    /// session (`fork_connect_client`) installed in the account panel.
+    fn signed_in_fork_cube_without_a_vault(root: &std::path::Path) -> App {
+        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:9");
+        client.set_token("synthetic-opening");
+        let (app, startup) = App::new_fork_without_wallet(
+            cek,
+            Some(client),
+            Config::new(false),
+            CoincubeDirectory::new(root.to_path_buf()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .unwrap();
+        drop(startup);
+        assert!(!app.requires_connect());
+        assert!(app.fork_connect_client.is_some());
+        app
+    }
+
+    /// Opened signed in, a Vault-less Bitcoin Blake2b Cube keeps its opening
+    /// session through the account panel's first check. Turning the panel
+    /// local before that `Init` dropped the session at every signed-in open;
+    /// the saved-session restore that followed was then refused with the
+    /// "Connect signer bootstrap" error.
+    #[test]
+    fn a_signed_in_fork_cube_without_a_vault_keeps_its_session_through_init() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-open-session-{}", uuid::Uuid::new_v4()));
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            app.fork_connect_client.is_some(),
+            "the opening session survives Init"
+        );
+        assert!(app.cache.has_connect_session);
+        assert_eq!(
+            app.panels
+                .connect
+                .account
+                .authenticated_client()
+                .and_then(|client| client.token().map(|token| token.to_string()))
+                .as_deref(),
+            Some("synthetic-opening")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Signing out of a Vault-less Bitcoin Blake2b Cube that was opened
+    /// signed in deletes the saved sign-in, as it does on a Bitcoin Cube.
+    /// While the panel still held the opening session it took the saved
+    /// sign-in for another tab's and kept it, so the next `Init` or launch
+    /// signed the user back in.
+    #[test]
+    fn signing_out_of_a_signed_in_fork_cube_deletes_the_saved_sign_in() {
+        use crate::app::state::connect::{
+            read_connect_secret, write_connect_secret, CONNECT_KEYRING_USER,
+        };
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-sign-out-{}", uuid::Uuid::new_v4()));
+        write_connect_secret(CONNECT_KEYRING_USER, b"saved-sign-in").unwrap();
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            read_connect_secret(CONNECT_KEYRING_USER).is_some(),
+            "opening the Cube leaves the saved sign-in alone"
+        );
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
+        assert!(
+            read_connect_secret(CONNECT_KEYRING_USER).is_none(),
+            "sign-out deletes the saved sign-in"
+        );
+        assert!(app.fork_connect_client.is_none());
+        assert!(!app.cache.has_connect_session);
+        assert!(app.panels.connect.account.authenticated_client().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The header reads the account email from `cache.connect_email`, which a
+    /// Bitcoin Cube fills from its login commit or live-updates startup. A
+    /// signed-in Bitcoin Blake2b Cube runs neither, so it shows the account
+    /// its panel loaded, and drops it when that account signs out.
+    #[test]
+    fn a_signed_in_fork_cube_shows_its_account_email() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-open-email-{}", uuid::Uuid::new_v4()));
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        ))));
+        assert_eq!(app.cache.connect_email, None, "no account loaded yet");
+
+        // The opening session's account, as the admitted user load returns it.
+        let account = &app.panels.connect.account;
+        let (generation, epoch) = (account.session_generation(), account.auth_epoch());
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Ok(crate::services::coincube::User {
+                    id: 77,
+                    email: "fixture@example.invalid".into(),
+                    email_verified: Some(true),
+                }),
+                generation,
+                epoch,
+            },
+        ))));
+        assert!(
+            app.fork_connect_client.is_some(),
+            "still the opening session"
+        );
+        assert_eq!(
+            app.cache.connect_email.as_deref(),
+            Some("fixture@example.invalid")
+        );
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
+        assert_eq!(app.cache.connect_email, None, "cleared with the session");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Once its opening session ends, a Vault-less Bitcoin Blake2b Cube's
+    /// account panel signs in by itself, as Home's does: a restored session is
+    /// accepted without the App commit the fork refuses. A deferred commit
+    /// that still arrives is answered so the panel never waits on it, and the
+    /// legacy bootstrap a sign-in asks for afterwards is refused, both without
+    /// the "Connect signer bootstrap" error.
+    #[test]
+    fn a_local_fork_cube_signs_in_without_the_bitcoin_commit() {
+        fn outputs(task: Task<Message>) -> Vec<Message> {
+            use iced_runtime::futures::futures::StreamExt;
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return Vec::new();
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(
+                    stream
+                        .filter_map(|action| async move {
+                            match action {
+                                iced_runtime::Action::Output(message) => Some(message),
+                                _ => None,
+                            }
+                        })
+                        .collect(),
+                )
+        }
+        let is_bootstrap_error = |message: &Message| {
+            matches!(message, Message::View(view::Message::ShowError(error))
+                if error.contains("Connect signer bootstrap"))
+        };
+
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-local-signin-{}", uuid::Uuid::new_v4()));
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        // Another tab's sign-in ends the opening session.
+        app.on_local_auth_change(false);
+        assert!(app.fork_connect_client.is_none());
+
+        let login = crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: "synthetic-restored".into(),
+            refresh_token: "synthetic-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 77,
+                email: "fixture@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        };
+        let revision = app.panels.connect.account.accepted_auth_revision();
+        let epoch = app.connect_auth_epoch();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshedSession(login.clone(), epoch, "old".into()),
+        ))));
+        assert_ne!(
+            app.panels.connect.account.accepted_auth_revision(),
+            revision,
+            "the restored session is accepted in the panel"
+        );
+        let saved = state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER)
+            .expect("the restored session is saved");
+        assert!(String::from_utf8(saved)
+            .unwrap()
+            .contains("synthetic-restored"));
+
+        let epoch = app.connect_auth_epoch();
+        let answered = outputs(app.update(Message::InAppConnectAuthReady {
+            login: login.clone(),
+            epoch,
+            previous_refresh_token: None,
+        }));
+        assert!(answered.iter().any(|message| matches!(
+            message,
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::AuthCommitRejected { epoch: answered_epoch }
+            )) if *answered_epoch == epoch
+        )));
+        assert!(!answered.iter().any(is_bootstrap_error));
+
+        let bootstrap = outputs(app.update(Message::InAppConnectLoginCompleted {
+            token: login.token.clone(),
+            refresh_token: login.refresh_token.clone(),
+            email: login.user.email.clone(),
+            epoch,
+        }));
+        assert!(!bootstrap.iter().any(is_bootstrap_error));
+        assert!(!bootstrap
+            .iter()
+            .any(|message| matches!(message, Message::TriggerConnectStreamReady { .. })));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Through the Tab, as the unlock routes reach it: a signed-out,
     /// Vault-less fork Cube stays open, because nothing in it needs a Connect
     /// session. Its feature check runs at once, and a revoked feature closes it.
@@ -14427,10 +14893,131 @@ pub(crate) mod shell_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A coin on both chains, so Split coins is on a step that shows why a
+    /// build failed.
+    fn coin_on_both_chains(app: &mut App) {
+        let outpoint: bitcoin::OutPoint = format!("{}:0", "08".repeat(32)).parse().unwrap();
+        app.cache.daemon_cache.blockheight = 110;
+        app.cache.daemon_cache.coins = vec![coincubed::commands::ListCoinsEntry {
+            outpoint,
+            amount: bitcoin::Amount::from_sat(100_000),
+            block_height: Some(100),
+            spend_info: None,
+            is_immature: false,
+            address: "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg"
+                .parse::<bitcoin::Address<_>>()
+                .unwrap()
+                .assume_checked(),
+            derivation_index: 0.into(),
+            is_change: false,
+            is_from_self: false,
+        }];
+        app.cache.record_entanglement(
+            outpoint.txid,
+            crate::services::entangled::Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// A rejected split coin stops being offered, and Split coins hears
+    /// why with what to do next.
+    #[test]
+    fn a_rejected_split_coin_is_recorded_and_reported() {
+        use crate::services::chain_status::ProofEntry;
+        use crate::services::split_coins::{KEY_REJECTED_HISTORY, KEY_REJECTED_SEND_ANOTHER};
+        let root = std::env::temp_dir().join(format!("split-rejected-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        coin_on_both_chains(&mut app);
+        app.panels
+            .split_hub
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        let key: bitcoin::OutPoint = format!("{}:0", "07".repeat(32)).parse().unwrap();
+        let rejected = || {
+            Err(crate::services::split_coins::PrepareError {
+                message: KEY_REJECTED_HISTORY.to_string(),
+                rejected_key: Some(key),
+            })
+        };
+        let progress = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+        };
+        // A result from another App's build changes nothing here: not a
+        // rejection, and not an ordinary failure.
+        let other = crate::app::cache::AppGeneration::next();
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: rejected(),
+        }));
+        assert!(!app.cache.chain_proofs.contains_key(&key));
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: Err("Couldn't build".to_string().into()),
+        }));
+        assert_eq!(progress(&app), (true, None), "still this App's build");
+        // A background check of the coin is in flight when it is rejected.
+        app.chain_proofs_in_flight.insert(key);
+        drop(app.update(Message::SplitBuilt {
+            app: app.cache.app_generation,
+            result: rejected(),
+        }));
+        assert!(app.cache.superseded_proof_checks.contains(&key));
+        assert!(matches!(
+            app.cache.chain_proofs.get(&key),
+            Some(ProofEntry::NoQualifyingAncestry { .. })
+        ));
+        assert_eq!(
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test(),
+            (
+                false,
+                Some(format!(
+                    "{KEY_REJECTED_HISTORY} {KEY_REJECTED_SEND_ANOTHER}"
+                ))
+            ),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A build error that goes stale while another panel is showing is
+    /// dropped then, so it isn't back when the flow looks the same again.
+    #[test]
+    fn a_stale_split_error_is_dropped_from_another_panel() {
+        let root = std::env::temp_dir().join(format!("split-stale-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let error = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+                .1
+        };
+        coin_on_both_chains(&mut app);
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        drop(app.update(Message::SplitPrepared(Err("Couldn't build".into()))));
+        assert!(error(&app).is_some());
+        // The coin goes: the flow is on another step.
+        app.cache.daemon_cache.coins.clear();
+        // Any message, to a panel that isn't Split coins.
+        drop(app.update(Message::View(view::Message::Close)));
+        assert_eq!(error(&app), None, "dropped while stale");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_split_result_reaches_split_coins_from_another_panel() {
         let root = std::env::temp_dir().join(format!("split-result-{}", uuid::Uuid::new_v4()));
         let (mut app, _) = bitcoin_app(&root);
+        coin_on_both_chains(&mut app);
         app.panels
             .split_hub
             .as_mut()
@@ -16059,6 +16646,9 @@ pub(crate) mod shell_tests {
         let refusal = |messages: Vec<Message>| {
             messages.into_iter().find_map(|message| match message {
                 Message::SplitPrepared(Err(error)) => Some(error),
+                Message::SplitBuilt {
+                    result: Err(error), ..
+                } => Some(error.message),
                 _ => None,
             })
         };

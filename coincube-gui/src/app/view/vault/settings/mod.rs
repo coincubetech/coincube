@@ -296,8 +296,10 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
         page::rows([data.into(), sync.into()]),
     ));
 
-    // Keychain signing reaches this Vault only through Connect's live updates.
-    if cache.connect_authenticated {
+    // Mobile signing reaches a Bitcoin Vault through Connect's live updates.
+    // A Bitcoin Blake2b Vault never starts them; its signing window checks
+    // Connect itself, so there is no status to show.
+    if cache.connect_authenticated && crate::app::live_updates_apply(cache.chain()) {
         let status = cache.connect_stream_status;
         let (kind, word) = live_updates_status(status);
         let line = match status {
@@ -3996,6 +3998,37 @@ mod tests {
                 crate::app::menu::SettingsOption::Node
             ))))
         )));
+    }
+
+    /// A Bitcoin Blake2b Vault never starts live updates (its signing window
+    /// checks Connect itself), so it has no "Signing updates" status stuck at
+    /// "Connecting…".
+    #[test]
+    fn a_blake2b_vault_has_no_signing_updates_status() {
+        use crate::app::view::shared::landing::capture;
+        let mut cache = Cache {
+            fiat_chain: crate::chain::ChainId::BitcoinBlake2bTestnet4,
+            connect_authenticated: true,
+            connect_stream_status: crate::app::ConnectionStatus::Inactive,
+            ..Cache::default()
+        };
+        cache.daemon_cache.blockheight = 974_600;
+        cache.daemon_cache.sync_progress = 1.0;
+        let probe = capture::inspect(
+            "vault-connections-blake2b",
+            connections(&cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(probe.contains("Blockchain data"));
+        for gone in [
+            "Signing updates",
+            "Connecting…",
+            "Starting live updates from Connect.",
+        ] {
+            assert!(!probe.contains(gone), "{}", gone);
+        }
     }
 
     fn value(text: &str, valid: bool) -> form::Value<String> {

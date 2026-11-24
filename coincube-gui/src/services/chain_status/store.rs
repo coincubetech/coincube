@@ -7,7 +7,8 @@
 //! outpoint it is filed under and structurally re-verified on load; a record
 //! that fails either check is dropped. One that passes loads as
 //! [`ProofEntry::Saved`], not verified: decoding proves the links fit, not
-//! that the chain still holds them, so it waits for a fresh check. A failed
+//! that the chain still holds them, so it waits for a fresh check (the split
+//! builder runs its own before using one as a split key). A failed
 //! check is not kept, so a restart retries it; a path whose check failed is
 //! kept, so a failure never erases it.
 
@@ -241,9 +242,7 @@ mod tests {
         proofs.insert(other, ProofEntry::NoQualifyingAncestry { checked_at });
         proofs.insert(
             OutPoint::new(selected.txid, 9),
-            ProofEntry::Failed {
-                failed_at: SystemTime::now(),
-            },
+            ProofEntry::failed(SystemTime::now()),
         );
         save(&dir, &proofs, |_| true).unwrap();
         let loaded = load(&dir);
@@ -294,19 +293,25 @@ mod tests {
     /// interval before the next attempt instead of being erased.
     #[test]
     fn a_failed_check_never_erases_a_saved_path() {
-        use crate::services::chain_status::{proof_candidates, FAILED_RETRY};
+        use crate::services::chain_status::{failed_retry, proof_candidates};
         let dir = temp_dir();
         let (selected, retained) = verified_path();
         let failed_at = SystemTime::now();
         let entry = ProofEntry::after_check(
             Some(&ProofEntry::Saved(retained)),
-            ProofEntry::Failed { failed_at },
+            ProofEntry::failed(failed_at),
         );
         assert!(
             matches!(&entry, ProofEntry::SavedRetry { path, .. } if path.selected() == selected),
             "the path is kept"
         );
         assert_eq!(entry.outcome(), None, "still shown as checking");
+        assert_eq!(entry.failed_attempts(), 1);
+        let again = ProofEntry::after_check(Some(&entry), ProofEntry::failed(failed_at));
+        assert!(
+            matches!(&again, ProofEntry::SavedRetry { path, attempts: 2, .. } if path.selected() == selected),
+            "a second failure keeps the path and counts on"
+        );
 
         let proofs: HashMap<_, _> = [(selected, entry)].into();
         let due = |now| {
@@ -319,7 +324,7 @@ mod tests {
             )
         };
         assert!(due(failed_at).is_empty(), "not retried at once");
-        assert_eq!(due(failed_at + FAILED_RETRY), vec![selected]);
+        assert_eq!(due(failed_at + failed_retry(1)), vec![selected]);
 
         save(&dir, &proofs, |_| true).unwrap();
         assert!(
@@ -342,9 +347,7 @@ mod tests {
             ProofEntry::after_check(Some(&saved), no_path),
             ProofEntry::NoQualifyingAncestry { .. }
         ));
-        let failed = ProofEntry::Failed {
-            failed_at: SystemTime::now(),
-        };
+        let failed = ProofEntry::failed(SystemTime::now());
         assert!(matches!(
             ProofEntry::after_check(None, failed.clone()),
             ProofEntry::Failed { .. }

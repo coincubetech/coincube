@@ -848,14 +848,18 @@ pub async fn ensure_tor_installed_if_wanted(coincube_datadir: &CoincubeDirectory
 // -------------------------------------------------------------------------
 
 /// Identifying material the duress wipe must obliterate: the managed Tor data
-/// directory (Tor state) and bitcoind's onion-service private key(s). These
-/// live under `<root>/bitcoind`, which the wipe otherwise preserves (the
-/// blockchain is expensive to re-sync and not sensitive) — so they must be
-/// listed explicitly. Returns only paths that currently exist.
+/// directory (Tor state) and each managed node's onion-service private key(s).
+/// These live under the node roots (`<root>/bitcoind`, and
+/// `<root>/bitcoind-blake2b` for a Bitcoin Blake2b node), which the wipe
+/// otherwise preserves (the blockchain is expensive to re-sync and not
+/// sensitive) — so they must be listed explicitly. Returns only paths that
+/// currently exist.
 ///
-/// bitcoind stores its ephemeral onion key as `onion_v3_private_key` (or the
-/// legacy `onion_private_key`) in its network data dir, so we look in the
-/// managed datadir root and one level of network subdirectories.
+/// A node stores its ephemeral onion key as `onion_v3_private_key` (or the
+/// legacy `onion_private_key`) in its network data dir, so we look in each
+/// chain family's managed datadir root and one level of network
+/// subdirectories. Every family is searched whether or not its node is set up
+/// for inbound Tor today: a key left behind is a fingerprint of the device.
 pub fn duress_identifying_targets(coincube_datadir_root: &Path) -> Vec<PathBuf> {
     // Derive paths through the same helpers the rest of the module uses, so the
     // wipe stays in lock-step with where Tor state and the onion keys actually
@@ -870,17 +874,21 @@ pub fn duress_identifying_targets(coincube_datadir_root: &Path) -> Vec<PathBuf> 
         targets.push(tor_data);
     }
 
-    // bitcoind's onion-service key(s), in the datadir root and per-network dirs.
+    // Each node's onion-service key(s), in its datadir root and per-network dirs.
     const ONION_KEY_FILES: &[&str] = &["onion_v3_private_key", "onion_private_key"];
-    let datadir = internal_bitcoind_datadir(&coincube_datadir);
-    let mut search_dirs = vec![datadir.clone()];
-    if let Ok(entries) = std::fs::read_dir(&datadir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                search_dirs.push(path);
+    let mut search_dirs = Vec::new();
+    for family in crate::node::bitcoind::NodeChainFamily::ALL {
+        let datadir =
+            crate::node::bitcoind::internal_bitcoind_datadir_for(&coincube_datadir, family);
+        if let Ok(entries) = std::fs::read_dir(&datadir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    search_dirs.push(path);
+                }
             }
         }
+        search_dirs.push(datadir);
     }
     for dir in search_dirs {
         for name in ONION_KEY_FILES {
@@ -1343,6 +1351,47 @@ mod tests {
             !targets.iter().any(|t| t.ends_with("blk0.dat")),
             "blockchain preserved"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn duress_targets_the_onion_keys_of_every_managed_node() {
+        use crate::node::bitcoind::{internal_bitcoind_datadir_for, NodeChainFamily};
+
+        let root = temp_datadir("duress-families");
+        let root = root.path();
+        let coincube_datadir = CoincubeDirectory::new(root.to_path_buf());
+
+        let mut keys = Vec::new();
+        let mut blocks = Vec::new();
+        for family in NodeChainFamily::ALL {
+            let datadir = internal_bitcoind_datadir_for(&coincube_datadir, family);
+            // A key in the datadir root, a legacy-named one in a network
+            // subdirectory, and chain data that must be left alone.
+            std::fs::create_dir_all(datadir.join("testnet4").join("blocks")).unwrap();
+            let root_key = datadir.join("onion_v3_private_key");
+            let network_key = datadir.join("testnet4").join("onion_private_key");
+            let block = datadir.join("testnet4").join("blocks").join("blk0.dat");
+            std::fs::write(&root_key, b"k").unwrap();
+            std::fs::write(&network_key, b"k").unwrap();
+            std::fs::write(&block, b"b").unwrap();
+            keys.extend([root_key, network_key]);
+            blocks.push(block);
+        }
+        assert_eq!(keys.len(), 2 * NodeChainFamily::ALL.len());
+
+        let targets = duress_identifying_targets(root);
+        for key in &keys {
+            assert!(targets.contains(key), "{} must be wiped", key.display());
+        }
+        for block in &blocks {
+            assert!(
+                !targets.iter().any(|t| block.starts_with(t)),
+                "{} must be preserved",
+                block.display()
+            );
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

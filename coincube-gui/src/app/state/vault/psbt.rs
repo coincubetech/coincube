@@ -6644,7 +6644,7 @@ mod tests {
 
             // The fresh check fails against the changed chains, and a late
             // positive reply for the old check is ignored.
-            let changed = "The split key couldn't be verified right now: reorg".to_string();
+            let changed = "The split coin couldn't be checked right now.".to_string();
             let failed =
                 drive(state.update(daemon.clone(), &cache, reply(second, Err(changed.clone()))))
                     .await;
@@ -6791,7 +6791,7 @@ mod tests {
 
             // The fresh check fails: the picker comes down, and a pick that
             // still arrives signs nothing.
-            let failed = "The split key couldn't be verified right now: reorg".to_string();
+            let failed = "The split coin couldn't be checked right now.".to_string();
             let reply = Message::SplitKeyChecked {
                 spend,
                 key,

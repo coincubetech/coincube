@@ -28,6 +28,28 @@ key directly. No Liquid or Spark SDK is constructed. A passkey fork Cube derives
 the same key from the session signer its assertion opened. Remote legacy wallet
 routes remain unavailable for the fork.
 
+The App hands that key's public half to Connect's registration wave, which
+publishes it (`PUT /connect/cubes/{id}/encryption-pubkey`) once the Cube's
+account reaches its dashboard, with or without a Vault. A Bitcoin Cube
+persists the value at unlock; a fork Cube derives it again at every open and
+never persists it. Without it Connect has no recipient key for the Cube, and
+COINCUBE Mobile cannot share a key with it.
+
+A Vault-less or managed-local fork Cube opened signed in keeps that session in
+its account panel until a log-out, an account change or another tab's sign-in
+ends it. The panel then becomes an ordinary local one: signing in or restoring
+the saved session finishes in the panel, as on Home, without the Bitcoin
+`connect.json` commit or the legacy device and stream bootstrap.
+
+Without that bootstrap a fork Cube never starts Connect's live updates, and a
+Bitcoin Cube fills the header's account email only from its login commit or
+that startup. So the fork App mirrors the email of the account its panel is
+signed in as (`sync_fork_connect_email`), and `live_updates_apply` leaves the
+live-updates status out of the Connect menu, Cube connections and Vault
+connections, where it would otherwise read "Connecting…" for good. A fork
+Vault's Mobile signing window checks Connect for signatures itself while it
+is open.
+
 A pending fork PIN screen receives a candidate from the exact current completed
 Connect login after its account safety gates, scoped to its data root and API
 provider. The next PIN submission rechecks that account's identity and feature availability before decrypting; it
