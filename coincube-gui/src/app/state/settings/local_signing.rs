@@ -361,6 +361,12 @@ impl LocalSigningState {
             super::keychain_backfill::lookup(
                 cache.datadir_path.clone(),
                 wallet,
+                // The endpoint the pipeline recorded; before the stream is
+                // up, a restored session is on the configured API.
+                cache
+                    .connect_base_url
+                    .clone()
+                    .unwrap_or_else(crate::services::coincube_api_base_url),
                 tokens,
                 cache.cube_id.clone(),
                 persist,

@@ -99,6 +99,7 @@ async fn quiet_server(respond: bool) -> (ConnectStreamConfig, tokio::task::JoinH
             .unwrap();
     });
     let config = ConnectStreamConfig {
+        base_url: "https://connect.example.invalid".into(),
         grpc_url: format!("http://{address}"),
         tokens: Arc::new(RwLock::new(AccessTokenResponse {
             access_token: "synthetic-token".into(),

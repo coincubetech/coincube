@@ -126,11 +126,14 @@ pub fn apply_to_wallet(wallet: &Wallet, found: &HashMap<Fingerprint, FoundKeycha
 pub async fn lookup(
     datadir: CoincubeDirectory,
     wallet: Arc<Wallet>,
+    base_url: String,
     tokens: Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
     cube_uuid: String,
     persist: bool,
 ) -> Result<HashMap<Fingerprint, FoundKeychainKey>, String> {
-    let mut client = CoincubeClient::new();
+    // `tokens` is the signer pipeline's session, so the request goes to the
+    // endpoint that session is on.
+    let mut client = CoincubeClient::with_base_url(base_url);
     client.set_token(&tokens.read().await.access_token);
     let cube_keys = client
         .get_cube_keys(&cube_uuid)

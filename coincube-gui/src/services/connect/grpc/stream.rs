@@ -21,6 +21,10 @@ mod transport_tests;
 /// Configuration for the realtime gRPC stream.
 #[derive(Debug, Clone)]
 pub struct ConnectStreamConfig {
+    /// Base URL of the Connect API that `grpc_url` was resolved from. The
+    /// stream itself does not use it; it travels with the address so the App
+    /// records the two together.
+    pub base_url: String,
     pub grpc_url: String,
     pub tokens: Arc<RwLock<AccessTokenResponse>>,
     pub device_id: String,

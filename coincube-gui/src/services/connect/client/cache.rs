@@ -478,11 +478,16 @@ fn validate_cache_update_guard(
 /// is absent or an About re-registration owns the cache claim.
 ///
 /// Clearing is how a device id that Connect has revoked is discarded: only
-/// the id goes, and the account's session and event sequence stay. A `false`
-/// answer to a clear needs no retry. With no account there is nothing stored;
-/// with a live re-registration claim (one whose process still holds its
-/// lock), that re-registration replaces the id itself when it finishes. A
-/// claim abandoned by an exited process does not block a clear.
+/// the id goes, and the account's session and event sequence stay.
+///
+/// A `false` answer to a clear means nothing was cleared, and the caller
+/// must not assume the id is gone. With no account there is nothing stored.
+/// With a live re-registration claim the id is left to that re-registration:
+/// it stores the new id if it succeeds, but puts the **old** id back if it
+/// fails or rolls back, so a caller discarding a revoked id has to check
+/// again once the claim is released. A claim counts as live while its
+/// process holds the claim's lock, and also when that lock cannot be read.
+/// A claim abandoned by an exited process does not block a clear.
 pub async fn set_device_id_for_email(
     network_dir: &NetworkDirectory,
     email: &str,

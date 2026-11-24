@@ -675,7 +675,7 @@ impl App {
                 // PSBT modal in particular) can spin up a
                 // GrpcSessionClient on demand.
                 self.cache.connect_grpc_url = Some(cfg.grpc_url.clone());
-                self.cache.connect_base_url = Some(self.connect_base_url());
+                self.cache.connect_base_url = Some(cfg.base_url.clone());
                 self.cache.connect_tokens = Some(cfg.tokens.clone());
                 self.cache.connect_device_id = Some(cfg.device_id.clone());
                 self.cache.connect_email = Some(email);

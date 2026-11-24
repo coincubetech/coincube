@@ -2821,6 +2821,7 @@ fn connect_stream_ready_task(
     let completion_email = email.clone();
     Task::perform(
         async move {
+            let stream_base_url = base_url.clone();
             let Some(grpc_url) = resolve_connect_grpc_url_for(&base_url).await else {
                 tracing::info!("Connect stream bootstrap: no Connect gRPC URL available");
                 return None;
@@ -2849,7 +2850,8 @@ fn connect_stream_ready_task(
             // we just read from the shared `Arc<RwLock>`.
             let vault_ids = if let Some(cube_uuid) = cube_uuid.as_ref() {
                 let access_token = tokens.read().await.access_token.clone();
-                let mut client = crate::services::coincube::CoincubeClient::with_base_url(base_url);
+                let mut client =
+                    crate::services::coincube::CoincubeClient::with_base_url(base_url.clone());
                 client.set_token(&access_token);
                 match client.list_cubes().await {
                     Ok(cubes) => cubes
@@ -2872,6 +2874,7 @@ fn connect_stream_ready_task(
             };
 
             Some(ConnectStreamConfig {
+                base_url: stream_base_url,
                 grpc_url,
                 tokens,
                 device_id,
@@ -3733,9 +3736,8 @@ impl App {
         if let (Some(auth), Some(email)) = (connect_auth_arc.as_ref(), connect_email.as_deref()) {
             tasks.push(connect_stream_ready_task(
                 cache.chain(),
-                // A Cube given a session at start-up is on the app's
-                // configured Connect API: its panel's client is built on it.
-                crate::services::coincube_api_base_url(),
+                // The Cube's own client, as everywhere else in the pipeline.
+                panels.connect.account.client.base_url.clone(),
                 data_dir.clone(),
                 auth.clone(),
                 email.to_string(),
@@ -11622,6 +11624,7 @@ pub(crate) mod tests {
         app.cache.fiat_chain = crate::chain::ChainId::Bitcoin;
         app.connect_stream_config = Some(
             crate::services::connect::grpc::stream::ConnectStreamConfig {
+                base_url: "https://connect.example.invalid".into(),
                 grpc_url: "https://grpc.example.invalid".into(),
                 tokens: Arc::new(tokio::sync::RwLock::new(
                     crate::services::connect::client::auth::AccessTokenResponse {
@@ -12525,6 +12528,30 @@ pub(crate) mod tests {
             grant == Some(true)
         );
         app
+    }
+
+    /// The pipeline's endpoint is the Cube's own client's: the session a
+    /// Bitcoin Blake2b Cube was opened with when it has one, otherwise the
+    /// Connect panel's client.
+    #[test]
+    fn the_signer_pipeline_endpoint_is_the_cubes_own_client() {
+        let root = std::env::temp_dir().join(format!(
+            "coincube-fork-connect-endpoint-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let opened_with_a_session = fork_app(&root, true);
+        assert_eq!(
+            opened_with_a_session.connect_base_url(),
+            "https://connect.example/"
+        );
+        let mut without = fork_app(&root, false);
+        assert_eq!(
+            without.connect_base_url(),
+            without.panels.connect.account.client.base_url
+        );
+        without.panels.connect.account.client.base_url = "https://panel.example.invalid".into();
+        assert_eq!(without.connect_base_url(), "https://panel.example.invalid");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A call site, not an accessor: the Connect cache snapshot a Bitcoin
@@ -15869,6 +15896,7 @@ pub(crate) mod shell_tests {
             },
         ));
         let old_cfg = crate::services::connect::grpc::stream::ConnectStreamConfig {
+            base_url: "https://connect.example.invalid".into(),
             grpc_url: "https://grpc.example.invalid".into(),
             tokens: stale,
             device_id: "alice-device".into(),
@@ -15914,6 +15942,7 @@ pub(crate) mod shell_tests {
         app.connect_auth = Some(shared.clone());
         app.connect_email = Some("alice@example.com".into());
         let stale_cfg = crate::services::connect::grpc::stream::ConnectStreamConfig {
+            base_url: "https://connect.example.invalid".into(),
             grpc_url: "https://grpc.example.invalid".into(),
             tokens: shared,
             device_id: "old-device".into(),
@@ -20349,6 +20378,7 @@ mod stream_startup_routing_tests {
 
     fn config(tokens: Arc<tokio::sync::RwLock<AccessTokenResponse>>) -> ConnectStreamConfig {
         ConnectStreamConfig {
+            base_url: "https://connect.example.invalid".into(),
             grpc_url: "https://grpc.example.invalid".into(),
             tokens,
             device_id: "old-device".into(),
@@ -20502,11 +20532,24 @@ mod stream_startup_routing_tests {
         assert!(Arc::ptr_eq(app.connect_auth.as_ref().unwrap(), &current));
         assert!(app.cache.connect_device_id.is_none());
         // Positive control: the same cache/config is admissible for its owner.
+        // The refused completion recorded no endpoint either.
+        assert!(app.cache.connect_base_url.is_none());
         drop(app.update(Message::ConnectStreamReady(Some((
             config(current.clone()),
             "alice@example.invalid".into(),
         )))));
         assert_installed(&app, &current);
+        // The endpoint is the one the address was resolved from: it comes
+        // with the result, not from the App's state when the result lands.
+        assert_eq!(
+            app.cache.connect_base_url.as_deref(),
+            Some("https://connect.example.invalid")
+        );
+        assert_ne!(
+            app.connect_base_url(),
+            "https://connect.example.invalid",
+            "the fixture App's own client is on another base URL"
+        );
     }
 
     #[test]
