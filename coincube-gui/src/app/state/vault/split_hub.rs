@@ -221,10 +221,11 @@ pub struct SplitHubPanel {
 }
 
 /// Why the last build failed, with what the flow showed when it landed. The
-/// message is about that method, so it goes once the method changes. One
-/// about a rejected split coin also goes once another split coin is offered;
-/// any other stays while the flow is on the same step. On step one, either
-/// goes once the step reports on another coin.
+/// message is about that method and that step, so it goes once the method
+/// changes or the flow moves to another step. One about a rejected split coin
+/// also goes once another split coin is offered. On step one, either goes
+/// once the step reports on another coin. The App drops it as soon as it is
+/// stale, whichever panel is showing, so it can't come back.
 #[derive(Debug, Clone)]
 struct BuildError {
     message: String,
@@ -232,8 +233,9 @@ struct BuildError {
     /// The split coin on offer. A rejected one has already left the offer,
     /// so this is the coin offered next, or none on step one.
     key: Option<OutPoint>,
-    /// What step one said about the coin it waits for.
-    waiting: KeyStatus,
+    /// The step the flow was on, with what step one said about the coin it
+    /// waits for.
+    step: Step,
     /// The build rejected its split coin.
     rejected: bool,
 }
@@ -396,7 +398,9 @@ impl SplitHubPanel {
             vbytes,
             working: self.working,
             stage: self.stage.filter(|_| self.working),
-            error: self.error_shown(cache).map(|error| error.message.clone()),
+            error: self
+                .error_shown(cache, step)
+                .map(|error| error.message.clone()),
             copy,
             waiting_to_sign,
             mask_amounts: cache.balance_amounts_masked(),
@@ -486,7 +490,7 @@ impl SplitHubPanel {
                     message,
                     method: self.method(),
                     key: offered_key(cache),
-                    waiting: key_status(cache, self.address.as_deref()),
+                    step: step(&self.facts(cache), self.method(), self.continuing),
                     rejected: false,
                 })
             }
@@ -501,30 +505,40 @@ impl SplitHubPanel {
     }
 
     /// The build error, while it is still about what the flow shows.
-    fn error_shown(&self, cache: &Cache) -> Option<&BuildError> {
+    fn error_shown(&self, cache: &Cache, step: Step) -> Option<&BuildError> {
         let error = self.error.as_ref()?;
         if self.method() != error.method {
             return None;
         }
-        if error.method == Method::SplitKey {
-            let offered = offered_key(cache);
-            // A failure that isn't about the split coin doesn't go because
-            // the offer moved to another one.
-            let same = if error.rejected {
-                offered == error.key
-            } else {
-                offered.is_some() == error.key.is_some()
-            };
-            if !same {
-                return None;
-            }
-            // On step one, only until it reports on another coin: a
-            // replacement on its way isn't the coin the message is about.
-            if error.key.is_none() && key_status(cache, self.address.as_deref()) != error.waiting {
-                return None;
-            }
+        // On step one, only until it reports on another coin: a replacement
+        // on its way isn't the coin the message is about.
+        let same_step = match step {
+            Step::Key(_) => step == error.step,
+            _ => std::mem::discriminant(&step) == std::mem::discriminant(&error.step),
+        };
+        if !same_step {
+            return None;
+        }
+        // A failure that isn't about the split coin doesn't go because the
+        // offer moved to another one.
+        if error.rejected && error.method == Method::SplitKey && offered_key(cache) != error.key {
+            return None;
         }
         Some(error)
+    }
+
+    /// Forget a build error that is no longer about what the flow shows.
+    /// The App calls this after every message, whichever panel is showing,
+    /// so a message that went stale can't come back when the flow happens
+    /// to look the same again later.
+    pub(crate) fn drop_stale_error(&mut self, cache: &Cache) {
+        if self.error.is_none() {
+            return;
+        }
+        let step = step(&self.facts(cache), self.method(), self.continuing);
+        if self.error_shown(cache, step).is_none() {
+            self.error = None;
+        }
     }
 
     /// A build in flight, for the App's routing test.
@@ -564,11 +578,7 @@ impl State for SplitHubPanel {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        // Dropped once stale, so it can't come back when the flow happens to
-        // look the same again later.
-        if self.error.is_some() && self.error_shown(cache).is_none() {
-            self.error = None;
-        }
+        self.drop_stale_error(cache);
         match message {
             Message::View(ViewMessage::Split(message)) => {
                 return self.update_split_view(cache, message);
@@ -999,7 +1009,8 @@ mod tests {
         assert_eq!(flow.step, Step::Review);
         assert_eq!(flow.error, None);
 
-        let _ = panel.update(None, &cache, Message::Labels(Ok(HashMap::new())));
+        // As the App does after every message, whichever panel is showing.
+        panel.drop_stale_error(&cache);
         cache.split_key_rejected(other, std::time::SystemTime::now());
         let flow = panel.flow(&cache);
         assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
@@ -1034,6 +1045,27 @@ mod tests {
         assert_eq!(flow.step, Step::Review);
         assert_eq!(flow.key, Some(Amount::from_sat(40_000)));
         assert_eq!(flow.error.as_deref(), Some("no longer usable"));
+    }
+
+    /// A failure on a review doesn't come back on a later review: the flow
+    /// left that step in between.
+    #[test]
+    fn a_build_error_goes_when_the_flow_leaves_its_step() {
+        let (mut panel, mut cache, _) = fixture();
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("couldn't build".to_string())),
+        );
+        assert!(panel.flow(&cache).error.is_some());
+        let coins = std::mem::take(&mut cache.daemon_cache.coins);
+        assert_ne!(panel.flow(&cache).step, Step::Review);
+        assert_eq!(panel.flow(&cache).error, None);
+        panel.drop_stale_error(&cache);
+        cache.daemon_cache.coins = coins;
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.error, None, "the old message doesn't come back");
     }
 
     /// The message is about the method the build used.

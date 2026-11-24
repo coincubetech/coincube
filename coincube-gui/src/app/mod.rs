@@ -5892,6 +5892,11 @@ impl App {
         }
         let task = self.update_connect_chrome(message);
         self.refresh_vault_alert();
+        // Whichever panel is showing: Split coins hears little while it
+        // isn't, and a build error that went stale must not come back.
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.drop_stale_error(&self.cache);
+        }
         task
     }
 
@@ -14415,6 +14420,53 @@ pub(crate) mod shell_tests {
                 ))
             ),
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A build error that goes stale while another panel is showing is
+    /// dropped then, so it isn't back when the flow looks the same again.
+    #[test]
+    fn a_stale_split_error_is_dropped_from_another_panel() {
+        use crate::services::entangled::Entanglement;
+        let root = std::env::temp_dir().join(format!("split-stale-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let error = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+                .1
+        };
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        drop(app.update(Message::SplitPrepared(Err("Couldn't build".into()))));
+        assert!(error(&app).is_some());
+        // A coin on both chains arrives: the flow is on another step.
+        let outpoint: bitcoin::OutPoint = format!("{}:0", "07".repeat(32)).parse().unwrap();
+        app.cache.daemon_cache.blockheight = 110;
+        app.cache.daemon_cache.coins = vec![coincubed::commands::ListCoinsEntry {
+            outpoint,
+            amount: bitcoin::Amount::from_sat(100_000),
+            block_height: Some(100),
+            spend_info: None,
+            is_immature: false,
+            address: "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg"
+                .parse::<bitcoin::Address<_>>()
+                .unwrap()
+                .assume_checked(),
+            derivation_index: 0.into(),
+            is_change: false,
+            is_from_self: false,
+        }];
+        app.cache.record_entanglement(
+            outpoint.txid,
+            Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+        // Any message, to a panel that isn't Split coins.
+        drop(app.update(Message::View(view::Message::Close)));
+        app.cache.daemon_cache.coins.clear();
+        assert_eq!(error(&app), None, "dropped while stale");
         let _ = std::fs::remove_dir_all(&root);
     }
 
