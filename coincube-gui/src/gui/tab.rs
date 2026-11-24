@@ -3160,7 +3160,7 @@ impl Tab {
         // is registered for the account; the Connect-tab sign-in
         // flow handles that registration.)
         let connect_auth = crate::services::connect::client::cache::ConnectCache::from_file(
-            &datadir.network_directory(cache.network),
+            &datadir.network_directory(cache.chain()),
         )
         .ok()
         .and_then(|c| c.active_account().cloned())

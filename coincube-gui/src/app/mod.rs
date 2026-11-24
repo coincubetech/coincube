@@ -2779,7 +2779,7 @@ async fn connect_registration_auth(
 }
 
 fn connect_stream_ready_task(
-    network: coincube_core::miniscript::bitcoin::Network,
+    chain: crate::chain::ChainId,
     datadir: CoincubeDirectory,
     tokens: Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
     email: String,
@@ -2796,7 +2796,7 @@ fn connect_stream_ready_task(
                 tracing::info!("Connect stream bootstrap: no Connect gRPC URL available");
                 return None;
             };
-            let network_dir = datadir.network_directory(network);
+            let network_dir = datadir.network_directory(chain);
             let cache_account = Account::from_cache(&network_dir, &email).ok().flatten();
             let Some(device_id) = cache_account.as_ref().and_then(|a| a.device_id.clone()) else {
                 tracing::info!(
@@ -3699,7 +3699,7 @@ impl App {
         };
         if let (Some(auth), Some(email)) = (connect_auth_arc.as_ref(), connect_email.as_deref()) {
             tasks.push(connect_stream_ready_task(
-                cache.network,
+                cache.chain(),
                 data_dir.clone(),
                 auth.clone(),
                 email.to_string(),
@@ -6753,7 +6753,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             let auth = self
                 .connect_auth
                 .as_ref()
@@ -6801,7 +6801,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             self.in_app_otp_cache_snapshot = match ConnectCache::from_file(&network_dir) {
                 Ok(cache) => Some(cache),
                 Err(ConnectCacheError::NotFound) => Some(ConnectCache::default()),
@@ -7024,7 +7024,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             let still_current =
                 crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                     .ok()
@@ -8856,14 +8856,13 @@ impl App {
                 return self.connect_login_completed(token, refresh_token, email, epoch);
             }
             Message::TriggerConnectStreamReady {
-                network,
+                chain,
                 datadir,
                 tokens,
                 email,
                 cube_uuid,
             } => {
-                return self
-                    .trigger_connect_stream_ready(network, datadir, tokens, email, cube_uuid);
+                return self.trigger_connect_stream_ready(chain, datadir, tokens, email, cube_uuid);
             }
             Message::EnsureConnectReady => return self.ensure_connect_ready(),
             Message::InstallStats(_) => {
@@ -12524,7 +12523,7 @@ pub(crate) mod tests {
             },
             Message::EnsureConnectReady,
             Message::TriggerConnectStreamReady {
-                network: chain.bitcoin_network(),
+                chain,
                 datadir: CoincubeDirectory::new(root.clone()),
                 tokens: legacy_tokens,
                 email: "other@example.invalid".into(),
@@ -14792,10 +14791,10 @@ pub(crate) mod shell_tests {
                 expires_at: 2000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         drop(app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: sibling.clone(),
             email: "alice@example.com".into(),
@@ -14887,10 +14886,10 @@ pub(crate) mod shell_tests {
                 expires_at: 2000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         drop(app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: valid_stream_auth.clone(),
             email: "alice@example.com".into(),
@@ -15099,10 +15098,10 @@ pub(crate) mod shell_tests {
                 expires_at: 1000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         let task = app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: stale,
             email: "alice@example.com".into(),
@@ -15141,10 +15140,10 @@ pub(crate) mod shell_tests {
         app.connect_auth = Some(shared.clone());
         app.connect_email = Some("alice@example.com".into());
         let held = shared.write().await;
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         let task = app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: shared.clone(),
             email: "alice@example.com".into(),
