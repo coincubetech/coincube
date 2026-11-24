@@ -3456,6 +3456,11 @@ impl ConnectAccountPanel {
         }
         self.user = Some(user);
         self.plan = plan;
+        // The previous session's AI access grant must not carry into this
+        // one: it reads off until this session's `FeaturesLoaded` arrives.
+        if let Some(features) = self.features.as_mut() {
+            features.ai_access_enabled = None;
+        }
         // Phase 6: gate on the duress check FIRST — don't reveal the
         // dashboard until we've confirmed the account isn't in duress.
         self.step = ConnectFlowStep::CheckingDuress {
@@ -8036,8 +8041,9 @@ impl ConnectAccountPanel {
 
     /// The account-scoped AI access flag from `GET /connect/features`
     /// (`aiAccessEnabled`). Fails closed while features are unloaded and
-    /// when the flag is absent, and reverts on logout because
-    /// `clear_session` drops `features`. Mirrored into
+    /// when the flag is absent, reverts on logout because `clear_session`
+    /// drops `features`, and reads off from a new session's start until its
+    /// own features load (`apply_loaded_connect_session`). Mirrored into
     /// [`crate::app::cache::Cache::ai_access_server_enabled`]; see
     /// [`crate::app::features::ai_access_enabled`] for the full gate.
     pub fn ai_access_server_enabled(&self) -> bool {
@@ -10999,6 +11005,39 @@ mod plan_lifecycle_tests {
             serde_json::from_value(serde_json::json!({"plans": [], "aiAccessEnabled": true}))
                 .unwrap();
         assert_eq!(wire.ai_access_enabled, Some(true));
+    }
+
+    #[test]
+    fn a_new_session_does_not_inherit_the_previous_ai_access_grant() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.features = Some(features(None));
+        panel.features.as_mut().unwrap().ai_access_enabled = Some(true);
+        assert!(panel.ai_access_server_enabled());
+        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+            user: User {
+                id: 2,
+                email: "next@example.invalid".into(),
+                email_verified: Some(true),
+            },
+            plan: None,
+            epoch: 0,
+        });
+        assert!(
+            !panel.ai_access_server_enabled(),
+            "off until this session's features load"
+        );
+        assert!(
+            panel.features.is_some(),
+            "other feature values are left in place"
+        );
+        let generation = panel.session_generation();
+        let mut granted = features(None);
+        granted.ai_access_enabled = Some(true);
+        let _ = panel.update_message(ConnectAccountMessage::FeaturesLoaded(
+            Some(granted),
+            generation,
+        ));
+        assert!(panel.ai_access_server_enabled());
     }
 
     #[test]

@@ -3392,26 +3392,36 @@ mod feature_flag_tests {
         };
         let ai_access = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
 
+        let serve = |app: &mut App| {
+            for message in [
+                Message::Enable(true),
+                Message::Wallet(true),
+                Message::ClientName("client".into()),
+                Message::Capability(0, true),
+                Message::Approve,
+            ] {
+                drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
+            }
+            let grant = app.local_mcp.server.as_ref().unwrap().grant.clone();
+            assert!(grant.active(), "a client is being served");
+            grant
+        };
+
         assert!(!app.mcp_supported(), "no grant and no override: off");
+        assert!(app.local_mcp.pairing_location.is_none());
         load(&mut app, Some(true));
         assert!(
             app.cache.ai_access_server_enabled,
             "the grant reaches the cache"
         );
         assert!(app.mcp_supported(), "the account grant turns AI access on");
+        assert!(
+            app.local_mcp.pairing_location.is_some(),
+            "the update that grants AI access opens the pairing registry"
+        );
         drop(app.update(AppMessage::View(view::Message::Menu(ai_access.clone()))));
         assert_eq!(app.panels.current, ai_access);
-        for message in [
-            Message::Enable(true),
-            Message::Wallet(true),
-            Message::ClientName("client".into()),
-            Message::Capability(0, true),
-            Message::Approve,
-        ] {
-            drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
-        }
-        let grant = app.local_mcp.server.as_ref().unwrap().grant.clone();
-        assert!(grant.active(), "a client is being served");
+        let grant = serve(&mut app);
 
         load(&mut app, Some(false));
         assert!(!app.cache.ai_access_server_enabled);
@@ -3430,6 +3440,24 @@ mod feature_flag_tests {
         assert!(app.mcp_supported(), "a renewed grant turns it back on");
         load(&mut app, None);
         assert!(!app.mcp_supported(), "a failed features fetch reads as off");
+
+        // A log-out in another tab holds this tab's session without
+        // clearing its features: the grant ends before the broadcast returns.
+        load(&mut app, Some(true));
+        drop(app.update(AppMessage::View(view::Message::Menu(ai_access.clone()))));
+        assert_eq!(app.panels.current, ai_access);
+        let grant = serve(&mut app);
+        drop(app.on_global_auth_change(crate::gui::tab::AuthChange::LogOut, false));
+        assert!(!app.cache.ai_access_server_enabled);
+        assert!(!grant.active(), "a log-out elsewhere stops the client");
+        assert!(app.local_mcp.is_dormant());
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            "a log-out elsewhere leaves the AI access page"
+        );
+        load(&mut app, Some(true));
+        assert!(!app.mcp_supported(), "a held session grants nothing");
         app.stop();
         drop(app);
         drop(daemon);

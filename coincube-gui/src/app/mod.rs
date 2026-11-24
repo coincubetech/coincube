@@ -4915,7 +4915,14 @@ impl App {
     ///   or entry — no sign-out copy, no log-out needed.
     /// - A sibling sign-in of another account, or while this tab has none,
     ///   holds the claim, and says why.
-    pub fn on_global_auth_change(&mut self, change: crate::gui::tab::AuthChange, originated: bool) {
+    /// - A hold ends the account's AI access grant before this returns: the
+    ///   gate closes, running AI clients stop, and the returned task leaves
+    ///   the AI access page if it is open (`enforce_ai_access_flag`).
+    pub fn on_global_auth_change(
+        &mut self,
+        change: crate::gui::tab::AuthChange,
+        originated: bool,
+    ) -> Task<Message> {
         use crate::gui::tab::AuthChange;
         match change {
             AuthChange::LogOut => self.invalidate_claim_session(),
@@ -4930,6 +4937,8 @@ impl App {
                 }
             }
         }
+        self.sync_panel_derived_cache_fields();
+        self.enforce_ai_access_flag().unwrap_or_else(Task::none)
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -6152,6 +6161,7 @@ impl App {
         if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
             self.local_mcp.revoke();
         }
+        let ai_access_before = self.cache.ai_access_enabled();
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
         // `self.panels.connect.cube.server_cube_id` (e.g. a
@@ -6160,6 +6170,11 @@ impl App {
         // A pre-dispatch sync would miss those same-call mutations
         // and leave view layers one full message cycle behind.
         self.sync_panel_derived_cache_fields();
+        // The refresh at the top ran against the previous flag: an update
+        // that just turned AI access on resumes stored pairings now.
+        if !ai_access_before && self.cache.ai_access_enabled() {
+            self.refresh_mcp_pairings();
+        }
         // Batch only when the gate has work, so an update with nothing to do
         // still returns an empty task.
         match self.enforce_ai_access_flag() {
@@ -6221,9 +6236,11 @@ impl App {
 
         // The account's AI access flag, every tick: features load after
         // sign-in, and logout or a revoked grant must reach the gate on
-        // the next render. See `enforce_ai_access_flag`.
-        self.cache.ai_access_server_enabled =
-            self.panels.connect.account.ai_access_server_enabled();
+        // the next render. A log-out or account change in another tab
+        // holds this tab's session without clearing the panel's features,
+        // so a held session grants nothing. See `enforce_ai_access_flag`.
+        self.cache.ai_access_server_enabled = !self.claim_session_invalidated
+            && self.panels.connect.account.ai_access_server_enabled();
 
         // The side panel's wallet names follow the Cube settings and the
         // loaded Vault, whichever message changed them (a Vault created or
