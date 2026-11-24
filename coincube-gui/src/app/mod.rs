@@ -12529,8 +12529,13 @@ pub(crate) mod tests {
             uuid::Uuid::new_v4()
         ));
         let mut app = fork_app(&root, false);
+        // `fork_app` leaves the cache's data directory at its default, which
+        // is a relative path: without this the fixture files below land in
+        // the crate directory.
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
+        assert!(datadir.path().is_absolute());
         for (dir, email) in [
             (datadir.network_directory(chain), "fork@example.invalid"),
             (
