@@ -46,13 +46,13 @@ pub fn get_or_create_device_fingerprint() -> String {
 /// other chain this is [`device_label`], unchanged: the first registration
 /// names a device for good, so the name must not move for existing installs.
 pub fn signer_device_label(chain: crate::chain::ChainId) -> String {
+    use crate::chain::ChainIdExt;
+
     let label = device_label();
-    match chain {
-        crate::chain::ChainId::BitcoinBlake2b => format!("{label} · Bitcoin Blake2b"),
-        crate::chain::ChainId::BitcoinBlake2bTestnet4 => {
-            format!("{label} · Bitcoin Blake2b testnet4")
-        }
-        _ => label,
+    if chain.is_blake2b() {
+        format!("{label} · {}", chain.label())
+    } else {
+        label
     }
 }
 
@@ -110,14 +110,13 @@ mod tests {
     /// Blake2b Cube, which registers a device of its own, says its chain.
     #[test]
     fn signer_device_label_names_the_chain_only_on_bitcoin_blake2b() {
-        use crate::chain::ChainId;
+        use crate::chain::{ChainId, ChainIdExt};
 
         let plain = super::device_label();
         for chain in ChainId::ALL {
             let label = super::signer_device_label(chain);
             if chain.is_blake2b() {
-                assert!(label.starts_with(&format!("{plain} · ")), "{}", label);
-                assert!(label.contains("Bitcoin Blake2b"), "{}", label);
+                assert_eq!(label, format!("{plain} · {}", chain.label()));
             } else {
                 assert_eq!(label, plain, "{chain:?}");
             }

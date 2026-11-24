@@ -805,10 +805,14 @@ mod chain_scope_tests {
         }
     }
 
-    /// The pipeline's own files must not go back to the lossy network. The
-    /// locked screen's duress check in `gui/tab.rs` is deliberately not
-    /// covered: it still reads the lossy network's folder until the check as
-    /// a whole changes, so a Bitcoin sign-in keeps confirming a clear.
+    /// A tripwire for three files, not a proof: the pipeline's own files must
+    /// not go back to the lossy network. It matches the accessor written on
+    /// one line, so a reformatted or aliased read slips past it, and it does
+    /// not cover `app/mod.rs` or `gui/tab.rs`, which have legitimate uses of
+    /// the lossy network (the duress check in `gui/tab.rs` among them, left
+    /// on it deliberately so a Bitcoin sign-in keeps confirming a clear).
+    /// `a_fork_cube_snapshots_the_connect_cache_of_its_own_chain_folder` in
+    /// `app/mod.rs` covers a call site there.
     #[test]
     fn the_signer_pipeline_never_reads_the_lossy_cache_network() {
         for (file, source) in [

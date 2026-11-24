@@ -241,7 +241,8 @@ impl App {
                     // `ensure_device_registered` short-circuits on a
                     // cached device_id, so whichever path registers
                     // first owns this machine's name permanently —
-                    // all four call sites must derive it identically.
+                    // every registration site derives it from
+                    // `signer_device_label`.
                     let device_name = crate::utils::device::signer_device_label(chain);
                     ensure_device_registered_best_effort(
                         &grpc_url,

@@ -6398,8 +6398,8 @@ impl App {
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
-        // Legacy signer bootstrap persists Bitcoin-family connect.json and uses
-        // unbound gRPC registration. A fork Cube must retain its admitted client;
+        // The signer bootstrap uses gRPC registration that is not bound to the
+        // Cube's admitted client. A fork Cube must retain its admitted client;
         // neither direct requests nor late completions may enter that pipeline.
         if self.cache.chain().is_blake2b()
             && matches!(
@@ -12048,6 +12048,64 @@ pub(crate) mod tests {
             grant == Some(true)
         );
         app
+    }
+
+    /// A call site, not an accessor: the Connect cache snapshot a Bitcoin
+    /// Blake2b Cube takes before a session restore is read from its own chain
+    /// folder. The lossy network would read the Bitcoin Cube's `connect.json`
+    /// and load that session's tokens.
+    #[tokio::test]
+    async fn a_fork_cube_snapshots_the_connect_cache_of_its_own_chain_folder() {
+        use crate::services::connect::client::cache::CONNECT_CACHE_FILENAME;
+
+        let root = std::env::temp_dir().join(format!(
+            "coincube-fork-connect-folder-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut app = fork_app(&root, false);
+        let chain = app.cache.chain();
+        let datadir = app.cache.datadir_path.clone();
+        for (dir, email) in [
+            (datadir.network_directory(chain), "fork@example.invalid"),
+            (
+                datadir.network_directory(chain.bitcoin_network()),
+                "bitcoin@example.invalid",
+            ),
+        ] {
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&serde_json::json!({
+                    "active_email": email,
+                    "accounts": [{
+                        "email": email,
+                        "tokens": {
+                            "access_token": "access",
+                            "refresh_token": "refresh",
+                            "expires_at": 1000
+                        }
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "keyring-refresh".into(),
+            },
+        ))));
+
+        let snapshot = app
+            .in_app_restore_cache_snapshot
+            .as_ref()
+            .expect("a signed-out fork panel snapshots the cache");
+        assert_eq!(
+            snapshot.cache.active_account().map(|a| a.email.as_str()),
+            Some("fork@example.invalid")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -19755,7 +19813,7 @@ mod stream_startup_routing_tests {
             let root = tempfile::tempdir().unwrap();
             let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
             seed_cached_session(&mut app, root.path());
-            let dir = app.cache.datadir_path.network_directory(app.cache.network);
+            let dir = app.cache.datadir_path.network_directory(app.cache.chain());
             // Positive fixture control: this is a valid populated cache, not a
             // missing-file refusal masking the account ownership check.
             assert!(
