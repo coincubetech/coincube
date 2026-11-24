@@ -5947,6 +5947,85 @@ mod tests {
             assert_eq!(home.transfer_feerate_preset, None);
         }
 
+        /// A Slow click that is still waiting must not be replaced by the Fast
+        /// estimate it superseded, and an estimate from outside 1..=1000 must
+        /// not become the rate that is sent. A send already in progress, and a
+        /// failed estimate, leave the rate the user already has.
+        #[test]
+        fn a_transfer_fee_estimate_is_clamped_and_a_stale_preset_is_dropped() {
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+            let fetch = |preset| {
+                Message::View(view::Message::Home(
+                    HomeMessage::FetchTransferFeeratePreset(preset),
+                ))
+            };
+            let estimated = |preset, result| {
+                Message::View(view::Message::Home(HomeMessage::TransferFeerateEstimated {
+                    preset,
+                    result,
+                }))
+            };
+
+            drop(home.update(None, &cache, fetch(FeeratePreset::Fast)));
+            drop(home.update(None, &cache, fetch(FeeratePreset::Slow)));
+            assert_eq!(home.transfer_feerate_loading, Some(FeeratePreset::Slow));
+
+            drain(home.update(None, &cache, estimated(FeeratePreset::Fast, Ok(40))));
+            assert_eq!(
+                home.transfer_feerate.value, "2",
+                "a late Fast result is not the Slow click"
+            );
+            assert_eq!(home.transfer_feerate_preset, None);
+            assert_eq!(home.transfer_feerate_loading, Some(FeeratePreset::Slow));
+
+            drain(home.update(None, &cache, estimated(FeeratePreset::Slow, Ok(0))));
+            assert_eq!(
+                home.transfer_feerate.value, "1",
+                "a zero estimate is not free"
+            );
+            assert!(home.transfer_feerate.valid);
+            assert_eq!(home.transfer_feerate.warning, None);
+            assert_eq!(home.transfer_feerate_preset, Some(FeeratePreset::Slow));
+            assert_eq!(home.transfer_feerate_loading, None);
+
+            drop(home.update(None, &cache, fetch(FeeratePreset::Fast)));
+            drain(home.update(None, &cache, estimated(FeeratePreset::Fast, Ok(50_000))));
+            assert_eq!(
+                home.transfer_feerate.value, "1000",
+                "an estimate above the cap is not sent as-is"
+            );
+            assert!(home.transfer_feerate.valid);
+            assert_eq!(home.transfer_feerate_preset, Some(FeeratePreset::Fast));
+
+            home.is_sending = true;
+            assert_eq!(
+                home.update(None, &cache, fetch(FeeratePreset::Normal))
+                    .units(),
+                0,
+                "a preset click during a send fetches nothing"
+            );
+            home.transfer_feerate_loading = Some(FeeratePreset::Normal);
+            drain(home.update(None, &cache, estimated(FeeratePreset::Normal, Ok(9))));
+            assert_eq!(home.transfer_feerate.value, "1000");
+            assert_eq!(home.transfer_feerate_preset, Some(FeeratePreset::Fast));
+            assert_eq!(home.transfer_feerate_loading, None);
+
+            home.is_sending = false;
+            home.transfer_feerate_loading = Some(FeeratePreset::Normal);
+            drain(home.update(
+                None,
+                &cache,
+                estimated(FeeratePreset::Normal, Err("offline".into())),
+            ));
+            assert_eq!(home.transfer_feerate.value, "1000");
+            assert_eq!(home.transfer_feerate_preset, Some(FeeratePreset::Fast));
+            assert_eq!(home.transfer_feerate_loading, None);
+        }
+
         #[test]
         fn current_psbt_result_releases_busy_state_after_fee_mismatch() {
             let (mut home, _) = home_on_transfer_screen();
