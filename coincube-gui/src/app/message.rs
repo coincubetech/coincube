@@ -357,6 +357,9 @@ pub enum Message {
     /// no longer qualifies: stop offering the coin, then report `message`
     /// like any failed build.
     SplitKeyRejected {
+        /// The `App` whose build it was: a result that outlives its `App`
+        /// (the Cube was locked or switched) isn't written into the next.
+        app: crate::app::cache::AppGeneration,
         key: coincube_core::miniscript::bitcoin::OutPoint,
         message: String,
     },
