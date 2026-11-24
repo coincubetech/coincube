@@ -233,9 +233,12 @@ pub enum SelectKeySourceMessage {
 const HARDWARE_DEVICE_TIP: &str = "Use a plugged-in hardware signer. \
      Supported: Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.";
 
-/// The Keychain Keys card's tip on the Bitcoin Blake2b picker, where the
-/// card is disabled.
-const BLAKE2B_KEYCHAIN_TIP: &str = "Mobile keys are not available for Bitcoin Blake2b yet.";
+/// The Keychain Keys card's tip on the Bitcoin Blake2b picker. The card lists
+/// the COINCUBE Mobile keys attached to this Cube; a phone signs a Bitcoin
+/// Blake2b spend only once its app has Bitcoin Blake2b signing.
+const BLAKE2B_KEYCHAIN_TIP: &str = "COINCUBE Mobile keys attached to this Cube. To sign a \
+     Bitcoin Blake2b spend, the phone needs a COINCUBE Mobile version with Bitcoin Blake2b \
+     signing.";
 
 /// The Hardware Device card's tip on the Bitcoin Blake2b picker. A device
 /// signs the legacy way, so a spend that only devices sign is replayable
@@ -1477,16 +1480,16 @@ impl SelectKeySource {
     /// The key-source cards, in display order, three per row:
     ///   Row 1: Hardware Device · Keychain Keys · Cube Key
     ///   Row 2: Border Wallet · Import xpub File · Paste xpub
-    /// Bitcoin Blake2b shows the same grid; only the Hardware Device tip
-    /// differs, and the Keychain Keys card is disabled there because
-    /// Keychain keys are not offered on that chain.
+    /// Bitcoin Blake2b shows the same grid; only the Hardware Device and
+    /// Keychain Keys tips differ. On every chain the Keychain Keys card lists
+    /// the keys attached to this Cube and needs a Connect session.
     fn grid_cards(&self) -> Vec<GridCard> {
         let blake2b = self.chain.is_blake2b();
-        let keychain_enabled = !blake2b && self.keychain_available();
-        let keychain_tip = if blake2b {
-            Some(BLAKE2B_KEYCHAIN_TIP)
-        } else if !keychain_enabled {
+        let keychain_enabled = self.keychain_available();
+        let keychain_tip = if !keychain_enabled {
             Some("Sign in to Connect to use Mobile keys.")
+        } else if blake2b {
+            Some(BLAKE2B_KEYCHAIN_TIP)
         } else {
             None
         };
@@ -2053,16 +2056,10 @@ impl SelectKeySource {
         let Message::SelectKeySource(msg) = message else {
             return false;
         };
-        // Hardware devices and Border Wallet are allowed on Bitcoin
-        // Blake2b (HW-1): their messages pass, and a fetched key still
-        // goes through `available_for_creation` in `LoadKey` below.
-        // Keychain entry points stay refused
-        // before any work.
+        // Hardware devices, Border Wallet (HW-1) and Keychain keys are
+        // allowed on Bitcoin Blake2b: their messages pass, and a fetched or
+        // reused key still goes through `available_for_creation` below.
         match msg {
-            SelectKeySourceMessage::ShowKeychainKeys
-            | SelectKeySourceMessage::FetchCubeKeys
-            | SelectKeySourceMessage::CubeKeysLoaded(_)
-            | SelectKeySourceMessage::SelectKeychainKey(_) => true,
             SelectKeySourceMessage::LoadKey(Ok(key)) => {
                 !key.source.available_for_creation(self.chain)
             }
@@ -2579,55 +2576,90 @@ mod tests {
         picker
     }
 
-    /// Every Keychain message is refused on a Bitcoin
-    /// Blake2b picker before any work: no task, no fetch, no step change, no
-    /// selected key. Hardware devices and Border Wallet are not in this list
-    /// (HW-1).
+    /// A Bitcoin Blake2b picker handles Keychain messages as a Bitcoin one
+    /// does: the Mobile Keys screen opens, it lists the keys attached to this
+    /// Cube, and a Keychain key already in this Vault passes `LoadKey` and
+    /// `SelectKey`.
     #[test]
-    fn fork_picker_refuses_external_source_events_before_work() {
+    fn fork_picker_lists_and_accepts_keychain_keys() {
+        const REFUSED: &str = "This key source is not available for Bitcoin Blake2b yet";
         let keychain_fg = Fingerprint::from_str("0a0b0c0d").unwrap();
         for chain in FORK_CHAINS {
             let mut picker = fork_picker(chain);
-            picker
-                .keys
-                .insert(keychain_fg, (vec![], keychain_key(keychain_fg, 1, 7)));
             let mut hws = HardwareWallets::new(
                 CoincubeDirectory::new(PathBuf::new()),
                 chain.bitcoin_network(),
             );
+            let _ = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::ShowKeychainKeys),
+            );
+            assert_eq!(picker.step, Step::KeychainKeys, "{chain:?}");
+            assert!(picker.error.is_none(), "{:?}", chain);
+
+            let _ = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::CubeKeysLoaded(Ok(
+                    ResolvedCubeKeys {
+                        my_keys: vec![resolved_key(7, "0a0b0c0d", 1)],
+                        contact_keys: Vec::new(),
+                        server_cube_id: Some(42),
+                    },
+                ))),
+            );
+            assert!(picker.error.is_none(), "{:?}", chain);
+            assert_eq!(
+                picker
+                    .my_keychain_keys
+                    .iter()
+                    .map(|key| key.raw.id)
+                    .collect::<Vec<_>>(),
+                vec![7],
+                "{chain:?}"
+            );
+            assert_eq!(picker.cube_server_id, Some(42), "{chain:?}");
+
+            picker
+                .keys
+                .insert(keychain_fg, (vec![], keychain_key(keychain_fg, 1, 7)));
             for event in [
-                SelectKeySourceMessage::ShowKeychainKeys,
-                SelectKeySourceMessage::FetchCubeKeys,
-                SelectKeySourceMessage::CubeKeysLoaded(Err("synthetic".to_string())),
-                SelectKeySourceMessage::SelectKeychainKey(resolved_key(7, "0a0b0c0d", 1)),
                 SelectKeySourceMessage::LoadKey(Ok(keychain_key(keychain_fg, 1, 7))),
                 SelectKeySourceMessage::SelectKey(keychain_fg),
             ] {
                 picker.error = None;
                 let label = format!("{chain:?} {event:?}");
-                let task = picker.update(&mut hws, SelectKeySource::route(event));
-                assert!(iced_runtime::task::into_stream(task).is_none(), "{}", label);
-                assert_eq!(picker.step, Step::Grid, "{}", label);
-                assert!(!picker.keychain_keys_loading, "{}", label);
-                assert!(!picker.processing, "{}", label);
-                assert!(
-                    matches!(picker.selected_key, SelectedKey::None),
-                    "{}",
-                    label
-                );
-                assert_eq!(
-                    picker.error.as_deref(),
-                    Some("This key source is not available for Bitcoin Blake2b yet"),
-                    "{}",
-                    label
-                );
+                let _ = picker.update(&mut hws, SelectKeySource::route(event));
+                assert_ne!(picker.error.as_deref(), Some(REFUSED), "{}", label);
             }
+            picker.step = Step::Grid;
             let _ = picker.update(
                 &mut hws,
                 SelectKeySource::route(SelectKeySourceMessage::SelectEnterXpub),
             );
             assert_eq!(picker.step, Step::PasteXpubEntry);
         }
+    }
+
+    /// Choosing a Keychain key attached to a Bitcoin Blake2b testnet4 Cube
+    /// opens it and moves to the details step with a Keychain key ready to
+    /// place, as on Bitcoin.
+    #[test]
+    fn fork_picker_selects_an_attached_keychain_key() {
+        let mut picker = fork_picker(crate::chain::ChainId::BitcoinBlake2bTestnet4);
+        let mut hws = HardwareWallets::new(CoincubeDirectory::new(PathBuf::new()), picker.network);
+        let _ = picker.update(
+            &mut hws,
+            SelectKeySource::route(SelectKeySourceMessage::SelectKeychainKey(resolved_key(
+                1, "8a550171", 7,
+            ))),
+        );
+        assert!(picker.error.is_none(), "{:?}", picker.error);
+        assert_eq!(picker.step, Step::Details);
+        assert!(matches!(
+            &picker.selected_key,
+            SelectedKey::New(key)
+                if matches!(key.source, KeySource::KeychainKey { key_id: 1, .. })
+        ));
     }
 
     /// HW-1 Amendment A: on a Bitcoin Blake2b picker the Border Wallet card
@@ -2856,14 +2888,22 @@ mod tests {
     }
 
     /// HW-1: the Bitcoin Blake2b grid matches the Bitcoin one — same cards,
-    /// same order — with Keychain Keys disabled. The Hardware Device card
-    /// says its spends can be replayed and points to the Cube Key; the
-    /// Border Wallet card keeps its Bitcoin tip.
+    /// same order. Signed in, Keychain Keys opens the keys attached to this
+    /// Cube and its tip says the phone needs Bitcoin Blake2b signing; signed
+    /// out, it asks for Connect as on Bitcoin. The Hardware Device card says
+    /// its spends can be replayed and points to the Cube Key; the Border
+    /// Wallet card keeps its Bitcoin tip.
     #[test]
     fn fork_grid_offers_cube_key_hardware_and_xpubs() {
         for chain in FORK_CHAINS {
             let mut picker = fork_picker(chain);
-            // Signed in or not, Keychain keys stay off on the fork chain.
+            assert!(!picker.keychain_available());
+            let signed_out = picker.grid_cards();
+            assert!(signed_out[1].on_press.is_none());
+            assert_eq!(
+                signed_out[1].tip,
+                Some("Sign in to Connect to use Mobile keys.")
+            );
             picker.cube_id = Some("cube".to_string());
             picker.coincube_client = Some(crate::services::coincube::CoincubeClient::new());
             assert!(picker.keychain_available());
@@ -2876,8 +2916,12 @@ mod tests {
                 cards[0].on_press,
                 Some(SelectKeySourceMessage::ShowHardwareListen)
             ));
-            assert!(cards[1].on_press.is_none());
+            assert!(matches!(
+                cards[1].on_press,
+                Some(SelectKeySourceMessage::ShowKeychainKeys)
+            ));
             assert_eq!(cards[1].tip, Some(BLAKE2B_KEYCHAIN_TIP));
+            assert!(BLAKE2B_KEYCHAIN_TIP.contains("attached to this Cube"));
             assert!(matches!(
                 cards[2].on_press,
                 Some(SelectKeySourceMessage::SelectGenerateMasterKey)

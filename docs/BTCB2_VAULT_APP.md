@@ -57,7 +57,11 @@ Legacy Connect signer bootstrap is refused for BTCB2, including direct retry/log
 messages and delayed stream completions. It cannot persist Bitcoin-family
 `connect.json`, register a device through the legacy gRPC bootstrap, or replace
 the admitted session. Reopen the Cube through authenticated Connect startup to
-change its session; this launch uses local Cube keys for signing.
+change its session; this launch uses local Cube keys for signing. A Cube that
+does not require Connect (no Vault, or a managed local node) signs in through
+its own panel instead (`BTCB2_CUBE_OPEN.md`): the gate refuses that sign-in's
+bootstrap tail without an error, and answers a deferred commit with
+`AuthCommitRejected` so the panel never waits on it.
 
 Once an admitted Cube loses authorization (401, logout, or account/token change),
 its account panel requires closing and reopening the Cube. It shows no OTP/login
