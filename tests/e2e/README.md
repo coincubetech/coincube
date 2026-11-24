@@ -6,7 +6,7 @@ tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001
 
 Fresh runs use strict delivery and Home-refresh acceptance by default. Before
 the phone process is pinned, the launcher builds and installs a signed QA app
-from the exact Keychain revision in the private workstation configuration.
+from the exact COINCUBE Mobile revision in the private workstation configuration.
 Every full run then executes environment, account, saved credential/network
 and signer-capacity gates before creating a Cube or requesting funding.
 
@@ -15,13 +15,13 @@ funding request and transaction. It does not take an existing vault, descriptor,
 PSBT, address, PIN or recovery phrase as input. Repeat the **same command and
 run directory** to resume; choose a new directory for a separate disposable
 vault. Pytest sequences the work and produces JUnit results. Appium/XCUITest
-controls Keychain over USB. No model, camera, iPhone Mirroring, screenshots or
+controls COINCUBE Mobile over USB. No model, camera, iPhone Mirroring, screenshots or
 browser automation is involved in reruns.
 
 Desktop provisioning exercises Tenshu's production Home, installer, storage and
 Connect code through a native test adapter. It does not drive desktop widgets or
 assert the balance shown in Tenshu's window; those visual acceptance checks
-remain separate. The Keychain steps operate the actual iPhone interface.
+remain separate. The COINCUBE Mobile steps operate the actual iPhone interface.
 
 ## Fresh flow
 
@@ -31,19 +31,19 @@ remain separate. The Keychain steps operate the actual iPhone interface.
    device-registration client. Persist its transport key before registration.
    Existing private auth caches can also be copied without changing their source.
 2. Attach to the wired phone and verify the account. For a fresh signed-in QA
-   keychain, select **Use a PIN**, generate and save its PIN, capture all twelve
+   Mobile install, select **Use a PIN**, generate and save its PIN, capture all twelve
    indexed recovery words, complete the real recovery challenge, and select
    Testnet4. Later runs reuse this account/device-bound credential.
 3. Create a persistent Cube through the production Home state machine, complete
    the actual backup challenge, reopen its encrypted seed and unlock it.
    Register its stable identity and encryption key with production Connect.
-4. Create a run-specific signer through Keychain's ordinary Add signer key
+4. Create a run-specific signer through COINCUBE Mobile's ordinary Add signer key
    flow. Reconcile the exact new key through Connect, then use the phone's
    **Attach to Cube** flow to bind and encrypt its public key. Require the
    Cube-scoped envelope to decrypt to the original exported public key before
    creating a vault.
 5. Generate and reconstruct a Border Wallet grid phrase, pattern and checksum.
-   Install a primary **2-of-3 Master / Keychain / Border Wallet** vault with a
+   Install a primary **2-of-3 Master / Mobile / Border Wallet** vault with a
    delayed Border Wallet recovery path through the production installer. Verify
    its Cube appears on the phone through Connect.
 6. Request Testnet4 faucet funding once. If it is unavailable or delayed, use
@@ -73,7 +73,7 @@ broadcast, and two independent explorers verify its acceptance.
 ## Workstation authentication and USB prerequisites
 
 The fresh flow needs a signed-in disposable QA account shared by Tenshu and
-Keychain. Account signup/email OTP, Apple trust/unlock/Developer Mode and
+COINCUBE Mobile. Account signup/email OTP, Apple trust/unlock/Developer Mode and
 access to the team's Apple signing credentials remain workstation prerequisites. They are not
 reported as successful test stages. The runner never logs out or replaces an
 existing master. An existing passkey master cannot become an unattended PIN
@@ -91,8 +91,8 @@ desktop session from macOS Keychain and performs supported device registration.
 `desktop_session_namespace` is `development` for a debug Tenshu build and
 `production` for the release app; this selects only its existing Keychain
 namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the minimum
-reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
-through Keychain's screenshot-protection wrapper: build 36 hides the recovery
+reviewed COINCUBE Mobile build. Fresh onboarding also requires accessibility forwarding
+through COINCUBE Mobile's screenshot-protection wrapper: build 36 hides the recovery
 controls from XCTest, and cannot complete this flow. The example selects build
 41. Build 38 introduced real PIN verification for PIN-backed signer entropy and
 non-spoken signing-session/empty-entry accessibility identifiers. A build
@@ -161,7 +161,7 @@ explicit and its configuration must omit both `strict_acceptance` and
 QA app. Existing old checkpoints cannot be silently upgraded to strict mode.
 
 Strict mode attaches to the already foreground app without activating it. It
-sets Appium's `defaultActiveApplication` to Keychain before binding the process,
+sets Appium's `defaultActiveApplication` to COINCUBE Mobile before binding the process,
 so WDA's automatic SpringBoard selection cannot masquerade as a PID change.
 Independent app-state checks still require foreground state around each identity
 read. The read-only system-alert endpoint separately rejects detected system
@@ -349,7 +349,7 @@ and whose challenge was never submitted may restart at the full fresh-setup
 chooser after an app restart. The runner archives the previous entry markers
 before acting and retains the same encrypted PIN. It never repeats an unlock,
 resets an existing master, or discards a saved phrase/submission. A second such
-restart is blocked. Keychain's normal local-blob and server-key guards must pass
+restart is blocked. COINCUBE Mobile's normal local-blob and server-key guards must pass
 again before a new recovery phrase appears, and Settings identity is verified
 before Cube creation or funding. Recovery confirmation resolves the exact visible
 button before saving dispatch intent; an uncertain submission never re-enters
@@ -384,7 +384,7 @@ blocks every unrelated credential use until it is consumed by the newly reached,
 empty PIN prompt. A second CAS records that new pending purpose before input.
 Before any PIN input, the same build-38 foreground process can continue its
 original newly created challenge with the exact unused encrypted reservation.
-This continuation never navigates, recreates the key, restarts Keychain, or
+This continuation never navigates, recreates the key, restarts COINCUBE Mobile, or
 clears input; an omitted WDA value is accepted only for that untouched prompt.
 Once the durable input marker is set, only remote reconciliation is allowed.
 Crashes reconcile the same reservation; they cannot clear a newer attempt or
@@ -414,9 +414,9 @@ The following setup details apply only to that legacy mode.
 ## One-time workstation and fixture setup
 
 Use a dedicated QA account and disposable Testnet4 signer/profile. The suite
-never resets Keychain or signs the user out. Keep the phone signed in, trusted,
+never resets COINCUBE Mobile or signs the user out. Keep the phone signed in, trusted,
 unlocked, in Developer Mode, with XCTest UI automation authorized. Install a
-Keychain build containing #194 and set its real build number as the minimum
+COINCUBE Mobile build containing #194 and set its real build number as the minimum
 (the default minimum is 35; a build number alone is not source provenance).
 
 Install the pinned Appium tools in the test user's normal environment:
@@ -628,3 +628,20 @@ Cube detail and key inventory because the separate `/vault` read is owner-only.
 Missing, failed, malformed or contradictory inventories block cleanup before it
 deletes the disposable fixture's own Vault, even if the API would later refuse
 signer deletion through its additional server-side reference guard.
+
+
+### Ordinary native QA on an owned loopback backend
+
+The integration-only `native_recovery` object optionally accepts
+`"ordinary_backend": "qa_loopback_31004"`. This explicitly binds ordinary
+Testnet4 native Recovery Kit admission, creation, restore and oracle operations
+to `http://127.0.0.1:31004`; it permits no caller URL, bearer or fallback. An
+independently admitted owned forward must already connect that port to the
+reviewed Testnet4 backend. Its owner/source/deadline guards and the original
+genesis/fullscan/current native oracles remain required. The option grants no
+runtime authority and does not start a tunnel. A new signed source/config/run
+binding is required; do not modify an existing fixture to switch its backend.
+
+Omitting the option keeps existing public-provider behavior. B2 signed case
+configs omit it and retain the authenticated Connect backend. Mainnet and B2
+reject the loopback selection. No ordinary bearer is serialized in daemon.toml.

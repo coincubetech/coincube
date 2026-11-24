@@ -6,6 +6,9 @@ use serde::Deserialize;
 /// bodies returned by the coincube-api on non-2xx responses.
 #[derive(Debug, Deserialize)]
 struct ApiErrorEnvelope {
+    // Older responses omitted the marker; an explicit success is never an error.
+    #[serde(default)]
+    success: bool,
     error: ApiErrorBody,
 }
 
@@ -63,7 +66,9 @@ impl NotSuccessResponseInfo {
     }
 
     fn envelope(&self) -> Option<ApiErrorEnvelope> {
-        serde_json::from_str::<ApiErrorEnvelope>(&self.text).ok()
+        serde_json::from_str::<ApiErrorEnvelope>(&self.text)
+            .ok()
+            .filter(|envelope| !envelope.success)
     }
 }
 
@@ -131,6 +136,18 @@ mod tests {
         };
 
         assert_eq!(info.message(), None);
+    }
+
+    #[test]
+    fn successful_envelope_does_not_supply_an_error_message_or_code() {
+        let info = NotSuccessResponseInfo {
+            status_code: 502,
+            text: r#"{"success":true,"error":{"code":"UPSTREAM","message":"upstream payload"}}"#
+                .to_string(),
+        };
+
+        assert_eq!(info.message(), None);
+        assert_eq!(info.code(), None);
     }
 
     #[test]

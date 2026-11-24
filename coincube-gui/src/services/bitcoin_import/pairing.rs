@@ -184,6 +184,98 @@ fn validate_syncing_discovery(
     Ok(())
 }
 
+fn reusable_target_pair(
+    root: &CoincubeDirectory,
+    source: &CubeSettings,
+) -> Result<Option<CubeSettings>, String> {
+    let target_dir = root.network_directory(ChainId::BitcoinBlake2b);
+    // A completed pair is reused without reopening or rewriting its database.
+    // Source discovery may grow while the fork daemon is running.
+    if target_dir
+        .path()
+        .join(settings::SETTINGS_FILE_NAME)
+        .exists()
+    {
+        let saved = Settings::from_file(&target_dir).map_err(|e| e.to_string())?;
+        if saved
+            .cubes
+            .iter()
+            .any(|c| c.id == target_cube_id(&source.id))
+        {
+            let prior = unique_cube(&saved, &target_cube_id(&source.id))?;
+            validate_target(source, prior)?;
+            if prior.has_imported_bitcoin() {
+                validate_pair(root, prior)?;
+                if !prior
+                    .bitcoin_import
+                    .as_ref()
+                    .is_some_and(|import| import.is_ready())
+                {
+                    validate_syncing_discovery(&target_dir, prior)?;
+                }
+                return Ok(Some(prior.clone()));
+            }
+            if read_journal(&journal_path(
+                &target_dir,
+                prior
+                    .bitcoin_import
+                    .as_ref()
+                    .ok_or("The paired import is unavailable.")?
+                    .operation_id,
+            ))?
+            .is_some_and(|journal| journal.restored_discovery_target.is_none())
+            {
+                return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying the copy; no wallet data was changed.".into());
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn save_paired_import_metadata(
+    mut saved: Settings,
+    source: &CubeSettings,
+    target: &CubeSettings,
+    wallet: &ImportedWalletAttachment,
+    source_metadata: &WalletSettings,
+) -> Result<Option<Settings>, SettingsError> {
+    if saved.cubes.iter().any(|c| c.id == target.id) {
+        validate_target(
+            source,
+            unique_cube(&saved, &target.id).map_err(SettingsError::WritingFile)?,
+        )
+        .map_err(SettingsError::WritingFile)?;
+    } else {
+        if saved.cubes.iter().any(|c| {
+            c.bitcoin_import
+                .as_ref()
+                .and_then(|i| i.attachment())
+                .is_some_and(|w| w.wallet_id == wallet.wallet_id)
+        }) {
+            return Err(SettingsError::WritingFile("This imported fork wallet already belongs to another Cube. Resolve that attachment first.".into()));
+        }
+        saved.cubes.push(target.clone());
+    }
+    let mut metadata = source_metadata.clone();
+    metadata.descriptor_checksum = wallet.wallet_id.descriptor_checksum.clone();
+    metadata.pinned_at = wallet.wallet_id.timestamp;
+    if let Some(prior) = saved
+        .wallets
+        .iter()
+        .find(|w| w.wallet_id() == wallet.wallet_id)
+    {
+        unique_wallet(&saved, &wallet.wallet_id).map_err(SettingsError::WritingFile)?;
+        if !matching_signers(&metadata, prior) {
+            return Err(SettingsError::WritingFile(
+                "Paired signer metadata conflicts; nothing was replaced.".into(),
+            ));
+        }
+    } else {
+        saved.wallets.push(metadata);
+    }
+    Ok(Some(saved))
+}
+
 /// Create, or reuse, this imported Bitcoin wallet's Bitcoin Blake2b copy:
 /// a Cube of its own holding the paired imported wallet, unlocked with the
 /// same seed, and the same PIN or passkey. `seed_password` is what the
@@ -212,46 +304,8 @@ pub async fn install_pair(
     {
         return Err("This Cube changed. Open Split coins and try again.".into());
     }
-    // A completed pair is reused without reopening or rewriting its database.
-    // Source discovery may grow while the fork daemon is running.
-    let target_dir = root.network_directory(ChainId::BitcoinBlake2b);
-    if target_dir
-        .path()
-        .join(settings::SETTINGS_FILE_NAME)
-        .exists()
-    {
-        let saved = Settings::from_file(&target_dir).map_err(|e| e.to_string())?;
-        if saved
-            .cubes
-            .iter()
-            .any(|c| c.id == target_cube_id(&source.id))
-        {
-            let prior = unique_cube(&saved, &target_cube_id(&source.id))?;
-            validate_target(source, prior)?;
-            if prior.has_imported_bitcoin() {
-                validate_pair(root, prior)?;
-                if !prior
-                    .bitcoin_import
-                    .as_ref()
-                    .is_some_and(|import| import.is_ready())
-                {
-                    validate_syncing_discovery(&target_dir, prior)?;
-                }
-                return Ok(prior.clone());
-            }
-            if read_journal(&journal_path(
-                &target_dir,
-                prior
-                    .bitcoin_import
-                    .as_ref()
-                    .ok_or("The paired import is unavailable.")?
-                    .operation_id,
-            ))?
-            .is_some_and(|journal| journal.restored_discovery_target.is_none())
-            {
-                return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying the copy; no wallet data was changed.".into());
-            }
-        }
+    if let Some(prior) = reusable_target_pair(root, source)? {
+        return Ok(prior);
     }
     let source_data = source_dir.coincubed_data_directory(&binding.source_wallet.wallet_id);
     let source_config =
@@ -293,23 +347,7 @@ pub async fn install_pair(
     let directory = root.network_directory(ChainId::BitcoinBlake2b);
     directory.init().map_err(|e| e.to_string())?;
     check_duress(&directory)?;
-    let mut target = CubeSettings::new_with_raw_id(
-        target_cube_id(&source.id),
-        format!("{} · BTCB2", source.name),
-        ChainId::BitcoinBlake2b,
-    );
-    target.master_signer_fingerprint = source.master_signer_fingerprint;
-    target.backed_up = source.backed_up;
-    target.mfa_done = source.mfa_done;
-    target.passkey_metadata = source.passkey_metadata.clone();
-    target.imported_claim_source = Some(Box::new(binding));
-    target.bitcoin_import = Some(Box::new(BitcoinImport {
-        operation_id: Uuid::parse_str(&target.id).map_err(|e| e.to_string())?,
-        stage: BitcoinImportStage::Installing {
-            wallet: wallet.clone(),
-        },
-        last_error: None,
-    }));
+    let mut target = paired_target(source, binding, &wallet)?;
     let prior = read_journal(&journal_path(
         &directory,
         target.bitcoin_import.as_ref().unwrap().operation_id,
@@ -320,21 +358,11 @@ pub async fn install_pair(
     {
         return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying the copy; no wallet data was changed.".into());
     }
-    settings::update_settings_file_checked(&directory, |mut saved| {
-        if saved.cubes.iter().any(|c|c.id == target.id) { validate_target(source,unique_cube(&saved,&target.id).map_err(SettingsError::WritingFile)?).map_err(SettingsError::WritingFile)?; }
-        else {
-            if saved.cubes.iter().any(|c|c.bitcoin_import.as_ref().and_then(|i|i.attachment()).is_some_and(|w|w.wallet_id == wallet.wallet_id)) { return Err(SettingsError::WritingFile("This imported fork wallet already belongs to another Cube. Resolve that attachment first.".into())); }
-            saved.cubes.push(target.clone());
-        }
-        let mut metadata = source_metadata.clone();
-        metadata.descriptor_checksum = wallet.wallet_id.descriptor_checksum.clone();
-        metadata.pinned_at = wallet.wallet_id.timestamp;
-        if let Some(prior) = saved.wallets.iter().find(|w|w.wallet_id() == wallet.wallet_id) {
-            unique_wallet(&saved,&wallet.wallet_id).map_err(SettingsError::WritingFile)?;
-            if !matching_signers(&metadata,prior) { return Err(SettingsError::WritingFile("Paired signer metadata conflicts; nothing was replaced.".into())); }
-        } else { saved.wallets.push(metadata); }
-        Ok(Some(saved))
-    }).await.map_err(|e|e.to_string())?;
+    settings::update_settings_file_checked(&directory, |saved| {
+        save_paired_import_metadata(saved, source, &target, &wallet, &source_metadata)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let secret = crate::services::unlock::device_secret::get_or_create(root.path(), &target.id)
         .map_err(|e| e.to_string())?;
     crate::installer::persist_cube_master_seed(
@@ -383,6 +411,37 @@ pub async fn install_pair(
         .find(|c| c.id == target.id)
         .ok_or("Paired Cube disappeared.")?;
     validate_pair(root, &target)?;
+    Ok(target)
+}
+
+/// The BTCB2 Cube record paired with `source`, before it is written.
+///
+/// It carries the source's unlock identity and its Connect owner: the copy is
+/// the same person's coins on another chain, so it is listed to exactly the
+/// accounts that see the source (an ownerless source gives an ownerless copy).
+fn paired_target(
+    source: &CubeSettings,
+    binding: ImportedClaimPair,
+    wallet: &ImportedWalletAttachment,
+) -> Result<CubeSettings, String> {
+    let mut target = CubeSettings::new_with_raw_id(
+        target_cube_id(&source.id),
+        format!("{} · BTCB2", source.name),
+        ChainId::BitcoinBlake2b,
+    );
+    target.master_signer_fingerprint = source.master_signer_fingerprint;
+    target.backed_up = source.backed_up;
+    target.mfa_done = source.mfa_done;
+    target.passkey_metadata = source.passkey_metadata.clone();
+    target.connect_owner = source.connect_owner.clone();
+    target.imported_claim_source = Some(Box::new(binding));
+    target.bitcoin_import = Some(Box::new(BitcoinImport {
+        operation_id: Uuid::parse_str(&target.id).map_err(|e| e.to_string())?,
+        stage: BitcoinImportStage::Installing {
+            wallet: wallet.clone(),
+        },
+        last_error: None,
+    }));
     Ok(target)
 }
 
@@ -465,6 +524,38 @@ pub(crate) mod tests {
         assert_eq!(target.id, target_cube_id(&source.id));
         assert!(target.spark_stable_balance.is_none());
     }
+    /// The paired copy is listed to the same accounts as its source: it keeps
+    /// the source's Connect owner (or lack of one), so another account on the
+    /// device does not see it.
+    #[test]
+    fn the_paired_copy_keeps_its_sources_connect_owner() {
+        use crate::app::settings::{cube_hidden_from_account, ConnectOwner};
+        let (mut source, _) = pair();
+        let binding = source_binding(&source).unwrap();
+        let wallet = paired_wallet(&binding).unwrap();
+
+        let unowned = paired_target(&source, binding.clone(), &wallet).unwrap();
+        assert_eq!(unowned.connect_owner, None);
+
+        source.connect_owner = Some(ConnectOwner {
+            user_id: 7,
+            email: "founder@example.com".into(),
+        });
+        let owned = paired_target(&source, binding, &wallet).unwrap();
+        assert_eq!(owned.connect_owner, source.connect_owner);
+        assert!(!cube_hidden_from_account(
+            owned.connect_owner.as_ref(),
+            true,
+            Some(7)
+        ));
+        assert!(cube_hidden_from_account(
+            owned.connect_owner.as_ref(),
+            true,
+            Some(8)
+        ));
+        validate_target(&source, &owned).unwrap();
+    }
+
     #[test]
     fn pairing_rejects_changed_source_operation_target_or_unlock_identity() {
         let (source, target) = pair();

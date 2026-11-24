@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-COINCUBE Desktop (formerly COINCUBE | Tenshu; the OS shows it as "COINCUBE") — a desktop Bitcoin wallet (Rust, iced GUI) hard-forked from Wizardsardine's Liana (v13). Each **Cube** (PIN- or passkey-encrypted container) holds up to two wallets: a **Vault** (miniscript multisig with time-locked recovery paths, served by the `coincubed` daemon) and a **Spark** wallet (Breez Spark SDK, out-of-process). The former Liquid wallet has been removed; its on-disk data is left untouched (see `docs/WALLETS.md`). A server-side **Connect** account (the sibling `coincube-api` repo) adds auth/OTP, billing, Cube registration, multi-signer Keychain phone signing over gRPC, duress and recovery features.
+COINCUBE Desktop (formerly COINCUBE | Tenshu; the OS shows it as "COINCUBE") — a desktop Bitcoin wallet (Rust, iced GUI) hard-forked from Wizardsardine's Liana (v13). Each **Cube** (PIN- or passkey-encrypted container) holds up to two wallets: a **Vault** (miniscript multisig with time-locked recovery paths, served by the `coincubed` daemon) and a **Spark** wallet (Breez Spark SDK, out-of-process). The former Liquid wallet has been removed; its on-disk data is left untouched (see `docs/WALLETS.md`). A server-side **Connect** account (the sibling `coincube-api` repo) adds auth/OTP, billing, Cube registration, multi-signer phone signing with COINCUBE Mobile over gRPC, duress and recovery features.
 
 ## Build, lint, test
 
@@ -83,9 +83,10 @@ Identifiers were bulk-renamed (`LianaDescriptor`→`CoincubeDescriptor`, `lianad
 
 ## Conventions and gotchas
 
+- Naming: the phone app is **COINCUBE Mobile** ("Mobile" for short); "Keychain" was retired as a product and feature name on 2026-11-15. In copy, docs, commits, PRs and replies write "Mobile key", "Mobile signer", "Mobile signing", and "the phone" for a paired device. The old word stays only in identifiers (`keychain_key_id`, `KeychainSignModal`, `keychain_sign.rs`), in older docs not yet reworded, and where it means the macOS Keychain.
 - Commits: atomic, don't mix formatting/moves with logic; each commit must build clean and pass tests (CONTRIBUTING.md). New features need tests — functional (pytest) and/or unit.
 - When bumping the Rust pin, also update every `toolchain: 1.x.y` in `.github/workflows/` (`git grep -n 'toolchain: [0-9]' .github/workflows/`); `coverage.yml` pins its own nightly and is exempt.
 - Windows CI runs `cargo test --no-default-features`; `coincubed`/`coincube-cli` are Unix-only (Unix socket).
 - Ubuntu unit tests need a Secret Service (gnome-keyring under `dbus-run-session`) for the device-secret tests; on macOS the `keychain-access-groups` entitlement means an unsigned/unprovisioned bundle is SIGKILLed at launch (`docs/MACOS_KEYCHAIN_ENTITLEMENT.md`).
 - `plans/` (design docs for in-flight features) and `.claude/` are gitignored — don't expect them on other checkouts.
-- Docs to open first: `docs/WALLETS.md` (wallet abstraction), `docs/SPARK_WALLET.md` (bridge lifecycle/packaging), `docs/SIGNING_FLOW.md` (Keychain signing), `docs/API.md` (daemon RPC), `docs/RELEASE.md` (release/verification).
+- Docs to open first: `docs/WALLETS.md` (wallet abstraction), `docs/SPARK_WALLET.md` (bridge lifecycle/packaging), `docs/SIGNING_FLOW.md` (Mobile signing), `docs/API.md` (daemon RPC), `docs/RELEASE.md` (release/verification).

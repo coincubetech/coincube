@@ -29,7 +29,7 @@ recovery flows keep their explicit source material and existing admission checks
 A Cube master backup and the Vault descriptor reproduce newly created Cube
 Keys. Recovery Kits keep their existing one-master-seed format; this change adds
 no seed slot, remote secret payload or key migration. External hardware,
-Keychain and separately imported keys retain their own recovery requirements.
+Mobile and separately imported keys retain their own recovery requirements.
 
 Existing descriptors, encrypted Vault seed files and keys are not rewritten.
 Historical Developer-mode Vaults that used the Cube master remain recoverable

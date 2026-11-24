@@ -40,7 +40,8 @@ pub struct CreateSpendPanel {
     /// Whether the one-time "default to Normal feerate" fetch has been
     /// dispatched. Fired on the first `reload` so the fee/amount compute
     /// immediately, without the user first picking a feerate — but only once,
-    /// so a later re-entry doesn't clobber a feerate they set.
+    /// so a later re-entry doesn't clobber a feerate they set. Not used by a
+    /// recovery spend, whose DefineSpend requests the default itself.
     initial_feerate_requested: bool,
     mcp_prepared: bool,
 }
@@ -125,7 +126,12 @@ impl CreateSpendPanel {
                         sync_status,
                         bitcoin_unit,
                     )
-                    .with_coins_sorted(blockheight),
+                    .with_coins_sorted(blockheight)
+                    // Recovery opens on the path-selection step, which would
+                    // drop the `reload` default: the step requests Normal
+                    // itself once it is shown (and again whenever a new path
+                    // re-creates it), never over a rate the user then set.
+                    .starting_on_normal_feerate(),
                 ),
                 Box::new(step::SaveSpend::new(wallet)),
             ],
@@ -259,6 +265,36 @@ impl CreateSpendPanel {
         }
     }
 
+    /// Whether the step on screen is the review of proposal `txid`. A delete
+    /// result for any other proposal belongs to the PSBTs list.
+    pub fn shows_psbt(&self, txid: &coincube_core::miniscript::bitcoin::Txid) -> bool {
+        self.steps
+            .get(self.current)
+            .is_some_and(|step| step.shows_psbt(txid))
+    }
+
+    /// A Send panel showing the review of `psbt`.
+    #[cfg(test)]
+    pub(crate) fn reviewing_for_test(
+        wallet: Arc<Wallet>,
+        network: Network,
+        psbt: coincube_core::miniscript::bitcoin::Psbt,
+    ) -> Self {
+        use step::Step as _;
+        let draft = step::TransactionDraft::generated_for_test(network, psbt);
+        let mut review = step::SaveSpend::new(wallet);
+        review.load(&[], 0, &draft);
+        Self {
+            draft,
+            current: 0,
+            steps: vec![Box::new(review)],
+            coins: Vec::new(),
+            tip_height: 0,
+            initial_feerate_requested: true,
+            mcp_prepared: false,
+        }
+    }
+
     fn advance_step(&mut self) -> bool {
         if let Some(step) = self.steps.get(self.current) {
             if !step.can_advance() {
@@ -330,6 +366,19 @@ impl State for CreateSpendPanel {
             self.return_to_previous_step();
         }
 
+        // A step shown again (e.g. a recovery's DefineSpend after Back then
+        // Next) requests what was in flight when it was left.
+        let resume_task = if matches!(
+            message,
+            Message::View(view::Message::Next | view::Message::Previous)
+        ) {
+            self.steps
+                .get_mut(self.current)
+                .map_or_else(Task::none, |step| step.resume())
+        } else {
+            Task::none()
+        };
+
         if let Message::CoinsTipHeight(Ok(coins), Ok(tip)) = &message {
             // Save the coins and tip for use in the `load()` method.
             self.coins = coins.clone();
@@ -337,24 +386,8 @@ impl State for CreateSpendPanel {
             // We still send this message to the current step below to update the values directly.
         }
 
-        // A recovery spend can't take the `reload` default (it opens on the
-        // path-selection step, which would drop the message). Instead fire the
-        // same "Normal" (~1h, 6-block target) default the first time we advance
-        // onto the DefineSpend step (index 1), so amounts/fees compute without
-        // the user first picking a feerate. The `initial_feerate_requested`
-        // guard keeps a later re-entry from clobbering a feerate they set.
-        let feerate_task =
-            if self.draft.is_recovery() && !self.initial_feerate_requested && self.current == 1 {
-                self.initial_feerate_requested = true;
-                Task::done(Message::View(view::Message::CreateSpend(
-                    view::CreateSpendMessage::FetchFeeEstimate(6),
-                )))
-            } else {
-                Task::none()
-            };
-
         if let Some(step) = self.steps.get_mut(self.current) {
-            return Task::batch([feerate_task, step.update(daemon, cache, message)]);
+            return Task::batch([resume_task, step.update(daemon, cache, message)]);
         }
 
         Task::none()
@@ -435,12 +468,17 @@ impl State for CreateSpendPanel {
         ];
         // Default the feerate to "Normal" (~1h, 6-block target) the first time
         // this panel loads, so amounts/fees compute immediately. Recovery
-        // starts on the path-selection step, which wouldn't consume it, so it
-        // fires the same default from `update` on entering DefineSpend instead.
+        // starts on the path-selection step. DefineSpend requests Normal when
+        // the recovery form first becomes visible.
+        // `reload` runs only for the panel on screen: the step shown again
+        // requests what was in flight when the panel was left.
+        if let Some(step) = self.steps.get_mut(self.current) {
+            tasks.push(step.resume());
+        }
         if !self.initial_feerate_requested && !self.draft.is_recovery() {
             self.initial_feerate_requested = true;
             tasks.push(Task::done(Message::View(view::Message::CreateSpend(
-                view::CreateSpendMessage::FetchFeeEstimate(6),
+                view::CreateSpendMessage::FetchFeeEstimate(step::NORMAL_FEE_TARGET),
             ))));
         }
         Task::batch(tasks)

@@ -7,19 +7,36 @@ daemon on macOS, Linux and Windows**. Supported exact chain identities are
 wallet preparation and unsigned transaction preparation. Liquid, Spark, imported
 non-Vault policies and external daemons remain unsupported. MCP starts disabled. Explicitly paired clients keep their selected scope until
 revoked; protected access pauses while the Cube is locked or COINCUBE Desktop is closed.
-No Connect API or mobile Keychain changes are needed.
+No Connect API or COINCUBE Mobile changes are needed.
 
-## Integration and release status
+## Feature flag and release status
 
-Local MCP access is integrated on `redesign`; the repository's primary branch is
-`master`. Build from the checkout containing the changes being tested. Presence
-on `redesign` does not imply inclusion in a production release. Follow-up work
-assigned to this integration targets `redesign`.
+AI access is **off by default** behind the build-time flag
+`COINCUBE_ENABLE_AI_ACCESS` (`feature_flags::AI_ACCESS_ENABLED`). It stays off
+for launch until signed-release, real-client and security acceptance pass
+(issue #1535). Build with it on by setting the variable in `.env` or the
+environment (`1`, `true` or `yes`) and rebuilding:
 
-Review and CI completion make a PR eligible for human review. Merging to
-`redesign`, promoting it to `master`, and publishing a release remain separate
-owner decisions. Packaged-client interoperability and signed-artifact checks
-remain release gates.
+```sh
+COINCUBE_ENABLE_AI_ACCESS=1 make run
+```
+
+With the flag off:
+
+- **Cube → Settings** shows no AI access tab, and a restored route to it opens
+  General instead.
+- The desktop never opens the pairing registry or publishes an endpoint, so no
+  MCP client is answered. Pairings already stored on disk are left untouched
+  and inert; they resume only in a build with the flag on, and still require
+  the Cube-wide switch.
+- `coincube-mcp` is still built and packaged, and its static tool discovery
+  and `tenshu_get_capabilities` still work. They describe the companion build,
+  not whether this desktop build serves AI access. A well-formed wallet call
+  returns `wallet_unavailable`.
+
+The code is on `master`. Packaged-client interoperability, signed-artifact
+checks and independent security review remain release gates before the flag
+is turned on.
 
 ## Build and install
 
@@ -353,7 +370,7 @@ Before production release, complete packaged-client acceptance on each platform 
 Maple and Claude, verify signed packaging, and obtain independent security review.
 Windows named-pipe and pairing-file security are included. Unsigned transaction
 preparation has a separate capability, scoped operation ID and trusted desktop
-review. Signing remains with existing user/Keychain mechanisms; read permissions
+review. Signing remains with existing user/Mobile signing mechanisms; read permissions
 cannot authorize preparation or signing.
 
 ## Native wallet proposals
@@ -410,7 +427,7 @@ process can interrupt completion, which is a recovery/inspection case, not a
 claim of rollback. Enabling this workflow in normal builds does not replace
 packaged-client, hardware and signed-release acceptance.
 
-Keychain guidance uses existing setup and verification screens. The owner's
+Mobile key guidance uses existing setup and verification screens. The owner's
 Cube Recovery Kit encryption key is not a Vault signing key. Do not label a
 manually entered key as phone-attested, or claim that a backup/recovery rehearsal
 passed because a key or descriptor exists. Phone/Connect-dependent setup is a

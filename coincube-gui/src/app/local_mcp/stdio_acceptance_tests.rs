@@ -471,6 +471,7 @@ fn stdio_client_unsigned_transaction_reaches_native_review_on_every_chain() {
     use coincube_core::miniscript::bitcoin::{hashes::Hash, Address, ScriptBuf, WScriptHash};
     use iced::futures::StreamExt;
     let _guard = session::test_guard();
+    let _ai_access = crate::feature_flags::test_override::ai_access(true);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for network in wire::Chain::ALL {
             eprintln!("MCP acceptance workflow=transaction chain={}", network.as_str());

@@ -456,6 +456,21 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn preview_spend_tx(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Address<address::NetworkUnchecked>,
+    ) -> Result<CreateSpendResult, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .preview_spend(destinations, coins_outpoints, feerate_vb, change_address)
+                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
+    }
+
     async fn create_spend_tx_capped(
         &self,
         coins_outpoints: &[OutPoint],
@@ -518,9 +533,12 @@ impl Daemon for EmbeddedDaemon {
     }
 
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError> {
+        // Not `broadcast_spend`: that one waits for a whole wallet sync after
+        // the network has the transaction, with the Broadcast dialog still up.
+        // Callers cover the gap by calling `Wallet::record_broadcast` on `Ok`.
         self.command(|daemon| {
             daemon
-                .broadcast_spend(txid)
+                .broadcast_spend_without_waiting(txid)
                 .map_err(map_spend_command_error)
         })
         .await

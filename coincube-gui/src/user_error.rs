@@ -364,6 +364,15 @@ impl From<&Error> for UserError {
 
                 DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
 
+                DaemonError::Start(coincubed::StartupError::ImportedHistoryIncomplete) => {
+                    UserError::new(
+                        "This wallet isn't ready for your local node",
+                        "Finish this wallet's scan on Connect before switching to your local node.",
+                        CC_DMN_START,
+                        false,
+                    )
+                }
+
                 DaemonError::Start(_) => UserError::new(
                     "The wallet engine didn't start",
                     "Restart the app. If it still won't start, check that no other COINCUBE Desktop instance is running.",
@@ -919,6 +928,19 @@ mod tests {
             "got {:?}",
             u.guidance
         );
+    }
+
+    #[test]
+    fn incomplete_imported_history_tells_the_user_to_finish_on_connect() {
+        let u: UserError = (&Error::Daemon(DaemonError::Start(
+            coincubed::StartupError::ImportedHistoryIncomplete,
+        )))
+            .into();
+        assert_eq!(
+            u.guidance,
+            "Finish this wallet's scan on Connect before switching to your local node."
+        );
+        assert!(!u.retryable);
     }
 
     /// The toast has room for one text run, so the three fields are joined —

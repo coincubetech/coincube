@@ -26,6 +26,15 @@ use iced::{Subscription, Task};
 
 static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
 static FEE_ESTIMATE_ID: AtomicU64 = AtomicU64::new(1);
+/// Redraft generations are drawn from one process-wide counter, not one per
+/// `DefineSpend`: task results go to whichever panel is on screen, so a draft
+/// started in one spend form (Send, Recovery, or a Send panel since replaced)
+/// must never carry a generation another form could accept.
+static REDRAFT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_redraft_seq() -> u64 {
+    REDRAFT_SEQ.fetch_add(1, AtomicOrdering::Relaxed)
+}
 const TAMPER_WARNING: &str = "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.";
 const AMOUNT_MISMATCH_WARNING: &str = "The prepared amount does not match the Bitcoin payment request. Return and resolve the amount before sending.";
 
@@ -61,6 +70,9 @@ use crate::{
 /// (coin selection / `create_spend_tx`). Coalesces a burst of keystrokes
 /// into a single backend call instead of one per character.
 const REDRAFT_DEBOUNCE_MS: u64 = 350;
+/// Block target of the Normal (~1h) fee preset, the default for a new or
+/// cleared form.
+pub(crate) const NORMAL_FEE_TARGET: usize = 6;
 
 #[derive(Clone)]
 pub struct TransactionDraft {
@@ -93,6 +105,14 @@ impl TransactionDraft {
         }
     }
 
+    /// A draft whose PSBT is already generated, for the review step.
+    #[cfg(test)]
+    pub(super) fn generated_for_test(network: Network, psbt: Psbt) -> Self {
+        let mut draft = Self::new(network, None);
+        draft.generated = Some((psbt, Vec::new()));
+        draft
+    }
+
     #[cfg(feature = "mcp-transactions")]
     pub(super) fn from_mcp(native: crate::app::local_mcp::transactions::NativeDraft) -> Self {
         let mut draft = Self::new(native.chain.bitcoin_network(), None);
@@ -119,7 +139,22 @@ pub trait Step {
         true
     }
     fn interrupt(&mut self) {}
+    /// The step is on screen again after `interrupt`: request whatever was
+    /// in flight when it was left. Called only while the step is shown, as
+    /// tasks' results go to whatever is on screen when they land.
+    fn resume(&mut self) -> Task<Message> {
+        Task::none()
+    }
+    /// Lets panel-level tests read the fee state of a panel's DefineSpend.
+    #[cfg(test)]
+    fn as_define_spend(&self) -> Option<&DefineSpend> {
+        None
+    }
     fn load(&mut self, _coins: &[Coin], _tip_height: i32, _draft: &TransactionDraft) {}
+    /// Whether this step is showing the proposal `txid` (the review step).
+    fn shows_psbt(&self, _txid: &coincube_core::miniscript::bitcoin::Txid) -> bool {
+        false
+    }
     fn reload_wallet(&mut self, _wallet: Arc<Wallet>) {}
     fn subscription(&self) -> Subscription<Message> {
         Subscription::none()
@@ -204,6 +239,13 @@ pub struct DefineSpend {
     /// estimate carrying any other identity, or arriving once nothing is
     /// loading, was replaced by Custom, a typed rate or another preset.
     fee_estimate_request: u64,
+    /// The preset whose estimate was on its way when the step was left
+    /// (another menu entry, or Back): fetched again by `resume` once the
+    /// step is shown again (the panel's `reload`, or Next/Previous).
+    resume_fee_estimate: Option<usize>,
+    /// A draft was pending when the step was left: drafted again by
+    /// `resume` once the step is shown again.
+    resume_redraft: bool,
     /// Block target (1/6/24) of the preset whose estimate currently fills the
     /// feerate field, so the matching Fast/Normal/Slow button can render as
     /// selected. Cleared when the user types a feerate manually.
@@ -225,10 +267,15 @@ pub struct DefineSpend {
     unconfirmed_balance: Amount,
     sync_status: SyncStatus,
     bitcoin_unit: BitcoinDisplayUnit,
-    /// Monotonic generation counter for debounced/async redrafts. Bumped
-    /// every time a redraft is scheduled so that stale debounce ticks and
-    /// in-flight coin-selection results can be discarded.
+    /// Generation token for debounced/async redrafts, drawn from the
+    /// process-wide `REDRAFT_SEQ`. Replaced every time a redraft is scheduled
+    /// so that stale debounce ticks and in-flight coin-selection results —
+    /// this form's or another spend form's — are discarded.
     redraft_seq: u64,
+    /// A redraft is scheduled or running and its result has not landed yet:
+    /// the footer says it is calculating instead of asking for fields the
+    /// user has already filled in.
+    draft_pending: bool,
     preparation_id: u64,
     lookup_ticket: Option<LookupTicket>,
     recipient_identities: Option<psbt::RecipientIdentities>,
@@ -284,17 +331,503 @@ impl DefineSpend {
             is_first_step,
             loading_fee_estimate: None,
             fee_estimate_request: 0,
+            resume_fee_estimate: None,
+            resume_redraft: false,
             balance,
             unconfirmed_balance,
             sync_status,
             bitcoin_unit,
-            redraft_seq: 0,
+            redraft_seq: next_redraft_seq(),
+            draft_pending: false,
             preparation_id: PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed),
             lookup_ticket: None,
             recipient_identities: None,
             tampered: false,
             tampered_destinations: HashSet::new(),
         }
+    }
+
+    fn update_spend_form(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        msg: view::CreateSpendMessage,
+    ) -> Task<Message> {
+        // Opening the coin list changes nothing the draft depends on.
+        if let view::CreateSpendMessage::ChooseCoins = msg {
+            self.coins_shown = true;
+            return Task::none();
+        }
+        // Automatic while already automatic: nothing to redraft.
+        if matches!(msg, view::CreateSpendMessage::AutomaticCoins) && !self.coin_list_shown() {
+            return Task::none();
+        }
+        if self.is_stale_fee_estimate(&msg) {
+            return Task::none();
+        }
+        if !matches!(msg, view::CreateSpendMessage::Generate) {
+            self.invalidate_preparation();
+        }
+        match msg {
+            view::CreateSpendMessage::BatchLabelEdited(label) => {
+                self.batch_label.valid = label.len() <= 100;
+                self.batch_label.value = label;
+            }
+            view::CreateSpendMessage::Clear => {
+                // `Self::new` draws a fresh redraft generation, so a draft or
+                // debounce tick still in flight from before Clear can never
+                // match a generation of the cleared form.
+                *self = Self::new(
+                    self.network,
+                    self.wallet.clone(),
+                    self.coins
+                        .iter()
+                        .map(|(c, _)| c.clone())
+                        .collect::<Vec<ListCoinsEntry>>()
+                        .as_slice(),
+                    self.tip_height,
+                    self.recovery_timelock,
+                    self.is_first_step,
+                    self.balance,
+                    self.unconfirmed_balance,
+                    self.sync_status.clone(),
+                    self.bitcoin_unit,
+                );
+                // A cleared form starts on Normal, as a new one does.
+                return Task::done(Message::View(view::Message::CreateSpend(
+                    CreateSpendMessage::FetchFeeEstimate(NORMAL_FEE_TARGET),
+                )));
+            }
+            view::CreateSpendMessage::AutomaticCoins => {
+                // Hand the choice back to automatic selection: the redraft
+                // below picks the coins again.
+                self.coins_shown = false;
+                self.is_user_coin_selection = false;
+                // The ticked coins were the user's: until the automatic draft
+                // lands, Prepare must not build from them.
+                self.amount_left_to_select = None;
+            }
+            view::CreateSpendMessage::AddRecipient => {
+                self.recipients.push(Recipient::default());
+            }
+            view::CreateSpendMessage::DeleteRecipient(i) => self.delete_recipient(i),
+            view::CreateSpendMessage::RecipientEdited(i, _, _)
+            | view::CreateSpendMessage::RecipientFiatAmountEdited(i, _, _) => {
+                self.recipients
+                    .get_mut(i)
+                    .unwrap()
+                    .update(cache.network, self.bitcoin_unit, msg);
+            }
+            view::CreateSpendMessage::FeerateEdited(s) => {
+                // A typed rate: no preset is selected, and a preset
+                // fetch still in flight is dropped when it lands.
+                self.set_feerate(s);
+                self.custom_feerate_value = Some(self.feerate.value.clone());
+                self.selected_feerate_target = None;
+                self.loading_fee_estimate = None;
+                // A feerate change must re-run coin selection: it
+                // changes the fee and therefore `amount_left_to_select`
+                // (which gates "Next"). Falling through to the
+                // debounced redraft recomputes `fee_amount` too, so we
+                // no longer clear it here or skip the redraft — doing
+                // so left the form stuck on "Enter recipient address
+                // and amount" whenever the feerate was edited last.
+            }
+            view::CreateSpendMessage::SessionError(error) => {
+                let err: Error = error.into();
+                let err_msg = crate::user_error::report(&err);
+                self.warning = Some(err);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+            view::CreateSpendMessage::CustomFeerate => {
+                return self.select_custom_feerate(daemon, cache);
+            }
+            view::CreateSpendMessage::FeeEstimated { feerate, .. } => {
+                // The pending preset's estimate (stale ones returned
+                // above): it fills the field and stays selected.
+                self.selected_feerate_target = self.loading_fee_estimate.take();
+                // A draft that landed while the estimate was on its way was
+                // built at the previous rate: Prepare waits for the redraft.
+                self.amount_left_to_select = None;
+                match feerate {
+                    Some(fee) => {
+                        self.set_feerate(fee.to_string());
+                        // Falls through to the redraft, as a typed
+                        // rate does.
+                    }
+                    None => {
+                        // Fall back to the rate already in the field (now
+                        // shown, as no preset fills it) and draft it again,
+                        // so the form is not left waiting on a draft that
+                        // never comes. The failure is reported by the error
+                        // alone: a `warning` would end `drafting()` and let
+                        // Prepare through before that draft lands (and the
+                        // draft clears it anyway).
+                        self.selected_feerate_target = None;
+                        // As a landed estimate does (`set_feerate`), drop an
+                        // earlier warning too, so `drafting()` holds Prepare.
+                        self.warning = None;
+                        let err: Error = SpendCreationError::FeeEstimationFailed.into();
+                        let err_msg = crate::user_error::report(&err);
+                        let redraft = self.schedule_redraft();
+                        return Task::batch([
+                            Task::done(Message::View(view::Message::ShowError(err_msg))),
+                            redraft,
+                        ]);
+                    }
+                }
+            }
+            view::CreateSpendMessage::FetchFeeEstimate(block_target) => {
+                return self.fetch_fee_estimate(block_target);
+            }
+            view::CreateSpendMessage::Generate => return self.prepare_spend(daemon),
+            view::CreateSpendMessage::SelectCoin(i) => {
+                if let Some(coin) = self.coins.get_mut(i) {
+                    coin.1 = !coin.1;
+                    // Once user edits selection, auto-selection can no longer be used.
+                    self.is_user_coin_selection = true;
+                }
+            }
+            view::CreateSpendMessage::SendMaxToRecipient(i) => self.toggle_send_max(i),
+            _ => {}
+        }
+
+        // Re-run coin selection after every form edit (as the
+        // pre-refactor code did unconditionally). Coin selection /
+        // `create_spend_tx` is async and potentially a network
+        // round-trip, so we schedule it debounced and off the UI
+        // thread rather than blocking on every keystroke.
+        self.tampered = self
+            .recipients
+            .iter()
+            .filter_map(|recipient| destination_binding(&recipient.address.value))
+            .any(|destination| self.tampered_destinations.contains(&destination));
+        if !self.tampered
+            && self
+                .warning
+                .as_ref()
+                .is_some_and(|warning| warning.to_string().contains(TAMPER_WARNING))
+        {
+            self.warning = None;
+        }
+        let redraft_task = self.schedule_redraft();
+        self.check_valid();
+        redraft_task
+    }
+
+    fn select_custom_feerate(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+    ) -> Task<Message> {
+        self.custom_feerate = true;
+        self.selected_feerate_target = None;
+        // A preset fetch still in flight would replace the
+        // custom rate when it lands: drop it.
+        let dropped_fetch = self.loading_fee_estimate.take().is_some();
+        if let Some(value) = self
+            .custom_feerate_value
+            .clone()
+            .filter(|value| *value != self.feerate.value)
+        {
+            // Applied here rather than sent as a message: a message
+            // lands on whatever is on screen, and would be lost if
+            // the user left Send before it was handled. It drafts
+            // the restored rate as a typed one does.
+            return self.update_spend_form(daemon, cache, CreateSpendMessage::FeerateEdited(value));
+        }
+        // The dropped fetch had set the draft aside: the rate in the
+        // field stays, so draft it again.
+        if dropped_fetch {
+            return self.schedule_redraft();
+        }
+        Task::none()
+    }
+
+    fn prepare_spend(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        // A preset's estimate is on its way (the rate in the field is about
+        // to be replaced), or the draft at the current rate has not landed:
+        // the same holds as the view's Prepare.
+        if self.generating
+            || self.loading_fee_estimate.is_some()
+            || self.drafting()
+            || self.tampered
+            || !self.form_values_are_valid(false)
+            || self.exists_duplicate()
+        {
+            return Task::none();
+        }
+        let inputs: Vec<OutPoint> = self
+            .coins
+            .iter()
+            .filter_map(|(coin, selected)| selected.then_some(coin.outpoint))
+            .collect();
+        let outputs: HashMap<_, _> = self
+            .recipients
+            .iter()
+            .map(|recipient| {
+                (
+                    recipient.destination().expect("validated destination"),
+                    recipient.amount().expect("validated amount"),
+                )
+            })
+            .collect();
+        let feerate_vb = self.feerate.value.parse::<u64>().unwrap_or(0);
+        self.warning = None;
+        self.generating = true;
+        self.preparation_id = PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let generation = self.preparation_id;
+        self.lookup_ticket = if self.recipients.is_empty() {
+            None
+        } else {
+            branta::begin(self.network)
+        };
+        let ticket = self.lookup_ticket.clone();
+        let recipients = self.recipients.clone();
+        // A Vault or an imported wallet: both say which outputs are their own.
+        let descriptor = self.wallet.main_descriptor.clone();
+        let requests: Vec<_> = self
+            .recipients
+            .iter()
+            .enumerate()
+            .filter_map(|(row, recipient)| {
+                let address = recipient
+                    .destination()
+                    .ok()?
+                    .require_network(self.network)
+                    .ok()?;
+                LookupRequest::bitcoin(&recipient.address.value, &address)
+                    .map(|request| (row, request))
+            })
+            .collect();
+        let recovery = self.recovery_timelock.map(|timelock| {
+            (
+                timelock,
+                self.recipients[0]
+                    .destination()
+                    .expect("validated recovery address"),
+            )
+        });
+        Task::perform(
+            async move {
+                let prepare = async {
+                    if let Some((timelock, address)) = recovery {
+                        daemon
+                            .create_recovery(address, &inputs, feerate_vb, Some(timelock))
+                            .await
+                            .map(|psbt| (psbt, vec![]))
+                            .map_err(Error::from)
+                    } else {
+                        daemon
+                            .create_spend_tx(&inputs, &outputs, feerate_vb, None)
+                            .await
+                            .map_err(Error::from)
+                            .and_then(|result| match result {
+                                CreateSpendResult::Success { psbt, warnings } => {
+                                    Ok((psbt, warnings))
+                                }
+                                CreateSpendResult::InsufficientFunds { missing } => {
+                                    Err(SpendCreationError::CoinSelection(
+                                        coincube_core::spend::InsufficientFunds { missing },
+                                    )
+                                    .into())
+                                }
+                            })
+                    }
+                };
+                let result = prepare.await.and_then(|(psbt, warnings)| {
+                    validate_requested_amounts(&recipients, &psbt)?;
+                    Ok((psbt, warnings))
+                });
+                let identities = if let (Ok((psbt, _)), Some(ticket)) = (&result, ticket) {
+                    let Some(association) = associate_recipients(&recipients, psbt) else {
+                        // Identity metadata is optional. A recovery/send-max output
+                        // can legitimately differ from the earlier redraft snapshot.
+                        return (result, Vec::new());
+                    };
+                    let owned: HashSet<_> = descriptor
+                        .spend_change_indexes(psbt, &secp256k1::Secp256k1::verification_only())
+                        .into_iter()
+                        .collect();
+                    let requests = requests
+                        .into_iter()
+                        .filter(|(row, _)| {
+                            association
+                                .get(*row)
+                                .is_some_and(|output| !owned.contains(output))
+                        })
+                        .collect();
+                    ticket.lookup_many(requests).await
+                } else {
+                    Vec::new()
+                };
+                (result, identities)
+            },
+            move |(result, identities)| Message::VaultSpendPrepared {
+                generation,
+                result,
+                identities,
+            },
+        )
+    }
+
+    fn apply_prepared_spend(
+        &mut self,
+        generation: u64,
+        result: Result<(Psbt, Vec<String>), Error>,
+        identities: Vec<(usize, LookupResult)>,
+    ) -> Task<Message> {
+        if !self.generating || generation != self.preparation_id {
+            return Task::none();
+        }
+        self.generating = false;
+        let identities = if self
+            .lookup_ticket
+            .as_ref()
+            .is_some_and(LookupTicket::is_current)
+        {
+            identities
+        } else {
+            Vec::new()
+        };
+        if identities
+            .iter()
+            .any(|(_, result)| matches!(result, LookupResult::Tampered))
+        {
+            self.record_tampered_destinations(&identities);
+            return Task::none();
+        }
+        match result {
+            Ok((psbt, warnings)) => {
+                // Explicit BIP21 amounts are payment instructions, independent of
+                // optional identity association and the privacy preference.
+                if let Err(error) = validate_requested_amounts(&self.recipients, &psbt) {
+                    self.warning = Some(error);
+                    return Task::none();
+                }
+                let association = associate_recipients(&self.recipients, &psbt).unwrap_or_default();
+                let bound = identities
+                    .into_iter()
+                    .filter_map(|(row, result)| association.get(row).map(|vout| (*vout, result)))
+                    .collect();
+                self.recipient_identities =
+                    self.lookup_ticket
+                        .clone()
+                        .map(|ticket| psbt::RecipientIdentities {
+                            ticket,
+                            transaction_id: psbt.unsigned_tx.compute_txid(),
+                            results: bound,
+                        });
+                self.generated = Some((psbt, warnings));
+                Task::done(Message::View(view::Message::Next))
+            }
+            // Shown as the compose hint; the generic error toast would
+            // hide why, and preparing again cannot change the outcome.
+            Err(e) if is_amount_mismatch(&e) => {
+                self.warning = Some(e);
+                Task::none()
+            }
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                Task::done(Message::View(view::Message::ShowError(err_msg)))
+            }
+        }
+    }
+
+    fn delete_recipient(&mut self, i: usize) {
+        self.recipients.remove(i);
+        if self.recipients.len() < 2 {
+            self.batch_label.valid = true;
+            self.batch_label.value = "".to_string();
+        }
+        if let Some(j) = self.send_max_to_recipient {
+            match j.cmp(&i) {
+                Ordering::Equal => {
+                    self.send_max_to_recipient = None;
+                }
+                Ordering::Greater => {
+                    self.send_max_to_recipient = Some(
+                        j.checked_sub(1)
+                            .expect("j must be greater than 0 in this case"),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn toggle_send_max(&mut self, i: usize) {
+        if let Some(recipient) = self.recipients.get_mut(i) {
+            if self.send_max_to_recipient == Some(i) {
+                // If already set to this recipient, then unset it.
+                self.send_max_to_recipient = None;
+                recipient.dust_warning = None;
+                recipient.estimated_max = None;
+            } else {
+                // Either it's set to some other recipient or not at all.
+                self.send_max_to_recipient = Some(i);
+            }
+        }
+    }
+
+    fn is_stale_fee_estimate(&self, message: &view::CreateSpendMessage) -> bool {
+        match message {
+            view::CreateSpendMessage::FeeEstimated { request, .. } => {
+                self.loading_fee_estimate.is_none() || *request != self.fee_estimate_request
+            }
+            _ => false,
+        }
+    }
+
+    fn record_tampered_destinations(&mut self, identities: &[(usize, LookupResult)]) {
+        self.tampered = true;
+        for (row, result) in identities {
+            if matches!(result, LookupResult::Tampered) {
+                if let Some(recipient) = self.recipients.get(*row) {
+                    if let Some(destination) = destination_binding(&recipient.address.value) {
+                        self.tampered_destinations.insert(destination);
+                    }
+                }
+            }
+        }
+        self.generated = None;
+        self.warning = Some(Error::Unexpected(TAMPER_WARNING.to_string()));
+        self.check_valid();
+    }
+
+    /// Fetch the estimate for a preset's block target (1/6/24). The current
+    /// draft was built at the rate this preset replaces: Prepare must not
+    /// build from it. A draft still in flight is dropped too; `FeeEstimated`
+    /// drafts again.
+    fn fetch_fee_estimate(&mut self, block_target: usize) -> Task<Message> {
+        self.custom_feerate = false;
+        self.loading_fee_estimate = Some(block_target);
+        self.fee_estimate_request = FEE_ESTIMATE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        self.amount_left_to_select = None;
+        self.redraft_seq = next_redraft_seq();
+        self.draft_pending = false;
+        let request = self.fee_estimate_request;
+        Task::perform(
+            async move {
+                let fee_estimator = FeeEstimator::new();
+                let feerate = match block_target {
+                    1 => fee_estimator.get_high_priority_rate().await,
+                    6 => fee_estimator.get_mid_priority_rate().await,
+                    _ => fee_estimator.get_low_priority_rate().await,
+                };
+
+                feerate
+            },
+            move |feerate| {
+                Message::View(view::Message::CreateSpend(
+                    CreateSpendMessage::FeeEstimated {
+                        request,
+                        feerate: feerate.ok(),
+                    },
+                ))
+            },
+        )
     }
 
     fn invalidate_preparation(&mut self) {
@@ -322,6 +855,15 @@ impl DefineSpend {
 
     pub fn with_coins_sorted(mut self, blockheight: u32) -> Self {
         self.sort_coins(blockheight);
+        self
+    }
+
+    /// Start the form on Normal (~1h, 6-block target): its estimate is
+    /// fetched by `resume` once the step is on screen (the panel's Next or
+    /// `reload`). A recovery spend uses this because it opens on the
+    /// path-selection step, where the panel's `reload` default would be lost.
+    pub fn starting_on_normal_feerate(mut self) -> Self {
+        self.resume_fee_estimate = Some(NORMAL_FEE_TARGET);
         self
     }
 
@@ -405,7 +947,8 @@ impl DefineSpend {
     /// that token. If the user keeps typing, each keystroke bumps the token so
     /// only the final, settled edit actually runs coin selection.
     fn schedule_redraft(&mut self) -> Task<Message> {
-        self.redraft_seq = self.redraft_seq.wrapping_add(1);
+        self.redraft_seq = next_redraft_seq();
+        self.draft_pending = true;
         let seq = self.redraft_seq;
         Task::perform(
             async move {
@@ -426,29 +969,8 @@ impl DefineSpend {
     /// validation and "nothing to draft" early-returns are handled inline.
     fn run_redraft(&mut self, daemon: Arc<dyn Daemon + Sync + Send>, seq: u64) -> Task<Message> {
         if !self.form_values_are_valid(true) || self.exists_duplicate() {
-            // The current form details are not valid to draft a spend, so remove any previously
-            // calculated amount as it will no longer be valid and could be misleading, e.g. if
-            // the user removes the amount from one of the recipients.
-            // We can leave any coins selected as they will either be automatically updated
-            // as soon as the form is valid or the user has selected these specific coins and
-            // so we should not touch them.
-            self.amount_left_to_select = None;
-            // Clear any error from a previous draft: the form is no longer in a
-            // state we'd draft from, so a stale error must not be shown as the
-            // disabled hint in place of "Enter recipient address and amount.".
-            self.warning = None;
-            // Remove any max amount from a recipient as it could be misleading.
-            if let Some(i) = self.send_max_to_recipient {
-                self.recipients
-                    .get_mut(i)
-                    .expect("max has been requested for this recipient so it must exist")
-                    .update(
-                        self.network,
-                        self.bitcoin_unit,
-                        view::CreateSpendMessage::RecipientEdited(i, "amount", "".to_string()),
-                    );
-            }
-            self.fee_amount = None;
+            self.draft_pending = false;
+            self.clear_invalid_redraft();
             return Task::none();
         }
         let is_self_transfer = self.recipients.is_empty();
@@ -479,56 +1001,13 @@ impl DefineSpend {
         // Index of the recipient (if any) that should receive the max. We carry
         // only the index through the async boundary and re-borrow on apply.
         let recipient_with_max = self.send_max_to_recipient;
-        let outpoints = if self.is_user_coin_selection
-            || is_self_transfer
-            || self.recovery_timelock.is_some()
-        {
-            // If user has edited selection, or otherwise for self-transfers and recovery spends, we pass the outpoints list.
-            // (We could also in principle pass an empty outpoints list for a recovery spend if all should
-            // be selected, i.e. not user edited, but this way we don't need to worry about checking selected
-            // coins match those used in the recovery).
-            let outpoints: Vec<_> = self
-                .coins
-                .iter()
-                .filter_map(
-                    |(c, selected)| {
-                        if *selected {
-                            Some(c.outpoint)
-                        } else {
-                            None
-                        }
-                    },
-                )
-                .collect();
-            if outpoints.is_empty() {
-                // If the user has deselected all coins, set any recipient's max amount to 0.
-                if let Some(i) = recipient_with_max {
-                    if let Some(recipient) = self.recipients.get_mut(i) {
-                        recipient.update(
-                            self.network,
-                            self.bitcoin_unit,
-                            view::CreateSpendMessage::RecipientEdited(i, "amount", "0".to_string()),
-                        );
-                    }
-                }
-                // Simply set the amount left to select as the total destination value. Note this
-                // doesn't take account of the fee, but passing an empty list to `create_spend_tx`
-                // would use auto-selection and so we settle for this approximation.
-                // Note that for a recovery, the amount left to select is ignored by the view.
-                self.amount_left_to_select = Some(Amount::from_sat(destinations.values().sum()));
-                self.fee_amount = None;
-                return Task::none();
-            }
-            outpoints
-        } else if !self.is_user_coin_selection && self.send_max_to_recipient.is_some() {
-            // If user has not selected coins, send the max available from all owned coins.
-            self.coins
-                .iter()
-                .filter_map(|(c, _)| coin_is_owned(c).then_some(c.outpoint))
-                .collect()
-        } else {
-            Vec::new() // pass empty list for auto-selection
+        let Some(outpoints) = self.redraft_outpoints(is_self_transfer, recipient_with_max, || {
+            destinations.values().sum()
+        }) else {
+            self.draft_pending = false;
+            return Task::none();
         };
+        self.draft_pending = true;
 
         // If sending the max to a recipient, use that recipient's address as the
         // change/recovery address.
@@ -583,11 +1062,11 @@ impl DefineSpend {
                     .await
                 } else {
                     daemon
-                        .create_spend_tx(
+                        .preview_spend_tx(
                             &outpoints,
                             &destinations,
                             feerate_vb,
-                            Some(max_address.clone()),
+                            max_address.clone(),
                         )
                         .await
                         .map_err(|e| e.into())
@@ -601,6 +1080,83 @@ impl DefineSpend {
                 result,
             },
         )
+    }
+
+    fn clear_invalid_redraft(&mut self) {
+        // The current form details are not valid to draft a spend, so remove any previously
+        // calculated amount as it will no longer be valid and could be misleading, e.g. if
+        // the user removes the amount from one of the recipients.
+        // We can leave any coins selected as they will either be automatically updated
+        // as soon as the form is valid or the user has selected these specific coins and
+        // so we should not touch them.
+        self.amount_left_to_select = None;
+        // Clear any error from a previous draft: the form is no longer in a
+        // state we'd draft from, so a stale error must not be shown as the
+        // disabled hint in place of "Enter recipient address and amount.".
+        self.warning = None;
+        // Remove any max amount from a recipient as it could be misleading.
+        if let Some(i) = self.send_max_to_recipient {
+            self.recipients
+                .get_mut(i)
+                .expect("max has been requested for this recipient so it must exist")
+                .update(
+                    self.network,
+                    self.bitcoin_unit,
+                    view::CreateSpendMessage::RecipientEdited(i, "amount", "".to_string()),
+                );
+        }
+        self.fee_amount = None;
+    }
+
+    fn redraft_outpoints(
+        &mut self,
+        is_self_transfer: bool,
+        recipient_with_max: Option<usize>,
+        destination_total: impl FnOnce() -> u64,
+    ) -> Option<Vec<OutPoint>> {
+        let outpoints = if self.is_user_coin_selection
+            || is_self_transfer
+            || self.recovery_timelock.is_some()
+        {
+            // If user has edited selection, or otherwise for self-transfers and recovery spends, we pass the outpoints list.
+            // (We could also in principle pass an empty outpoints list for a recovery spend if all should
+            // be selected, i.e. not user edited, but this way we don't need to worry about checking selected
+            // coins match those used in the recovery).
+            let outpoints: Vec<_> = self
+                .coins
+                .iter()
+                .filter_map(|(coin, selected)| selected.then_some(coin.outpoint))
+                .collect();
+            if outpoints.is_empty() {
+                // If the user has deselected all coins, set any recipient's max amount to 0.
+                if let Some(i) = recipient_with_max {
+                    if let Some(recipient) = self.recipients.get_mut(i) {
+                        recipient.update(
+                            self.network,
+                            self.bitcoin_unit,
+                            view::CreateSpendMessage::RecipientEdited(i, "amount", "0".to_string()),
+                        );
+                    }
+                }
+                // Simply set the amount left to select as the total destination value. Note this
+                // doesn't take account of the fee, but passing an empty list to `create_spend_tx`
+                // would use auto-selection and so we settle for this approximation.
+                // Note that for a recovery, the amount left to select is ignored by the view.
+                self.amount_left_to_select = Some(Amount::from_sat(destination_total()));
+                self.fee_amount = None;
+                return None;
+            }
+            outpoints
+        } else if self.send_max_to_recipient.is_some() {
+            // If user has not selected coins, send the max available from all owned coins.
+            self.coins
+                .iter()
+                .filter_map(|(c, _)| coin_is_owned(c).then_some(c.outpoint))
+                .collect()
+        } else {
+            Vec::new() // pass empty list for auto-selection
+        };
+        Some(outpoints)
     }
 
     /// Turns a mixed send-max into explicit destination amounts.
@@ -621,12 +1177,7 @@ impl DefineSpend {
         let mut drafted: Option<CreateSpendResult> = None;
         for _ in 0..4 {
             let result = daemon
-                .create_spend_tx(
-                    outpoints,
-                    &destinations,
-                    feerate_vb,
-                    Some(wallet_change.clone()),
-                )
+                .preview_spend_tx(outpoints, &destinations, feerate_vb, wallet_change.clone())
                 .await
                 .map_err(crate::app::error::Error::from)?;
             match result {
@@ -662,7 +1213,7 @@ impl DefineSpend {
             }
         }
         daemon
-            .create_spend_tx(outpoints, &destinations, feerate_vb, Some(wallet_change))
+            .preview_spend_tx(outpoints, &destinations, feerate_vb, wallet_change)
             .await
             .map_err(crate::app::error::Error::from)
     }
@@ -687,108 +1238,168 @@ impl DefineSpend {
         }
         match result {
             Ok(CreateSpendResult::Success { psbt, .. }) => {
-                self.warning = None;
-                self.fee_amount = Some(psbt.fee().expect("Valid fees"));
-                // Update selected coins for auto-selection (non-recovery case).
-                if !self.is_user_coin_selection && self.recovery_timelock.is_none() {
-                    let selected_coins: Vec<OutPoint> = psbt
-                        .unsigned_tx
-                        .input
-                        .iter()
-                        .map(|c| c.previous_output)
-                        .collect();
-                    // Mark coins as selected.
-                    for (coin, selected) in &mut self.coins {
-                        *selected = selected_coins.contains(&coin.outpoint);
-                    }
-                }
-                // As coin selection was successful, we can assume there is nothing left to select.
-                self.amount_left_to_select = Some(Amount::from_sat(0));
-                if let Some(i) = recipient_with_max {
-                    // If there's no change output, any excess must be below the dust threshold
-                    // and so the max available for this recipient is 0.
-                    let amount_sat = psbt
-                        .unsigned_tx
-                        .output
-                        .iter()
-                        .find(|o| {
-                            o.script_pubkey == max_address.clone().assume_checked().script_pubkey()
-                        })
-                        .map(|change_output| change_output.value.to_sat())
-                        .unwrap_or(0);
-                    let amount = match self.bitcoin_unit {
-                        BitcoinDisplayUnit::BTC => {
-                            Amount::from_sat(amount_sat).to_btc().to_string()
-                        }
-                        BitcoinDisplayUnit::Sats => amount_sat.to_string(),
-                    };
-                    if let Some(recipient) = self.recipients.get_mut(i) {
-                        recipient.update(
-                            self.network,
-                            self.bitcoin_unit,
-                            view::CreateSpendMessage::RecipientEdited(i, "amount", amount),
-                        );
-                    }
-                }
+                self.apply_successful_redraft(psbt, max_address, recipient_with_max)
             }
             Ok(CreateSpendResult::InsufficientFunds { missing }) => {
-                self.fee_amount = None;
-                // To be sure, we exclude recovery transactions here, although they
-                // can't currently reach this part of code.
-                if !self.is_user_coin_selection && self.recovery_timelock.is_none() {
-                    // The missing amount is based on all candidates for coin selection
-                    // being used, which are all owned coins.
-                    for (coin, selected) in &mut self.coins {
-                        *selected = coin_is_owned(coin);
-                    }
-                }
-                // Whether every available coin is already selected. Read the actual
-                // selection state so this is correct for manual and recovery spends,
-                // where the auto-selection branch above is skipped.
-                let all_selected = self.coins.iter().all(|(_, selected)| *selected);
-                if let Some(i) = recipient_with_max {
-                    // An output has MAX selected, but the available amount is lower than
-                    // the dust limit. Rather than showing a confusing near-zero amount,
-                    // surface an explicit under-dust message and clear the amount field.
-                    self.amount_left_to_select = None;
-                    let total_recipients = self.recipients.len();
-                    // Derive the threshold string from DUST_OUTPUT_SATS so the message
-                    // can never drift out of sync with the constant.
-                    let min_amount = format_btc_string(Amount::from_sat(DUST_OUTPUT_SATS).to_btc());
-                    if let Some(recipient) = self.recipients.get_mut(i) {
-                        recipient.dust_warning = Some(if all_selected {
-                            coincube_ui::localized_format!(
-                                "Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).",
-                                "El importe mínimo es {min_amount} BTC. Agrega fondos a tu cartera para gastar las monedas."
-                            )
-                        } else {
-                            coincube_ui::localized_format!(
-                                "Minimum amount is {min_amount} BTC. Select more coins to continue.",
-                                "El importe mínimo es {min_amount} BTC. Selecciona más monedas para continuar."
-                            )
-                        });
-                        recipient.update(
-                            self.network,
-                            self.bitcoin_unit,
-                            view::CreateSpendMessage::RecipientEdited(i, "amount", String::new()),
-                        );
-                        if total_recipients > 1 {
-                            recipient.estimated_max = None;
-                        } else if missing > DUST_OUTPUT_SATS {
-                            // NOTE: Not reachable in theory.
-                        } else {
-                            recipient.estimated_max =
-                                Some(Amount::from_sat(DUST_OUTPUT_SATS - missing));
-                        }
-                    }
-                } else {
-                    self.warning = None;
-                    self.amount_left_to_select = Some(Amount::from_sat(missing));
-                }
+                self.apply_insufficient_redraft(missing, recipient_with_max)
             }
             Err(e) => {
                 self.warning = Some(e);
                 self.fee_amount = None;
+            }
+        }
+    }
+
+    fn apply_successful_redraft(
+        &mut self,
+        psbt: Psbt,
+        max_address: Address<address::NetworkUnchecked>,
+        recipient_with_max: Option<usize>,
+    ) {
+        self.warning = None;
+        self.fee_amount = Some(psbt.fee().expect("Valid fees"));
+        // Update selected coins for auto-selection (non-recovery case).
+        if !self.is_user_coin_selection && self.recovery_timelock.is_none() {
+            let selected_coins: Vec<OutPoint> = psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|c| c.previous_output)
+                .collect();
+            // Mark coins as selected.
+            for (coin, selected) in &mut self.coins {
+                *selected = selected_coins.contains(&coin.outpoint);
+            }
+        }
+        // As coin selection was successful, we can assume there is nothing left to select.
+        self.amount_left_to_select = Some(Amount::from_sat(0));
+        if let Some(i) = recipient_with_max {
+            // If there's no change output, any excess must be below the dust threshold
+            // and so the max available for this recipient is 0.
+            let amount_sat = psbt
+                .unsigned_tx
+                .output
+                .iter()
+                .find(|o| o.script_pubkey == max_address.clone().assume_checked().script_pubkey())
+                .map(|change_output| change_output.value.to_sat())
+                .unwrap_or(0);
+            let amount = match self.bitcoin_unit {
+                BitcoinDisplayUnit::BTC => Amount::from_sat(amount_sat).to_btc().to_string(),
+                BitcoinDisplayUnit::Sats => amount_sat.to_string(),
+            };
+            if let Some(recipient) = self.recipients.get_mut(i) {
+                recipient.update(
+                    self.network,
+                    self.bitcoin_unit,
+                    view::CreateSpendMessage::RecipientEdited(i, "amount", amount),
+                );
+            }
+        }
+    }
+
+    fn apply_insufficient_redraft(&mut self, missing: u64, recipient_with_max: Option<usize>) {
+        self.fee_amount = None;
+        // To be sure, we exclude recovery transactions here, although they
+        // can't currently reach this part of code.
+        if !self.is_user_coin_selection && self.recovery_timelock.is_none() {
+            // The missing amount is based on all candidates for coin selection
+            // being used, which are all owned coins.
+            for (coin, selected) in &mut self.coins {
+                *selected = coin_is_owned(coin);
+            }
+        }
+        // Whether every available coin is already selected. Read the actual
+        // selection state so this is correct for manual and recovery spends,
+        // where the auto-selection branch above is skipped.
+        let all_selected = self.coins.iter().all(|(_, selected)| *selected);
+        if let Some(i) = recipient_with_max {
+            // An output has MAX selected, but the available amount is lower than
+            // the dust limit. Rather than showing a confusing near-zero amount,
+            // surface an explicit under-dust message and clear the amount field.
+            self.amount_left_to_select = None;
+            let total_recipients = self.recipients.len();
+            // Derive the threshold string from DUST_OUTPUT_SATS so the message
+            // can never drift out of sync with the constant.
+            let min_amount = format_btc_string(Amount::from_sat(DUST_OUTPUT_SATS).to_btc());
+            self.apply_under_dust_warning(i, total_recipients, min_amount, all_selected, missing);
+        } else {
+            self.warning = None;
+            self.amount_left_to_select = Some(Amount::from_sat(missing));
+        }
+    }
+
+    fn apply_under_dust_warning(
+        &mut self,
+        i: usize,
+        total_recipients: usize,
+        min_amount: String,
+        all_selected: bool,
+        missing: u64,
+    ) {
+        if let Some(recipient) = self.recipients.get_mut(i) {
+            recipient.dust_warning = Some(if all_selected {
+                coincube_ui::localized_format!(
+                    "Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).",
+                    "El importe mínimo es {min_amount} BTC. Agrega fondos a tu cartera para gastar las monedas."
+                )
+            } else {
+                coincube_ui::localized_format!(
+                    "Minimum amount is {min_amount} BTC. Select more coins to continue.",
+                    "El importe mínimo es {min_amount} BTC. Selecciona más monedas para continuar."
+                )
+            });
+            recipient.update(
+                self.network,
+                self.bitcoin_unit,
+                view::CreateSpendMessage::RecipientEdited(i, "amount", String::new()),
+            );
+            if total_recipients > 1 {
+                recipient.estimated_max = None;
+            } else if missing > DUST_OUTPUT_SATS {
+                // NOTE: Not reachable in theory.
+            } else {
+                recipient.estimated_max = Some(Amount::from_sat(DUST_OUTPUT_SATS - missing));
+            }
+        }
+    }
+    fn apply_coins_tip_height(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        res_coins: Result<Vec<Coin>, Error>,
+        res_tip: Result<i32, Error>,
+    ) -> Task<Message> {
+        match (res_coins, res_tip) {
+            (Ok(coins), Ok(tip)) => {
+                self.tip_height = tip as u32;
+                // If it's a recovery spend and user has never edited the selection, then we won't pass
+                // any selection and will let `filter_coins` select all by default.
+                let selected = (self.recovery_timelock.is_none() || self.is_user_coin_selection)
+                    .then_some(HashSet::from_iter(self.coins.iter().filter_map(
+                        |(c, selected)| {
+                            if *selected {
+                                Some(c.outpoint)
+                            } else {
+                                None
+                            }
+                        },
+                    )));
+                self.coins = filter_coins(&coins, self.recovery_timelock, tip, selected);
+                self.sort_coins(tip as u32);
+                // In case some selected coins are not spendable anymore and
+                // new coins make more sense to be selected. A redraft is triggered
+                // if all forms are valid (checked in the redraft method). This
+                // is not a keystroke path, so run it immediately (still off the
+                // UI thread) rather than debouncing.
+                self.redraft_seq = next_redraft_seq();
+                let seq = self.redraft_seq;
+                let task = self.run_redraft(daemon, seq);
+                self.check_valid();
+                task
+            }
+            (Err(e), _) | (Ok(_), Err(e)) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                Task::done(Message::View(view::Message::ShowError(err_msg)))
             }
         }
     }
@@ -801,6 +1412,9 @@ impl Step for DefineSpend {
             (Some(old_tl), Some(new_tl)) => {
                 if old_tl != new_tl {
                     // If the timelock has changed, reinitialise this step.
+                    // The fresh form starts on Normal, as a new recovery
+                    // does: the step is about to be shown, so the estimate
+                    // goes out with the message that brought it on screen.
                     let new = Self::new(
                         self.network,
                         self.wallet.clone(),
@@ -812,7 +1426,8 @@ impl Step for DefineSpend {
                         self.unconfirmed_balance,
                         self.sync_status.clone(),
                         self.bitcoin_unit,
-                    );
+                    )
+                    .starting_on_normal_feerate();
                     *self = new;
                     return;
                 } else {
@@ -869,312 +1484,18 @@ impl Step for DefineSpend {
             }
             Message::View(view::Message::Previous) => {
                 self.invalidate_preparation();
+                // Back from the review step: a draft that started while
+                // preparing delivered its result to that step, where it was
+                // dropped. Draft again rather than wait on it.
+                if self.draft_pending {
+                    return self.schedule_redraft();
+                }
             }
             Message::View(view::Message::CreateSpend(msg)) => {
-                // Opening the coin list changes nothing the draft depends on.
-                if let view::CreateSpendMessage::ChooseCoins = msg {
-                    self.coins_shown = true;
-                    return Task::none();
-                }
-                if let view::CreateSpendMessage::FeeEstimated { request, .. } = &msg {
-                    if self.loading_fee_estimate.is_none()
-                        || *request != self.fee_estimate_request
-                    {
-                        return Task::none();
-                    }
-                }
-                if !matches!(msg, view::CreateSpendMessage::Generate) {
-                    self.invalidate_preparation();
-                }
-                match msg {
-                    view::CreateSpendMessage::BatchLabelEdited(label) => {
-                        self.batch_label.valid = label.len() <= 100;
-                        self.batch_label.value = label;
-                    }
-                    view::CreateSpendMessage::Clear => {
-                        *self = Self::new(
-                            self.network,
-                            self.wallet.clone(),
-                            self.coins
-                                .iter()
-                                .map(|(c, _)| c.clone())
-                                .collect::<Vec<ListCoinsEntry>>()
-                                .as_slice(),
-                            self.tip_height,
-                            self.recovery_timelock,
-                            self.is_first_step,
-                            self.balance,
-                            self.unconfirmed_balance,
-                            self.sync_status.clone(),
-                            self.bitcoin_unit,
-                        );
-                        return Task::none();
-                    }
-                    view::CreateSpendMessage::AddRecipient => {
-                        self.recipients.push(Recipient::default());
-                    }
-                    view::CreateSpendMessage::DeleteRecipient(i) => {
-                        self.recipients.remove(i);
-                        if self.recipients.len() < 2 {
-                            self.batch_label.valid = true;
-                            self.batch_label.value = "".to_string();
-                        }
-                        if let Some(j) = self.send_max_to_recipient {
-                            match j.cmp(&i) {
-                                Ordering::Equal => {
-                                    self.send_max_to_recipient = None;
-                                }
-                                Ordering::Greater => {
-                                    self.send_max_to_recipient = Some(
-                                        j.checked_sub(1)
-                                            .expect("j must be greater than 0 in this case"),
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    view::CreateSpendMessage::RecipientEdited(i, _, _)
-                    | view::CreateSpendMessage::RecipientFiatAmountEdited(i, _, _) => {
-                        self.recipients.get_mut(i).unwrap().update(
-                            cache.network,
-                            self.bitcoin_unit,
-                            msg,
-                        );
-                    }
-                    view::CreateSpendMessage::FeerateEdited(s) => {
-                        // A typed rate: no preset is selected, and a preset
-                        // fetch still in flight is dropped when it lands.
-                        self.set_feerate(s);
-                        self.custom_feerate_value = Some(self.feerate.value.clone());
-                        self.selected_feerate_target = None;
-                        self.loading_fee_estimate = None;
-                        // A feerate change must re-run coin selection: it
-                        // changes the fee and therefore `amount_left_to_select`
-                        // (which gates "Next"). Falling through to the
-                        // debounced redraft recomputes `fee_amount` too, so we
-                        // no longer clear it here or skip the redraft — doing
-                        // so left the form stuck on "Enter recipient address
-                        // and amount" whenever the feerate was edited last.
-                    }
-                    view::CreateSpendMessage::SessionError(error) => {
-                        let err: Error = error.into();
-                        let err_msg = crate::user_error::report(&err);
-                        self.warning = Some(err);
-                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                    }
-                    view::CreateSpendMessage::CustomFeerate => {
-                        self.custom_feerate = true;
-                        self.selected_feerate_target = None;
-                        // A preset fetch still in flight would replace the
-                        // custom rate when it lands: drop it.
-                        self.loading_fee_estimate = None;
-                        if let Some(value) = self
-                            .custom_feerate_value
-                            .clone()
-                            .filter(|value| *value != self.feerate.value)
-                        {
-                            return Task::done(Message::View(view::Message::CreateSpend(
-                                CreateSpendMessage::FeerateEdited(value),
-                            )));
-                        }
-                        return Task::none();
-                    }
-                    view::CreateSpendMessage::FeeEstimated { feerate, .. } => {
-                        // The pending preset's estimate (stale ones returned
-                        // above): it fills the field and stays selected.
-                        self.selected_feerate_target = self.loading_fee_estimate.take();
-                        match feerate {
-                            Some(fee) => {
-                                self.set_feerate(fee.to_string());
-                                // Falls through to the redraft, as a typed
-                                // rate does.
-                            }
-                            None => {
-                                self.selected_feerate_target = None;
-                                let err: Error = SpendCreationError::FeeEstimationFailed.into();
-                                let err_msg = crate::user_error::report(&err);
-                                self.warning = Some(err);
-                                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                            }
-                        }
-                    }
-                    view::CreateSpendMessage::FetchFeeEstimate(block_target) => {
-                        self.custom_feerate = false;
-                        self.loading_fee_estimate = Some(block_target);
-                        self.fee_estimate_request = FEE_ESTIMATE_ID.fetch_add(1, AtomicOrdering::Relaxed);
-                        let request = self.fee_estimate_request;
-                        return Task::perform(
-                            async move {
-                                let fee_estimator = FeeEstimator::new();
-                                let feerate = match block_target {
-                                    1 => fee_estimator.get_high_priority_rate().await,
-                                    6 => fee_estimator.get_mid_priority_rate().await,
-                                    _ => fee_estimator.get_low_priority_rate().await,
-                                };
-
-                                feerate
-                            },
-                            move |feerate| {
-                                Message::View(view::Message::CreateSpend(
-                                    CreateSpendMessage::FeeEstimated {
-                                        request,
-                                        feerate: feerate.ok(),
-                                    },
-                                ))
-                            },
-                        );
-                    }
-                    view::CreateSpendMessage::Generate => {
-                        if self.generating || self.tampered || !self.form_values_are_valid(false)
-                            || self.exists_duplicate() {
-                            return Task::none();
-                        }
-                        let inputs: Vec<OutPoint> = self.coins.iter()
-                            .filter_map(|(coin, selected)| selected.then_some(coin.outpoint)).collect();
-                        let outputs: HashMap<_, _> = self.recipients.iter().map(|recipient|
-                            (recipient.destination().expect("validated destination"), recipient.amount().expect("validated amount"))
-                        ).collect();
-                        let feerate_vb = self.feerate.value.parse::<u64>().unwrap_or(0);
-                        self.warning = None;
-                        self.generating = true;
-                        self.preparation_id = PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed);
-                        let generation = self.preparation_id;
-                        self.lookup_ticket = if self.recipients.is_empty() { None } else { branta::begin(self.network) };
-                        let ticket = self.lookup_ticket.clone();
-                        let recipients = self.recipients.clone();
-                        // A Vault or an imported wallet: both say which outputs are their own.
-                        let descriptor = self.wallet.main_descriptor.clone();
-                        let requests: Vec<_> = self.recipients.iter().enumerate().filter_map(|(row, recipient)| {
-                            let address = recipient.destination().ok()?.require_network(self.network).ok()?;
-                            LookupRequest::bitcoin(&recipient.address.value, &address).map(|request| (row, request))
-                        }).collect();
-                        let recovery = self.recovery_timelock.map(|timelock|
-                            (timelock, self.recipients[0].destination().expect("validated recovery address")));
-                        return Task::perform(async move {
-                            let prepare = async {
-                                if let Some((timelock, address)) = recovery {
-                                    daemon.create_recovery(address, &inputs, feerate_vb, Some(timelock)).await
-                                        .map(|psbt| (psbt, vec![])).map_err(Error::from)
-                                } else {
-                                    daemon.create_spend_tx(&inputs, &outputs, feerate_vb, None).await
-                                        .map_err(Error::from).and_then(|result| match result {
-                                            CreateSpendResult::Success { psbt, warnings } => Ok((psbt, warnings)),
-                                            CreateSpendResult::InsufficientFunds { missing } => Err(SpendCreationError::CoinSelection(
-                                                coincube_core::spend::InsufficientFunds { missing }).into()),
-                                        })
-                                }
-                            };
-                            let result = prepare.await.and_then(|(psbt, warnings)| {
-                                validate_requested_amounts(&recipients, &psbt)?;
-                                Ok((psbt, warnings))
-                            });
-                            let identities = if let (Ok((psbt, _)), Some(ticket)) = (&result, ticket) {
-                                let Some(association) = associate_recipients(&recipients, psbt) else {
-                                    // Identity metadata is optional. A recovery/send-max output
-                                    // can legitimately differ from the earlier redraft snapshot.
-                                    return (result, Vec::new());
-                                };
-                                let owned: HashSet<_> = descriptor.spend_change_indexes(psbt, &secp256k1::Secp256k1::verification_only())
-                                    .into_iter().collect();
-                                let requests = requests.into_iter().filter(|(row, _)|
-                                    association.get(*row).is_some_and(|output| !owned.contains(output))).collect();
-                                ticket.lookup_many(requests).await
-                            } else { Vec::new() };
-                            (result, identities)
-                        }, move |(result, identities)| Message::VaultSpendPrepared { generation, result, identities });
-                    }
-                    view::CreateSpendMessage::SelectCoin(i) => {
-                        if let Some(coin) = self.coins.get_mut(i) {
-                            coin.1 = !coin.1;
-                            // Once user edits selection, auto-selection can no longer be used.
-                            self.is_user_coin_selection = true;
-                        }
-                    }
-                    view::CreateSpendMessage::SendMaxToRecipient(i) => {
-                        if let Some(recipient) = self.recipients.get_mut(i) {
-                            if self.send_max_to_recipient == Some(i) {
-                                // If already set to this recipient, then unset it.
-                                self.send_max_to_recipient = None;
-                                recipient.dust_warning = None;
-                                recipient.estimated_max = None;
-                            } else {
-                                // Either it's set to some other recipient or not at all.
-                                self.send_max_to_recipient = Some(i);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Re-run coin selection after every form edit (as the
-                // pre-refactor code did unconditionally). Coin selection /
-                // `create_spend_tx` is async and potentially a network
-                // round-trip, so we schedule it debounced and off the UI
-                // thread rather than blocking on every keystroke.
-                self.tampered = self.recipients.iter()
-                    .filter_map(|recipient| destination_binding(&recipient.address.value))
-                    .any(|destination| self.tampered_destinations.contains(&destination));
-                if !self.tampered && self.warning.as_ref().is_some_and(|warning| warning.to_string().contains(TAMPER_WARNING)) {
-                    self.warning = None;
-                }
-                let redraft_task = self.schedule_redraft();
-                self.check_valid();
-                return redraft_task;
+                return self.update_spend_form(daemon, cache, msg);
             }
             Message::VaultSpendPrepared { generation, result, identities } => {
-                if !self.generating || generation != self.preparation_id {
-                    return Task::none();
-                }
-                self.generating = false;
-                let identities = if self.lookup_ticket.as_ref().is_some_and(LookupTicket::is_current) {
-                    identities
-                } else { Vec::new() };
-                if identities.iter().any(|(_, result)| matches!(result, LookupResult::Tampered)) {
-                    self.tampered = true;
-                    for (row, result) in &identities {
-                        if matches!(result, LookupResult::Tampered) {
-                            if let Some(recipient) = self.recipients.get(*row) {
-                                if let Some(destination) = destination_binding(&recipient.address.value) {
-                                    self.tampered_destinations.insert(destination);
-                                }
-                            }
-                        }
-                    }
-                    self.generated = None;
-                    self.warning = Some(Error::Unexpected(TAMPER_WARNING.to_string()));
-                    self.check_valid();
-                    return Task::none();
-                }
-                match result {
-                    Ok((psbt, warnings)) => {
-                        // Explicit BIP21 amounts are payment instructions, independent of
-                        // optional identity association and the privacy preference.
-                        if let Err(error) = validate_requested_amounts(&self.recipients, &psbt) {
-                            self.warning = Some(error);
-                            return Task::none();
-                        }
-                        let association = associate_recipients(&self.recipients, &psbt).unwrap_or_default();
-                        let bound = identities.into_iter().filter_map(|(row, result)|
-                            association.get(row).map(|vout| (*vout, result))).collect();
-                        self.recipient_identities = self.lookup_ticket.clone().map(|ticket| psbt::RecipientIdentities {
-                            ticket, transaction_id: psbt.unsigned_tx.compute_txid(), results: bound,
-                        });
-                        self.generated = Some((psbt, warnings));
-                        return Task::done(Message::View(view::Message::Next));
-                    }
-                    // Shown as the compose hint; the generic error toast would
-                    // hide why, and preparing again cannot change the outcome.
-                    Err(e) if is_amount_mismatch(&e) => {
-                        self.warning = Some(e);
-                        return Task::none();
-                    }
-                    Err(e) => {
-                        let err_msg = crate::user_error::report(&e);
-                        self.warning = Some(e);
-                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                    }
-                }
+                return self.apply_prepared_spend(generation, result, identities);
             }
             Message::Labels(res) => match res {
                 Ok(labels) => {
@@ -1186,41 +1507,9 @@ impl Step for DefineSpend {
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
             },
-            Message::CoinsTipHeight(res_coins, res_tip) => match (res_coins, res_tip) {
-                (Ok(coins), Ok(tip)) => {
-                    self.tip_height = tip as u32;
-                    // If it's a recovery spend and user has never edited the selection, then we won't pass
-                    // any selection and will let `filter_coins` select all by default.
-                    let selected = (self.recovery_timelock.is_none()
-                        || self.is_user_coin_selection)
-                        .then_some(HashSet::from_iter(self.coins.iter().filter_map(
-                            |(c, selected)| {
-                                if *selected {
-                                    Some(c.outpoint)
-                                } else {
-                                    None
-                                }
-                            },
-                        )));
-                    self.coins = filter_coins(&coins, self.recovery_timelock, tip, selected);
-                    self.sort_coins(tip as u32);
-                    // In case some selected coins are not spendable anymore and
-                    // new coins make more sense to be selected. A redraft is triggered
-                    // if all forms are valid (checked in the redraft method). This
-                    // is not a keystroke path, so run it immediately (still off the
-                    // UI thread) rather than debouncing.
-                    self.redraft_seq = self.redraft_seq.wrapping_add(1);
-                    let seq = self.redraft_seq;
-                    let task = self.run_redraft(daemon, seq);
-                    self.check_valid();
-                    return task;
-                }
-                (Err(e), _) | (Ok(_), Err(e)) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-            },
+            Message::CoinsTipHeight(res_coins, res_tip) => {
+                return self.apply_coins_tip_height(daemon, res_coins, res_tip);
+            }
             Message::RedraftDebounce(seq) => {
                 // Only the latest scheduled redraft survives; older ticks were
                 // superseded by subsequent edits that bumped `redraft_seq`.
@@ -1237,6 +1526,7 @@ impl Step for DefineSpend {
             }
                 // Ignore a stale result the user has already typed past.
                 if seq == self.redraft_seq && !self.generating => {
+                    self.draft_pending = false;
                     self.apply_redraft_result(
                         max_address,
                         recipient_with_max,
@@ -1245,6 +1535,11 @@ impl Step for DefineSpend {
                     );
                     self.check_valid();
                 }
+            // Preparation took over while this draft ran: it is dropped, so
+            // it is no longer pending.
+            Message::RedraftResult { seq, .. } if seq == self.redraft_seq => {
+                self.draft_pending = false;
+            }
             _ => {}
         }
         Task::none()
@@ -1256,6 +1551,28 @@ impl Step for DefineSpend {
 
     fn interrupt(&mut self) {
         self.invalidate_preparation();
+        // An estimate, debounce tick or draft in flight is delivered to
+        // whatever is on screen when it lands, not to this step: `resume`
+        // requests it again once the step is back. Until then the loading
+        // estimate and pending draft stay set, so Prepare stays held.
+        self.resume_fee_estimate = self.loading_fee_estimate;
+        self.resume_redraft = self.draft_pending;
+    }
+
+    fn resume(&mut self) -> Task<Message> {
+        let redraft = std::mem::take(&mut self.resume_redraft);
+        match self.resume_fee_estimate.take() {
+            // Resume an interrupted estimate or start the recovery default
+            // now that the form is visible. Earlier replies are stale.
+            Some(block_target) => self.fetch_fee_estimate(block_target),
+            _ if redraft && self.draft_pending => self.schedule_redraft(),
+            _ => Task::none(),
+        }
+    }
+
+    #[cfg(test)]
+    fn as_define_spend(&self) -> Option<&DefineSpend> {
+        Some(self)
     }
 
     fn apply(&self, draft: &mut TransactionDraft) {
@@ -1351,6 +1668,7 @@ impl Step for DefineSpend {
             } else {
                 self.warning.as_ref().map(|e| e.to_string())
             },
+            self.drafting(),
             blocking_warning,
             &self.feerate,
             self.fee_amount.as_ref(),
@@ -1386,6 +1704,14 @@ impl DefineSpend {
             self.feerate.valid = false;
         }
         self.warning = None;
+    }
+
+    /// The form is complete and its draft has not landed yet.
+    fn drafting(&self) -> bool {
+        self.draft_pending
+            && self.warning.is_none()
+            && self.form_values_are_valid(true)
+            && !self.exists_duplicate()
     }
 
     /// The coin list is open: Choose coins was pressed, the user already
@@ -1489,38 +1815,48 @@ fn validate_requested_amounts(recipients: &[Recipient], psbt: &Psbt) -> Result<(
 fn parse_payment_request(
     raw: &str,
 ) -> Result<(Address<address::NetworkUnchecked>, Option<Amount>), Error> {
-    let invalid = || Error::Unexpected("Invalid Bitcoin payment request".to_string());
     let raw = raw.trim();
     if raw
         .get(..8)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bitcoin:"))
     {
-        let uri = reqwest::Url::parse(raw).map_err(|_| invalid())?;
+        let uri = reqwest::Url::parse(raw).map_err(|_| invalid_payment_request())?;
         if uri.host_str().is_some() || uri.fragment().is_some() {
-            return Err(invalid());
+            return Err(invalid_payment_request());
         }
-        let address = Address::from_str(uri.path()).map_err(|_| invalid())?;
-        let mut amount = None;
-        for (key, value) in uri.query_pairs() {
-            if key.starts_with("req-") {
-                return Err(invalid());
-            }
-            if key == "amount" {
-                if amount.is_some() {
-                    return Err(invalid());
-                }
-                let parsed =
-                    Amount::from_str_in(&value, Denomination::Bitcoin).map_err(|_| invalid())?;
-                if parsed == Amount::ZERO {
-                    return Err(invalid());
-                }
-                amount = Some(parsed);
-            }
-        }
-        Ok((address, amount))
+        let address = Address::from_str(uri.path()).map_err(|_| invalid_payment_request())?;
+        Ok((address, payment_request_amount(&uri)?))
     } else {
-        Ok((Address::from_str(raw).map_err(|_| invalid())?, None))
+        Ok((
+            Address::from_str(raw).map_err(|_| invalid_payment_request())?,
+            None,
+        ))
     }
+}
+
+fn invalid_payment_request() -> Error {
+    Error::Unexpected("Invalid Bitcoin payment request".to_string())
+}
+
+fn payment_request_amount(uri: &reqwest::Url) -> Result<Option<Amount>, Error> {
+    let mut amount = None;
+    for (key, value) in uri.query_pairs() {
+        if key.starts_with("req-") {
+            return Err(invalid_payment_request());
+        }
+        if key == "amount" {
+            if amount.is_some() {
+                return Err(invalid_payment_request());
+            }
+            let parsed = Amount::from_str_in(&value, Denomination::Bitcoin)
+                .map_err(|_| invalid_payment_request())?;
+            if parsed == Amount::ZERO {
+                return Err(invalid_payment_request());
+            }
+            amount = Some(parsed);
+        }
+    }
+    Ok(amount)
 }
 
 #[derive(Default, Clone)]
@@ -1618,110 +1954,13 @@ impl Recipient {
     ) {
         match message {
             view::CreateSpendMessage::RecipientEdited(_, "address", address) => {
-                self.address.value = address;
-                if self.amount.value.is_empty() {
-                    if let Ok((_, Some(amount))) = parse_payment_request(&self.address.value) {
-                        self.bitcoin_unit = bitcoin_unit;
-                        self.amount.value = match bitcoin_unit {
-                            BitcoinDisplayUnit::BTC => amount.to_btc().to_string(),
-                            BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
-                        };
-                    }
-                }
-                if let Ok(address) = self.destination() {
-                    self.address.valid = address.is_valid_for_network(network);
-                    if !self.amount.value.is_empty() {
-                        self.amount.valid = self.amount().is_ok();
-                    }
-                } else if self.address.value.is_empty() {
-                    // Make the error disappear if we deleted the invalid address
-                    self.address.valid = true;
-                } else {
-                    self.address.valid = false;
-                }
+                self.edit_address(network, bitcoin_unit, address)
             }
             view::CreateSpendMessage::RecipientFiatAmountEdited(_, fiat_amt_str, converter) => {
-                // Clear any warning on the BTC amount as it is no longer the last edited field.
-                self.amount.warning = None;
-                self.fiat_converter = Some(converter);
-                if fiat_amt_str.is_empty() {
-                    self.fiat_amount = Some(form::Value::default());
-                    self.amount = form::Value::default(); // reset the BTC amount to be consistent
-                    return;
-                }
-                // Don't allow more than currency's decimal places for fiat amounts.
-                if fiat_amt_str
-                    .split_once(".")
-                    .filter(|(_, decimals)| {
-                        converter.currency().decimals() == 0
-                            || decimals.len() > converter.currency().decimals()
-                    })
-                    .is_some()
-                {
-                    return;
-                }
-                let Ok(fiat_amount) = FiatAmount::from_str_in(&fiat_amt_str, converter.currency())
-                else {
-                    // We don't save the invalid fiat amount.
-                    return;
-                };
-                match converter.convert_to_btc(&fiat_amount) {
-                    Ok(btc_amount) => {
-                        // Update both BTC and fiat amounts.
-                        self.amount.value = btc_amount.to_btc().to_string();
-                        self.bitcoin_unit = BitcoinDisplayUnit::BTC;
-                        self.amount.valid = self.amount().is_ok();
-                        self.fiat_amount = Some(form::Value {
-                            value: fiat_amt_str,
-                            valid: true,
-                            warning: None,
-                        });
-                    }
-                    Err(e) => {
-                        // Probably the BTC amount is too large.
-                        tracing::debug!("Could not convert fiat to BTC: {e}");
-                        self.fiat_amount = Some(form::Value {
-                            value: fiat_amt_str,
-                            valid: false,
-                            warning: Some(coincube_ui::locale::copy("Could not convert to BTC")),
-                        });
-                    }
-                }
+                return self.edit_fiat_amount(fiat_amt_str, converter)
             }
             view::CreateSpendMessage::RecipientEdited(_, "amount", amount) => {
-                self.bitcoin_unit = bitcoin_unit;
-                self.fiat_amount = None; // Clear any fiat amount to indicate BTC amount is now primary.
-                self.fiat_converter = None;
-                self.amount.warning = None;
-
-                // If a float has been pasted with more than 8 decimal places, and truncating
-                // it to 8 places yields a valid BTC amount, truncate it and show a warning.
-                // This can only happen on paste, as the input otherwise allows up to 8 decimal
-                // places. Sats entry has no fractional part, so it is kept as-is.
-                self.amount.value = match bitcoin_unit {
-                    BitcoinDisplayUnit::BTC => f64::from_str(&amount)
-                        .ok()
-                        .and_then(|_| amount.split_once('.'))
-                        .filter(|(_, fraction)| fraction.len() > 8)
-                        .map(|(integer, fraction)| format!("{}.{}", integer, &fraction[..8]))
-                        .filter(|truncated| {
-                            Amount::from_str_in(truncated, Denomination::Bitcoin).is_ok()
-                        })
-                        .inspect(|_| {
-                            self.amount.warning = Some(coincube_ui::locale::copy(
-                                "Amount has been truncated to 8 decimal places",
-                            ));
-                        })
-                        .unwrap_or(amount),
-                    BitcoinDisplayUnit::Sats => amount,
-                };
-
-                if !self.amount.value.is_empty() {
-                    self.amount.valid = self.amount().is_ok();
-                } else {
-                    // Make the error disappear if we deleted the invalid amount
-                    self.amount.valid = true;
-                }
+                self.edit_bitcoin_amount(bitcoin_unit, amount)
             }
             view::CreateSpendMessage::RecipientEdited(_, "label", label) => {
                 self.label.valid = label.len() <= 100;
@@ -1729,6 +1968,122 @@ impl Recipient {
             }
             _ => {}
         }
+        self.enforce_payment_request_amount();
+    }
+
+    fn edit_address(
+        &mut self,
+        network: Network,
+        bitcoin_unit: BitcoinDisplayUnit,
+        address: String,
+    ) {
+        self.address.value = address;
+        if self.amount.value.is_empty() {
+            if let Ok((_, Some(amount))) = parse_payment_request(&self.address.value) {
+                self.bitcoin_unit = bitcoin_unit;
+                self.amount.value = match bitcoin_unit {
+                    BitcoinDisplayUnit::BTC => amount.to_btc().to_string(),
+                    BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
+                };
+            }
+        }
+        if let Ok(address) = self.destination() {
+            self.address.valid = address.is_valid_for_network(network);
+            if !self.amount.value.is_empty() {
+                self.amount.valid = self.amount().is_ok();
+            }
+        } else if self.address.value.is_empty() {
+            // Make the error disappear if we deleted the invalid address
+            self.address.valid = true;
+        } else {
+            self.address.valid = false;
+        }
+    }
+
+    fn edit_fiat_amount(&mut self, fiat_amt_str: String, converter: view::FiatAmountConverter) {
+        // Clear any warning on the BTC amount as it is no longer the last edited field.
+        self.amount.warning = None;
+        self.fiat_converter = Some(converter);
+        if fiat_amt_str.is_empty() {
+            self.fiat_amount = Some(form::Value::default());
+            self.amount = form::Value::default(); // reset the BTC amount to be consistent
+            return;
+        }
+        // Don't allow more than currency's decimal places for fiat amounts.
+        if fiat_amt_str
+            .split_once(".")
+            .filter(|(_, decimals)| {
+                converter.currency().decimals() == 0
+                    || decimals.len() > converter.currency().decimals()
+            })
+            .is_some()
+        {
+            return;
+        }
+        let Ok(fiat_amount) = FiatAmount::from_str_in(&fiat_amt_str, converter.currency()) else {
+            // We don't save the invalid fiat amount.
+            return;
+        };
+        match converter.convert_to_btc(&fiat_amount) {
+            Ok(btc_amount) => {
+                // Update both BTC and fiat amounts.
+                self.amount.value = btc_amount.to_btc().to_string();
+                self.bitcoin_unit = BitcoinDisplayUnit::BTC;
+                self.amount.valid = self.amount().is_ok();
+                self.fiat_amount = Some(form::Value {
+                    value: fiat_amt_str,
+                    valid: true,
+                    warning: None,
+                });
+            }
+            Err(e) => {
+                // Probably the BTC amount is too large.
+                tracing::debug!("Could not convert fiat to BTC: {e}");
+                self.fiat_amount = Some(form::Value {
+                    value: fiat_amt_str,
+                    valid: false,
+                    warning: Some(coincube_ui::locale::copy("Could not convert to BTC")),
+                });
+            }
+        }
+        self.enforce_payment_request_amount();
+    }
+
+    fn edit_bitcoin_amount(&mut self, bitcoin_unit: BitcoinDisplayUnit, amount: String) {
+        self.bitcoin_unit = bitcoin_unit;
+        self.fiat_amount = None; // Clear any fiat amount to indicate BTC amount is now primary.
+        self.fiat_converter = None;
+        self.amount.warning = None;
+
+        // If a float has been pasted with more than 8 decimal places, and truncating
+        // it to 8 places yields a valid BTC amount, truncate it and show a warning.
+        // This can only happen on paste, as the input otherwise allows up to 8 decimal
+        // places. Sats entry has no fractional part, so it is kept as-is.
+        self.amount.value = match bitcoin_unit {
+            BitcoinDisplayUnit::BTC => f64::from_str(&amount)
+                .ok()
+                .and_then(|_| amount.split_once('.'))
+                .filter(|(_, fraction)| fraction.len() > 8)
+                .map(|(integer, fraction)| format!("{}.{}", integer, &fraction[..8]))
+                .filter(|truncated| Amount::from_str_in(truncated, Denomination::Bitcoin).is_ok())
+                .inspect(|_| {
+                    self.amount.warning = Some(coincube_ui::locale::copy(
+                        "Amount has been truncated to 8 decimal places",
+                    ));
+                })
+                .unwrap_or(amount),
+            BitcoinDisplayUnit::Sats => amount,
+        };
+
+        if !self.amount.value.is_empty() {
+            self.amount.valid = self.amount().is_ok();
+        } else {
+            // Make the error disappear if we deleted the invalid amount
+            self.amount.valid = true;
+        }
+    }
+
+    fn enforce_payment_request_amount(&mut self) {
         if let Ok((_, Some(_))) = parse_payment_request(&self.address.value) {
             if !self.amount.value.is_empty() && self.amount().is_err() {
                 self.amount.valid = false;
@@ -1806,6 +2161,12 @@ impl SaveSpend {
 }
 
 impl Step for SaveSpend {
+    fn shows_psbt(&self, txid: &coincube_core::miniscript::bitcoin::Txid) -> bool {
+        self.spend
+            .as_ref()
+            .is_some_and(|(state, _)| state.tx.psbt.unsigned_tx.compute_txid() == *txid)
+    }
+
     fn load(&mut self, _coins: &[Coin], _tip_height: i32, draft: &TransactionDraft) {
         let (psbt, warnings) = draft.generated.clone().unwrap();
         let mut tx = SpendTx::new(
@@ -1864,6 +2225,17 @@ impl Step for SaveSpend {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        // A proposal deleted from the review has nothing left to review:
+        // show the PSBTs list, which says what was deleted.
+        if let Message::View(view::Message::Psbts(view::PsbtsMessage::Deleted(name))) = &message {
+            let deleted = Message::View(view::Message::Psbts(view::PsbtsMessage::Deleted(
+                name.clone(),
+            )));
+            return Task::done(Message::View(view::Message::Menu(Menu::Vault(
+                crate::app::menu::VaultSubMenu::PSBTs(None),
+            ))))
+            .chain(Task::done(deleted));
+        }
         if self.mcp_review {
             match &message {
                 #[cfg(feature = "mcp-transactions")]
@@ -1913,6 +2285,7 @@ impl Step for SaveSpend {
             psbt_state.replay_presentation(cache),
             psbt_state.broadcast_ready(cache),
             self.mcp_review,
+            psbt_state.delete,
         );
         if let Some(modal) = &psbt_state.modal {
             modal.as_ref().view(content)
@@ -2652,7 +3025,7 @@ mod tests {
         .unwrap();
         let daemon = Arc::new(crate::daemon::client::Coincubed::new(
             crate::utils::mock::Daemon::new(vec![(
-                Some(json!({"method": "createspend", "params": [{}, [outpoint], 2, &recipient]})),
+                Some(json!({"method": "previewspend", "params": [{}, [outpoint], 2, &recipient]})),
                 Ok(response),
             )])
             .run(),
@@ -2785,10 +3158,749 @@ mod tests {
         assert!(state.coin_list_shown());
         assert_eq!(state.preparation_id, preparation, "the draft is untouched");
 
+        drop(send(&mut state, view::CreateSpendMessage::SelectCoin(0)));
+        assert!(state.is_user_coin_selection);
+        drop(send(&mut state, view::CreateSpendMessage::AutomaticCoins));
+        assert!(!state.coin_list_shown(), "Automatic closes the list");
+        assert!(
+            !state.is_user_coin_selection,
+            "the draft picks the coins again"
+        );
+
+        drop(send(&mut state, view::CreateSpendMessage::ChooseCoins));
         drop(send(&mut state, view::CreateSpendMessage::Clear));
         assert!(!state.coin_list_shown());
         drop(send(&mut state, view::CreateSpendMessage::SelectCoin(0)));
         assert!(state.coin_list_shown(), "a chosen coin keeps the list open");
+    }
+
+    /// Clear starts the fee on Normal again, as a new form does, never on an
+    /// empty Custom field; and it keeps the redraft generation counting up.
+    #[tokio::test]
+    async fn clear_resets_the_fee_to_normal() {
+        use iced_runtime::futures::futures::StreamExt;
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        drop(state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::CustomFeerate,
+            )),
+        ));
+        let seq = state.redraft_seq;
+        let task = state.update(
+            daemon,
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(view::CreateSpendMessage::Clear)),
+        );
+        assert!(state.redraft_seq > seq);
+        let messages: Vec<Message> = iced_runtime::task::into_stream(task)
+            .expect("a fee estimate request")
+            .filter_map(|action| async move {
+                match action {
+                    iced_runtime::Action::Output(message) => Some(message),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::View(view::Message::CreateSpend(
+                    view::CreateSpendMessage::FetchFeeEstimate(NORMAL_FEE_TARGET)
+                ))]
+            ),
+            "{:?}",
+            messages
+        );
+    }
+
+    /// While a complete form's draft is pending the footer says it is
+    /// calculating; the draft landing (or the form going incomplete) ends it.
+    #[tokio::test]
+    async fn a_pending_draft_reads_as_drafting_only_while_the_form_is_complete() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        assert!(state.form_values_are_valid(true), "fixture is complete");
+        drop(state.schedule_redraft());
+        assert!(state.drafting());
+        state.feerate.value.clear();
+        assert!(!state.drafting(), "an incomplete form is not drafting");
+        // The debounce firing on the incomplete form ends the pending draft.
+        let seq = state.redraft_seq;
+        drop(state.run_redraft(daemon, seq));
+        assert!(!state.draft_pending);
+    }
+
+    /// Drive one debounced redraft through `update` the way the runtime does:
+    /// fire the debounce tick, run the dispatched draft against `daemon`, and
+    /// return its `RedraftResult` for the caller to feed back.
+    async fn land_redraft(
+        state: &mut DefineSpend,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+    ) -> Message {
+        use iced_runtime::futures::futures::StreamExt;
+        let seq = state.redraft_seq;
+        let task = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::RedraftDebounce(seq),
+        );
+        let mut results: Vec<Message> = iced_runtime::task::into_stream(task)
+            .expect("a dispatched draft")
+            .filter_map(|action| async move {
+                match action {
+                    iced_runtime::Action::Output(message) => Some(message),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        assert_eq!(results.len(), 1, "one draft result");
+        results.pop().unwrap()
+    }
+
+    fn redraft_message_clone(message: &Message) -> Message {
+        match message {
+            Message::RedraftResult {
+                seq,
+                max_address,
+                recipient_with_max,
+                destinations_is_empty,
+                result: Ok(result),
+            } => Message::RedraftResult {
+                seq: *seq,
+                max_address: max_address.clone(),
+                recipient_with_max: *recipient_with_max,
+                destinations_is_empty: *destinations_is_empty,
+                result: Ok(result.clone()),
+            },
+            other => panic!("expected a successful draft, got {:?}", other),
+        }
+    }
+
+    /// A draft spending exactly `inputs` (outpoint, value) with one 1,000 sat
+    /// payment.
+    fn draft_spending(inputs: &[(OutPoint, u64)]) -> serde_json::Value {
+        use coincube_core::miniscript::bitcoin::{psbt::Input, TxIn, TxOut};
+        let mut psbt = prepared_outputs(&[1_000]);
+        psbt.unsigned_tx.input = inputs
+            .iter()
+            .map(|(outpoint, _)| TxIn {
+                previous_output: *outpoint,
+                ..Default::default()
+            })
+            .collect();
+        psbt.inputs = inputs
+            .iter()
+            .map(|(_, sats)| Input {
+                witness_utxo: Some(TxOut {
+                    value: Amount::from_sat(*sats),
+                    script_pubkey: address().script_pubkey(),
+                }),
+                ..Default::default()
+            })
+            .collect();
+        serde_json::to_value(CreateSpendResult::Success {
+            psbt,
+            warnings: vec![],
+        })
+        .unwrap()
+    }
+
+    /// Automatic, end to end: after the user picked coins, choosing Automatic
+    /// redrafts with an empty outpoint list (the daemon's automatic coin
+    /// selection), and the coins that draft spends replace the user's ticks.
+    #[tokio::test]
+    async fn automatic_redrafts_with_automatic_coin_selection() {
+        use serde_json::json;
+        let mut state = branta_form();
+        state.coins.push((coin(2, 80_000, Some(90)), false));
+        let destinations = json!({ MAINNET_ADDR: 1_000 });
+        let change = state.wallet.preview_change_address();
+        // The user's pick: both coins, by hand.
+        let idle: Arc<dyn Daemon + Sync + Send> = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        drop(state.update(
+            idle.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::SelectCoin(1),
+            )),
+        ));
+        assert!(state.is_user_coin_selection);
+        assert!(state.coins.iter().all(|(_, selected)| *selected));
+
+        drop(state.update(
+            idle,
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::AutomaticCoins,
+            )),
+        ));
+        assert!(state.drafting());
+        // Automatic selection: no outpoints passed, the daemon chooses. It
+        // picks only the second coin.
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![(
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
+                    Ok(draft_spending(&[(outpoint(2), 80_000)])),
+                )])
+                .run(),
+            ));
+        let result = land_redraft(&mut state, daemon.clone()).await;
+        drop(state.update(daemon, &Cache::default(), result));
+
+        assert!(!state.drafting());
+        assert!(!state.coin_list_shown());
+        assert_eq!(
+            state
+                .coins
+                .iter()
+                .map(|(coin, selected)| (coin.outpoint, *selected))
+                .collect::<Vec<_>>(),
+            vec![(outpoint(1), false), (outpoint(2), true)],
+            "the automatic draft's coins replace the user's"
+        );
+        assert_eq!(state.amount_left_to_select, Some(Amount::ZERO));
+        assert!(state.is_valid);
+    }
+
+    /// A draft that was running when the user pressed Clear must not land on
+    /// the cleared form, even once the cleared form has drafted again.
+    #[tokio::test]
+    async fn a_draft_from_before_clear_is_ignored() {
+        use serde_json::json;
+        let mut state = branta_form();
+        state.coins.push((coin(2, 80_000, Some(90)), false));
+        let destinations = json!({ MAINNET_ADDR: 1_000 });
+        let change = state.wallet.preview_change_address();
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![(
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
+                    Ok(draft_spending(&[(outpoint(2), 80_000)])),
+                )])
+                .run(),
+            ));
+        drop(state.schedule_redraft());
+        let stale = land_redraft(&mut state, daemon.clone()).await;
+
+        drop(state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(view::CreateSpendMessage::Clear)),
+        ));
+        let selection = |state: &DefineSpend| -> Vec<bool> {
+            state.coins.iter().map(|(_, selected)| *selected).collect()
+        };
+        let cleared_coins = selection(&state);
+        // The cleared form schedules a draft of its own. Before Clear kept the
+        // generation counting, this first post-Clear draft reused the old
+        // draft's seq, so the old result landed on the cleared form.
+        drop(state.schedule_redraft());
+        drop(state.update(
+            daemon.clone(),
+            &Cache::default(),
+            redraft_message_clone(&stale),
+        ));
+        assert_eq!(state.fee_amount, None, "no fee from the old draft");
+        assert_eq!(state.amount_left_to_select, None);
+        assert_eq!(
+            selection(&state),
+            cleared_coins,
+            "the old draft's coins are not applied"
+        );
+        // Nor does its debounce tick redraft the cleared form.
+        let Message::RedraftResult { seq, .. } = &stale else {
+            unreachable!()
+        };
+        let task = state.update(daemon, &Cache::default(), Message::RedraftDebounce(*seq));
+        assert_eq!(task.units(), 0, "a pre-Clear debounce tick does nothing");
+    }
+
+    /// Two spend forms (Send and Recovery, or a Send panel and the one that
+    /// replaced it) never share a redraft generation: results are delivered
+    /// to whichever panel is on screen, so a per-form counter let one form's
+    /// draft be accepted by another.
+    #[test]
+    fn spend_forms_never_share_a_redraft_generation() {
+        let mut send = branta_form();
+        let mut recovery = branta_form();
+        let mut seen = std::collections::HashSet::new();
+        assert!(seen.insert(send.redraft_seq));
+        assert!(seen.insert(recovery.redraft_seq));
+        for _ in 0..8 {
+            drop(send.schedule_redraft());
+            assert!(seen.insert(send.redraft_seq), "send reused a generation");
+            drop(recovery.schedule_redraft());
+            assert!(
+                seen.insert(recovery.redraft_seq),
+                "recovery reused a generation"
+            );
+        }
+    }
+
+    /// A draft started in one spend form must not land on another form that
+    /// is on screen when it completes, even on that form's first draft.
+    #[tokio::test]
+    async fn a_draft_from_another_spend_form_is_ignored() {
+        use serde_json::json;
+        let mut old_send = branta_form();
+        old_send.coins.push((coin(2, 80_000, Some(90)), false));
+        let destinations = json!({ MAINNET_ADDR: 1_000 });
+        let change = old_send.wallet.preview_change_address();
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![(
+                    Some(
+                        json!({"method": "previewspend", "params": [destinations, [], 2, change]}),
+                    ),
+                    Ok(draft_spending(&[(outpoint(2), 80_000)])),
+                )])
+                .run(),
+            ));
+        drop(old_send.schedule_redraft());
+        let stale = land_redraft(&mut old_send, daemon.clone()).await;
+
+        // A fresh form (the panel that replaced Send, or Recovery) schedules
+        // its own first draft. With per-form counters both drafts were seq 1.
+        let mut other = branta_form();
+        other.coins.push((coin(2, 80_000, Some(90)), false));
+        let selection = |state: &DefineSpend| -> Vec<bool> {
+            state.coins.iter().map(|(_, selected)| *selected).collect()
+        };
+        let coins_before = selection(&other);
+        drop(other.schedule_redraft());
+        drop(other.update(
+            daemon.clone(),
+            &Cache::default(),
+            redraft_message_clone(&stale),
+        ));
+        assert_eq!(other.fee_amount, None, "no fee from the other form's draft");
+        assert_eq!(other.amount_left_to_select, None);
+        assert!(other.draft_pending, "its own draft is still pending");
+        assert_eq!(
+            selection(&other),
+            coins_before,
+            "the other form's coins are not applied"
+        );
+        // Nor does the other form's debounce tick redraft this one.
+        let Message::RedraftResult { seq, .. } = &stale else {
+            unreachable!()
+        };
+        let task = other.update(daemon, &Cache::default(), Message::RedraftDebounce(*seq));
+        assert_eq!(task.units(), 0, "another form's debounce tick does nothing");
+    }
+
+    /// Automatic hands the choice back: Prepare waits for the automatic
+    /// draft instead of building from the coins the user had ticked.
+    #[tokio::test]
+    async fn automatic_waits_for_the_automatic_draft() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let send = |state: &mut DefineSpend, message: view::CreateSpendMessage| {
+            state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::CreateSpend(message)),
+            )
+        };
+        let seq = state.redraft_seq;
+        assert_eq!(
+            send(&mut state, view::CreateSpendMessage::AutomaticCoins).units(),
+            0,
+            "already automatic: nothing to redraft"
+        );
+        assert_eq!(state.redraft_seq, seq);
+
+        drop(send(&mut state, view::CreateSpendMessage::SelectCoin(0)));
+        state.amount_left_to_select = Some(Amount::ZERO);
+        drop(send(&mut state, view::CreateSpendMessage::AutomaticCoins));
+        assert_eq!(state.amount_left_to_select, None);
+        assert!(state.drafting());
+    }
+
+    /// Switching presets on a complete form: Prepare does not build at the
+    /// old rate while the new estimate is on its way, waits for the redraft
+    /// once it lands, and a failed estimate falls back to the rate already in
+    /// the field instead of leaving the form waiting.
+    #[tokio::test]
+    async fn a_preset_switch_holds_prepare_until_its_estimate_is_drafted() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let send = |state: &mut DefineSpend, message: view::CreateSpendMessage| {
+            state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::CreateSpend(message)),
+            )
+        };
+        // Normal's draft has landed: the form is ready to prepare.
+        state.selected_feerate_target = Some(NORMAL_FEE_TARGET);
+        state.amount_left_to_select = Some(Amount::ZERO);
+
+        // Fast: the Normal draft is set aside, and one still in flight is
+        // dropped (its generation no longer matches).
+        let seq = state.redraft_seq;
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(1),
+        ));
+        assert_eq!(state.loading_fee_estimate, Some(1));
+        assert_eq!(state.amount_left_to_select, None);
+        assert_ne!(state.redraft_seq, seq);
+        assert!(!state.draft_pending);
+        assert_eq!(
+            state.feerate.value, "2",
+            "the old rate stays until replaced"
+        );
+
+        // A draft at the old rate landing meanwhile is ignored.
+        drop(state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::RedraftResult {
+                seq,
+                max_address:
+                    Address::from_str("bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg").unwrap(),
+                recipient_with_max: None,
+                destinations_is_empty: false,
+                result: Err(SpendCreationError::FeeEstimationFailed.into()),
+            },
+        ));
+        assert_eq!(state.amount_left_to_select, None);
+        assert!(state.warning.is_none());
+
+        // Prepare is a no-op while the estimate is on its way.
+        assert_eq!(
+            send(&mut state, view::CreateSpendMessage::Generate).units(),
+            0
+        );
+        assert!(!state.generating);
+
+        // Fast's estimate lands: it fills the field and the redraft at the
+        // new rate is pending, so the footer reads "Calculating…".
+        let fast = state.fee_estimate_request;
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: fast,
+                feerate: Some(40),
+            },
+        ));
+        assert_eq!(state.loading_fee_estimate, None);
+        assert_eq!(state.selected_feerate_target, Some(1));
+        assert_eq!(state.feerate.value, "40");
+        assert_eq!(state.amount_left_to_select, None);
+        assert!(state.drafting());
+
+        // Slow fails: the field keeps Fast's 40, now shown as no preset fills
+        // it, and the form drafts it again rather than waiting forever.
+        state.amount_left_to_select = Some(Amount::ZERO);
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(24),
+        ));
+        let slow = state.fee_estimate_request;
+        // A warning from elsewhere (e.g. a failed label load) must not let
+        // Prepare through before the fallback draft lands.
+        state.warning = Some(Error::Unexpected("synthetic labels failure".into()));
+        let failed = send(
+            &mut state,
+            view::CreateSpendMessage::FeeEstimated {
+                request: slow,
+                feerate: None,
+            },
+        );
+        assert_eq!(failed.units(), 2, "the error and the redraft");
+        assert_eq!(state.loading_fee_estimate, None);
+        assert_eq!(state.selected_feerate_target, None);
+        assert_eq!(state.feerate.value, "40");
+        assert!(state.custom_feerate_shown());
+        // Reported by the error alone, so the draft still holds Prepare
+        // (a recovery or self-transfer never waits on `amount_left`).
+        assert!(state.warning.is_none());
+        assert!(state.drafting());
+        assert_eq!(
+            send(&mut state, view::CreateSpendMessage::Generate).units(),
+            0
+        );
+        assert!(!state.generating);
+
+        // Custom while a preset is fetching, with the field's rate already
+        // the custom one: nothing to restore, but the draft set aside by the
+        // fetch is drafted again.
+        state.custom_feerate_value = Some("40".into());
+        state.warning = None;
+        state.draft_pending = false;
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(6),
+        ));
+        assert!(!state.draft_pending);
+        drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
+        assert_eq!(state.loading_fee_estimate, None);
+        assert!(state.draft_pending);
+        assert!(state.drafting());
+
+        // Custom restoring a different typed rate mid-fetch: applied at
+        // once (a returned message could land on another page) and drafted.
+        state.custom_feerate_value = Some("12".into());
+        state.draft_pending = false;
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(6),
+        ));
+        drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
+        assert_eq!(state.loading_fee_estimate, None);
+        assert_eq!(state.feerate.value, "12");
+        assert!(state.drafting());
+    }
+
+    /// Leaving the step (another menu entry, or Back) while a preset's
+    /// estimate or a draft is on its way: those land on whatever is on
+    /// screen, so the step requests them again once it is shown (`resume`,
+    /// from the panel's `reload` or a step change), never while hidden, and
+    /// holds Prepare until then.
+    #[tokio::test]
+    async fn leaving_mid_fetch_or_mid_draft_resumes_once_shown_again() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let send = |state: &mut DefineSpend, message: Message| {
+            state.update(daemon.clone(), &Cache::default(), message)
+        };
+        let generate = || {
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::Generate,
+            ))
+        };
+        state.amount_left_to_select = Some(Amount::ZERO);
+
+        // Fast is fetching when the step is left.
+        drop(send(
+            &mut state,
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::FetchFeeEstimate(1),
+            )),
+        ));
+        let fast = state.fee_estimate_request;
+        state.interrupt();
+        assert_eq!(state.resume_fee_estimate, Some(1));
+        assert_eq!(state.loading_fee_estimate, Some(1), "Prepare stays held");
+
+        // While hidden, the cache refresh still reaches the panel: nothing
+        // is requested, as its result would land on another page.
+        drop(send(&mut state, Message::UpdatePanelCache(false)));
+        assert_eq!(state.resume_fee_estimate, Some(1));
+        assert_eq!(state.fee_estimate_request, fast);
+        // Prepare is refused before the step is back.
+        assert_eq!(send(&mut state, generate()).units(), 0);
+        assert!(!state.generating);
+
+        // Shown again: Fast is fetched anew.
+        assert!(state.resume().units() > 0);
+        assert_eq!(state.resume_fee_estimate, None);
+        assert_eq!(state.loading_fee_estimate, Some(1));
+        assert_ne!(state.fee_estimate_request, fast);
+        assert_eq!(state.resume().units(), 0, "nothing left to resume");
+        // The first fetch's estimate, if it does reach the step, is dropped.
+        drop(send(
+            &mut state,
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::FeeEstimated {
+                    request: fast,
+                    feerate: Some(40),
+                },
+            )),
+        ));
+        assert_eq!(state.feerate.value, "2");
+        assert_eq!(state.loading_fee_estimate, Some(1));
+
+        // A draft pending when the step is left: Prepare stays held (the
+        // previous draft's selection is stale), and the draft is requested
+        // again once shown.
+        state.loading_fee_estimate = None;
+        state.amount_left_to_select = Some(Amount::ZERO);
+        drop(state.schedule_redraft());
+        state.interrupt();
+        assert!(state.resume_redraft);
+        assert!(state.drafting());
+        drop(send(&mut state, Message::UpdatePanelCache(false)));
+        assert!(state.resume_redraft, "not while hidden");
+        assert_eq!(send(&mut state, generate()).units(), 0);
+        assert!(!state.generating);
+        let seq = state.redraft_seq;
+        assert!(state.resume().units() > 0);
+        assert!(!state.resume_redraft);
+        assert!(state.draft_pending);
+        assert_ne!(state.redraft_seq, seq);
+    }
+
+    /// A recovery's DefineSpend starts on Normal once shown, keeps the rate
+    /// the user set when Back/Next returns to the same path, and starts on
+    /// Normal again when another path (timelock) re-creates it.
+    #[tokio::test]
+    async fn recovery_form_starts_on_normal_again_after_a_path_change() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let coins = [coin(1, 50_000, Some(50))];
+        let mut state = DefineSpend::new(
+            Network::Bitcoin,
+            wallet(),
+            &coins,
+            100,
+            Some(10),
+            false,
+            Amount::from_sat(50_000),
+            Amount::ZERO,
+            SyncStatus::Synced,
+            BitcoinDisplayUnit::Sats,
+        )
+        .starting_on_normal_feerate();
+        // The panel's Next: load the step, resume it, then hand it the
+        // message.
+        let next = |state: &mut DefineSpend, timelock: u16| {
+            state.load(
+                &coins,
+                100,
+                &TransactionDraft::new(Network::Bitcoin, Some(timelock)),
+            );
+            let resumed = state.resume();
+            Task::batch([
+                resumed,
+                state.update(
+                    daemon.clone(),
+                    &Cache::default(),
+                    Message::View(view::Message::Next),
+                ),
+            ])
+        };
+
+        // First shown: Normal is fetched.
+        drop(next(&mut state, 10));
+        assert_eq!(state.loading_fee_estimate, Some(NORMAL_FEE_TARGET));
+
+        // The user types their own rate, goes Back and Next on the same path:
+        // the rate is kept, nothing is fetched.
+        drop(state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::FeerateEdited("12".into()),
+            )),
+        ));
+        assert_eq!(state.loading_fee_estimate, None);
+        state.interrupt();
+        drop(next(&mut state, 10));
+        assert_eq!(state.feerate.value, "12");
+        assert_eq!(state.loading_fee_estimate, None);
+        assert_eq!(state.resume_fee_estimate, None);
+
+        // Back, another path, Next: the re-created form starts on Normal.
+        state.interrupt();
+        drop(next(&mut state, 20));
+        assert_eq!(state.timelock(), Some(20));
+        assert_eq!(state.loading_fee_estimate, Some(NORMAL_FEE_TARGET));
+        assert_eq!(state.resume_fee_estimate, None);
+    }
+
+    /// A recovery through the real panel: its DefineSpend fetches Normal once
+    /// Next first shows it (not while the path step is on screen), Back saves
+    /// a fetch still in flight for the next Next (its estimate lands on the
+    /// path step and is lost), and a rate the user typed survives Back and
+    /// Next on the same path.
+    #[tokio::test]
+    async fn the_recovery_panel_starts_on_normal_once_and_keeps_a_typed_rate() {
+        use super::super::CreateSpendPanel;
+        use crate::app::state::State;
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let cache = Cache::default();
+        let mut panel = CreateSpendPanel::new_recovery(
+            wallet(),
+            &[coin(1, 50_000, Some(50))],
+            100,
+            Network::Bitcoin,
+            Amount::from_sat(50_000),
+            Amount::ZERO,
+            SyncStatus::Synced,
+            BitcoinDisplayUnit::Sats,
+        );
+        let form = |panel: &CreateSpendPanel| {
+            let form = panel.steps[1]
+                .as_define_spend()
+                .expect("the recovery's DefineSpend");
+            (
+                form.loading_fee_estimate,
+                form.resume_fee_estimate,
+                form.fee_estimate_request,
+                form.feerate.value.clone(),
+            )
+        };
+        let send = |panel: &mut CreateSpendPanel, message: view::Message| {
+            panel.update(Some(daemon.clone()), &cache, Message::View(message))
+        };
+
+        // On the path step, the panel's reload requests nothing of the form.
+        drop(panel.reload(Some(daemon.clone()), Some(wallet())));
+        assert_eq!(panel.current, 0);
+        let (loading, resume, _, _) = form(&panel);
+        assert_eq!(loading, None);
+        assert_eq!(resume, Some(NORMAL_FEE_TARGET));
+
+        // Next shows it: Normal is fetched, once.
+        drop(send(&mut panel, view::Message::Next));
+        assert_eq!(panel.current, 1);
+        let (loading, resume, first, _) = form(&panel);
+        assert_eq!(loading, Some(NORMAL_FEE_TARGET));
+        assert_eq!(resume, None);
+
+        // Back while it is fetching saves the fetch; Next on the same path
+        // requests it anew.
+        drop(send(&mut panel, view::Message::Previous));
+        assert_eq!(panel.current, 0);
+        assert_eq!(form(&panel).1, Some(NORMAL_FEE_TARGET));
+        drop(send(&mut panel, view::Message::Next));
+        let (loading, resume, again, _) = form(&panel);
+        assert_eq!(loading, Some(NORMAL_FEE_TARGET));
+        assert_eq!(resume, None);
+        assert_ne!(again, first);
+
+        // A typed rate survives Back and Next on the same path: nothing is
+        // fetched over it.
+        drop(send(
+            &mut panel,
+            view::Message::CreateSpend(view::CreateSpendMessage::FeerateEdited("12".into())),
+        ));
+        drop(send(&mut panel, view::Message::Previous));
+        drop(send(&mut panel, view::Message::Next));
+        assert_eq!(panel.current, 1);
+        let (loading, resume, request, rate) = form(&panel);
+        assert_eq!(rate, "12");
+        assert_eq!(loading, None);
+        assert_eq!(resume, None);
+        assert_eq!(request, again);
     }
 
     /// Fee segments map to rates: a preset fetches its block target's
@@ -2834,31 +3946,9 @@ mod tests {
         assert!(!state.custom_feerate_shown());
 
         // Custom: the field shows again with the typed 12, not Normal's 4.
-        let restore = send(&mut state, view::CreateSpendMessage::CustomFeerate);
+        drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
         assert!(state.custom_feerate_shown());
         assert_eq!(state.selected_feerate_target, None);
-        let restored: Vec<Message> = {
-            use iced_runtime::futures::futures::StreamExt;
-            iced_runtime::task::into_stream(restore)
-                .expect("a restore task")
-                .filter_map(|action| async move {
-                    match action {
-                        iced_runtime::Action::Output(message) => Some(message),
-                        _ => None,
-                    }
-                })
-                .collect()
-                .await
-        };
-        assert!(matches!(
-            restored.as_slice(),
-            [Message::View(view::Message::CreateSpend(
-                view::CreateSpendMessage::FeerateEdited(value)
-            ))] if value == "12"
-        ));
-        for message in restored {
-            drop(state.update(daemon.clone(), &Cache::default(), message));
-        }
         assert_eq!(state.feerate.value, "12");
         assert!(state.custom_feerate_shown(), "still Custom after restoring");
 

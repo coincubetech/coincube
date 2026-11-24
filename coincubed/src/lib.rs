@@ -52,6 +52,14 @@ use std::{
 
 use miniscript::bitcoin::{constants::ChainHash, hashes::Hash, secp256k1, BlockHash};
 
+/// Why an imported wallet may not run on a Bitcoin Core backend yet. Shared by
+/// every refusal so the wording cannot drift.
+const IMPORTED_ON_BITCOIND_REFUSAL: &str = "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora";
+
+fn imported_on_bitcoind_refused() -> StartupError {
+    StartupError::Config(ConfigError::Unexpected(IMPORTED_ON_BITCOIND_REFUSAL.into()))
+}
+
 /// Prepare an imported wallet without starting a backend or publishing it as a
 /// Cube. `config` must already name the final data directory; `staged_dir` is
 /// where the caller builds the private database and daemon.toml before rename.
@@ -82,9 +90,7 @@ pub fn create_imported_storage(
         config.bitcoin_backend,
         Some(config::BitcoinBackend::Bitcoind(_))
     ) {
-        return Err(StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )));
+        return Err(imported_on_bitcoind_refused());
     }
     staged_dir
         .init()
@@ -402,6 +408,10 @@ pub enum StartupError {
     Bitcoind(BitcoindError),
     Electrum(ElectrumError),
     Esplora(EsploraError),
+    /// An imported wallet was asked to run on a Bitcoin Core/Knots backend before
+    /// its database records a complete historical scan (invariant I1). The node
+    /// never establishes an imported wallet's history; Connect/Esplora must.
+    ImportedHistoryIncomplete,
 }
 
 impl fmt::Display for StartupError {
@@ -464,6 +474,11 @@ impl fmt::Display for StartupError {
             Self::Bitcoind(e) => write!(f, "Error setting up bitcoind interface: '{}'.", e),
             Self::Electrum(e) => write!(f, "Error setting up Electrum interface: '{}'.", e),
             Self::Esplora(e) => write!(f, "Error setting up Esplora interface: '{}'.", e),
+            Self::ImportedHistoryIncomplete => write!(
+                f,
+                "This imported wallet's history scan is not complete; finish it on Connect \
+                 before using a local node. Nothing was created or modified."
+            ),
         }
     }
 }
@@ -761,7 +776,7 @@ fn scan_repair_needed(
 fn heal_scan_window(
     bitcoind: &mut BitcoinD,
     db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-    descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    descriptor: &coincube_core::wallet_descriptor::WalletDescriptor,
 ) {
     // The database first, deliberately. It is a local read, and when it comes
     // back empty — every fresh install — there is no history that could fall
@@ -907,16 +922,21 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     path.replace("\\\\?\\", "").replace("\\\\?", "")
 }
 
+/// `imported` is the discovery state [`admit_imported_on_bitcoind`] admitted an
+/// imported wallet with; an imported wallet without one is refused.
 fn setup_bitcoind(
     config: &Config,
     data_dir: &DataDirectory,
     fresh_data_dir: bool,
     admitted: Option<BitcoinD>,
+    imported: Option<ImportedClaimState>,
 ) -> Result<BitcoinD, StartupError> {
-    let vault = config.main_descriptor.as_vault().ok_or_else(||
-        StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )))?;
+    let imported = match (&config.main_descriptor, imported) {
+        (coincube_core::wallet_descriptor::WalletDescriptor::Vault(_), _) => None,
+        (_, Some(state)) if state.history_complete => Some(state),
+        (_, _) => return Err(StartupError::ImportedHistoryIncomplete),
+    };
+    let wallet = &config.main_descriptor;
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = bitcoind_watchonly_wallet_path(data_dir);
 
@@ -924,19 +944,31 @@ fn setup_bitcoind(
         Some(config::BitcoinBackend::Bitcoind(bitcoind_config)) => bitcoind_config,
         _ => Err(StartupError::MissingBitcoindConfig)?,
     };
-    let bitcoind = match admitted {
+    let mut bitcoind = match admitted {
         Some(bitcoind) => bitcoind,
         None => BitcoinD::new(bitcoind_config, wo_path_str)?,
     };
-    bitcoind.node_sanity_checks(config.bitcoin_config.network, vault.is_taproot())?;
+    bitcoind.node_sanity_checks(config.bitcoin_config.network, wallet.is_taproot())?;
+    let imported_range = imported.map(|state| {
+        (
+            state.receive_index.max(state.change_index),
+            state.discovery_target,
+        )
+    });
+    if let Some((highest, target)) = imported_range {
+        bitcoind.set_imported_range(highest, target);
+    }
     if fresh_data_dir || !wo_path.exists() {
         log::info!("Creating a new watchonly wallet on bitcoind.");
-        bitcoind.create_watchonly_wallet(vault)?;
+        bitcoind.create_watchonly_wallet(wallet)?;
         log::info!("Watchonly wallet created.");
     }
     log::info!("Loading our watchonly wallet on bitcoind.");
     bitcoind.maybe_load_watchonly_wallet()?;
-    bitcoind.wallet_sanity_checks(vault)?;
+    bitcoind.wallet_sanity_checks(wallet)?;
+    if let Some((highest, target)) = imported_range {
+        bitcoind.ensure_imported_range(wallet, highest, target)?;
+    }
     log::info!("Watchonly wallet loaded on bitcoind and sanity checked.");
 
     Ok(bitcoind)
@@ -1128,6 +1160,10 @@ fn setup_esplora(
 pub struct DaemonControl {
     config: Config,
     bitcoin: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
+    // Broadcasts without locking `bitcoin`, which the poller holds for a whole
+    // wallet sync. Taken once at startup, before the poller runs. `None` for a
+    // backend that has no such handle: its broadcasts lock `bitcoin`.
+    detached_broadcaster: Option<crate::bitcoin::DetachedBroadcaster>,
     poller_sender: mpsc::SyncSender<poller::PollerMessage>,
     // FIXME: Should we require Sync on DatabaseInterface rather than using a Mutex?
     db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
@@ -1142,6 +1178,13 @@ pub struct DaemonControl {
     // Lock-free record of full-scan progress and poll outcomes, read by `get_info` for
     // the same reason as `sync_progress_cache`.
     history_sync_cache: sync::Arc<crate::bitcoin::HistorySyncCache>,
+    // The poller's latest tip and header time, read when setting a new spend's
+    // anti-fee-sniping locktime for the same reason as `sync_progress_cache`.
+    tip_time_cache: sync::Arc<crate::bitcoin::TipTimeCache>,
+    // Coins spent by a transaction we broadcast that the database does not
+    // record as spending yet, kept out of automatic coin selection. Shared by
+    // every clone of this control.
+    broadcast_holds: sync::Arc<commands::BroadcastHolds>,
 }
 
 impl DaemonControl {
@@ -1155,17 +1198,40 @@ impl DaemonControl {
         sync_progress_cache: sync::Arc<crate::bitcoin::SyncProgressCache>,
         reorg_alert_cache: sync::Arc<crate::bitcoin::ReorgAlertCache>,
         history_sync_cache: sync::Arc<crate::bitcoin::HistorySyncCache>,
+        tip_time_cache: sync::Arc<crate::bitcoin::TipTimeCache>,
     ) -> DaemonControl {
         DaemonControl {
             config,
             bitcoin,
+            detached_broadcaster: None,
             poller_sender,
             db,
             secp,
             sync_progress_cache,
             reorg_alert_cache,
             history_sync_cache,
+            tip_time_cache,
+            broadcast_holds: Default::default(),
         }
+    }
+
+    /// Share the poller's broadcast holds, so that it ends the ones this
+    /// handle's broadcasts take. See [`commands::BroadcastHolds`].
+    pub(crate) fn with_broadcast_holds(
+        mut self,
+        broadcast_holds: sync::Arc<commands::BroadcastHolds>,
+    ) -> DaemonControl {
+        self.broadcast_holds = broadcast_holds;
+        self
+    }
+
+    /// Broadcast through this handle instead of locking the backend.
+    pub(crate) fn with_detached_broadcaster(
+        mut self,
+        broadcaster: Option<crate::bitcoin::DetachedBroadcaster>,
+    ) -> DaemonControl {
+        self.detached_broadcaster = broadcaster;
+        self
     }
 
     // Useful for unit test to directly mess up with the DB
@@ -1353,7 +1419,7 @@ impl DaemonHandle {
             None
         };
         let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
-        preflight_startup_storage(&config, &data_dir, fresh_data_dir)?;
+        let imported_on_bitcoind = preflight_startup_storage(&config, &data_dir, fresh_data_dir)?;
         initialize_startup_data_directory(&data_dir)?;
         // The RPC socket name is random, so two processes would otherwise both
         // bind and the second would overwrite `rpc.socket`. Hold the datadir
@@ -1369,6 +1435,7 @@ impl DaemonHandle {
                     &data_dir,
                     fresh_data_dir,
                     admitted_local,
+                    imported_on_bitcoind,
                 )?)
             } else {
                 None
@@ -1423,12 +1490,19 @@ impl DaemonHandle {
         bit.lock()
             .expect("new backend lock is not poisoned")
             .set_history_sync_cache(history_sync_cache.clone());
+        // Taken here, before the poller exists: once it runs it holds this lock
+        // for a whole wallet sync, which is the wait this handle is there to avoid.
+        let detached_broadcaster = bit
+            .lock()
+            .expect("new backend lock is not poisoned")
+            .detached_broadcaster();
 
         // Shared, lock-free sync-progress mirror: the poller publishes into it,
         // `get_info` reads from it — so `get_info` (and the GUI's startup gate
         // that awaits it) never blocks behind the poller's full wallet scan.
         let sync_progress_cache = sync::Arc::new(crate::bitcoin::SyncProgressCache::default());
         let reorg_alert_cache = sync::Arc::new(crate::bitcoin::ReorgAlertCache::default());
+        let tip_time_cache = sync::Arc::new(crate::bitcoin::TipTimeCache::default());
 
         // Start the poller thread. Keep the thread handle to be able to check if it crashed. Store
         // an atomic to be able to stop it.
@@ -1439,7 +1513,9 @@ impl DaemonHandle {
             sync_progress_cache.clone(),
             reorg_alert_cache.clone(),
             history_sync_cache.clone(),
+            tip_time_cache.clone(),
         )?;
+        let broadcast_holds = bitcoin_poller.broadcast_holds();
         let (poller_sender, poller_receiver) = mpsc::sync_channel(1);
         let poller_handle = thread::Builder::new()
             .name("Bitcoin Network poller".to_string())
@@ -1464,7 +1540,10 @@ impl DaemonHandle {
             sync_progress_cache,
             reorg_alert_cache,
             history_sync_cache,
-        );
+            tip_time_cache,
+        )
+        .with_broadcast_holds(broadcast_holds)
+        .with_detached_broadcaster(detached_broadcaster);
 
         if with_rpc_server {
             let rpcserver_shutdown = sync::Arc::from(sync::atomic::AtomicBool::from(false));
@@ -1639,16 +1718,6 @@ fn check_startup_admission(
     if config.main_descriptor.as_imported().is_some() {
         config.check().map_err(StartupError::Config)?;
     }
-    if config.main_descriptor.as_imported().is_some()
-        && matches!(
-            config.bitcoin_backend,
-            Some(config::BitcoinBackend::Bitcoind(_))
-        )
-    {
-        return Err(StartupError::Config(ConfigError::Unexpected(
-            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
-        )));
-    }
     if let Some(backend) = connect.as_ref() {
         if backend.chain() != config.bitcoin_config.chain
             || bitcoin.is_some()
@@ -1670,7 +1739,7 @@ fn preflight_startup_storage(
     config: &Config,
     data_dir: &DataDirectory,
     fresh_data_dir: bool,
-) -> Result<(), StartupError> {
+) -> Result<Option<ImportedClaimState>, StartupError> {
     if !fresh_data_dir {
         preflight_existing_database(config, &data_dir.sqlite_db_file_path())?;
     } else if data_dir.exists() {
@@ -1685,7 +1754,36 @@ fn preflight_startup_storage(
     if config.main_descriptor.as_vault().is_some() {
         config.check().map_err(StartupError::Config)?;
     }
-    Ok(())
+    admit_imported_on_bitcoind(config, data_dir, fresh_data_dir)
+}
+
+/// Invariant I1: an imported wallet may run on a Bitcoin Core/Knots backend only
+/// once its existing database records a complete historical scan. Fresh imported
+/// storage is incomplete by definition. Reads the database without modifying it.
+///
+/// Returns the imported wallet's discovery state when it is admitted on bitcoind,
+/// so the watch-only wallet can import a range that covers it; `None` for a Vault
+/// or another backend.
+fn admit_imported_on_bitcoind(
+    config: &Config,
+    data_dir: &DataDirectory,
+    fresh_data_dir: bool,
+) -> Result<Option<ImportedClaimState>, StartupError> {
+    let on_bitcoind = matches!(
+        config.bitcoin_backend,
+        Some(config::BitcoinBackend::Bitcoind(_))
+    );
+    if config.main_descriptor.as_imported().is_none() || !on_bitcoind {
+        return Ok(None);
+    }
+    if fresh_data_dir {
+        return Err(StartupError::ImportedHistoryIncomplete);
+    }
+    let state = read_imported_claim_state(config, data_dir)?;
+    if !state.history_complete {
+        return Err(StartupError::ImportedHistoryIncomplete);
+    }
+    Ok(Some(state))
 }
 
 fn initialize_startup_data_directory(data_dir: &DataDirectory) -> Result<(), StartupError> {
@@ -1718,11 +1816,23 @@ fn heal_startup_scan_window(
 ) {
     // A wallet whose scan window starts after the coins we already know about
     // cannot track them, and nothing else notices — see `heal_scan_window`.
-    if let Some(bitcoind) = bitcoind.as_mut() {
-        if let Some(vault) = config.main_descriptor.as_vault() {
-            heal_scan_window(bitcoind, db, vault);
-        }
+    if let (Some(bitcoind), Some(wallet)) = (bitcoind.as_mut(), scan_window_wallet(config)) {
+        heal_scan_window(bitcoind, db, wallet);
     }
+}
+
+/// The wallet whose scan window the daemon heals on start-up: a Vault only.
+/// An imported wallet's history is established on Connect and transferred to the
+/// node as records, with its descriptors stamped "now"; its descriptor timestamps
+/// say nothing about the history it holds, so a time-based rescan must not be
+/// inferred from them (invariant I1).
+fn scan_window_wallet(
+    config: &Config,
+) -> Option<&coincube_core::wallet_descriptor::WalletDescriptor> {
+    config
+        .main_descriptor
+        .as_vault()
+        .map(|_| &config.main_descriptor)
 }
 
 #[cfg(test)]
@@ -2033,6 +2143,222 @@ mod tests {
         str::FromStr,
         thread, time,
     };
+
+    fn bitcoind_config_for(
+        wallet: coincube_core::wallet_descriptor::WalletDescriptor,
+        data_dir: &path::Path,
+    ) -> Config {
+        // Nothing listens here: a refusal must come before any node contact.
+        let bitcoind_config = BitcoindConfig {
+            addr: net::SocketAddr::from(([127, 0, 0, 1], 1)),
+            rpc_auth: BitcoindRpcAuth::CookieFile(path::PathBuf::from("/nonexistent/.cookie")),
+        };
+        Config::new(
+            BitcoinConfig::new(
+                ChainId::from(bitcoin::Network::Bitcoin),
+                time::Duration::from_secs(2),
+            ),
+            Some(config::BitcoinBackend::Bitcoind(bitcoind_config)),
+            log::LevelFilter::Debug,
+            wallet,
+            DataDirectory::new(data_dir.to_path_buf()),
+        )
+    }
+
+    /// The refusal every imported-on-bitcoind gate returns, with its text pinned.
+    fn assert_imported_on_bitcoind_refusal(err: StartupError) {
+        match err {
+            StartupError::Config(ConfigError::Unexpected(msg)) => assert_eq!(
+                msg,
+                "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora"
+            ),
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[test]
+    fn setup_bitcoind_refuses_an_unadmitted_imported_wallet_before_contacting_the_node() {
+        let dir = tmp_dir();
+        let config = bitcoind_config_for(imported_wallet_descriptor(), &dir);
+        let data_dir = DataDirectory::new(dir.clone());
+        let Err(err) = setup_bitcoind(&config, &data_dir, true, None, None) else {
+            panic!("an imported wallet without complete history must not be set up on bitcoind");
+        };
+        assert!(
+            matches!(err, StartupError::ImportedHistoryIncomplete),
+            "{}",
+            err
+        );
+        let mut incomplete = imported_claim_state();
+        incomplete.history_complete = false;
+        let Err(err) = setup_bitcoind(&config, &data_dir, true, None, Some(incomplete)) else {
+            panic!("incomplete history must be refused even if a caller passes its state");
+        };
+        assert!(
+            matches!(err, StartupError::ImportedHistoryIncomplete),
+            "{}",
+            err
+        );
+    }
+
+    fn imported_claim_state() -> ImportedClaimState {
+        ImportedClaimState {
+            discovery_target: 20,
+            receive_scanned: 20,
+            change_scanned: 20,
+            history_complete: true,
+            receive_index: 0,
+            change_index: 0,
+        }
+    }
+
+    fn with_backend(mut config: Config, backend: config::BitcoinBackend) -> Config {
+        config.bitcoin_backend = Some(backend);
+        config
+    }
+
+    /// An imported wallet's database in `dir`, created as the import would, and
+    /// optionally marked as having completed its historical scan.
+    fn imported_wallet_in(dir: &path::Path, complete: bool) -> Config {
+        let mut config = bitcoind_config_for(imported_wallet_descriptor(), dir);
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        let data_dir = DataDirectory::new(dir.to_path_buf());
+        data_dir.init().unwrap();
+        database::sqlite::create_imported_db(
+            &data_dir.sqlite_db_file_path(),
+            config.bitcoin_config.chain,
+            config.main_descriptor.as_imported().unwrap(),
+            0,
+            20,
+        )
+        .unwrap();
+        if complete {
+            complete_imported_history_for_test(&config, &data_dir, 20, 20).unwrap();
+        }
+        config
+    }
+
+    #[test]
+    fn imported_wallet_runs_on_bitcoind_only_with_complete_history() {
+        let electrum = config::BitcoinBackend::Electrum(config::ElectrumConfig {
+            addr: "tcp://127.0.0.1:1".into(),
+            validate_domain: true,
+        });
+        let esplora = config::BitcoinBackend::Esplora(config::EsploraConfig {
+            addr: "https://127.0.0.1:1".into(),
+            token: None,
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        });
+        let vault_dir = tmp_dir();
+        let vault = bitcoind_config_for(
+            vault_wallet_descriptor(concat!(
+                "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+                "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+                "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+                "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+            )),
+            &vault_dir,
+        );
+        let complete_dir = tmp_dir();
+        let complete = imported_wallet_in(&complete_dir, true);
+        let incomplete_dir = tmp_dir();
+        let incomplete = imported_wallet_in(&incomplete_dir, false);
+
+        for (name, config, dir) in [
+            ("vault", &vault, &vault_dir),
+            ("imported-complete", &complete, &complete_dir),
+            ("imported-incomplete", &incomplete, &incomplete_dir),
+        ] {
+            let data_dir = DataDirectory::new(dir.clone());
+            // Electrum and Esplora: always admitted, with no state for the node.
+            for backend in [&electrum, &esplora] {
+                let config = with_backend(config.clone(), backend.clone());
+                assert!(
+                    admit_imported_on_bitcoind(&config, &data_dir, false)
+                        .unwrap()
+                        .is_none(),
+                    "{} on a non-node backend",
+                    name
+                );
+            }
+            // Bitcoind: refused only for incomplete imported history.
+            let admitted = admit_imported_on_bitcoind(config, &data_dir, false);
+            match name {
+                "vault" => assert!(admitted.unwrap().is_none()),
+                "imported-complete" => {
+                    let state = admitted
+                        .unwrap()
+                        .expect("admitted with its discovery state");
+                    assert!(state.history_complete);
+                    assert_eq!(state.discovery_target, 20);
+                }
+                _ => assert!(matches!(
+                    admitted,
+                    Err(StartupError::ImportedHistoryIncomplete)
+                )),
+            }
+        }
+        // Fresh imported storage is incomplete by definition.
+        assert!(matches!(
+            admit_imported_on_bitcoind(&complete, &DataDirectory::new(tmp_dir()), true),
+            Err(StartupError::ImportedHistoryIncomplete)
+        ));
+    }
+
+    #[test]
+    fn startup_admission_no_longer_refuses_imported_bitcoind_by_config_alone() {
+        // The history check needs the database, so it moved to the storage
+        // preflight (`admit_imported_on_bitcoind`); the config-only stage passes.
+        let mut config = bitcoind_config_for(imported_wallet_descriptor(), &tmp_dir());
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        check_startup_admission(&config, &None::<DummyBitcoind>, &None, |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn preflight_refuses_incomplete_imported_history_on_bitcoind_before_any_write() {
+        let dir = tmp_dir();
+        let config = imported_wallet_in(&dir, false);
+        let data_dir = DataDirectory::new(dir.clone());
+        assert!(matches!(
+            preflight_startup_storage(&config, &data_dir, false),
+            Err(StartupError::ImportedHistoryIncomplete)
+        ));
+        assert!(!data_dir.coincubed_watchonly_wallet_path().exists());
+    }
+
+    #[test]
+    fn imported_storage_is_never_created_for_bitcoind() {
+        let dir = tmp_dir();
+        let config = bitcoind_config_for(imported_wallet_descriptor(), &dir.join("final"));
+        let staged = DataDirectory::new(dir.join("staged"));
+        let err = create_imported_storage(&config, &staged, 0, 20).unwrap_err();
+        assert_imported_on_bitcoind_refusal(err);
+        assert!(!staged.path().exists(), "refused before staging anything");
+    }
+
+    #[test]
+    fn startup_scan_window_healing_is_vault_only() {
+        // `heal_startup_scan_window` needs a live `BitcoinD`; this is the gate it
+        // goes through, tested directly.
+        let dir = tmp_dir();
+        let imported = bitcoind_config_for(imported_wallet_descriptor(), &dir);
+        assert!(scan_window_wallet(&imported).is_none());
+        let vault = bitcoind_config_for(
+            vault_wallet_descriptor(concat!(
+            "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+            "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+            "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+            "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+            )),
+            &dir,
+        );
+        assert_eq!(scan_window_wallet(&vault), Some(&vault.main_descriptor));
+    }
 
     // Validate one complete JSON object without waiting for the peer to close the socket.
     fn read_til_json_end(stream: &mut net::TcpStream) {

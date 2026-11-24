@@ -386,6 +386,7 @@ pub struct Cache {
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
     pub btc_usd_price: Option<f64>,
+    pub(crate) btc_usd_requested_at: Option<Instant>,
     /// Whether to show direction badges (receive/spend arrows) on transaction rows.
     pub show_direction_badges: bool,
     /// Cached Lightning Address for display in the sidebar across all panels
@@ -565,6 +566,7 @@ impl std::default::Default for Cache {
             connect_panel_open: false,
             cube_lock_confirmation: false,
             btc_usd_price: None,
+            btc_usd_requested_at: None,
             show_direction_badges: true,
             lightning_address: None,
             avatar_handle: None,
@@ -869,12 +871,12 @@ impl Cache {
         }
         let mut changed = false;
         for (outpoint, entry) in results {
-            if matches!(
-                self.chain_proofs.get(&outpoint),
-                Some(ProofEntry::Verified(_))
-            ) {
+            let previous = self.chain_proofs.get(&outpoint);
+            if matches!(previous, Some(ProofEntry::Verified(_))) {
                 continue;
             }
+            // A check that couldn't finish never drops a saved path.
+            let entry = ProofEntry::after_check(previous, entry);
             self.chain_proofs.insert(outpoint, entry);
             changed = true;
         }
@@ -1536,6 +1538,7 @@ impl Cache {
             || self.display_mode != DisplayMode::BitcoinNative;
         self.fiat_price = None;
         self.btc_usd_price = None;
+        self.btc_usd_requested_at = None;
         self.display_mode = DisplayMode::BitcoinNative;
         changed
     }
@@ -1552,6 +1555,7 @@ impl Cache {
             return false;
         }
         self.btc_usd_price = None;
+        self.btc_usd_requested_at = None;
         self.fiat_price = Some(price);
         if !self.btcb2_price_usable() {
             self.clear_btcb2_fiat();

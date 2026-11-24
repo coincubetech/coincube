@@ -26,6 +26,7 @@ fn backend(addr: SocketAddr) -> BitcoinD {
         retries: BITCOIND_RETRY_LIMIT,
         config,
         record_replay: Default::default(),
+        imported_range: None,
     };
     bit.record_replay.acknowledge(1);
     bit
@@ -298,17 +299,18 @@ fn unreachable_node_is_not_absence_or_rescan_completion() {
     assert!(bit.try_list_since_block(&hash).is_err());
     assert!(bit.try_chain_tip().is_err());
     assert!(bit.try_sync_progress().is_err());
+    assert!(bit.try_block_time(&hash).is_err());
 }
 
 #[test]
 fn polling_transport_errors_make_one_attempt_per_read() {
     // Closed-port connection timing differs across operating systems. Count
-    // real accepted connections instead of timing seven connection refusals.
+    // real accepted connections instead of timing each read's connection refusal.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut bit = backend(listener.local_addr().unwrap());
     // A regression into the generic retry path must fail without making the
-    // test spend a minute on each of the seven reads.
+    // test spend a minute on each of these reads.
     bit.retries = 2;
     let (stop, stopped) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
@@ -347,11 +349,38 @@ fn polling_transport_errors_make_one_attempt_per_read() {
         bit.try_list_since_block(&hash).is_err(),
         bit.try_chain_tip().is_err(),
         bit.try_sync_progress().is_err(),
+        bit.try_block_time(&hash).is_err(),
+        // What the poller actually calls to publish the tip's time, through the
+        // trait (#1478): it must stay on the poll client, not fall back to the
+        // retrying `tip_time` while the poller holds the backend mutex.
+        crate::bitcoin::BitcoinInterface::try_tip_time(
+            &bit,
+            &crate::bitcoin::BlockChainTip { hash, height: 0 },
+        )
+        .is_err(),
     ];
     stop.send(()).unwrap();
     let requests = worker.join().unwrap();
     assert!(failures.iter().all(|failed| *failed));
-    assert_eq!(requests, 7, "polling must not retry a transport failure");
+    assert_eq!(requests, 9, "polling must not retry a transport failure");
+}
+
+/// The poller's tip time is the header time of the very block it holds.
+#[test]
+fn block_time_reads_the_header_of_the_given_block() {
+    let hash = bitcoin::BlockHash::all_zeros();
+    let time = response(
+        "getblockheader",
+        serde_json::json!({
+            "confirmations": 1,
+            "height": 900_000,
+            "time": 1_700_000_000u32,
+            "mediantime": 1_699_999_000u32,
+        }),
+        Json::Null,
+        |bit| bit.try_block_time(&hash),
+    );
+    assert_eq!(time, Ok(1_700_000_000));
 }
 
 #[test]
@@ -1434,4 +1463,140 @@ fn local_fork_tip_movement_retries_a_complete_snapshot_with_a_fixed_bound() {
             Err(BitcoindError::LocalForkTipChanged)
         ))
     });
+}
+
+fn listed(ends: [u32; 2]) -> Json {
+    let imported = crate::testutils::imported_wallet_descriptor();
+    let (receive, change) = imported.branches_public();
+    serde_json::json!({"descriptors": [
+        {"desc": receive.to_string(), "range": [0, ends[0]], "timestamp": 1},
+        {"desc": change.to_string(), "range": [0, ends[1]], "timestamp": 1},
+    ]})
+}
+
+fn widen(bit: &mut BitcoinD, highest_index: u32) -> Result<(), BitcoindError> {
+    let imported = crate::testutils::imported_wallet_descriptor();
+    bit.widen_imported_range(imported.branches_public(), highest_index, 20)
+}
+
+#[test]
+fn a_failed_range_widening_is_an_error_for_the_poller_not_a_panic() {
+    // An RPC failure on the re-import used to panic the poller thread.
+    let result = responses(
+        vec![
+            ("listdescriptors", listed([1_000, 1_000]), Json::Null),
+            (
+                "importdescriptors",
+                Json::Null,
+                serde_json::json!({"code": -1, "message": "node restarting"}),
+            ),
+        ],
+        |bit| {
+            bit.set_imported_range(0, 20);
+            let result = widen(bit, 990);
+            (result, bit.imported_range)
+        },
+    );
+    assert!(
+        matches!(result.0, Err(BitcoindError::Server(_))),
+        "{:?}",
+        result.0
+    );
+    // Nothing was widened: the ranges are the ones the node listed.
+    assert_eq!(result.1, Some(ImportedRange::from_listed([1_000, 1_000])));
+}
+
+#[test]
+fn a_partly_refused_widening_maps_with_what_the_node_lists() {
+    let result = responses(
+        vec![
+            // Core already extended the receive branch by itself.
+            ("listdescriptors", listed([1_900, 1_000]), Json::Null),
+            (
+                "importdescriptors",
+                serde_json::json!([{"success": false, "error": {"code": -8}}, {"success": true}]),
+                Json::Null,
+            ),
+        ],
+        |bit| {
+            bit.set_imported_range(0, 20);
+            let result = widen(bit, 990);
+            (result, bit.imported_range)
+        },
+    );
+    assert!(
+        matches!(
+            result.0,
+            Err(BitcoindError::Wallet(
+                _,
+                WalletError::ImportingDescriptor(_)
+            ))
+        ),
+        "{:?}",
+        result.0
+    );
+    // Mapping searches both branches as far as the longer one.
+    assert_eq!(
+        result.1,
+        Some(ImportedRange {
+            covered: 1_000,
+            watched: 1_900
+        })
+    );
+}
+
+#[test]
+fn a_widening_never_requests_less_than_a_branch_already_has() {
+    let (request_range, range) = responses(
+        vec![
+            ("listdescriptors", listed([1_900, 1_000]), Json::Null),
+            (
+                "importdescriptors",
+                serde_json::json!([{"success": true}, {"success": true}]),
+                Json::Null,
+            ),
+        ],
+        |bit| {
+            bit.set_imported_range(0, 20);
+            widen(bit, 990).unwrap();
+            (imported_range_end(990, 20), bit.imported_range)
+        },
+    );
+    // 990 + 2 x 20 = 1030 would shrink the receive branch; 1900 is requested.
+    assert_eq!(request_range, 1_030);
+    assert_eq!(
+        range,
+        Some(ImportedRange {
+            covered: 1_900,
+            watched: 1_900
+        })
+    );
+}
+
+#[test]
+fn refreshing_adopts_the_ranges_the_node_lists() {
+    let refreshed = responses(
+        vec![("listdescriptors", listed([2_100, 1_005]), Json::Null)],
+        |bit| {
+            bit.set_imported_range(0, 20);
+            let imported = crate::testutils::imported_wallet_descriptor();
+            bit.refresh_imported_range(imported.branches_public())
+                .unwrap();
+            bit.imported_range
+        },
+    );
+    assert_eq!(
+        refreshed,
+        Some(ImportedRange {
+            covered: 1_005,
+            watched: 2_100
+        })
+    );
+    // A Vault has no imported range to refresh, and asks the node nothing.
+    let mut vault = backend("127.0.0.1:1".parse().unwrap());
+    let imported = crate::testutils::imported_wallet_descriptor();
+    vault
+        .refresh_imported_range(imported.branches_public())
+        .unwrap();
+    assert_eq!(vault.imported_range, None);
 }

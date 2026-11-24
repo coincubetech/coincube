@@ -249,16 +249,32 @@ pub fn extended_path(
 /// Add [`Derived::proofs`] to the cache's ancestry results. A derived path
 /// only fills a gap: it never replaces a check's own answer, verified or not,
 /// so a coin a check found no path for keeps that answer until it is due
-/// again. Returns whether anything was added.
+/// again. A check that could not finish is not an answer, so the path fills
+/// in beside it ([`ProofEntry::SavedRetry`]). Returns whether anything was
+/// added.
 pub fn merge_proofs(
     chain_proofs: &mut HashMap<OutPoint, ProofEntry>,
     derived: Vec<(OutPoint, ProofEntry)>,
 ) -> bool {
     let mut added = false;
     for (outpoint, entry) in derived {
-        if let std::collections::hash_map::Entry::Vacant(slot) = chain_proofs.entry(outpoint) {
-            slot.insert(entry);
-            added = true;
+        match chain_proofs.entry(outpoint) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+                added = true;
+            }
+            // A check that couldn't finish is no answer: the derived path
+            // fills in and keeps the failure's retry time.
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if let (ProofEntry::Failed { failed_at }, Some(path)) = (slot.get(), entry.path()) {
+                    let failed_at = *failed_at;
+                    slot.insert(ProofEntry::SavedRetry {
+                        path: path.clone(),
+                        failed_at,
+                    });
+                    added = true;
+                }
+            }
         }
     }
     added
@@ -704,6 +720,37 @@ fn spent_by(raw: &[u8], txid: Txid) -> Option<HashSet<OutPoint>> {
         .then(|| tx.input.iter().map(|input| input.previous_output).collect())
 }
 
+/// Where a split build is, for the review's status line while it runs.
+/// Checking the split key asks Connect about both chains and can take a
+/// while; the user should see which part is slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStage {
+    CheckingKey,
+    CheckingCoins,
+    Building,
+    Saving,
+}
+
+impl BuildStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            BuildStage::CheckingKey => "Checking the split key on both chains",
+            BuildStage::CheckingCoins => "Checking the coins",
+            BuildStage::Building => "Building the transaction",
+            BuildStage::Saving => "Saving the split",
+        }
+    }
+
+    /// The stage a build of `method` starts in, shown from the moment the
+    /// user presses Sign and send.
+    pub fn first(method: Method) -> Self {
+        match method {
+            Method::SplitKey => BuildStage::CheckingKey,
+            Method::Signature => BuildStage::CheckingCoins,
+        }
+    }
+}
+
 /// Build the split, store it with the daemon, and return it for the PSBT
 /// screen. The caller records it in the journal. For [`Method::SplitKey`]
 /// the key is re-qualified against both chains first; nothing is built if
@@ -719,6 +766,7 @@ pub async fn prepare(
     client: crate::services::coincube::CoincubeClient,
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
+    mut progress: iced_runtime::task::Sender<BuildStage>,
 ) -> Result<Prepared, String> {
     let chain = wallet.chain;
     if !crate::services::chain_status::checks_enabled(chain) {
@@ -736,6 +784,7 @@ pub async fn prepare(
         (Method::Signature, _) => None,
     };
     if let Some(key) = &key {
+        progress.send(BuildStage::CheckingKey).await;
         requalify(&client, chain, key, generation, live.clone()).await?;
     }
     let mut requested: BTreeSet<OutPoint> = coins.iter().copied().collect();
@@ -748,6 +797,7 @@ pub async fn prepare(
         }
     }
     let requested: Vec<OutPoint> = requested.into_iter().collect();
+    progress.send(BuildStage::CheckingCoins).await;
     let mut fresh = daemon
         .list_coins(&[CoinStatus::Confirmed], &requested)
         .await
@@ -769,6 +819,7 @@ pub async fn prepare(
     if !crate::services::claim_observation::session_current(&live, generation) {
         return Err("The session changed. Try again.".into());
     }
+    progress.send(BuildStage::Building).await;
     let psbt = match daemon
         .create_spend_tx(&requested, &HashMap::new(), feerate_vb, None)
         .await
@@ -783,6 +834,7 @@ pub async fn prepare(
         }
     };
     check_construction(&psbt, &requested)?;
+    progress.send(BuildStage::Saving).await;
     daemon
         .update_spend_tx(&psbt)
         .await
@@ -1200,9 +1252,6 @@ mod tests {
             ProofEntry::NoQualifyingAncestry {
                 checked_at: UNIX_EPOCH,
             },
-            ProofEntry::Failed {
-                failed_at: UNIX_EPOCH,
-            },
         ] {
             let mut proofs: HashMap<_, _> = [(output, answer.clone())].into();
             assert!(!merge_proofs(&mut proofs, derived()));
@@ -1212,6 +1261,22 @@ mod tests {
                 "a check's own answer stays"
             );
         }
+
+        // A check that couldn't finish is no answer: the path fills in and
+        // the failure's retry time stays.
+        let mut proofs: HashMap<_, _> = [(
+            output,
+            ProofEntry::Failed {
+                failed_at: UNIX_EPOCH,
+            },
+        )]
+        .into();
+        assert!(merge_proofs(&mut proofs, derived()));
+        assert!(matches!(
+            proofs.get(&output),
+            Some(ProofEntry::SavedRetry { failed_at, .. }) if *failed_at == UNIX_EPOCH
+        ));
+        assert!(!merge_proofs(&mut proofs, derived()), "already there");
     }
 
     #[test]
@@ -2053,6 +2118,160 @@ mod tests {
                     None
                 );
             }
+        }
+    }
+
+    /// What a build reports while it runs: the stages in order, none for a
+    /// request refused up front, and nothing past the step that failed.
+    mod build_stages {
+        use super::*;
+        use crate::{
+            daemon::{client::Coincubed, DaemonError},
+            services::split_test_wallets::{imported_fork_vault, Shape},
+            utils::mock::Daemon as MockDaemon,
+        };
+        use iced::futures::{channel::mpsc, StreamExt};
+        use serde_json::{json, Value};
+
+        type Reply = (Option<Value>, Result<Value, DaemonError>);
+
+        fn shared() -> [OutPoint; 2] {
+            [
+                OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 0),
+                OutPoint::new(Txid::from_str(&"22".repeat(32)).unwrap(), 1),
+            ]
+        }
+
+        fn list_coins(outpoints: &[OutPoint]) -> Reply {
+            let coins: Vec<_> = outpoints
+                .iter()
+                .map(|outpoint| coin(*outpoint, Some(100)))
+                .collect();
+            (None, Ok(json!({ "coins": coins })))
+        }
+
+        /// A self-send of exactly `inputs` into one output of the wallet.
+        fn create_spend(inputs: &[OutPoint]) -> Reply {
+            let mut psbt = Psbt::from_unsigned_tx(tx(inputs.to_vec(), None)).unwrap();
+            psbt.outputs[0].bip32_derivation.insert(
+                coincube_core::miniscript::bitcoin::secp256k1::PublicKey::from_str(
+                    "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+                )
+                .unwrap(),
+                (Default::default(), Default::default()),
+            );
+            (
+                None,
+                Ok(json!({ "psbt": psbt.to_string(), "warnings": [] })),
+            )
+        }
+
+        async fn run(
+            replies: Vec<Reply>,
+            method: Method,
+            coins: Vec<OutPoint>,
+            key: Option<KeyChoice>,
+        ) -> (Result<Prepared, String>, Vec<BuildStage>) {
+            let daemon: Arc<dyn Daemon + Send + Sync> =
+                Arc::new(Coincubed::new(MockDaemon::new(replies).run()));
+            let wallet = Arc::new(imported_fork_vault(Shape::Wpkh));
+            assert!(wallet.chain.is_blake2b());
+            let (_session, live) = tokio::sync::watch::channel(7);
+            let (sender, receiver) = mpsc::channel(16);
+            let result = prepare(
+                daemon,
+                wallet,
+                method,
+                coins,
+                key,
+                2,
+                crate::services::coincube::CoincubeClient::new(),
+                7,
+                live,
+                sender.into(),
+            )
+            .await;
+            (result, receiver.collect().await)
+        }
+
+        #[tokio::test]
+        async fn a_build_reports_its_stages_in_order() {
+            let coins = shared();
+            let (result, stages) = run(
+                vec![
+                    list_coins(&coins),
+                    create_spend(&coins),
+                    (None, Ok(json!({}))),
+                ],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(
+                stages,
+                [
+                    BuildStage::CheckingCoins,
+                    BuildStage::Building,
+                    BuildStage::Saving,
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_request_reports_no_stage() {
+            let (result, stages) = run(vec![], Method::Signature, vec![], None).await;
+            assert!(result.is_err());
+            assert!(stages.is_empty(), "{:?}", stages);
+        }
+
+        #[tokio::test]
+        async fn a_failed_step_reports_nothing_after_it() {
+            let coins = shared();
+            // The coins changed: never "Building".
+            let (result, stages) = run(
+                vec![list_coins(&coins[..1])],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(stages, [BuildStage::CheckingCoins]);
+
+            // Not enough for the fee: stops at "Building".
+            let (result, stages) = run(
+                vec![list_coins(&coins), (None, Ok(json!({ "missing": 500 })))],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().contains("500 sats short"));
+            assert_eq!(stages, [BuildStage::CheckingCoins, BuildStage::Building]);
+        }
+
+        /// A split key is checked first; a proof that fails stops the build
+        /// before the coins are read.
+        #[tokio::test]
+        async fn a_split_key_is_checked_first() {
+            let (record, _) = split_fixture();
+            let path = RetainedPath::decode(
+                record.key.unwrap(),
+                &hex::decode(record.key_path.unwrap()).unwrap(),
+            )
+            .unwrap();
+            // The proof is for another coin than the key, so it fails before
+            // anything asks Connect.
+            let key = KeyChoice {
+                outpoint: shared()[1],
+                path,
+            };
+            let (result, stages) =
+                run(vec![], Method::SplitKey, vec![shared()[0]], Some(key)).await;
+            assert!(result.unwrap_err().contains("doesn't match"));
+            assert_eq!(stages, [BuildStage::CheckingKey]);
         }
     }
 

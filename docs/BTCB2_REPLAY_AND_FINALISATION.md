@@ -97,7 +97,7 @@ share a txid and differ in wtxid.
 
 How leftover signatures can arise:
 
-- Keychain keys are classified `ReplayProtection::Legacy` until Lane B3
+- Mobile keys are classified `ReplayProtection::Legacy` until Lane B3
   (`state/vault/signers.rs`). Hardware is `UserMarked`, default unmarked =
   not capable. A mixed witness can legitimately need one or more of those
   legacy signatures alongside a unified signature.
@@ -126,7 +126,7 @@ refused. A legacy signature required by a mixed witness is preserved when the
 legacy set is insufficient on its own; legacy-only and incomplete spends keep
 their existing replay status.
 
-The policy runs on the desktop's local/device/Keychain/import merge result,
+The policy runs on the desktop's local/device/Mobile/import merge result,
 daemon first insert and merge, export, reload status, and the daemon's final
 broadcast check. All refusals are atomic: no signature is silently removed and
 an existing stored or in-memory PSBT stays byte-identical. An unsafe row made
@@ -138,7 +138,7 @@ merge, persistence, export, and finalisation behavior.
 Coincube blocks new unsafe legacy alternatives at its guarded merge,
 persistence, export, and finalisation boundaries. Rows created by older builds
 remain stored, but once detected they cannot be exported or broadcast. The app
-cannot revoke signatures that already left on a Keychain, a hardware device,
+cannot revoke signatures that already left on a phone, a hardware device,
 an exported file, or another coordinator. A separately retained legacy-only
 copy remains usable if it independently meets the script.
 
@@ -200,14 +200,14 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
 
 - **Signer index** (`state/vault/signers.rs`): `ReplayProtection::{Capable,
   Legacy, UserMarked(bool)}` — hot key and Border Wallet keys are capable,
-  Keychain keys are `Legacy` until Lane B3, devices carry the user's mark
+  Mobile keys are `Legacy` until Lane B3, devices carry the user's mark
   (`KeySetting::replay_protected`, sparse on disk, unmarked = `false`). The
   Settings toggle that sets a mark is not in this slice; `UserMarked(true)`
   is reachable only through the settings file until it lands.
 - **Signing** (`state/vault/psbt.rs`): on BTCB2 the hot key and Border Wallet
   sign unified (`Signer::sign_psbt_unified`,
-  `sign_psbt_with_border_wallet_unified`); hardware and Keychain sign legacy as
-  before. Before any signer — local, device or Keychain — is dispatched, the
+  `sign_psbt_with_border_wallet_unified`); hardware and Mobile signers sign legacy as
+  before. Before any signer — local, device or Mobile — is dispatched, the
   PSBT is refused if any input asks for or carries `ANYONECANPAY`, carries a
   reserved unified record the adapter rejects, or carries Taproot signature
   data at all (a Blake2b Vault is P2WSH; Taproot signatures bring their own
@@ -221,7 +221,7 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   verification needs — so the desktop never holds a PSBT the daemon would
   reject and a conflicting or invalid signature never overwrites a stored one.
   The merge destination is therefore always the local, authenticated PSBT:
-  the Keychain API rail (`keychain_sign.rs`, `on_session_fetched`) seeds its
+  the Mobile signing API rail (`keychain_sign.rs`, `on_session_fetched`) seeds its
   accumulator from a clone of `tx.psbt` and merges every returned blob into
   that clone — the first included, so the adapter's transaction check binds
   every return to the request, not only the last — and assigns `tx.psbt` only
@@ -232,7 +232,7 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   historical copy applied in submission order, last write wins on a key —
   and pinned byte-for-byte against the former composition. A signer result's
   Taproot fields never enter: the adapter merge carries signatures only, and
-  the dispatch guard refuses such a PSBT before any signer sees it. The Keychain flow's "who still has to sign" classification uses
+  the dispatch guard refuses such a PSBT before any signer sees it. The Mobile signing flow's "who still has to sign" classification uses
   the same chain-keyed analysis, so a collected unified signature is not asked
   for again.
 - **Status** (`state/vault/replay.rs`): four states derived from the
@@ -267,7 +267,7 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   hot key or Border Wallet signature that satisfies it can still be collected.
   Consequence, accepted deliberately: a Vault whose only usable path has no
   replay-capable signer cannot spend a known-entangled coin until Lane B3
-  (Keychain unified) or B1.5 (split) — which is why the creation notice exists.
+  (Mobile unified signing) or B1.5 (split) — which is why the creation notice exists.
   **Cache lifecycle:** *Entangled* is terminal (never re-queried, never
   overwritten); *Not entangled* carries the instant it was resolved and is
   re-queried by the sync task once older than one hour (anyone holding the
@@ -307,7 +307,7 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
 
 ## Not in this slice
 
-Keychain unified signing (Lane B3); the Settings → Signers replay-mark toggle;
+Mobile unified signing (Lane B3); the Settings → Signers replay-mark toggle;
 poison-split evidence and the *Split* state's producer (B1.5); BTCB2 runtime
 activation — every path above is chain-gated and, in this build, a BTCB2 Cube
 is refused before a Vault opens (B1.3).

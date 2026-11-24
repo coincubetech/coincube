@@ -558,6 +558,15 @@ impl Wallet {
         self.is_imported() || (self.keychain_keys_recorded && self.keychain_key_ids.is_empty())
     }
 
+    /// Whether `fingerprint` could be a key held in the COINCUBE Keychain,
+    /// and so reachable through Connect. Certain once the Vault recorded
+    /// which keys came from it; a Vault without that record may still hold
+    /// one, so any of its keys could be. An imported wallet never has one.
+    pub fn may_hold_keychain_key(&self, fingerprint: &Fingerprint) -> bool {
+        !self.is_imported()
+            && (!self.keychain_keys_recorded || self.keychain_key_ids.contains_key(fingerprint))
+    }
+
     /// Record which keys came from the COINCUBE Keychain, and whether that
     /// record is complete for this Vault.
     pub fn with_keychain_keys(
@@ -629,19 +638,23 @@ impl Wallet {
                 }
             }
         } else {
-            self.main_descriptor
-                .receive_descriptor()
-                .as_descriptor()
-                .for_each_key(|key| {
-                    if let DescriptorPublicKey::XPub(xpub) = key {
-                        if let Some((fingerprint, _)) = &xpub.origin {
-                            descriptor_keys.insert(*fingerprint);
-                        }
-                    }
-                    true
-                });
+            self.collect_receive_descriptor_keys(&mut descriptor_keys);
         }
         descriptor_keys
+    }
+
+    fn collect_receive_descriptor_keys(&self, descriptor_keys: &mut HashSet<Fingerprint>) {
+        self.main_descriptor
+            .receive_descriptor()
+            .as_descriptor()
+            .for_each_key(|key| {
+                if let DescriptorPublicKey::XPub(xpub) = key {
+                    if let Some((fingerprint, _)) = &xpub.origin {
+                        descriptor_keys.insert(*fingerprint);
+                    }
+                }
+                true
+            });
     }
 
     pub fn load_from_settings(self, wallet_settings: WalletSettings) -> Result<Self, WalletError> {

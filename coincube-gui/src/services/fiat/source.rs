@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::api::{GetPriceResult, ListCurrenciesResult, PriceApiError};
+use super::api::{is_usable_price, GetPriceResult, ListCurrenciesResult, PriceApiError};
 use super::currency::Currency;
 use crate::services::coincube_api_base_url;
 
@@ -126,6 +126,9 @@ impl PriceSource {
                 (value, updated_at)
             }
         };
+        if !is_usable_price(value) {
+            return Err(PriceApiError::CannotParseData("price".to_string()));
+        }
         Ok(GetPriceResult { value, updated_at })
     }
 
@@ -238,6 +241,33 @@ mod tests {
             PriceSource::MempoolSpace.list_currencies_url(),
             "https://mempool.space/api/v1/prices"
         );
+    }
+
+    #[test]
+    fn rejects_nonpositive_prices_in_every_provider_response() {
+        for (source, payload) in [
+            (PriceSource::Coincube, json!({"value": -12.0})),
+            (PriceSource::Coincube, json!({"value": 0})),
+            (
+                PriceSource::CoinGecko,
+                json!({"rates": {"usd": {"value": -12.0}}}),
+            ),
+            (
+                PriceSource::CoinGecko,
+                json!({"rates": {"usd": {"value": 0}}}),
+            ),
+            (PriceSource::MempoolSpace, json!({"USD": 0, "time": 123})),
+        ] {
+            assert!(
+                matches!(
+                    source.parse_price_data(Currency::USD, &payload),
+                    Err(PriceApiError::CannotParseData(_))
+                ),
+                "{} accepted {}",
+                source,
+                payload
+            );
+        }
     }
 
     #[test]

@@ -475,10 +475,15 @@ pub struct PasskeyMetadata {
 
 /// Mark a cube as synced with the remote Connect API.
 ///
-/// `owner` is the account the sync ran under. It is recorded as the Cube's
+/// `owner` is the account that created the Cube, when this sync is that
+/// creation's own registration. It is recorded as the Cube's
 /// [`CubeSettings::connect_owner`] only on the *first* sync of a Cube that has
 /// no owner yet — a later sync (or a Cube already marked synced before owners
 /// were tracked) must not attribute it to whoever happens to be signed in.
+/// Every sync path (catch-up, the creation's registration reply, a remote
+/// update such as a rename) now passes `None`: the creation paths (PIN,
+/// passkey and phrase restore) record the owner on disk themselves, and an ownerless Cube was made signed out, so no
+/// account that signs in or acts on it later has a claim to it.
 pub async fn mark_cube_synced(
     network_dir: &NetworkDirectory,
     cube_id: &str,
@@ -965,12 +970,14 @@ pub struct CubeSettings {
     /// account that owns its server-side record, and so its Vault and the
     /// Keychain signers attached to it.
     ///
-    /// Written once, on the Cube's first successful registration (see
-    /// [`mark_cube_synced`] and the creation Recovery Kit path), and never
+    /// Written once, when the Cube is created while signed in (or by its
+    /// post-creation registration, see [`mark_cube_synced`]), and never
     /// overwritten: signing in as another account re-registers the same local
     /// Cube UUID as a *new* server row, which must not claim ownership. `None`
-    /// on Cubes registered before this field existed, and on Cubes never
-    /// registered at all — callers treat that as "unknown", not "mismatch".
+    /// on Cubes registered before this field existed and on Cubes created
+    /// signed out — even once the catch-up sync has registered them, since
+    /// the first account to sign in is not evidence of who made the Cube.
+    /// Callers treat `None` as "unknown", not "mismatch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_owner: Option<ConnectOwner>,
 }
@@ -987,6 +994,33 @@ pub struct SplitFromRecord {
     pub completed_height: u64,
     /// The signed step 2's own txid.
     pub step2_txid: coincube_core::miniscript::bitcoin::Txid,
+}
+
+/// Whether a Cube must be hidden from the Connect account that is currently
+/// signed in on this device.
+///
+/// Cubes live in the device's `settings.json`, not in an account, so without
+/// this every account that signs in on a shared machine would list (and be
+/// able to open, rename or delete) the previous account's Cubes.
+///
+/// * No recorded owner -> never hidden: ownership is unknown, not foreign.
+/// * Signed out -> never hidden: Cubes must stay reachable offline, and the
+///   PIN / passkey still protects them.
+/// * Signed in, profile loaded -> hidden iff the owner is another user id.
+/// * Signed in, profile not loaded yet -> hidden (fail closed), so the list
+///   cannot flash the previous account's Cubes during sign-in.
+pub fn cube_hidden_from_account(
+    owner: Option<&ConnectOwner>,
+    signed_in: bool,
+    signed_in_user_id: Option<u32>,
+) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    match signed_in_user_id {
+        Some(id) => owner.user_id != id,
+        None => signed_in,
+    }
 }
 
 /// Identity of the Connect account that owns a Cube. See
@@ -2922,43 +2956,8 @@ pub mod global {
 
         fn value(&mut self) -> Result<(), String> {
             match self.peek() {
-                Some(b'{') => {
-                    self.at += 1;
-                    if self.peek() == Some(b'}') {
-                        self.at += 1;
-                        return Ok(());
-                    }
-                    loop {
-                        let key = self.string()?;
-                        if self.peek() != Some(b':') {
-                            return Err(Self::unexpected());
-                        }
-                        self.at += 1;
-                        self.path.push(Step::Key(key));
-                        self.value()?;
-                        self.path.pop();
-                        if !self.next_item(b'}')? {
-                            return Ok(());
-                        }
-                    }
-                }
-                Some(b'[') => {
-                    self.at += 1;
-                    if self.peek() == Some(b']') {
-                        self.at += 1;
-                        return Ok(());
-                    }
-                    let mut index = 0;
-                    loop {
-                        self.path.push(Step::Index(index));
-                        self.value()?;
-                        self.path.pop();
-                        index += 1;
-                        if !self.next_item(b']')? {
-                            return Ok(());
-                        }
-                    }
-                }
+                Some(b'{') => self.object(),
+                Some(b'[') => self.array(),
                 Some(b'"') => self.string().map(drop),
                 Some(b'-' | b'0'..=b'9') => self.number(),
                 Some(b't' | b'f' | b'n') => {
@@ -2968,6 +2967,45 @@ pub mod global {
                     Ok(())
                 }
                 _ => Err(Self::unexpected()),
+            }
+        }
+
+        fn object(&mut self) -> Result<(), String> {
+            self.at += 1;
+            if self.peek() == Some(b'}') {
+                self.at += 1;
+                return Ok(());
+            }
+            loop {
+                let key = self.string()?;
+                if self.peek() != Some(b':') {
+                    return Err(Self::unexpected());
+                }
+                self.at += 1;
+                self.path.push(Step::Key(key));
+                self.value()?;
+                self.path.pop();
+                if !self.next_item(b'}')? {
+                    return Ok(());
+                }
+            }
+        }
+
+        fn array(&mut self) -> Result<(), String> {
+            self.at += 1;
+            if self.peek() == Some(b']') {
+                self.at += 1;
+                return Ok(());
+            }
+            let mut index = 0;
+            loop {
+                self.path.push(Step::Index(index));
+                self.value()?;
+                self.path.pop();
+                index += 1;
+                if !self.next_item(b']')? {
+                    return Ok(());
+                }
             }
         }
 
@@ -4297,27 +4335,30 @@ pub mod global {
 
         /// The child half runs in another process, so the OS lock (not an
         /// in-process mutex) must keep the parent's read after its commit.
+        fn run_global_lock_child(directory: PathBuf) {
+            let path = directory.join(DEFAULT_FILE_NAME);
+            let (locked, waiting) = (
+                directory.join("child-locked"),
+                directory.join("parent-waiting"),
+            );
+            let _hook = install(&path, move |stage| {
+                if stage == Stage::Locked {
+                    std::fs::write(&locked, b"")?;
+                    let deadline = Instant::now() + DEADLOCK;
+                    while !waiting.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Ok(())
+            });
+            GlobalSettings::update_account_tier(&path, AccountTier::Pro).unwrap();
+        }
+
         #[test]
         fn the_global_lock_serializes_writers_across_processes() {
             const CHILD: &str = "COINCUBE_R04B_GLOBAL_LOCK_CHILD";
             if let Some(directory) = std::env::var_os(CHILD) {
-                let directory = PathBuf::from(directory);
-                let path = directory.join(DEFAULT_FILE_NAME);
-                let (locked, waiting) = (
-                    directory.join("child-locked"),
-                    directory.join("parent-waiting"),
-                );
-                let _hook = install(&path, move |stage| {
-                    if stage == Stage::Locked {
-                        std::fs::write(&locked, b"")?;
-                        let deadline = Instant::now() + DEADLOCK;
-                        while !waiting.exists() && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                    }
-                    Ok(())
-                });
-                GlobalSettings::update_account_tier(&path, AccountTier::Pro).unwrap();
+                run_global_lock_child(PathBuf::from(directory));
                 return;
             }
             let root = TempRoot::new("process-lock");
@@ -6275,6 +6316,24 @@ mod chain_identity_tests {
             Some(owner(1, "a@example.com"))
         );
         assert_eq!(find(&legacy_id).connect_owner, None);
+    }
+
+    #[test]
+    fn cubes_owned_by_another_account_are_hidden() {
+        let owner = ConnectOwner {
+            user_id: 1,
+            email: "a@example.com".to_string(),
+        };
+        // Another account signed in: hidden.
+        assert!(cube_hidden_from_account(Some(&owner), true, Some(2)));
+        // The owner, or nobody, signed in: visible.
+        assert!(!cube_hidden_from_account(Some(&owner), true, Some(1)));
+        assert!(!cube_hidden_from_account(Some(&owner), false, None));
+        // Signed in but profile not loaded yet: fail closed.
+        assert!(cube_hidden_from_account(Some(&owner), true, None));
+        // Unknown owner is never treated as foreign.
+        assert!(!cube_hidden_from_account(None, true, Some(2)));
+        assert!(!cube_hidden_from_account(None, true, None));
     }
 
     #[test]

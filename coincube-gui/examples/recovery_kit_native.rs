@@ -114,12 +114,19 @@ mod native {
         auth_account: String,
         owner_id: u32,
         source_head: String,
+        #[serde(
+            default,
+            skip_serializing_if = "recovery_native::OrdinaryBackend::is_public"
+        )]
+        ordinary_backend: recovery_native::OrdinaryBackend,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
         action: String,
         config: Config,
+        #[serde(default)]
+        retry_create: bool,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -376,6 +383,7 @@ mod native {
             "native_config",
         )?;
         recovery_native::allowed_chain(c.chain)?;
+        c.ordinary_backend.validate(c.chain)?;
         check(
             std::env::var("COINCUBE_API_URL")
                 .ok()
@@ -732,6 +740,7 @@ mod native {
                 &identity,
                 client.clone(),
                 &c.case_root.join("oracle-retirement.jsonl"),
+                c.ordinary_backend,
             )
             .await?,
         );
@@ -927,28 +936,9 @@ mod native {
             "native_abandon_identity",
         )?;
         check(
-            state.stage == "new"
-                && state.pending.as_deref() == Some("create_export")
-                && state.identity.is_none()
-                && state.kit.is_none()
-                && state.restorer.is_none()
-                && state.original_manifest.is_none()
-                && state.original_files.is_none()
-                && state.wipe_manifest.is_none()
-                && state.wipe_oracle.is_none()
-                && state.retirement_oracle.is_none()
-                && state.original_factor.is_none()
-                && state.restored_factor.is_none()
-                && state.proof_sha256.is_none()
-                && !state.remote_delete_started
-                && state.canary_uuid.is_some()
-                && state
-                    .canary
-                    .as_ref()
-                    .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
+            state.stage == "new" && prepared_create_state(state),
             "native_abandon_stage",
-        )?;
-        Ok(())
+        )
     }
 
     async fn audit_capacity_abandonment(input: &AbandonInput) -> Result<()> {
@@ -1486,6 +1476,7 @@ mod native {
             client.clone(),
             &input.access_token,
             &root.join("oracle.jsonl"),
+            input.config.ordinary_backend,
         )
         .await?;
         if state.phase == "new" {
@@ -1565,8 +1556,31 @@ mod native {
         Ok(lock)
     }
 
-    fn load_action_state(c: &Config, root: &Path, action: &str) -> Result<State> {
-        let state = if action == "create_export" {
+    const CREATE_BACKEND_REFUSED: &str = "create_backend_refused";
+
+    fn prepared_create_state(state: &State) -> bool {
+        state.pending.as_deref() == Some("create_export")
+            && state.identity.is_none()
+            && state.kit.is_none()
+            && state.restorer.is_none()
+            && state.original_manifest.is_none()
+            && state.original_files.is_none()
+            && state.wipe_manifest.is_none()
+            && state.wipe_oracle.is_none()
+            && state.retirement_oracle.is_none()
+            && state.original_factor.is_none()
+            && state.restored_factor.is_none()
+            && state.proof_sha256.is_none()
+            && !state.remote_delete_started
+            && state.canary_uuid.is_some()
+            && state
+                .canary
+                .as_ref()
+                .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+
+    fn load_action_state(c: &Config, root: &Path, fresh_create: bool) -> Result<State> {
+        let state = if fresh_create {
             State {
                 config: c.clone(),
                 stage: "new".into(),
@@ -1592,6 +1606,44 @@ mod native {
                 .map_err(|_| "native_state_invalid")?
         };
         Ok(state)
+    }
+
+    fn validate_create_retry(c: &Config, state: &State) -> Result<()> {
+        check(
+            state.config == *c
+                && state.stage == CREATE_BACKEND_REFUSED
+                && prepared_create_state(state),
+            "native_uncertain_action",
+        )?;
+        process_absent(&state.creator)?;
+        let root = &c.case_root;
+        check(
+            state_staging_absent(root)?
+                && absent(&root.join("original"))?
+                && absent(&root.join("restored"))?
+                && absent(&root.join("quarantined-original"))?,
+            "native_create_retry_files",
+        )
+    }
+
+    fn record_backend_refusal(root: &Path, state: &mut State, admission: Result<()>) -> Result<()> {
+        if let Err(code) = admission {
+            state.stage = CREATE_BACKEND_REFUSED.into();
+            save(root, state)?;
+            return Err(code);
+        }
+        Ok(())
+    }
+
+    fn begin_create(root: &Path, state: &mut State) -> Result<()> {
+        if state.stage == CREATE_BACKEND_REFUSED {
+            // Persist consumption before anything can create a local or remote
+            // Cube. A lost response after this point remains uncertain.
+            state.stage = "new".into();
+            state.creator = this_process()?;
+            save(root, state)?;
+        }
+        Ok(())
     }
 
     fn validate_action_state(c: &Config, state: &State, action: &str) -> Result<()> {
@@ -1625,9 +1677,197 @@ mod native {
         Ok(())
     }
 
+    fn prepare_create_secrets(c: &Config, state: &mut State) -> Result<()> {
+        let pin = Zeroizing::new(format!(
+            "{:04}",
+            u32::from_le_bytes(
+                random(4)
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "native_entropy")?
+            ) % 10_000
+        ));
+        let mut next = Zeroizing::new(format!(
+            "{:04}",
+            u32::from_le_bytes(
+                random(4)
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "native_entropy")?
+            ) % 10_000
+        ));
+        if *next == *pin {
+            next = Zeroizing::new(format!(
+                "{:04}",
+                (pin.parse::<u32>().map_err(|_| "native_pin")? + 1) % 10_000
+            ));
+        }
+        let password = Zeroizing::new(hex::encode(random(32).as_slice()));
+        put(c, "original_pin", pin.as_bytes())?;
+        put(c, "recovery_password", password.as_bytes())?;
+        put(c, "restored_pin", next.as_bytes())?;
+        let canary_id = uuid::Uuid::new_v4();
+        check(
+            device_secret::load_optional(&canary_id.to_string())
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_canary_exists",
+        )?;
+        let canary = device_secret::get_or_create(&c.case_root, &canary_id.to_string())
+            .map_err(|_| "native_canary_create")?;
+        put(c, "canary", canary.as_ref())?;
+        state.canary_uuid = Some(canary_id);
+        state.canary = Some(hash(canary.as_ref()));
+        save(&c.case_root, state)
+    }
+
+    fn validate_canary(c: &Config, state: &State) -> Result<()> {
+        check(
+            Some(hash(&load(c, "canary")?)) == state.canary,
+            "native_canary_changed",
+        )?;
+        let production_canary = device_secret::load(
+            &state
+                .canary_uuid
+                .ok_or("native_canary_missing")?
+                .to_string(),
+        )
+        .map_err(|_| "native_production_canary_missing")?;
+        check(
+            Some(hash(production_canary.as_ref())) == state.canary,
+            "native_production_canary_changed",
+        )
+    }
+
+    async fn create_export(
+        c: &Config,
+        state: &mut State,
+        root: &Path,
+        original: &Path,
+        retry_create: bool,
+    ) -> Result<()> {
+        check(
+            device_secret::load_optional(&c.run_id.to_string())
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_original_factor_exists",
+        )?;
+        let (client, jwt) = auth(c)?;
+        check(
+            client
+                .get_user()
+                .await
+                .map_err(|_| "native_auth_blocked")?
+                .id
+                == c.owner_id,
+            "native_account_changed",
+        )?;
+        if retry_create {
+            observe_remote_before_create(c, &jwt, &client).await?;
+            validate_canary(c, state)?;
+        } else {
+            prepare_create_secrets(c, state)?;
+        }
+        let pin = string(load(c, "original_pin")?)?;
+        let password = string(load(c, "recovery_password")?)?;
+        let _restored_pin = load(c, "restored_pin")?;
+        let admission = recovery_native::admit_backend_readiness_with_backend(
+            c.chain,
+            &client,
+            c.ordinary_backend,
+        )
+        .await;
+        record_backend_refusal(root, state, admission)?;
+        let entropy = random(16);
+        let phrase = bip39::Mnemonic::from_entropy(&entropy).map_err(|_| "native_entropy")?;
+        let words = Zeroizing::new(phrase.words().map(str::to_owned).collect::<Vec<_>>());
+        let (identity, kit) = recovery_native::create_export(
+            c.chain,
+            &CoincubeDirectory::new(original.to_path_buf()),
+            c.run_id,
+            &pin,
+            &words,
+            &password,
+            &jwt,
+            client,
+            || begin_create(root, state),
+            c.ordinary_backend,
+        )
+        .await?;
+        check(
+            identity.owner_id == c.owner_id && kit.cube_id == identity.remote_cube_id,
+            "native_remote_binding",
+        )?;
+        validate_identity(c, &identity, &Kit::from_api(kit.clone()))?;
+        let factor =
+            device_secret::load(&identity.cube.id).map_err(|_| "native_original_factor")?;
+        state.original_factor = Some(hash(factor.as_ref()));
+        let files = manifest_files(original)?;
+        state.original_manifest = Some(files_digest(&files)?);
+        state.original_files = Some(files);
+        state.identity = Some(identity);
+        state.kit = Some(Kit::from_api(kit));
+        put(c, "provenance", &binding(state)?)?;
+        state.stage = "exported".into();
+        Ok(())
+    }
+
+    async fn reopen_sign(
+        c: &Config,
+        state: &mut State,
+        root: &Path,
+        original: &Path,
+        restored: PathBuf,
+    ) -> Result<()> {
+        process_absent(
+            state
+                .restorer
+                .as_ref()
+                .ok_or("native_restore_process_missing")?,
+        )?;
+        check(!original.exists(), "native_original_reappeared")?;
+        let identity = state.identity.as_ref().ok_or("native_identity_missing")?;
+        let factor =
+            device_secret::load(&identity.cube.id).map_err(|_| "native_restored_factor")?;
+        check(
+            Some(hash(factor.as_ref())) == state.restored_factor
+                && state.restored_factor != state.original_factor,
+            "native_restored_factor_changed",
+        )?;
+        // C can load only the new PIN; never either recovery/old-PIN/factor handle.
+        let pin = string(load(c, "restored_pin")?)?;
+        let wrong = if pin.as_str() == "0000" {
+            "0001"
+        } else {
+            "0000"
+        };
+        let (client, _) = auth(c)?;
+        let wallet = recovery_native::cold_load(
+            &CoincubeDirectory::new(restored),
+            identity,
+            &pin,
+            wrong,
+            client,
+            c.ordinary_backend,
+        )
+        .await?;
+        let psbt = recovery_native::sign_unfunded(&wallet)?;
+        let bytes = psbt.serialize();
+        write(root, "unfunded-key-control.psbt", &bytes)?;
+        state.proof_sha256 = Some(hash(&bytes));
+        state.stage = "signed_unfunded".into();
+        Ok(())
+    }
+
     async fn action(request: Request) -> Result<()> {
         let c = request.config;
         preflight(&c)?;
+        let retry_create = request.retry_create;
+        let fresh_create = request.action == "create_export" && !retry_create;
+        check(
+            !retry_create || request.action == "create_export",
+            "native_action",
+        )?;
         let root = &c.case_root;
         validate_action_parent(root)?;
         let original = root.join("original");
@@ -1649,7 +1889,7 @@ mod native {
             )?;
             return Ok(());
         }
-        if request.action == "create_export" {
+        if fresh_create {
             check(absent(root)?, "native_run_not_fresh")?;
             let (client, _) = auth(&c)?;
             recovery_native::admit_create(c.chain, c.run_id, c.owner_id, &client).await?;
@@ -1659,99 +1899,17 @@ mod native {
                 .map_err(|_| "native_run_create")?;
         }
         let _lock = lock_action_directory(root)?;
-        let mut state = load_action_state(&c, root, &request.action)?;
-        validate_action_state(&c, &state, &request.action)?;
-        state.pending = Some(request.action.clone());
-        save(root, &state)?;
+        let mut state = load_action_state(&c, root, fresh_create)?;
+        if retry_create {
+            validate_create_retry(&c, &state)?;
+        } else {
+            validate_action_state(&c, &state, &request.action)?;
+            state.pending = Some(request.action.clone());
+            save(root, &state)?;
+        }
         match request.action.as_str() {
             "create_export" => {
-                check(
-                    device_secret::load_optional(&c.run_id.to_string())
-                        .map_err(|_| "native_keychain_blocked")?
-                        .is_none(),
-                    "native_original_factor_exists",
-                )?;
-                let entropy = random(16);
-                let phrase =
-                    bip39::Mnemonic::from_entropy(&entropy).map_err(|_| "native_entropy")?;
-                let words = Zeroizing::new(phrase.words().map(str::to_owned).collect::<Vec<_>>());
-                let pin = Zeroizing::new(format!(
-                    "{:04}",
-                    u32::from_le_bytes(
-                        random(4)
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| "native_entropy")?
-                    ) % 10_000
-                ));
-                let mut next = Zeroizing::new(format!(
-                    "{:04}",
-                    u32::from_le_bytes(
-                        random(4)
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| "native_entropy")?
-                    ) % 10_000
-                ));
-                if *next == *pin {
-                    next = Zeroizing::new(format!(
-                        "{:04}",
-                        (pin.parse::<u32>().map_err(|_| "native_pin")? + 1) % 10_000
-                    ));
-                }
-                let password = Zeroizing::new(hex::encode(random(32).as_slice()));
-                put(&c, "original_pin", pin.as_bytes())?;
-                put(&c, "recovery_password", password.as_bytes())?;
-                put(&c, "restored_pin", next.as_bytes())?;
-                let canary_id = uuid::Uuid::new_v4();
-                check(
-                    device_secret::load_optional(&canary_id.to_string())
-                        .map_err(|_| "native_keychain_blocked")?
-                        .is_none(),
-                    "native_canary_exists",
-                )?;
-                let canary = device_secret::get_or_create(root, &canary_id.to_string())
-                    .map_err(|_| "native_canary_create")?;
-                put(&c, "canary", canary.as_ref())?;
-                state.canary_uuid = Some(canary_id);
-                state.canary = Some(hash(canary.as_ref()));
-                save(root, &state)?;
-                let (client, jwt) = auth(&c)?;
-                check(
-                    client
-                        .get_user()
-                        .await
-                        .map_err(|_| "native_auth_blocked")?
-                        .id
-                        == c.owner_id,
-                    "native_account_changed",
-                )?;
-                let (identity, kit) = recovery_native::create_export(
-                    c.chain,
-                    &CoincubeDirectory::new(original.clone()),
-                    c.run_id,
-                    &pin,
-                    &words,
-                    &password,
-                    &jwt,
-                    client,
-                )
-                .await?;
-                check(
-                    identity.owner_id == c.owner_id && kit.cube_id == identity.remote_cube_id,
-                    "native_remote_binding",
-                )?;
-                validate_identity(&c, &identity, &Kit::from_api(kit.clone()))?;
-                let factor =
-                    device_secret::load(&identity.cube.id).map_err(|_| "native_original_factor")?;
-                state.original_factor = Some(hash(factor.as_ref()));
-                let files = manifest_files(&original)?;
-                state.original_manifest = Some(files_digest(&files)?);
-                state.original_files = Some(files);
-                state.identity = Some(identity);
-                state.kit = Some(Kit::from_api(kit));
-                put(&c, "provenance", &binding(&state)?)?;
-                state.stage = "exported".into();
+                create_export(&c, &mut state, root, &original, retry_create).await?;
             }
             "wipe_original" => {
                 let identity = state.identity.as_ref().ok_or("native_identity_missing")?;
@@ -1783,6 +1941,7 @@ mod native {
                         identity,
                         oracle_client,
                         &root.join("oracle-wipe.jsonl"),
+                        c.ordinary_backend,
                     )
                     .await?,
                 );
@@ -1845,6 +2004,7 @@ mod native {
                     &pin,
                     &jwt,
                     client,
+                    c.ordinary_backend,
                 )
                 .await?;
                 let factor =
@@ -1858,42 +2018,7 @@ mod native {
                 state.stage = "restored".into();
             }
             "reopen_sign" => {
-                process_absent(
-                    state
-                        .restorer
-                        .as_ref()
-                        .ok_or("native_restore_process_missing")?,
-                )?;
-                check(!original.exists(), "native_original_reappeared")?;
-                let identity = state.identity.as_ref().ok_or("native_identity_missing")?;
-                let factor =
-                    device_secret::load(&identity.cube.id).map_err(|_| "native_restored_factor")?;
-                check(
-                    Some(hash(factor.as_ref())) == state.restored_factor
-                        && state.restored_factor != state.original_factor,
-                    "native_restored_factor_changed",
-                )?;
-                // C can load only the new PIN; never either recovery/old-PIN/factor handle.
-                let pin = string(load(&c, "restored_pin")?)?;
-                let wrong = if pin.as_str() == "0000" {
-                    "0001"
-                } else {
-                    "0000"
-                };
-                let (client, _) = auth(&c)?;
-                let wallet = recovery_native::cold_load(
-                    &CoincubeDirectory::new(restored),
-                    identity,
-                    &pin,
-                    wrong,
-                    client,
-                )
-                .await?;
-                let psbt = recovery_native::sign_unfunded(&wallet)?;
-                let bytes = psbt.serialize();
-                write(root, "unfunded-key-control.psbt", &bytes)?;
-                state.proof_sha256 = Some(hash(&bytes));
-                state.stage = "signed_unfunded".into();
+                reopen_sign(&c, &mut state, root, &original, restored).await?;
             }
             "retire_remote" => {
                 let raw = private(&root.join("unfunded-key-control.psbt"))?;
@@ -1912,25 +2037,92 @@ mod native {
             }
             _ => return Err("native_action"),
         }
-        check(
-            Some(hash(&load(&c, "canary")?)) == state.canary,
-            "native_canary_changed",
-        )?;
-        let production_canary = device_secret::load(
-            &state
-                .canary_uuid
-                .ok_or("native_canary_missing")?
-                .to_string(),
-        )
-        .map_err(|_| "native_production_canary_missing")?;
-        check(
-            Some(hash(production_canary.as_ref())) == state.canary,
-            "native_production_canary_changed",
-        )?;
+        validate_canary(&c, &state)?;
         state.pending = None;
         save(root, &state)?;
         Ok(())
     }
+    fn authenticated_command(input: &[u8], mode: Option<&str>) -> Result<()> {
+        let request: AuthInput =
+            serde_json::from_slice(input).map_err(|_| "native_auth_input_schema")?;
+        preflight(&request.config)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "native_runtime")?;
+        let mut client = CoincubeClient::new();
+        client.set_token(&request.access_token);
+        let user = runtime
+            .block_on(client.get_user())
+            .map_err(|_| "native_auth_blocked")?;
+        check(user.id == request.config.owner_id, "native_account_changed")?;
+        if mode == Some("--admit-backends") {
+            for chain in [ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4] {
+                runtime.block_on(recovery_native::admit_backend_readiness_with_backend(
+                    chain,
+                    &client,
+                    if chain == ChainId::Testnet4 {
+                        request.config.ordinary_backend
+                    } else {
+                        recovery_native::OrdinaryBackend::Public
+                    },
+                ))?;
+            }
+        } else if mode == Some("--begin-cleanup") {
+            runtime.block_on(observe_before_create(
+                &request.config,
+                &request.access_token,
+                &client,
+            ))?;
+            check(
+                !runtime.block_on(recovery_native::create_capacity_available(
+                    request.config.chain,
+                    request.config.run_id,
+                    request.config.owner_id,
+                    &client,
+                ))?,
+                "native_capacity_not_full",
+            )?;
+        } else if mode == Some("--observe-cleanup") {
+            runtime.block_on(observe_before_create(
+                &request.config,
+                &request.access_token,
+                &client,
+            ))?;
+        } else if mode == Some("--admit-create") {
+            runtime.block_on(recovery_native::admit_backend_readiness_with_backend(
+                request.config.chain,
+                &client,
+                request.config.ordinary_backend,
+            ))?;
+            runtime.block_on(observe_before_create(
+                &request.config,
+                &request.access_token,
+                &client,
+            ))?;
+            runtime.block_on(recovery_native::admit_create(
+                request.config.chain,
+                request.config.run_id,
+                request.config.owner_id,
+                &client,
+            ))?;
+        } else if mode == Some("--refresh-auth") {
+            let _ = load(&request.config, "auth")?;
+            device_secret::integration::update(
+                &request.config.auth_account,
+                request.access_token.as_bytes(),
+            )
+            .map_err(|_| "native_auth_refresh")?;
+            check(
+                load(&request.config, "auth")?.as_slice() == request.access_token.as_bytes(),
+                "native_auth_refresh",
+            )?;
+        } else {
+            put(&request.config, "auth", request.access_token.as_bytes())?;
+        }
+        Ok(())
+    }
+
     pub fn main() -> Result<()> {
         log::set_logger(&PROVIDER_WARNING_LOGGER).map_err(|_| "native_diagnostic_logger")?;
         log::set_max_level(log::LevelFilter::Warn);
@@ -1967,72 +2159,13 @@ mod native {
             Some(
                 "--bind-auth"
                     | "--admit-create"
+                    | "--admit-backends"
                     | "--observe-cleanup"
                     | "--begin-cleanup"
                     | "--refresh-auth"
             )
         ) {
-            let request: AuthInput =
-                serde_json::from_slice(&input).map_err(|_| "native_auth_input_schema")?;
-            preflight(&request.config)?;
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|_| "native_runtime")?;
-            let mut client = CoincubeClient::new();
-            client.set_token(&request.access_token);
-            let user = runtime
-                .block_on(client.get_user())
-                .map_err(|_| "native_auth_blocked")?;
-            check(user.id == request.config.owner_id, "native_account_changed")?;
-            if mode.as_deref() == Some("--begin-cleanup") {
-                runtime.block_on(observe_before_create(
-                    &request.config,
-                    &request.access_token,
-                    &client,
-                ))?;
-                check(
-                    !runtime.block_on(recovery_native::create_capacity_available(
-                        request.config.chain,
-                        request.config.run_id,
-                        request.config.owner_id,
-                        &client,
-                    ))?,
-                    "native_capacity_not_full",
-                )?;
-            } else if mode.as_deref() == Some("--observe-cleanup") {
-                runtime.block_on(observe_before_create(
-                    &request.config,
-                    &request.access_token,
-                    &client,
-                ))?;
-            } else if mode.as_deref() == Some("--admit-create") {
-                runtime.block_on(observe_before_create(
-                    &request.config,
-                    &request.access_token,
-                    &client,
-                ))?;
-                runtime.block_on(recovery_native::admit_create(
-                    request.config.chain,
-                    request.config.run_id,
-                    request.config.owner_id,
-                    &client,
-                ))?;
-            } else if mode.as_deref() == Some("--refresh-auth") {
-                let _ = load(&request.config, "auth")?;
-                device_secret::integration::update(
-                    &request.config.auth_account,
-                    request.access_token.as_bytes(),
-                )
-                .map_err(|_| "native_auth_refresh")?;
-                check(
-                    load(&request.config, "auth")?.as_slice() == request.access_token.as_bytes(),
-                    "native_auth_refresh",
-                )?;
-            } else {
-                put(&request.config, "auth", request.access_token.as_bytes())?;
-            }
-            return Ok(());
+            return authenticated_command(&input, mode.as_deref());
         }
         check(std::env::args().len() == 1, "native_arguments")?;
         let request: Request = serde_json::from_slice(&input).map_err(|_| "native_input_schema")?;
@@ -2045,6 +2178,97 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn ordinary_backend_is_explicit_scope_bound_and_part_of_config_digest() {
+            let (mut config, _, _) = fixture();
+            let public = serde_json::to_value(&config).unwrap();
+            assert!(public.get("ordinary_backend").is_none());
+            let legacy: Config = serde_json::from_value(public.clone()).unwrap();
+            assert!(legacy.ordinary_backend.is_public());
+            config.ordinary_backend = recovery_native::OrdinaryBackend::QaLoopback31004;
+            let selected = serde_json::to_value(&config).unwrap();
+            assert_eq!(selected["ordinary_backend"], "qa_loopback_31004");
+            assert_ne!(
+                hash(&serde_json::to_vec(&public).unwrap()),
+                hash(&serde_json::to_vec(&selected).unwrap())
+            );
+            config.chain = ChainId::BitcoinBlake2bTestnet4;
+            assert_eq!(preflight(&config), Err("native_ordinary_backend_scope"));
+            for value in [
+                "http://127.0.0.1:31004",
+                "qa_loopback_31005",
+                "public_with_token",
+            ] {
+                let mut bad = selected.clone();
+                bad["ordinary_backend"] = serde_json::json!(value);
+                assert!(serde_json::from_value::<Config>(bad).is_err());
+            }
+        }
+
+        #[test]
+        fn ordinary_backend_selection_drift_rejects_existing_state() {
+            let mut state = legacy215_state();
+            state.pending = None;
+            state.stage = "exported".into();
+            let mut changed = state.config.clone();
+            changed.ordinary_backend = recovery_native::OrdinaryBackend::QaLoopback31004;
+            assert_eq!(
+                validate_action_state(&changed, &state, "wipe_original"),
+                Err("native_uncertain_action")
+            );
+        }
+
+        #[test]
+        fn create_backend_refusal_is_durable_and_consumed_before_creation() {
+            let (mut config, _, _) = fixture();
+            let root = tempfile::tempdir().unwrap();
+            config.case_root = root.path().to_owned();
+            let mut state = load_action_state(&config, root.path(), true).unwrap();
+            state.pending = Some("create_export".into());
+            let canary_uuid = uuid::Uuid::new_v4();
+            state.canary_uuid = Some(canary_uuid);
+            state.canary = Some(hash(b"test canary"));
+            let mut prior_creator = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            state.creator.pid = prior_creator.id();
+            assert!(prior_creator.wait().unwrap().success());
+
+            assert_eq!(
+                record_backend_refusal(root.path(), &mut state, Err("native_b2_backend_syncing")),
+                Err("native_b2_backend_syncing")
+            );
+            let mut state = load_action_state(&config, root.path(), false).unwrap();
+            assert_eq!(validate_create_retry(&config, &state), Ok(()));
+            let mut wrong_config = config.clone();
+            wrong_config.owner_id += 1;
+            assert_eq!(
+                validate_create_retry(&wrong_config, &state),
+                Err("native_uncertain_action")
+            );
+            let original = root.path().join("original");
+            fs::create_dir(&original).unwrap();
+            assert_eq!(
+                validate_create_retry(&config, &state),
+                Err("native_create_retry_files")
+            );
+            fs::remove_dir(&original).unwrap();
+
+            record_backend_refusal(root.path(), &mut state, Ok(())).unwrap();
+            let still_retryable = load_action_state(&config, root.path(), false).unwrap();
+            assert_eq!(validate_create_retry(&config, &still_retryable), Ok(()));
+
+            begin_create(root.path(), &mut state).unwrap();
+            let consumed = load_action_state(&config, root.path(), false).unwrap();
+            assert_eq!(consumed.creator.pid, std::process::id());
+            assert_eq!(consumed.canary_uuid, Some(canary_uuid));
+            assert_eq!(consumed.canary, Some(hash(b"test canary")));
+            assert_eq!(consumed.pending.as_deref(), Some("create_export"));
+            assert_eq!(
+                validate_create_retry(&config, &consumed),
+                Err("native_uncertain_action")
+            );
+        }
+
         fn fixture() -> (Config, Identity, Kit) {
             use coincube_core::miniscript::bitcoin::{
                 bip32::DerivationPath, secp256k1::Secp256k1, Network,
@@ -2062,6 +2286,7 @@ mod native {
                 auth_account: String::new(),
                 owner_id: 1,
                 source_head: "a".repeat(40),
+                ordinary_backend: recovery_native::OrdinaryBackend::Public,
             };
             config.auth_account = account(&config, "auth");
             let cube = coincube_gui::app::settings::CubeSettings::new_with_raw_id(

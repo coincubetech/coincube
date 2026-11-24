@@ -117,6 +117,27 @@ fn pending_deposit_amount(
     }
 }
 
+fn wallet_loading_header<'a>(loading_status: Option<String>) -> Element<'a, Message> {
+    Column::new()
+        .spacing(4)
+        .push(spinner::typing_text_carousel(
+            "...",
+            false,
+            Duration::from_millis(400),
+            |content| text(content).size(H2_SIZE).bold(),
+        ))
+        .push(match loading_status {
+            Some(status) => Element::from(text(status).size(P1_SIZE).style(theme::text::secondary)),
+            None => {
+                spinner::typing_text_carousel("...", false, Duration::from_millis(400), |content| {
+                    text(content).size(P1_SIZE).style(theme::text::secondary)
+                })
+                .into()
+            }
+        })
+        .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wallet_card<'a>(
     wallet_type: WalletType,
@@ -139,6 +160,8 @@ fn wallet_card<'a>(
     vault_alias: Option<&str>,
     // The Vault's stale-balance line while it isn't updating.
     stale: Option<String>,
+    // Why there is no balance yet, under the loading dots.
+    loading_status: Option<String>,
 ) -> Element<'a, Message> {
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
 
@@ -305,31 +328,10 @@ fn wallet_card<'a>(
                 })
                 .into()
             } else {
-                Column::new()
-                    .spacing(4)
-                    .push(spinner::typing_text_carousel(
-                        "...",
-                        false,
-                        Duration::from_millis(400),
-                        |content| text(content).size(H2_SIZE).bold(),
-                    ))
-                    .push(spinner::typing_text_carousel(
-                        "...",
-                        false,
-                        Duration::from_millis(400),
-                        |content| text(content).size(P1_SIZE).style(theme::text::secondary),
-                    ))
-                    .into()
+                wallet_loading_header(loading_status)
             };
 
-            let title_label = if matches!(wallet_type, WalletType::Vault) {
-                vault_alias
-                    .filter(|alias| !alias.trim().is_empty())
-                    .map(|alias| format!("Vault · {alias}"))
-                    .unwrap_or_else(|| title.to_owned())
-            } else {
-                title.to_owned()
-            };
+            let title_label = wallet_card_title(wallet_type, title, vault_alias);
             let title_action = Action::new(
                 landing_control_id(cube_id, title, "open"),
                 Container::new(
@@ -344,8 +346,10 @@ fn wallet_card<'a>(
             )
             .style(theme::button::transparent)
             .on_press(overview_action.clone());
-            // Like Spark's "Last known Spark balance · refresh failed".
-            let stale = stale.map(|line| {
+            // Like Spark's "Last known Spark balance · refresh failed". With no
+            // balance yet there is nothing "last known": the loading status
+            // under the dots says what is happening instead.
+            let stale = stale.filter(|_| loaded).map(|line| {
                 Row::new()
                     .spacing(6)
                     .align_y(Alignment::Center)
@@ -403,6 +407,17 @@ fn wallet_card<'a>(
             .style(landing_card_style),
         overview_action,
     )
+}
+
+fn wallet_card_title(wallet_type: WalletType, title: &str, vault_alias: Option<&str>) -> String {
+    if matches!(wallet_type, WalletType::Vault) {
+        vault_alias
+            .filter(|alias| !alias.trim().is_empty())
+            .map(|alias| format!("Vault · {alias}"))
+            .unwrap_or_else(|| title.to_owned())
+    } else {
+        title.to_owned()
+    }
 }
 
 /// A wallet card opens its wallet from anywhere on its surface, not only
@@ -940,7 +955,7 @@ fn from_menu<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
 /// one that can't receive says why.
 fn to_menu<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     use crate::app::view::shared::picker::{
-        dropdown_heading, dropdown_menu, dropdown_note, dropdown_option, DROPDOWN_LOGO,
+        dropdown_heading, dropdown_menu, dropdown_option, DROPDOWN_LOGO,
     };
     let source = ctx.direction.from_kind();
     let other = ctx.direction.is_other_cube();
@@ -969,63 +984,75 @@ fn to_menu<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         ));
     }
     if TransferDirection::to_other_cube(source, ctx.chain).is_some() {
-        list = list.push(dropdown_heading(localized_copy("Other Cubes")));
-        if ctx.other.choices.is_empty() {
-            list = list.push(dropdown_note(localized_copy(
-                "No other Cubes on this device.",
-            )));
-        }
-        for choice in ctx.other.choices {
-            let kinds: Vec<WalletKind> = [WalletKind::Spark, WalletKind::Vault]
-                .iter()
-                .copied()
-                .filter(|kind| choice.can_receive(*kind))
-                .collect();
-            if kinds.is_empty() {
-                // One row that says why this Cube can't receive.
-                list = list.push(dropdown_option(
-                    format!("transfer-to-cube-{}", choice.cube_id),
-                    wallet_logo(WalletKind::Spark, DROPDOWN_LOGO),
-                    &choice.name,
-                    "Can't receive",
-                    Some(
-                        choice
-                            .refusal
-                            .map(|reason| reason.to_string())
-                            .unwrap_or_else(|| {
-                                localized_copy("No wallet that can receive").to_string()
-                            }),
-                    ),
-                    false,
-                    None,
-                    Message::FocusAction,
-                ));
-                continue;
-            }
-            for kind in kinds {
-                let selected = other
-                    && ctx.other.selected == Some(choice.cube_id.as_str())
-                    && ctx.direction.to_kind() == kind;
-                list = list.push(dropdown_option(
-                    format!("transfer-to-{}-{}", choice.cube_id, kind.label()),
-                    wallet_logo(kind, DROPDOWN_LOGO),
-                    &localized_format!("{} in {}", "{} en {}", kind.label(), choice.name),
-                    if choice.passkey { "Passkey" } else { "PIN" },
-                    Some(localized_copy("Locked · unlocks for this transfer").to_string()),
-                    selected,
-                    Some(Message::Home(HomeMessage::PickOtherCubeWallet(
-                        choice.cube_id.clone(),
-                        kind,
-                    ))),
-                    Message::FocusAction,
-                ));
-            }
-        }
-        list = list.push(dropdown_note(localized_copy(
-            "Locked Cubes show no balances.",
-        )));
+        list = append_other_cube_options(list, ctx, other);
     }
     dropdown_menu(list)
+}
+
+fn append_other_cube_options<'a>(
+    mut list: coincube_ui::widget::Column<'a, Message>,
+    ctx: &TransferCtx<'a>,
+    other: bool,
+) -> coincube_ui::widget::Column<'a, Message> {
+    use crate::app::view::shared::picker::{
+        dropdown_heading, dropdown_note, dropdown_option, DROPDOWN_LOGO,
+    };
+    list = list.push(dropdown_heading(localized_copy("Other Cubes")));
+    if ctx.other.choices.is_empty() {
+        list = list.push(dropdown_note(localized_copy(
+            "No other Cubes on this device.",
+        )));
+    }
+    for choice in ctx.other.choices {
+        let kinds: Vec<WalletKind> = [WalletKind::Spark, WalletKind::Vault]
+            .iter()
+            .copied()
+            .filter(|kind| choice.can_receive(*kind))
+            .collect();
+        if kinds.is_empty() {
+            // One row that says why this Cube can't receive.
+            list = list.push(dropdown_option(
+                format!("transfer-to-cube-{}", choice.cube_id),
+                wallet_logo(WalletKind::Spark, DROPDOWN_LOGO),
+                &choice.name,
+                "Can't receive",
+                Some(
+                    choice
+                        .refusal
+                        .map(|reason| reason.to_string())
+                        .unwrap_or_else(|| {
+                            localized_copy("No wallet that can receive").to_string()
+                        }),
+                ),
+                false,
+                None,
+                Message::FocusAction,
+            ));
+            continue;
+        }
+        for kind in kinds {
+            let selected = other
+                && ctx.other.selected == Some(choice.cube_id.as_str())
+                && ctx.direction.to_kind() == kind;
+            list = list.push(dropdown_option(
+                format!("transfer-to-{}-{}", choice.cube_id, kind.label()),
+                wallet_logo(kind, DROPDOWN_LOGO),
+                &localized_format!("{} in {}", "{} en {}", kind.label(), choice.name),
+                if choice.passkey { "Passkey" } else { "PIN" },
+                Some(localized_copy("Locked · unlocks for this transfer").to_string()),
+                selected,
+                Some(Message::Home(HomeMessage::PickOtherCubeWallet(
+                    choice.cube_id.clone(),
+                    kind,
+                ))),
+                Message::FocusAction,
+            ));
+        }
+    }
+    list = list.push(dropdown_note(localized_copy(
+        "Locked Cubes show no balances.",
+    )));
+    list
 }
 
 /// A route tile that opens its menu: the Send tile's surface, the accent
@@ -1508,7 +1535,142 @@ fn details_page<'a>(
         _ => None,
     };
 
-    let amount_body: Element<'a, Message> = if amount_open {
+    let amount_body =
+        transfer_details_amount(ctx, page, amount, amount_open, other, limits, estimate);
+
+    let fee = match expected_fee_text(direction) {
+        Some(fee) => (localized_copy(fee).to_string(), false),
+        None => (localized_copy("Shown when you prepare").to_string(), true),
+    };
+    let summary = Column::new()
+        .spacing(10)
+        .push(match parsed {
+            Some(parsed) => kv_row(
+                localized_copy("They receive about"),
+                bitcoin_text(parsed, ctx.unit, ctx.balance_masked),
+                false,
+            ),
+            None => kv_row(localized_copy("They receive about"), "—", true),
+        })
+        .push(kv_row(
+            localized_copy("Route"),
+            route_text(direction),
+            false,
+        ))
+        .push(kv_row(localized_copy("Fee"), fee.0, fee.1));
+
+    let footer =
+        transfer_details_footer(ctx, page, parsed, source, source_empty, other, amount_open);
+
+    let mut sections = vec![card_section(
+        Column::new()
+            .spacing(16)
+            .push(text(localized_copy("Transfer details")).size(18).bold())
+            .push(transfer_route_tiles(ctx, page)),
+    )];
+    append_transfer_destination(&mut sections, ctx, page, other);
+    sections.push(card_section(
+        Column::new()
+            .spacing(10)
+            .push(text(localized_copy("Amount")).bold())
+            .push(amount_body),
+    ));
+    sections.push(card_section(summary));
+    sections.push(card_section(footer));
+
+    transfer_dialog(
+        ctx,
+        0,
+        None,
+        Some(Message::Home(HomeMessage::LeaveTransfer)),
+        crate::app::view::shared::payment_columns::payment_columns(
+            transfer_card(sections),
+            transfer_rail(ctx, parsed, None),
+        ),
+    )
+}
+
+fn transfer_details_footer<'a>(
+    ctx: &TransferCtx<'a>,
+    page: TransferPage,
+    parsed: Option<Amount>,
+    source: WalletKind,
+    source_empty: bool,
+    other: bool,
+    amount_open: bool,
+) -> Row<'a, Message> {
+    let status = if source_empty && !ctx.balance_masked {
+        localized_format!(
+            "{} has nothing to transfer.",
+            "{} no tiene nada que transferir.",
+            source.label()
+        )
+    } else if other && page == TransferPage::Wallets {
+        localized_copy("Choose another Cube in To.").to_string()
+    } else if !amount_open {
+        localized_format!(
+            "Unlock {} to continue.",
+            "Desbloquea {} para continuar.",
+            ctx.other.name()
+        )
+    } else if parsed.is_none() {
+        localized_copy("Enter an amount.").to_string()
+    } else {
+        localized_copy("Prepare gets the route and fee. Nothing moves yet.").to_string()
+    };
+    Row::new()
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .push(muted(status).width(Length::Fill))
+        .push(dialog_button(
+            coincube_ui::locale::copy("Prepare"),
+            None,
+            true,
+            parsed.map(|_| Message::Home(HomeMessage::NextStep)),
+        ))
+}
+
+fn append_transfer_destination<'a>(
+    sections: &mut Vec<Element<'a, Message>>,
+    ctx: &TransferCtx<'a>,
+    page: TransferPage,
+    other: bool,
+) {
+    if other && page == TransferPage::Unlock {
+        sections.push(card_section(unlock_section(ctx)));
+    } else if other && page == TransferPage::OtherCube {
+        // The pick didn't start an unlock: no PIN or passkey control could
+        // do anything here, so say why and how to try again.
+        sections.push(card_section(
+            Column::new()
+                .spacing(8)
+                .push_maybe(ctx.other.error.map(|error| {
+                    status_line(
+                        exclamation_circle_icon(),
+                        StatusTone::Bad,
+                        error.to_string(),
+                    )
+                }))
+                .push(muted(localized_format!(
+                    "{} can't be unlocked here. Choose it again in To, or pick another wallet.",
+                    "{} no se puede desbloquear aquí. Elígelo de nuevo en Para, o elige otra billetera.",
+                    ctx.other.name()
+                ))),
+        ));
+    }
+}
+
+fn transfer_details_amount<'a>(
+    ctx: &TransferCtx<'a>,
+    page: TransferPage,
+    amount: &'a form::Value<String>,
+    amount_open: bool,
+    other: bool,
+    limits: String,
+    estimate: Option<String>,
+) -> Element<'a, Message> {
+    let source = ctx.direction.from_kind();
+    if amount_open {
         let input = match ctx.unit {
             BitcoinDisplayUnit::BTC => form::Form::new_amount_btc("0", amount, |msg| {
                 Message::Home(HomeMessage::AmountEdited(msg))
@@ -1553,106 +1715,7 @@ fn details_page<'a>(
             localized_copy("Choose where it goes to enter an amount.").to_string()
         })
         .into()
-    };
-
-    let fee = match expected_fee_text(direction) {
-        Some(fee) => (localized_copy(fee).to_string(), false),
-        None => (localized_copy("Shown when you prepare").to_string(), true),
-    };
-    let summary = Column::new()
-        .spacing(10)
-        .push(match parsed {
-            Some(parsed) => kv_row(
-                localized_copy("They receive about"),
-                bitcoin_text(parsed, ctx.unit, ctx.balance_masked),
-                false,
-            ),
-            None => kv_row(localized_copy("They receive about"), "—", true),
-        })
-        .push(kv_row(
-            localized_copy("Route"),
-            route_text(direction),
-            false,
-        ))
-        .push(kv_row(localized_copy("Fee"), fee.0, fee.1));
-
-    let status = if source_empty && !ctx.balance_masked {
-        localized_format!(
-            "{} has nothing to transfer.",
-            "{} no tiene nada que transferir.",
-            source.label()
-        )
-    } else if other && page == TransferPage::Wallets {
-        localized_copy("Choose another Cube in To.").to_string()
-    } else if !amount_open {
-        localized_format!(
-            "Unlock {} to continue.",
-            "Desbloquea {} para continuar.",
-            ctx.other.name()
-        )
-    } else if parsed.is_none() {
-        localized_copy("Enter an amount.").to_string()
-    } else {
-        localized_copy("Prepare gets the route and fee. Nothing moves yet.").to_string()
-    };
-    let footer = Row::new()
-        .spacing(16)
-        .align_y(Alignment::Center)
-        .push(muted(status).width(Length::Fill))
-        .push(dialog_button(
-            coincube_ui::locale::copy("Prepare"),
-            None,
-            true,
-            parsed.map(|_| Message::Home(HomeMessage::NextStep)),
-        ));
-
-    let mut sections = vec![card_section(
-        Column::new()
-            .spacing(16)
-            .push(text(localized_copy("Transfer details")).size(18).bold())
-            .push(transfer_route_tiles(ctx, page)),
-    )];
-    if other && page == TransferPage::Unlock {
-        sections.push(card_section(unlock_section(ctx)));
-    } else if other && page == TransferPage::OtherCube {
-        // The pick didn't start an unlock: no PIN or passkey control could
-        // do anything here, so say why and how to try again.
-        sections.push(card_section(
-            Column::new()
-                .spacing(8)
-                .push_maybe(ctx.other.error.map(|error| {
-                    status_line(
-                        exclamation_circle_icon(),
-                        StatusTone::Bad,
-                        error.to_string(),
-                    )
-                }))
-                .push(muted(localized_format!(
-                    "{} can't be unlocked here. Choose it again in To, or pick another wallet.",
-                    "{} no se puede desbloquear aquí. Elígelo de nuevo en Para, o elige otra billetera.",
-                    ctx.other.name()
-                ))),
-        ));
     }
-    sections.push(card_section(
-        Column::new()
-            .spacing(10)
-            .push(text(localized_copy("Amount")).bold())
-            .push(amount_body),
-    ));
-    sections.push(card_section(summary));
-    sections.push(card_section(footer));
-
-    transfer_dialog(
-        ctx,
-        0,
-        None,
-        Some(Message::Home(HomeMessage::LeaveTransfer)),
-        crate::app::view::shared::payment_columns::payment_columns(
-            transfer_card(sections),
-            transfer_rail(ctx, parsed, None),
-        ),
-    )
 }
 
 /// The route a direction takes, for Review.
@@ -1791,6 +1854,7 @@ fn review_page<'a>(
     vault_fees: Option<Amount>,
     transfer_feerate: &'a form::Value<String>,
     transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    transfer_feerate_preset: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     spark_send_fee_sat: Option<u64>,
 ) -> TransferScreen<'a> {
     let direction = ctx.direction;
@@ -1881,6 +1945,7 @@ fn review_page<'a>(
             .push(
                 crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
                     transfer_feerate_loading,
+                    transfer_feerate_preset,
                     |preset| Message::Home(HomeMessage::FetchTransferFeeratePreset(preset)),
                     is_tx_signed || is_sending,
                 ),
@@ -1895,41 +1960,14 @@ fn review_page<'a>(
             ))
     });
 
-    let primary = match direction {
-        // Vault-sourced: sign the on-chain tx first, then broadcast. Shared
-        // signer path handles Spark and another Cube's Vault.
-        TransferDirection::VaultToSpark
-        | TransferDirection::VaultToOtherSpark
-        | TransferDirection::VaultToOtherCube => {
-            if is_tx_signed {
-                button::primary_loading(
-                    None,
-                    coincube_ui::locale::copy("Confirm transfer"),
-                    is_sending,
-                    transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
-                )
-            } else {
-                button::primary_loading(
-                    None,
-                    coincube_ui::locale::copy("Sign transaction"),
-                    is_sending,
-                    (transfer_feerate.valid && destination_ready)
-                        .then_some(Message::Home(HomeMessage::SignVaultTransferTx)),
-                )
-            }
-        }
-        // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
-        // calls `spark.send_payment(handle)` synchronously from the UI's
-        // perspective; stage flips to PendingDeposit on success.
-        TransferDirection::SparkToVault
-        | TransferDirection::SparkToOtherSpark
-        | TransferDirection::SparkToOtherCube => button::primary_loading(
-            None,
-            coincube_ui::locale::copy("Confirm transfer"),
-            is_sending,
-            transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
-        ),
-    };
+    let primary = transfer_review_primary(
+        direction,
+        destination_ready,
+        transfer_action_ready,
+        is_sending,
+        is_tx_signed,
+        transfer_feerate,
+    );
 
     // You transfer → They receive, as Swap's Review opens.
     let side = |caption: &'static str, value: Option<Amount>, place: String| {
@@ -2021,6 +2059,51 @@ fn review_page<'a>(
             rail,
         ),
     )
+}
+
+fn transfer_review_primary<'a>(
+    direction: TransferDirection,
+    destination_ready: bool,
+    transfer_action_ready: bool,
+    is_sending: bool,
+    is_tx_signed: bool,
+    transfer_feerate: &form::Value<String>,
+) -> coincube_ui::widget::Button<'a, Message> {
+    match direction {
+        // Vault-sourced: sign the on-chain tx first, then broadcast. Shared
+        // signer path handles Spark and another Cube's Vault.
+        TransferDirection::VaultToSpark
+        | TransferDirection::VaultToOtherSpark
+        | TransferDirection::VaultToOtherCube => {
+            if is_tx_signed {
+                button::primary_loading(
+                    None,
+                    coincube_ui::locale::copy("Confirm transfer"),
+                    is_sending,
+                    transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
+                )
+            } else {
+                button::primary_loading(
+                    None,
+                    coincube_ui::locale::copy("Sign transaction"),
+                    is_sending,
+                    (transfer_feerate.valid && destination_ready)
+                        .then_some(Message::Home(HomeMessage::SignVaultTransferTx)),
+                )
+            }
+        }
+        // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
+        // calls `spark.send_payment(handle)` synchronously from the UI's
+        // perspective; stage flips to PendingDeposit on success.
+        TransferDirection::SparkToVault
+        | TransferDirection::SparkToOtherSpark
+        | TransferDirection::SparkToOtherCube => button::primary_loading(
+            None,
+            coincube_ui::locale::copy("Confirm transfer"),
+            is_sending,
+            transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
+        ),
+    }
 }
 
 /// Done: the sender has submitted the payment. On-chain deposits can still
@@ -2255,8 +2338,8 @@ pub enum PickerSide {
 pub enum TransferDirection {
     VaultToSpark,
     SparkToVault,
-    /// This Cube's Vault to the Vault of another local Bitcoin mainnet Cube,
-    /// unlocked in place for this transfer only. Never built from a wallet
+    /// This Cube's Vault to the Vault of another local Cube on the same
+    /// chain (Bitcoin mainnet or Bitcoin Blake2b), unlocked in place for this transfer only. Never built from a wallet
     /// pair: the To list's "Another Cube…" row selects it.
     VaultToOtherCube,
     /// This Cube's Spark wallet to another local Bitcoin mainnet Cube's Vault.
@@ -2291,7 +2374,9 @@ impl TransferDirection {
 
     pub fn to_other_wallet(from: WalletKind, to: WalletKind, chain: ChainId) -> Option<Self> {
         match (from, to, chain) {
-            (WalletKind::Vault, WalletKind::Vault, ChainId::Bitcoin) => {
+            (WalletKind::Vault, WalletKind::Vault, chain)
+                if crate::app::transfer_destination::vault_cross_cube_chain(chain) =>
+            {
                 Some(Self::VaultToOtherCube)
             }
             (WalletKind::Spark, WalletKind::Vault, ChainId::Bitcoin) => {
@@ -2379,6 +2464,8 @@ pub struct GlobalViewConfig<'a> {
     /// "Last known Vault balance · not updating since {time}" while the
     /// Vault's recent polls fail.
     pub vault_stale: Option<String>,
+    /// Why the Vault card has no balance yet, shown under its loading dots.
+    pub vault_loading_status: Option<String>,
     /// Global fiat-native vs. bitcoin-native display preference. Mirrored
     /// from `cache.display_mode`.
     pub display_mode: crate::app::settings::display::DisplayMode,
@@ -2414,6 +2501,9 @@ pub struct GlobalViewConfig<'a> {
     /// Which Fast/Normal/Slow preset is currently fetching a mempool-driven
     /// estimate. The button for the loading preset renders non-pressable.
     pub transfer_feerate_loading: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
+    /// The preset whose estimate fills the feerate input, drawn selected.
+    /// `None` once the user types a rate of their own.
+    pub transfer_feerate_preset: Option<crate::app::view::shared::feerate_picker::FeeratePreset>,
     /// Spark-quoted on-chain fee for the prepared send (Spark-sourced
     /// directions only). Rendered in the Fees row on the confirm screen.
     pub spark_send_fee_sat: Option<u64>,
@@ -2467,71 +2557,51 @@ impl HomeView {
 pub fn global_home_view<'a>(
     config: GlobalViewConfig<'a>,
 ) -> (Element<'a, Message>, Option<TransferScreen<'a>>) {
+    let overview_masks = OverviewMasks::new(
+        config.balance_masked,
+        config.overview_total_hidden,
+        config.overview_wallets_hidden,
+    );
+    let transfer = active_transfer(&config);
+    let overview = overview_body(&config, overview_masks);
+    (overview, transfer)
+}
+
+fn active_transfer<'a>(config: &GlobalViewConfig<'a>) -> Option<TransferScreen<'a>> {
     let GlobalViewConfig {
         cube_id,
-        spark_balance,
-        spark_btc_balance,
-        spark_usdb_balance,
-        spark_balance_error,
-        vault_pending_send_sats,
-        vault_pending_receive_sats,
-        vault_balance,
-        imported_balance,
-        imported_installed,
-        fiat_converter,
-        balance_masked,
-        overview_total_hidden,
-        overview_wallets_hidden,
-        total_balance_loading,
-        spark_balance_loaded,
-        vault_loaded,
-        recovery_available,
-        vault_stale,
-        display_mode,
+        cube_name,
+        chain,
         has_vault,
-        has_imported_bitcoin,
         has_spark,
+        spark_balance,
+        vault_balance,
+        fiat_converter,
+        transfer_unit,
+        transfer_max,
+        balance_masked,
+        other_cube,
+        wallet_picker,
+        transfer_origin,
         current_view,
         transfer_direction,
-        transfer_from: _,
-        transfer_to: _,
-        wallet_picker,
+        transfer_page,
         entered_amount,
         receive_address,
         destination_ready,
         transfer_action_ready,
-        receive_index: _receive_index,
         labels,
         labels_editing,
         address_expanded,
-        bitcoin_unit,
         is_sending,
         is_tx_signed,
         spend_tx_fees,
         transfer_feerate,
         transfer_feerate_loading,
+        transfer_feerate_preset,
         spark_send_fee_sat,
-        pending_spark_incoming,
-        btc_usd_price,
-        cube_name,
-        vault_alias,
-        chain,
-        light_theme: _,
-        transfer_page,
-        transfer_unit,
-        transfer_max,
-        other_cube,
-        transfer_origin,
-    } = config;
-
-    let overview_masks = OverviewMasks::new(
-        balance_masked,
-        overview_total_hidden,
-        overview_wallets_hidden,
-    );
-    let wallet_balance_masked = overview_masks.wallets;
-    let total_balance_masked = overview_masks.total;
-
+        ..
+    } = *config;
     // Step machine:
     //   0 — overview (wallet cards; Transfer is the page head's action)
     //   1 — Wallets, then Amount (and, to another Cube, Other Cube and
@@ -2539,7 +2609,7 @@ pub fn global_home_view<'a>(
     //   2 — Review
     //   3 — Done
     // Steps 1–3 are a dialog the state layer lays over the overview.
-    let transfer = transfer_direction.and_then(|direction| {
+    transfer_direction.and_then(|direction| {
         let ctx = TransferCtx {
             cube_id,
             cube_name,
@@ -2573,13 +2643,42 @@ pub fn global_home_view<'a>(
                 spend_tx_fees,
                 transfer_feerate,
                 transfer_feerate_loading,
+                transfer_feerate_preset,
                 spark_send_fee_sat,
             )),
             3 => Some(done_page(&ctx, entered_amount)),
             _ => None,
         }
-    });
+    })
+}
 
+struct OverviewBalances {
+    usable_usd_quote: Option<f64>,
+    imported_balance_loaded: bool,
+    display_vault_balance: Amount,
+    spark_usdb_as_sats: u64,
+    spark_display_balance: Amount,
+    spark_valuation_partial: bool,
+    global_total_amount: Amount,
+    global_total_fiat: Option<crate::app::view::vault::fiat::FiatAmount>,
+    total_partial: bool,
+}
+
+fn overview_balances(config: &GlobalViewConfig<'_>) -> OverviewBalances {
+    let GlobalViewConfig {
+        btc_usd_price,
+        has_imported_bitcoin,
+        imported_installed,
+        imported_balance,
+        vault_balance,
+        spark_usdb_balance,
+        spark_balance_loaded,
+        has_spark,
+        spark_btc_balance,
+        fiat_converter,
+        spark_balance_error,
+        ..
+    } = *config;
     // USDB (Spark's Stable Balance) is pegged to USD, so it converts at the
     // BTC/USD price whatever the user's fiat currency.
     let usable_usd_quote = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
@@ -2627,269 +2726,51 @@ pub fn global_home_view<'a>(
         .map(|c| c.convert(global_total_amount));
     let total_partial = has_spark && (spark_balance_error || spark_valuation_partial);
 
-    let orange_outline_btn =
-        |wallet: &'static str, control: &'static str, msg: Message| -> Element<'a, Message> {
-            landing_button(
-                landing_control_id(cube_id, wallet, control),
-                localized_copy("Receive"),
-                None,
-                Message::FocusAction,
-                Some(msg),
-                theme::button::orange_outline,
-            )
-            .width(Length::Fixed(90.0))
-            .into()
-        };
+    OverviewBalances {
+        usable_usd_quote,
+        imported_balance_loaded,
+        display_vault_balance,
+        spark_usdb_as_sats,
+        spark_display_balance,
+        spark_valuation_partial,
+        global_total_amount,
+        global_total_fiat,
+        total_partial,
+    }
+}
 
-    // --- Spark card (BTC row only) ---
-    // Spark is the default wallet for everyday Lightning UX. The card only
-    // surfaces when `has_spark` is true — cubes without a Spark
-    // signer hide it entirely, so the entire widget tree is built
-    // lazily inside `then(..)` to avoid wasted work on every render.
-    let spark_card = has_spark.then(|| {
-        let spark_fiat = (!spark_valuation_partial)
-            .then(|| {
-                fiat_converter
-                    .as_ref()
-                    .map(|c| c.convert(spark_display_balance))
-            })
-            .flatten();
-        let spark_btc_fiat = fiat_converter
-            .as_ref()
-            .map(|c| c.convert(spark_btc_balance));
-        // `fit_row`, as on the Vault card.
-        let spark_btc_row = coincube_ui::component::tenshu::fit_row(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(coincube_ui::image::asset_network_logo::<Message>(
-                    "btc", "spark", 32.0,
-                ))
-                .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-                .push(if wallet_balance_masked {
-                    Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
-                } else if spark_balance_error && !spark_balance_loaded {
-                    Row::new().push(
-                        text(localized_copy("Balance unavailable"))
-                            .size(P1_SIZE)
-                            .style(theme::text::warning),
-                    )
-                } else if !spark_balance_loaded {
-                    // Pre-Synced placeholder — see the comment on the
-                    // Spark wallet_header below for why we don't render
-                    // the raw value yet. Animated dots mirror the Total
-                    // Balance loading treatment for visual consistency.
-                    Row::new().push(spinner::typing_text_carousel(
-                        "...",
-                        false,
-                        Duration::from_millis(400),
-                        |content| text(content).size(P1_SIZE).style(theme::text::secondary),
-                    ))
-                } else {
-                    amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
-                })
-                .push_maybe(
-                    (!wallet_balance_masked && spark_balance_loaded)
-                        .then(|| {
-                            spark_btc_fiat
-                                .as_ref()
-                                .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
-                        })
-                        .flatten(),
-                ),
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(
-                    landing_button(
-                        landing_control_id(cube_id, "Spark", "send-btc"),
-                        localized_copy("Send"),
-                        None,
-                        Message::FocusAction,
-                        Some(Message::Home(HomeMessage::SendSparkBtc)),
-                        theme::button::primary,
-                    )
-                    .width(Length::Fixed(90.0)),
-                )
-                .push(orange_outline_btn(
-                    "Spark",
-                    "receive-btc",
-                    Message::Home(HomeMessage::ReceiveSparkBtc),
-                )),
-        );
-
-        // Headline balance — placeholder while the bridge hasn't
-        // corroborated the Spark balance with a `Synced` event yet,
-        // since the SDK can return a stale persisted value before
-        // incremental sync completes. Animated dots match the Total
-        // Balance loading treatment for visual consistency.
-        let spark_header: Element<'a, Message> = if spark_balance_error && !spark_balance_loaded {
-            amount_cell::<Message>(
-                AmountCell::unavailable(coincube_ui::locale::copy(
-                    "Spark bridge has not returned a balance",
-                )),
-                AmountTier::Card,
-            )
-        } else if spark_balance_loaded && spark_valuation_partial {
-            amount_cell::<Message>(
-                if wallet_balance_masked {
-                    AmountCell::masked()
-                } else {
-                    AmountCell::unavailable(coincube_ui::locale::copy(
-                        "Combined BTC and USDB valuation needs a BTC/USD quote",
-                    ))
-                },
-                AmountTier::Card,
-            )
-        } else if spark_balance_loaded {
-            wallet_header::<Message>(
-                WalletHeaderProps::new(
-                    spark_display_balance,
-                    spark_fiat,
-                    wallet_balance_masked,
-                    bitcoin_unit,
-                    HeaderVariant::Card,
-                    display_mode,
-                    Some(Message::FlipDisplayMode),
-                )
-                .with_swap_focus(
-                    landing_control_id(cube_id, "Spark", "flip-balance"),
-                    Message::FocusAction,
-                ),
-            )
-            .into()
-        } else {
-            Column::new()
-                .spacing(4)
-                .push(spinner::typing_text_carousel(
-                    "...",
-                    false,
-                    Duration::from_millis(400),
-                    |content| text(content).size(H2_SIZE).bold(),
-                ))
-                .push(spinner::typing_text_carousel(
-                    "...",
-                    false,
-                    Duration::from_millis(400),
-                    |content| text(content).size(P1_SIZE).style(theme::text::secondary),
-                ))
-                .into()
-        };
-
-        // US Dollar row, as on the Spark page: shown while the wallet holds
-        // USDB, with its own Send/Receive.
-        let spark_usdb_row =
-            spark_usdb_balance
-                .filter(|holding| holding.balance > 0)
-                .map(|holding| {
-                    use crate::app::breez_spark::assets::format_token_display_u128;
-                    let usdb_figure = format_token_display_u128(holding.balance, holding.decimals);
-                    // ≈ sats only at a dedicated BTC/USD quote; sits inline after
-                    // the amount like the BTC row's fiat value.
-                    let usdb_sats = usable_usd_quote.map(|_| {
-                        format!(
-                            "≈ {} {}",
-                            Amount::from_sat(spark_usdb_as_sats)
-                                .to_formatted_string_with_unit(bitcoin_unit),
-                            bitcoin_unit.label()
-                        )
-                    });
-                    let shown = !wallet_balance_masked && spark_balance_loaded;
-                    coincube_ui::component::tenshu::fit_row(
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(
-                                coincube_ui::image::asset_logo("usdb")
-                                    .width(Length::Fixed(32.0))
-                                    .height(Length::Fixed(32.0)),
-                            )
-                            .push(text("USDB").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-                            .push(if shown {
-                                // Bold figure, muted unit, as the BTC row.
-                                Row::new()
-                                    .spacing(5)
-                                    .align_y(Alignment::Center)
-                                    .push(text(usdb_figure).size(P1_SIZE).bold())
-                                    .push(text("USDB").size(P1_SIZE).color(color::GREY_3))
-                                    .into()
-                            } else {
-                                amount_cell::<Message>(
-                                    if wallet_balance_masked {
-                                        AmountCell::masked()
-                                    } else if spark_balance_error {
-                                        AmountCell::unavailable(coincube_ui::locale::copy(
-                                            "Spark bridge has not returned a balance",
-                                        ))
-                                    } else {
-                                        AmountCell::unknown("Waiting for Spark sync")
-                                    },
-                                    AmountTier::Row,
-                                )
-                            })
-                            .push_maybe(usdb_sats.filter(|_| shown).map(|sats| {
-                                text(sats).size(P2_SIZE).style(theme::text::secondary)
-                            })),
-                        Row::new()
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                            .push(
-                                landing_button(
-                                    landing_control_id(cube_id, "Spark", "send-usdb"),
-                                    localized_copy("Send"),
-                                    None,
-                                    Message::FocusAction,
-                                    Some(Message::Home(HomeMessage::SendSparkUsdb)),
-                                    theme::button::primary,
-                                )
-                                .width(Length::Fixed(90.0)),
-                            )
-                            .push(orange_outline_btn(
-                                "Spark",
-                                "receive-usdb",
-                                Message::Home(HomeMessage::ReceiveSparkUsdb),
-                            )),
-                    )
-                });
-
-        let spark_card_content = Column::new()
-            .spacing(12)
-            .push(landing_button(
-                landing_control_id(cube_id, "Spark", "open"),
-                "Spark",
-                Some(spark_icon().size(16).style(theme::text::secondary)),
-                Message::FocusAction,
-                Some(Message::Menu(Menu::Spark(
-                    crate::app::menu::SparkSubMenu::Overview,
-                ))),
-                theme::button::transparent,
-            ))
-            .push(spark_header)
-            .push(spark_btc_row)
-            .push_maybe(spark_usdb_row)
-            .push_maybe((spark_balance_error && spark_balance_loaded).then(|| {
-                text(localized_copy("Last known Spark balance · refresh failed"))
-                    .size(P2_SIZE)
-                    .style(theme::text::warning)
-            }))
-            .push_maybe(pending_spark_incoming.and_then(|pt| {
-                (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit, wallet_balance_masked))
-            }));
-
-        openable_card(
-            Container::new(spark_card_content)
-                .padding(20)
-                .style(landing_card_style),
-            Message::Menu(Menu::Spark(crate::app::menu::SparkSubMenu::Overview)),
-        )
-    });
+fn overview_body<'a>(
+    config: &GlobalViewConfig<'a>,
+    overview_masks: OverviewMasks,
+) -> Element<'a, Message> {
+    let GlobalViewConfig {
+        cube_id,
+        has_spark,
+        fiat_converter,
+        has_vault,
+        has_imported_bitcoin,
+        imported_installed,
+        recovery_available,
+        bitcoin_unit,
+        vault_pending_send_sats,
+        vault_pending_receive_sats,
+        display_mode,
+        vault_loaded,
+        vault_alias,
+        balance_masked,
+        ..
+    } = *config;
+    let balances = overview_balances(config);
+    let wallet_balance_masked = overview_masks.wallets;
+    // A Cube without Spark never builds its wallet card.
+    let spark_card =
+        has_spark.then(|| spark_overview_card(config, &balances, wallet_balance_masked));
 
     let vault_card_element: Element<'a, Message> = {
         wallet_card(
             WalletType::Vault,
             cube_id,
-            &display_vault_balance,
+            &balances.display_vault_balance,
             fiat_converter,
             wallet_balance_masked,
             has_vault || (has_imported_bitcoin && imported_installed),
@@ -2900,15 +2781,416 @@ pub fn global_home_view<'a>(
             vault_pending_receive_sats,
             display_mode,
             if has_imported_bitcoin {
-                imported_balance_loaded
+                balances.imported_balance_loaded
             } else {
                 vault_loaded
             },
             vault_alias,
-            vault_stale.clone(),
+            config.vault_stale.clone(),
+            config.vault_loading_status.clone(),
         )
     };
 
+    let total_balance_block = overview_total(config, &balances, overview_masks);
+
+    // A Cube with no wallet yet has nothing to total; the Wallets cards
+    // carry the create/restore actions on their own.
+    let has_any_wallet = has_spark || has_vault || has_imported_bitcoin;
+
+    Container::new(
+        Column::new()
+            .spacing(12)
+            .push_maybe(has_any_wallet.then_some(total_balance_block))
+            .push_maybe(has_any_wallet.then(|| Space::new().height(Length::Fixed(8.0))))
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .width(Length::Fill)
+                    .push(h3(localized_copy("Wallets")).bold())
+                    .push(overview_eye(
+                        cube_id,
+                        coincube_ui::locale::copy("Wallets"),
+                        overview_masks.wallets,
+                        balance_masked,
+                        HomeMessage::ToggleWalletBalances,
+                    ))
+                    .align_y(Alignment::Center),
+            )
+            // `.cards`: two to a row while the column fits them.
+            .push(coincube_ui::component::tenshu::cards(
+                spark_card
+                    .into_iter()
+                    .chain(std::iter::once(vault_card_element)),
+            )),
+    )
+    .into()
+}
+
+fn spark_overview_card<'a>(
+    config: &GlobalViewConfig<'a>,
+    balances: &OverviewBalances,
+    wallet_balance_masked: bool,
+) -> Element<'a, Message> {
+    let GlobalViewConfig {
+        cube_id,
+        fiat_converter,
+        spark_btc_balance,
+        spark_balance_error,
+        spark_balance_loaded,
+        pending_spark_incoming,
+        bitcoin_unit,
+        ..
+    } = *config;
+    let OverviewBalances {
+        spark_valuation_partial,
+        spark_display_balance,
+        ..
+    } = *balances;
+    let spark_fiat = (!spark_valuation_partial)
+        .then(|| {
+            fiat_converter
+                .as_ref()
+                .map(|c| c.convert(spark_display_balance))
+        })
+        .flatten();
+    let spark_btc_fiat = fiat_converter
+        .as_ref()
+        .map(|c| c.convert(spark_btc_balance));
+
+    let spark_btc_row = spark_bitcoin_row(config, wallet_balance_masked, spark_btc_fiat);
+    let spark_header = spark_card_header(config, balances, wallet_balance_masked, spark_fiat);
+    let spark_usdb_row = spark_usdb_row(config, balances, wallet_balance_masked);
+
+    let spark_card_content = Column::new()
+        .spacing(12)
+        .push(landing_button(
+            landing_control_id(cube_id, "Spark", "open"),
+            "Spark",
+            Some(spark_icon().size(16).style(theme::text::secondary)),
+            Message::FocusAction,
+            Some(Message::Menu(Menu::Spark(
+                crate::app::menu::SparkSubMenu::Overview,
+            ))),
+            theme::button::transparent,
+        ))
+        .push(spark_header)
+        .push(spark_btc_row)
+        .push_maybe(spark_usdb_row)
+        .push_maybe((spark_balance_error && spark_balance_loaded).then(|| {
+            text(localized_copy("Last known Spark balance · refresh failed"))
+                .size(P2_SIZE)
+                .style(theme::text::warning)
+        }))
+        .push_maybe(pending_spark_incoming.and_then(|pt| {
+            (pt.stage != TransferStage::Completed)
+                .then(|| pending_deposit_card(pt, bitcoin_unit, wallet_balance_masked))
+        }));
+
+    openable_card(
+        Container::new(spark_card_content)
+            .padding(20)
+            .style(landing_card_style),
+        Message::Menu(Menu::Spark(crate::app::menu::SparkSubMenu::Overview)),
+    )
+}
+
+fn spark_bitcoin_row<'a>(
+    config: &GlobalViewConfig<'a>,
+    wallet_balance_masked: bool,
+    spark_btc_fiat: Option<crate::app::view::vault::fiat::FiatAmount>,
+) -> Element<'a, Message> {
+    let GlobalViewConfig {
+        cube_id,
+        bitcoin_unit,
+        spark_btc_balance,
+        spark_balance_error,
+        spark_balance_loaded,
+        ..
+    } = *config;
+    // `fit_row`, as on the Vault card.
+    coincube_ui::component::tenshu::fit_row(
+        Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(coincube_ui::image::asset_network_logo::<Message>(
+                "btc", "spark", 32.0,
+            ))
+            .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
+            .push(if wallet_balance_masked {
+                Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
+            } else if spark_balance_error && !spark_balance_loaded {
+                Row::new().push(
+                    text(localized_copy("Balance unavailable"))
+                        .size(P1_SIZE)
+                        .style(theme::text::warning),
+                )
+            } else if !spark_balance_loaded {
+                // Pre-Synced placeholder — see the comment on the
+                // Spark wallet_header below for why we don't render
+                // the raw value yet. Animated dots mirror the Total
+                // Balance loading treatment for visual consistency.
+                Row::new().push(spinner::typing_text_carousel(
+                    "...",
+                    false,
+                    Duration::from_millis(400),
+                    |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+                ))
+            } else {
+                amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
+            })
+            .push_maybe(
+                (!wallet_balance_masked && spark_balance_loaded)
+                    .then(|| {
+                        spark_btc_fiat
+                            .as_ref()
+                            .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
+                    })
+                    .flatten(),
+            ),
+        Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(
+                landing_button(
+                    landing_control_id(cube_id, "Spark", "send-btc"),
+                    localized_copy("Send"),
+                    None,
+                    Message::FocusAction,
+                    Some(Message::Home(HomeMessage::SendSparkBtc)),
+                    theme::button::primary,
+                )
+                .width(Length::Fixed(90.0)),
+            )
+            .push(spark_receive_button(
+                cube_id,
+                "Spark",
+                "receive-btc",
+                Message::Home(HomeMessage::ReceiveSparkBtc),
+            )),
+    )
+    .into()
+}
+
+fn spark_card_header<'a>(
+    config: &GlobalViewConfig<'a>,
+    balances: &OverviewBalances,
+    wallet_balance_masked: bool,
+    spark_fiat: Option<crate::app::view::vault::fiat::FiatAmount>,
+) -> Element<'a, Message> {
+    let GlobalViewConfig {
+        cube_id,
+        bitcoin_unit,
+        spark_balance_error,
+        spark_balance_loaded,
+        display_mode,
+        ..
+    } = *config;
+    let OverviewBalances {
+        spark_display_balance,
+        spark_valuation_partial,
+        ..
+    } = *balances;
+    // Headline balance — placeholder while the bridge hasn't
+    // corroborated the Spark balance with a `Synced` event yet,
+    // since the SDK can return a stale persisted value before
+    // incremental sync completes. Animated dots match the Total
+    // Balance loading treatment for visual consistency.
+    if spark_balance_error && !spark_balance_loaded {
+        amount_cell::<Message>(
+            AmountCell::unavailable(coincube_ui::locale::copy(
+                "Spark bridge has not returned a balance",
+            )),
+            AmountTier::Card,
+        )
+    } else if spark_balance_loaded && spark_valuation_partial {
+        amount_cell::<Message>(
+            if wallet_balance_masked {
+                AmountCell::masked()
+            } else {
+                AmountCell::unavailable(coincube_ui::locale::copy(
+                    "Combined BTC and USDB valuation needs a BTC/USD quote",
+                ))
+            },
+            AmountTier::Card,
+        )
+    } else if spark_balance_loaded {
+        wallet_header::<Message>(
+            WalletHeaderProps::new(
+                spark_display_balance,
+                spark_fiat,
+                wallet_balance_masked,
+                bitcoin_unit,
+                HeaderVariant::Card,
+                display_mode,
+                Some(Message::FlipDisplayMode),
+            )
+            .with_swap_focus(
+                landing_control_id(cube_id, "Spark", "flip-balance"),
+                Message::FocusAction,
+            ),
+        )
+        .into()
+    } else {
+        Column::new()
+            .spacing(4)
+            .push(spinner::typing_text_carousel(
+                "...",
+                false,
+                Duration::from_millis(400),
+                |content| text(content).size(H2_SIZE).bold(),
+            ))
+            .push(spinner::typing_text_carousel(
+                "...",
+                false,
+                Duration::from_millis(400),
+                |content| text(content).size(P1_SIZE).style(theme::text::secondary),
+            ))
+            .into()
+    }
+}
+
+fn spark_usdb_row<'a>(
+    config: &GlobalViewConfig<'a>,
+    balances: &OverviewBalances,
+    wallet_balance_masked: bool,
+) -> Option<Element<'a, Message>> {
+    let GlobalViewConfig {
+        cube_id,
+        bitcoin_unit,
+        spark_usdb_balance,
+        spark_balance_loaded,
+        spark_balance_error,
+        ..
+    } = *config;
+    let OverviewBalances {
+        usable_usd_quote,
+        spark_usdb_as_sats,
+        ..
+    } = *balances;
+    // US Dollar row, as on the Spark page: shown while the wallet holds
+    // USDB, with its own Send/Receive.
+    spark_usdb_balance
+        .filter(|holding| holding.balance > 0)
+        .map(|holding| {
+            use crate::app::breez_spark::assets::format_token_display_u128;
+            let usdb_figure = format_token_display_u128(holding.balance, holding.decimals);
+            // ≈ sats only at a dedicated BTC/USD quote; sits inline after
+            // the amount like the BTC row's fiat value.
+            let usdb_sats = usable_usd_quote.map(|_| {
+                format!(
+                    "≈ {} {}",
+                    Amount::from_sat(spark_usdb_as_sats)
+                        .to_formatted_string_with_unit(bitcoin_unit),
+                    bitcoin_unit.label()
+                )
+            });
+            let shown = !wallet_balance_masked && spark_balance_loaded;
+            coincube_ui::component::tenshu::fit_row(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        coincube_ui::image::asset_logo("usdb")
+                            .width(Length::Fixed(32.0))
+                            .height(Length::Fixed(32.0)),
+                    )
+                    .push(text("USDB").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
+                    .push(if shown {
+                        // Bold figure, muted unit, as the BTC row.
+                        Row::new()
+                            .spacing(5)
+                            .align_y(Alignment::Center)
+                            .push(text(usdb_figure).size(P1_SIZE).bold())
+                            .push(text("USDB").size(P1_SIZE).color(color::GREY_3))
+                            .into()
+                    } else {
+                        amount_cell::<Message>(
+                            if wallet_balance_masked {
+                                AmountCell::masked()
+                            } else if spark_balance_error {
+                                AmountCell::unavailable(coincube_ui::locale::copy(
+                                    "Spark bridge has not returned a balance",
+                                ))
+                            } else {
+                                AmountCell::unknown("Waiting for Spark sync")
+                            },
+                            AmountTier::Row,
+                        )
+                    })
+                    .push_maybe(
+                        usdb_sats
+                            .filter(|_| shown)
+                            .map(|sats| text(sats).size(P2_SIZE).style(theme::text::secondary)),
+                    ),
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        landing_button(
+                            landing_control_id(cube_id, "Spark", "send-usdb"),
+                            localized_copy("Send"),
+                            None,
+                            Message::FocusAction,
+                            Some(Message::Home(HomeMessage::SendSparkUsdb)),
+                            theme::button::primary,
+                        )
+                        .width(Length::Fixed(90.0)),
+                    )
+                    .push(spark_receive_button(
+                        cube_id,
+                        "Spark",
+                        "receive-usdb",
+                        Message::Home(HomeMessage::ReceiveSparkUsdb),
+                    )),
+            )
+        })
+        .map(Into::into)
+}
+
+fn spark_receive_button<'a>(
+    cube_id: &str,
+    wallet: &'static str,
+    control: &'static str,
+    msg: Message,
+) -> Element<'a, Message> {
+    landing_button(
+        landing_control_id(cube_id, wallet, control),
+        localized_copy("Receive"),
+        None,
+        Message::FocusAction,
+        Some(msg),
+        theme::button::orange_outline,
+    )
+    .width(Length::Fixed(90.0))
+    .into()
+}
+
+fn overview_total<'a>(
+    config: &GlobalViewConfig<'a>,
+    balances: &OverviewBalances,
+    overview_masks: OverviewMasks,
+) -> coincube_ui::widget::Column<'a, Message> {
+    let GlobalViewConfig {
+        has_spark,
+        spark_balance_loaded,
+        has_vault,
+        has_imported_bitcoin,
+        vault_loaded,
+        cube_id,
+        balance_masked,
+        total_balance_loading,
+        bitcoin_unit,
+        display_mode,
+        ..
+    } = *config;
+    let OverviewBalances {
+        imported_balance_loaded,
+        total_partial,
+        global_total_amount,
+        global_total_fiat,
+        ..
+    } = *balances;
+    let total_balance_masked = overview_masks.total;
     // Total Balance block — the fiat-first headline number above the
     // Wallets section. Before the first authoritative result, a zero is not
     // a wallet balance. A failed first read without any known component is
@@ -2999,7 +3281,7 @@ pub fn global_home_view<'a>(
             .style(theme::text::warning)
         }),
     );
-    let total_balance_block = Column::new()
+    Column::new()
         .push(total_balance_block)
         .push(Space::new().height(Length::Fixed(28.0)))
         .push(
@@ -3007,41 +3289,7 @@ pub fn global_home_view<'a>(
                 .width(Length::Fill)
                 .height(Length::Fixed(1.0))
                 .style(theme::tenshu::control::divider),
-        );
-
-    // A Cube with no wallet yet has nothing to total; the Wallets cards
-    // carry the create/restore actions on their own.
-    let has_any_wallet = has_spark || has_vault || has_imported_bitcoin;
-
-    let overview = Container::new(
-        Column::new()
-            .spacing(12)
-            .push_maybe(has_any_wallet.then_some(total_balance_block))
-            .push_maybe(has_any_wallet.then(|| Space::new().height(Length::Fixed(8.0))))
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .width(Length::Fill)
-                    .push(h3(localized_copy("Wallets")).bold())
-                    .push(overview_eye(
-                        cube_id,
-                        coincube_ui::locale::copy("Wallets"),
-                        overview_masks.wallets,
-                        balance_masked,
-                        HomeMessage::ToggleWalletBalances,
-                    ))
-                    .align_y(Alignment::Center),
-            )
-            // `.cards`: two to a row while the column fits them.
-            .push(coincube_ui::component::tenshu::cards(
-                spark_card
-                    .into_iter()
-                    .chain(std::iter::once(vault_card_element)),
-            )),
-    )
-    .into();
-
-    (overview, transfer)
+        )
 }
 
 /// The Overview page (`P-Overview`): its head with the Transfer action, the
@@ -3359,6 +3607,7 @@ mod tests {
                 vault_loaded: true,
                 recovery_available: true,
                 vault_stale: None,
+                vault_loading_status: None,
                 display_mode: DisplayMode::FiatNative,
                 has_vault: true,
                 has_imported_bitcoin: false,
@@ -3382,6 +3631,7 @@ mod tests {
                 spend_tx_fees: None,
                 transfer_feerate: &self.transfer_feerate,
                 transfer_feerate_loading: None,
+                transfer_feerate_preset: None,
                 spark_send_fee_sat: None,
                 pending_spark_incoming: Some(PendingTransfer {
                     amount: Amount::from_sat(31_000),
@@ -3404,6 +3654,41 @@ mod tests {
     fn directions() -> [TransferDirection; 2] {
         use TransferDirection::*;
         [VaultToSpark, SparkToVault]
+    }
+
+    /// A Vault with no balance yet says why under its dots, and never calls
+    /// a balance it has not loaded "last known".
+    #[test]
+    fn loading_vault_card_shows_its_status_not_a_last_known_balance() {
+        use crate::app::view::shared::landing::capture;
+        let fixture = ViewFixture::new();
+        let mut loading = fixture.config(0, None, None);
+        loading.vault_loaded = false;
+        loading.total_balance_loading = true;
+        loading.vault_stale = Some("Last known Vault balance · not updating".into());
+        loading.vault_loading_status = Some("Loading Vault history (25%)".into());
+        let shown = capture::inspect(
+            "hub-vault-loading",
+            overview(loading),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("Loading Vault history (25%)"));
+        assert!(!shown.contains("Last known Vault balance"));
+
+        let mut loaded = fixture.config(0, None, None);
+        loaded.vault_stale = Some("Last known Vault balance · not updating".into());
+        loaded.vault_loading_status = Some("Loading Vault history (25%)".into());
+        let shown = capture::inspect(
+            "hub-vault-stale",
+            overview(loaded),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("Last known Vault balance"));
+        assert!(!shown.contains("Loading Vault history"));
     }
 
     #[test]
@@ -4363,6 +4648,30 @@ mod tests {
 
     /// Every directed pair of distinct wallets must map to exactly one
     /// `TransferDirection`, and same-wallet pairs must map to `None`.
+    /// Bitcoin Blake2b has no Spark: the one cross-Cube route there is Vault
+    /// to Vault. Test networks have none.
+    #[test]
+    fn blake2b_offers_only_vault_to_vault_across_cubes() {
+        use WalletKind::{Spark, Vault};
+        let route = |from, to, chain| TransferDirection::to_other_wallet(from, to, chain);
+        assert_eq!(
+            route(Vault, Vault, ChainId::BitcoinBlake2b),
+            Some(TransferDirection::VaultToOtherCube)
+        );
+        for (from, to) in [(Vault, Spark), (Spark, Vault), (Spark, Spark)] {
+            assert_eq!(route(from, to, ChainId::BitcoinBlake2b), None);
+        }
+        for chain in [
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            assert_eq!(route(Vault, Vault, chain), None, "{:?}", chain);
+        }
+    }
+
     #[test]
     fn try_from_pair_is_total_over_distinct_pairs() {
         let kinds = [WalletKind::Spark, WalletKind::Vault];
@@ -5078,6 +5387,7 @@ mod tests {
         vault_to_spark.address_expanded = true;
         vault_to_spark.spend_tx_fees = Some(Amount::from_sat(750));
         vault_to_spark.transfer_feerate_loading = Some(FeeratePreset::Fast);
+        vault_to_spark.transfer_feerate_preset = Some(FeeratePreset::Normal);
         let _ = transfer_dialog_for(vault_to_spark);
 
         let mut vault_to_spark_signed =
@@ -5283,6 +5593,97 @@ mod tests {
         ] {
             assert!(done.contains(label), "done: {}", label);
         }
+    }
+
+    const UNBREAKABLE_CUBE_NAME: &str = "EmmanuelsLongTermSavingsCube";
+
+    /// Each route tile's "**Spark** in Cube" stays one phrase (COIN-677):
+    /// on one line when it fits, else "in Cube" drops whole under the
+    /// asset. It never wraps beside the asset, stranding the asset on its
+    /// last line. A name with no spaces that is wider than the tile breaks
+    /// between glyphs instead of painting past the tile.
+    #[test]
+    fn transfer_route_tiles_keep_asset_and_place_together() {
+        let fixture = ViewFixture::new();
+        for cube_name in [
+            "Everyday",
+            "Emmanuel's Cube",
+            "Emmanuel's Long-Term Savings Cube",
+            UNBREAKABLE_CUBE_NAME,
+        ] {
+            for direction in [
+                TransferDirection::SparkToVault,
+                TransferDirection::VaultToSpark,
+            ] {
+                for outer in [(1024, 768), (1440, 900)] {
+                    let mut config = fixture.config(1, Some(direction), None);
+                    config.transfer_page = TransferPage::Amount;
+                    config.cube_name = cube_name;
+                    let shown = capture::inspect(
+                        "transfer-route-tiles",
+                        transfer_dialog_for(config),
+                        outer,
+                        "dark",
+                        theme::Theme::dark(),
+                    );
+                    assert_transfer_route_tiles(&shown.text, cube_name, direction, outer);
+                }
+            }
+        }
+    }
+
+    fn assert_transfer_route_tiles(
+        text: &[(String, iced::Rectangle)],
+        cube_name: &str,
+        direction: TransferDirection,
+        outer: (u32, u32),
+    ) {
+        let place_text = format!("in {}", cube_name);
+        let mut tiles = 0;
+        for (i, (value, place)) in text.iter().enumerate() {
+            if *value != place_text {
+                continue;
+            }
+            tiles += 1;
+            let (asset_text, asset) = &text[i - 1];
+            assert!(
+                asset_text == "Spark" || asset_text == "Vault",
+                "{:?} precedes {:?}",
+                asset_text,
+                value
+            );
+            let one_line = (place.y - asset.y).abs() < 0.5 && place.x >= asset.x + asset.width;
+            let dropped =
+                (place.x - asset.x).abs() < 0.5 && place.y >= asset.y + asset.height - 0.5;
+            assert!(
+                one_line || dropped,
+                "{:?} {:?} at {:?}: {} {:?} beside {} {:?}",
+                cube_name,
+                direction,
+                outer,
+                asset_text,
+                asset,
+                value,
+                place
+            );
+            // A text node's bounds are clamped to its limits, so
+            // overflow shows as a missing line break, not as width:
+            // at 1024 the unbreakable name is about twice the
+            // tile's width. Word wrapping gives two lines ("in",
+            // then the whole name, painted past the tile); it must
+            // break inside the name too.
+            if cube_name == UNBREAKABLE_CUBE_NAME && outer == (1024, 768) {
+                assert!(
+                    place.height > 2.0 * asset.height + 0.5,
+                    "{:?} at {:?}: {:?} {:?} did not break inside its tile",
+                    direction,
+                    outer,
+                    value,
+                    place
+                );
+            }
+        }
+        assert_eq!(tiles, 2, "From and To: {:?}", text);
     }
 
     #[test]
