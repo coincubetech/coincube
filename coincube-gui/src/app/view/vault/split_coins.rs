@@ -678,6 +678,9 @@ fn key_step<'a>(
             )
             .push(body)
             .push(status)
+            .push(flow.error.as_ref().map(|error| {
+                p2_regular(coincube_ui::locale::notice(error.clone())).style(theme::text::error)
+            }))
             .push(flow.signature_available.then(|| {
                 Row::new()
                     .spacing(12)

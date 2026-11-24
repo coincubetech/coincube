@@ -218,6 +218,14 @@ pub struct SplitHubPanel {
     /// Where the build in flight is, once it says.
     stage: Option<split_coins::BuildStage>,
     error: Option<String>,
+    /// The split coin on offer when `error` landed. The message is about
+    /// that offer, so it goes once another coin is offered.
+    error_key: Option<OutPoint>,
+}
+
+/// The split coin a split would spend now.
+fn offered_key(cache: &Cache) -> Option<OutPoint> {
+    cache.split_keys().first().map(|(coin, _)| coin.outpoint)
 }
 
 impl SplitHubPanel {
@@ -238,6 +246,7 @@ impl SplitHubPanel {
             working: false,
             stage: None,
             error: None,
+            error_key: None,
         }
     }
 
@@ -373,7 +382,10 @@ impl SplitHubPanel {
             vbytes,
             working: self.working,
             stage: self.stage.filter(|_| self.working),
-            error: self.error.clone(),
+            error: self
+                .error
+                .clone()
+                .filter(|_| offered_key(cache) == self.error_key),
             copy,
             waiting_to_sign,
             mask_amounts: cache.balance_amounts_masked(),
@@ -446,7 +458,7 @@ impl SplitHubPanel {
         }
     }
 
-    fn set_result(&mut self, result: Result<Box<split_coins::SplitRecord>, String>) {
+    fn set_result(&mut self, cache: &Cache, result: Result<Box<split_coins::SplitRecord>, String>) {
         self.working = false;
         self.stage = None;
         match result {
@@ -455,7 +467,12 @@ impl SplitHubPanel {
                 self.continuing = false;
                 self.error = None;
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => {
+                // A rejected split coin has already left the offer, so this
+                // is the coin offered next, or none on step one.
+                self.error_key = offered_key(cache);
+                self.error = Some(e);
+            }
         }
     }
 
@@ -501,7 +518,7 @@ impl State for SplitHubPanel {
                 return self.set_feerate(generation, rate)
             }
             Message::SplitAddress(result) => self.set_address(result),
-            Message::SplitPrepared(result) => self.set_result(result),
+            Message::SplitPrepared(result) => self.set_result(cache, result),
             Message::SplitBuildStage(stage) => {
                 if self.working {
                     self.stage = Some(stage);
@@ -880,6 +897,47 @@ mod tests {
         let flow = panel.flow(&cache);
         assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
         assert_eq!(flow.key, None);
+    }
+
+    /// Why a build failed stays with the offer it landed on: step one says
+    /// why the split coin went, and the message goes once another split
+    /// coin is offered rather than waiting on the next review.
+    #[test]
+    fn a_build_error_goes_when_another_split_coin_is_offered() {
+        let (mut panel, mut cache, [_, _, key]) = fixture();
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::Saved(path.clone()));
+        // The App records the rejection before the panel hears of it.
+        cache.split_key_rejected(key, std::time::SystemTime::now());
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("no longer usable".to_string())),
+        );
+        let flow = panel.flow(&cache);
+        assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
+        assert_eq!(flow.error.as_deref(), Some("no longer usable"));
+
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.error, None);
+    }
+
+    /// A failure that isn't about the split coin stays on the review.
+    #[test]
+    fn a_build_error_stays_on_the_review_it_failed_on() {
+        let (mut panel, cache, _) = fixture();
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::SplitPrepared(Err("couldn't build".to_string())),
+        );
+        let flow = panel.flow(&cache);
+        assert_eq!(flow.step, Step::Review);
+        assert_eq!(flow.error.as_deref(), Some("couldn't build"));
     }
 
     fn fee(generation: u64, rate: Option<u64>) -> Message {
