@@ -7126,9 +7126,20 @@ impl App {
         // first `Init`, dropped the session at every signed-in open;
         // the bound-client check below hands the panel back to local
         // mode once that session ends.
+        //
+        // An explicit sign-out is the exception: the panel goes local first,
+        // so `clear_session` treats the saved sign-in as this Cube's and
+        // deletes it. Left in opening-session mode it would keep the keyring
+        // entry, and the next `Init` or launch would sign the user back in.
+        let signing_out = matches!(
+            &msg,
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::LogOut
+            ))
+        );
         if self.cache.chain().is_blake2b()
             && !self.requires_connect()
-            && self.fork_connect_client.is_none()
+            && (self.fork_connect_client.is_none() || signing_out)
         {
             self.panels.connect.account.use_local_backend();
         }
@@ -12036,6 +12047,41 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("synthetic-opening")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Signing out of a Vault-less Bitcoin Blake2b Cube that was opened
+    /// signed in deletes the saved sign-in, as it does on a Bitcoin Cube.
+    /// While the panel still held the opening session it took the saved
+    /// sign-in for another tab's and kept it, so the next `Init` or launch
+    /// signed the user back in.
+    #[test]
+    fn signing_out_of_a_signed_in_fork_cube_deletes_the_saved_sign_in() {
+        use crate::app::state::connect::{
+            read_connect_secret, write_connect_secret, CONNECT_KEYRING_USER,
+        };
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-sign-out-{}", uuid::Uuid::new_v4()));
+        write_connect_secret(CONNECT_KEYRING_USER, b"saved-sign-in").unwrap();
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        ))));
+        assert!(
+            read_connect_secret(CONNECT_KEYRING_USER).is_some(),
+            "opening the Cube leaves the saved sign-in alone"
+        );
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
+        assert!(
+            read_connect_secret(CONNECT_KEYRING_USER).is_none(),
+            "sign-out deletes the saved sign-in"
+        );
+        assert!(app.fork_connect_client.is_none());
+        assert!(!app.cache.has_connect_session);
+        assert!(app.panels.connect.account.authenticated_client().is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
