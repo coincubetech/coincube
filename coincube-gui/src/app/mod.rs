@@ -7948,15 +7948,35 @@ impl App {
                 .await
             }),
             Message::SplitBuildStage,
-            move |result| match result {
-                Ok(prepared) => Message::SplitPrepared(Ok(Box::new(prepared.record))),
-                Err(crate::services::split_coins::PrepareError {
-                    message,
-                    rejected_key: Some(key),
-                }) => Message::SplitKeyRejected { app, key, message },
-                Err(error) => Message::SplitPrepared(Err(error.message)),
+            move |result| Message::SplitBuilt {
+                app,
+                result: result.map(|prepared| Box::new(prepared.record)),
             },
         )
+    }
+
+    /// A split build finished. One from another `App` (its Cube was locked
+    /// or switched meanwhile) changes nothing here: its record belongs to
+    /// that `App`'s Vault, and its failure to that `App`'s review.
+    fn route_split_built(
+        &mut self,
+        app: cache::AppGeneration,
+        result: Result<
+            Box<crate::services::split_coins::SplitRecord>,
+            crate::services::split_coins::PrepareError,
+        >,
+    ) -> Task<Message> {
+        if app != self.cache.app_generation {
+            return Task::none();
+        }
+        match result {
+            Ok(record) => self.route_split_prepared(Ok(record)),
+            Err(crate::services::split_coins::PrepareError {
+                message,
+                rejected_key: Some(key),
+            }) => self.route_split_key_rejected(key, message),
+            Err(error) => self.route_split_prepared(Err(error.message)),
+        }
     }
 
     /// The build's fresh check rejected its split key: stop offering that
@@ -7964,14 +7984,9 @@ impl App {
     /// one), then report the failed build.
     fn route_split_key_rejected(
         &mut self,
-        app: cache::AppGeneration,
         key: bitcoin::OutPoint,
         message: String,
     ) -> Task<Message> {
-        // Another App's build: its Cube was locked or switched meanwhile.
-        if app != self.cache.app_generation {
-            return Task::none();
-        }
         self.cache
             .split_key_rejected(key, std::time::SystemTime::now());
         // A background check of this coin still in flight is older than
@@ -8966,8 +8981,8 @@ impl App {
             Message::SplitPrepared(result) => {
                 return self.route_split_prepared(result);
             }
-            Message::SplitKeyRejected { app, key, message } => {
-                return self.route_split_key_rejected(app, key, message);
+            Message::SplitBuilt { app, result } => {
+                return self.route_split_built(app, result);
             }
             // To Split coins whichever panel is showing, like the result.
             Message::SplitBuildStage(stage) => return self.route_split_build_stage(stage),
@@ -14443,19 +14458,37 @@ pub(crate) mod shell_tests {
             .unwrap()
             .start_building_split_for_test();
         let key: bitcoin::OutPoint = format!("{}:0", "07".repeat(32)).parse().unwrap();
-        // A result from another App's build changes nothing here.
-        drop(app.update(Message::SplitKeyRejected {
-            app: crate::app::cache::AppGeneration::next(),
-            key,
-            message: KEY_REJECTED_HISTORY.to_string(),
+        let rejected = || {
+            Err(crate::services::split_coins::PrepareError {
+                message: KEY_REJECTED_HISTORY.to_string(),
+                rejected_key: Some(key),
+            })
+        };
+        let progress = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+        };
+        // A result from another App's build changes nothing here: not a
+        // rejection, and not an ordinary failure.
+        let other = crate::app::cache::AppGeneration::next();
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: rejected(),
         }));
         assert!(!app.cache.chain_proofs.contains_key(&key));
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: Err("Couldn't build".to_string().into()),
+        }));
+        assert_eq!(progress(&app), (true, None), "still this App's build");
         // A background check of the coin is in flight when it is rejected.
         app.chain_proofs_in_flight.insert(key);
-        drop(app.update(Message::SplitKeyRejected {
+        drop(app.update(Message::SplitBuilt {
             app: app.cache.app_generation,
-            key,
-            message: KEY_REJECTED_HISTORY.to_string(),
+            result: rejected(),
         }));
         assert!(app.cache.superseded_proof_checks.contains(&key));
         assert!(matches!(
@@ -16137,6 +16170,9 @@ pub(crate) mod shell_tests {
         let refusal = |messages: Vec<Message>| {
             messages.into_iter().find_map(|message| match message {
                 Message::SplitPrepared(Err(error)) => Some(error),
+                Message::SplitBuilt {
+                    result: Err(error), ..
+                } => Some(error.message),
                 _ => None,
             })
         };

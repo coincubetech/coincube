@@ -353,15 +353,18 @@ pub enum Message {
     SplitBuildStage(crate::services::split_coins::BuildStage),
     /// The split was built and stored with the daemon, or why not.
     SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
-    /// The split builder's fresh check answered that this split key's path
-    /// no longer qualifies: stop offering the coin, then report `message`
-    /// like any failed build.
-    SplitKeyRejected {
+    /// A split build finished. The `App` that started it turns this into
+    /// [`Self::SplitPrepared`], first recording a rejected split key so the
+    /// coin stops being offered.
+    SplitBuilt {
         /// The `App` whose build it was: a result that outlives its `App`
-        /// (the Cube was locked or switched) isn't written into the next.
+        /// (the Cube was locked or switched) is not recorded in, shown by
+        /// or written into the next.
         app: crate::app::cache::AppGeneration,
-        key: coincube_core::miniscript::bitcoin::OutPoint,
-        message: String,
+        result: Result<
+            Box<crate::services::split_coins::SplitRecord>,
+            crate::services::split_coins::PrepareError,
+        >,
     },
     /// Open Send with exactly these coins chosen.
     SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
