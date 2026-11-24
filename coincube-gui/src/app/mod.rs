@@ -1025,6 +1025,15 @@ impl ConnectionStatus {
     }
 }
 
+/// Whether a Cube on this chain runs Connect's live updates. A Bitcoin
+/// Blake2b Cube never starts them: the legacy stream bootstrap is refused
+/// for the fork (`docs/BTCB2_VAULT_APP.md`), and its Mobile signing checks
+/// Connect while the signing window is open instead. Its status would read
+/// "Connecting…" for good, so the views leave it out.
+pub fn live_updates_apply(chain: crate::chain::ChainId) -> bool {
+    !chain.is_blake2b()
+}
+
 /// The notice shown when automatic renewal didn't work.
 pub const RENEW_FAILED_TITLE: &str = "Couldn’t reconnect this computer";
 
@@ -6966,6 +6975,22 @@ impl App {
         }
     }
 
+    /// The header shows the account email from `cache.connect_email`. A
+    /// Bitcoin Cube fills it from its login commit or live-updates startup;
+    /// a Bitcoin Blake2b Cube runs neither, so it mirrors the account its
+    /// panel is signed in as, and clears it once the panel has none.
+    fn sync_fork_connect_email(&mut self) {
+        if !self.cache.chain().is_blake2b() {
+            return;
+        }
+        let account = &self.panels.connect.account;
+        self.cache.connect_email = account
+            .authenticated_client()
+            .and(account.user.as_ref())
+            .map(|user| user.email.clone())
+            .filter(|email| !email.is_empty());
+    }
+
     fn sync_connect_stream_after_auth(&mut self, was_authenticated: bool) {
         // Connect logout: tear down the realtime stream. The
         // subscription is keyed on `connect_stream_config`, so
@@ -7174,6 +7199,7 @@ impl App {
         self.sync_connect_claim_session(session_epoch, explicit_logout);
         self.sync_connect_sidebar(was_authenticated);
         self.sync_connect_stream_after_auth(was_authenticated);
+        self.sync_fork_connect_email();
         // Auto-return for the "Switch to Connect" flow. When the user
         // clicked it without an active session, we routed them to the
         // Connect tab and set this flag. Now that they've signed in,
@@ -12010,6 +12036,50 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("synthetic-opening")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The header reads the account email from `cache.connect_email`, which a
+    /// Bitcoin Cube fills from its login commit or live-updates startup. A
+    /// signed-in Bitcoin Blake2b Cube runs neither, so it shows the account
+    /// its panel loaded, and drops it when that account signs out.
+    #[test]
+    fn a_signed_in_fork_cube_shows_its_account_email() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-open-email-{}", uuid::Uuid::new_v4()));
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        ))));
+        assert_eq!(app.cache.connect_email, None, "no account loaded yet");
+
+        // The opening session's account, as the admitted user load returns it.
+        let account = &app.panels.connect.account;
+        let (generation, epoch) = (account.session_generation(), account.auth_epoch());
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Ok(crate::services::coincube::User {
+                    id: 77,
+                    email: "fixture@example.invalid".into(),
+                    email_verified: Some(true),
+                }),
+                generation,
+                epoch,
+            },
+        ))));
+        assert!(
+            app.fork_connect_client.is_some(),
+            "still the opening session"
+        );
+        assert_eq!(
+            app.cache.connect_email.as_deref(),
+            Some("fixture@example.invalid")
+        );
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
+        assert_eq!(app.cache.connect_email, None, "cleared with the session");
         let _ = std::fs::remove_dir_all(&root);
     }
 

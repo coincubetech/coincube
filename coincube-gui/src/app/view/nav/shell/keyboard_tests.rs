@@ -1694,3 +1694,88 @@ fn connect_panel_says_what_the_state_table_says() {
         }
     }
 }
+
+/// A signed-in Bitcoin Blake2b Cube never starts live updates, so its
+/// Connect control and panel show the account without a live-updates row
+/// that would read "Connecting…" for good. A Bitcoin Cube in the same state
+/// is still starting them and keeps the row.
+#[test]
+fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
+    use crate::app::view::shared::landing::capture;
+    use crate::app::{VaultAlert, VaultStall};
+    let offline_vault = VaultAlert {
+        stall: VaultStall::Offline,
+        via_connect: true,
+        needs_sign_in: false,
+        last_synced: Some("14:02".into()),
+        block: 974_600,
+    };
+    for (name, chain, vault, says, never) in [
+        (
+            "blake2b",
+            ChainId::BitcoinBlake2bTestnet4,
+            None,
+            &[
+                "Signed in to COINCUBE | Connect",
+                "alex@example.test",
+                "Connect account",
+                "Connections settings",
+            ][..],
+            &[
+                "Live updates on this computer",
+                "Connecting…",
+                "Starting live updates from Connect.",
+            ][..],
+        ),
+        (
+            "blake2b-vault-offline",
+            ChainId::BitcoinBlake2bTestnet4,
+            Some(&offline_vault),
+            &[
+                "alex@example.test",
+                "Family savings",
+                "The balance shown is from 14:02.",
+            ][..],
+            &["Live updates on this computer", "Connecting…"][..],
+        ),
+        (
+            "bitcoin",
+            ChainId::Bitcoin,
+            None,
+            &[
+                "alex@example.test",
+                "Live updates on this computer",
+                "Connecting…",
+            ][..],
+            &[][..],
+        ),
+    ] {
+        let mut ctx = fixture_context();
+        ctx.network = chain;
+        ctx.connect_authenticated = true;
+        ctx.connect_email = Some("alex@example.test");
+        ctx.connect.vault_alert = vault;
+        let bar = capture::inspect_filled(
+            &format!("connect-control-{}", name),
+            top_bar_with_privacy(&ctx, None),
+            (1024, 65),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 65),
+        );
+        assert!(bar.contains("alex@example.test"), "{}", name);
+        let panel = capture::inspect_full_window(
+            &format!("connect-panel-{}", name),
+            container(connect_panel(&ctx)).padding(16).into(),
+            (392, 460),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for label in says {
+            assert!(panel.contains(label), "{}: {}", name, label);
+        }
+        for label in never {
+            assert!(!panel.contains(label), "{}: {}", name, label);
+        }
+    }
+}
