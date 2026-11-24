@@ -1972,6 +1972,22 @@ impl ConnectAccountPanel {
         self.session_generation
     }
 
+    /// Whether a `FeaturesLoaded` carrying `generation` belongs to the
+    /// current session: its generation matches, and no newly adopted session
+    /// is still waiting for its `SessionLoaded` (see `awaiting_session_load`).
+    /// The panel applies only such loads, and the App acts on a features
+    /// denial only under the same test, so the two never disagree.
+    pub fn is_current_features_load(&self, generation: u64) -> bool {
+        generation == self.session_generation && !self.awaiting_session_load
+    }
+
+    /// Opens the adoption window without a real sign-in, for App tests that
+    /// cannot reach `post_login_tasks` through an admitted panel.
+    #[cfg(test)]
+    pub(crate) fn begin_session_load_for_test(&mut self) {
+        self.awaiting_session_load = true;
+    }
+
     pub(crate) fn accepted_auth_revision(&self) -> u64 {
         self.accepted_auth_revision
     }
@@ -2675,7 +2691,7 @@ impl ConnectAccountPanel {
 
             // ── Plan & Billing ──────────────────────────────────────────
             ConnectAccountMessage::FeaturesLoaded(features, gen) => {
-                if gen == self.session_generation && !self.awaiting_session_load {
+                if self.is_current_features_load(gen) {
                     self.features = features;
                     self.leave_hidden_duress_route();
                 }
@@ -11135,6 +11151,78 @@ mod plan_lifecycle_tests {
             panel.ai_access_server_enabled(),
             "this session's own features apply"
         );
+    }
+
+    /// Every way out of the adoption window reopens features loads: a later
+    /// adoption's `SessionLoaded` (after a stale one left it open), a
+    /// log-out, and an installed admitted client.
+    #[test]
+    fn the_adoption_window_closes_on_every_session_reset() {
+        fn adopt(panel: &mut ConnectAccountPanel) -> u64 {
+            let epoch = panel.auth_epoch();
+            panel.auth_commit_pending = true;
+            let _ = panel.update_message(ConnectAccountMessage::AuthCommitAccepted {
+                login: crate::services::coincube::LoginResponse {
+                    requires_2fa: false,
+                    token: "next-bearer".into(),
+                    refresh_token: "next-refresh".into(),
+                    user: User {
+                        id: 2,
+                        email: "next@example.invalid".into(),
+                        email_verified: Some(true),
+                    },
+                },
+                epoch,
+                refreshed: false,
+            });
+            assert!(panel.awaiting_session_load, "adoption opens the window");
+            assert!(!panel.is_current_features_load(panel.session_generation()));
+            epoch
+        }
+        let loaded = |epoch| ConnectAccountMessage::SessionLoaded {
+            user: User {
+                id: 2,
+                email: "next@example.invalid".into(),
+                email_verified: Some(true),
+            },
+            plan: None,
+            epoch,
+        };
+
+        // A hold lands before the queued `SessionLoaded`: it is stale and
+        // leaves the window open, and the next adoption's own closes it.
+        let mut panel = ConnectAccountPanel::new();
+        let stale_epoch = adopt(&mut panel);
+        panel.invalidate_auth();
+        let _ = panel.update_message(loaded(stale_epoch));
+        assert!(
+            panel.awaiting_session_load,
+            "a stale SessionLoaded closes nothing"
+        );
+        let epoch = adopt(&mut panel);
+        let _ = panel.update_message(loaded(epoch));
+        assert!(!panel.awaiting_session_load);
+        assert!(panel.is_current_features_load(panel.session_generation()));
+
+        // A log-out (`clear_session`).
+        let mut panel = ConnectAccountPanel::new();
+        adopt(&mut panel);
+        let _ = panel.update_message(ConnectAccountMessage::LogOut);
+        assert!(!panel.awaiting_session_load, "a log-out closes the window");
+        assert!(panel.is_current_features_load(panel.session_generation()));
+
+        // An admitted client replaces the session.
+        let mut panel = ConnectAccountPanel::new();
+        adopt(&mut panel);
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("admitted-bearer");
+        panel.install_admitted_client(client);
+        assert!(
+            !panel.awaiting_session_load,
+            "an admitted client closes the window"
+        );
+        assert!(panel.is_current_features_load(panel.session_generation()));
     }
 
     #[test]

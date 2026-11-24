@@ -7130,7 +7130,7 @@ impl App {
             &msg,
             Message::View(view::Message::ConnectAccount(
                 view::ConnectAccountMessage::FeaturesLoaded(features, generation)
-            )) if *generation == self.panels.connect.account.session_generation()
+            )) if self.panels.connect.account.is_current_features_load(*generation)
                 && !crate::app::features::bitcoin_blake2b_enabled(
                     features.as_ref().and_then(|f| f.bitcoin_blake2b_enabled).unwrap_or(false),
                     self.panels.connect.account.bitcoin_blake2b_opt_in,
@@ -12222,6 +12222,39 @@ pub(crate) mod tests {
         assert!(app.authenticated_coincube_client().is_none());
         assert!(!app.cache.btcb2_server_enabled);
         assert_ne!(*app.panels.session_generation.borrow(), session_generation);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// While a newly adopted session waits for its `SessionLoaded`, the panel
+    /// drops a features load begun under the previous session. The fork gate
+    /// must not act on a denial the panel ignored.
+    #[test]
+    fn global_beta_gate_ignores_a_denial_the_panel_drops_after_adoption() {
+        let root = std::env::temp_dir().join(format!(
+            "coincube-beta-adoption-window-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = granted_fork_app(&root, Some(true));
+        assert!(app.requires_connect());
+        let generation = app.panels.connect.account.session_generation();
+        let session_generation = *app.panels.session_generation.borrow();
+        app.panels.connect.account.begin_session_load_for_test();
+        let denied =
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":false}))
+                .unwrap();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(denied), generation),
+        ))));
+        assert!(
+            app.authenticated_coincube_client().is_some(),
+            "a denial from before the adoption revokes nothing"
+        );
+        assert!(
+            app.panels.connect.account.bitcoin_blake2b_enabled(),
+            "the panel kept its features"
+        );
+        assert_eq!(*app.panels.session_generation.borrow(), session_generation);
         std::fs::remove_dir_all(root).unwrap();
     }
 
