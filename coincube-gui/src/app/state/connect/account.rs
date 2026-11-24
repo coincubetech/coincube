@@ -2143,6 +2143,14 @@ impl ConnectAccountPanel {
         self.save_session_to_keyring(&session);
         self.client.set_token(&session.login.token);
         self.accepted_auth_revision = self.accepted_auth_revision.wrapping_add(1);
+        // Adopting a session can lift another tab's claim hold in this same
+        // update (`AuthCommitAccepted` carries the session epoch), before
+        // the queued `SessionLoaded` runs. Drop the previous session's AI
+        // access grant here so the mirror never reads it under the new
+        // session; it reads off until this session's `FeaturesLoaded`.
+        if let Some(features) = self.features.as_mut() {
+            features.ai_access_enabled = None;
+        }
 
         let user = session.login.user.clone();
         // A true login bootstraps the signer device and realtime stream.
@@ -8042,8 +8050,9 @@ impl ConnectAccountPanel {
     /// The account-scoped AI access flag from `GET /connect/features`
     /// (`aiAccessEnabled`). Fails closed while features are unloaded and
     /// when the flag is absent, reverts on logout because `clear_session`
-    /// drops `features`, and reads off from a new session's start until its
-    /// own features load (`apply_loaded_connect_session`). Mirrored into
+    /// drops `features`, and reads off from a new session's adoption until
+    /// its own features load (`post_login_tasks`, again in
+    /// `apply_loaded_connect_session`). Mirrored into
     /// [`crate::app::cache::Cache::ai_access_server_enabled`]; see
     /// [`crate::app::features::ai_access_enabled`] for the full gate.
     pub fn ai_access_server_enabled(&self) -> bool {
@@ -11038,6 +11047,40 @@ mod plan_lifecycle_tests {
             generation,
         ));
         assert!(panel.ai_access_server_enabled());
+    }
+
+    #[test]
+    fn an_adopted_session_drops_the_previous_ai_access_grant_before_session_loaded() {
+        // `AuthCommitAccepted` lifts another tab's claim hold in the same
+        // update that adopts the session; the grant must already read off
+        // then, not only once the queued `SessionLoaded` runs.
+        let mut panel = ConnectAccountPanel::new();
+        panel.features = Some(features(None));
+        panel.features.as_mut().unwrap().ai_access_enabled = Some(true);
+        panel.auth_commit_pending = true;
+        let _ = panel.update_message(ConnectAccountMessage::AuthCommitAccepted {
+            login: crate::services::coincube::LoginResponse {
+                requires_2fa: false,
+                token: "next-bearer".into(),
+                refresh_token: "next-refresh".into(),
+                user: User {
+                    id: 2,
+                    email: "next@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+            },
+            epoch: 0,
+            refreshed: false,
+        });
+        assert!(!panel.auth_commit_pending, "the commit was adopted");
+        assert!(
+            !panel.ai_access_server_enabled(),
+            "off from adoption until this session's features load"
+        );
+        assert!(
+            panel.features.is_some(),
+            "other feature values are left in place"
+        );
     }
 
     #[test]
