@@ -1310,6 +1310,7 @@ pub async fn load_application(
         // Local-daemon path has no Connect tokens or gRPC URL; the user
         // would have to sign in via the Connect tab to populate these.
         connect_grpc_url: None,
+        connect_base_url: None,
         connect_tokens: None,
         connect_stream_status: crate::app::ConnectionStatus::default(),
         connect_signed_out_by: None,

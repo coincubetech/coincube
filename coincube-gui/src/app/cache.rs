@@ -469,6 +469,10 @@ pub struct Cache {
     /// — the Keychain "Sign via Keychain" button stays disabled while
     /// this is `None`.
     pub connect_grpc_url: Option<String>,
+    /// Base URL of the Connect API this Cube's signer pipeline is using, set
+    /// with [`Self::connect_grpc_url`]. A panel that builds its own REST
+    /// client for signing takes it from here, not from the global default.
+    pub connect_base_url: Option<String>,
     /// Shared `Arc<RwLock<AccessTokenResponse>>` for the Connect session,
     /// mirrored into Cache so deep panels (PsbtState et al.) can spin up
     /// a `GrpcSessionClient` on demand without re-plumbing the auth
@@ -584,6 +588,7 @@ impl std::default::Default for Cache {
             recovery_kit_last_backed_up_keychain_descriptor_fingerprint: None,
             recovery_kit_password_backed_up: false,
             connect_grpc_url: None,
+            connect_base_url: None,
             connect_tokens: None,
             connect_stream_status: crate::app::ConnectionStatus::default(),
             connect_signed_out_by: None,

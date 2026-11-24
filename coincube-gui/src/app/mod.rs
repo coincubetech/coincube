@@ -2808,19 +2808,20 @@ async fn connect_registration_auth(
 
 fn connect_stream_ready_task(
     chain: crate::chain::ChainId,
+    base_url: String,
     datadir: CoincubeDirectory,
     tokens: Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
     email: String,
     cube_uuid: Option<String>,
 ) -> Task<Message> {
     use crate::services::connect::client::cache::Account;
-    use crate::services::connect::client::resolve_connect_grpc_url;
+    use crate::services::connect::client::resolve_connect_grpc_url_for;
     use crate::services::connect::grpc::stream::ConnectStreamConfig;
 
     let completion_email = email.clone();
     Task::perform(
         async move {
-            let Some(grpc_url) = resolve_connect_grpc_url().await else {
+            let Some(grpc_url) = resolve_connect_grpc_url_for(&base_url).await else {
                 tracing::info!("Connect stream bootstrap: no Connect gRPC URL available");
                 return None;
             };
@@ -2848,7 +2849,7 @@ fn connect_stream_ready_task(
             // we just read from the shared `Arc<RwLock>`.
             let vault_ids = if let Some(cube_uuid) = cube_uuid.as_ref() {
                 let access_token = tokens.read().await.access_token.clone();
-                let mut client = crate::services::coincube::CoincubeClient::new();
+                let mut client = crate::services::coincube::CoincubeClient::with_base_url(base_url);
                 client.set_token(&access_token);
                 match client.list_cubes().await {
                     Ok(cubes) => cubes
@@ -3732,6 +3733,9 @@ impl App {
         if let (Some(auth), Some(email)) = (connect_auth_arc.as_ref(), connect_email.as_deref()) {
             tasks.push(connect_stream_ready_task(
                 cache.chain(),
+                // A Cube given a session at start-up is on the app's
+                // configured Connect API: its panel's client is built on it.
+                crate::services::coincube_api_base_url(),
                 data_dir.clone(),
                 auth.clone(),
                 email.to_string(),
@@ -7021,6 +7025,7 @@ impl App {
             self.connect_stream_config = None;
             self.connect_email = None;
             self.cache.connect_grpc_url = None;
+            self.cache.connect_base_url = None;
             self.cache.connect_tokens = None;
             self.cache.connect_device_id = None;
             self.cache.connect_email = None;
@@ -7059,6 +7064,7 @@ impl App {
         if needs_new_arc {
             self.connect_stream_config = None;
             self.cache.connect_grpc_url = None;
+            self.cache.connect_base_url = None;
             self.cache.connect_device_id = None;
             let tokens = std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::services::connect::client::auth::AccessTokenResponse {

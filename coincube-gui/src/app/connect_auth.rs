@@ -188,6 +188,7 @@ impl App {
         self.cache.has_connect_session = true;
 
         let chain = self.cache.chain();
+        let base_url = self.connect_base_url();
         let datadir = self.cache.datadir_path.clone();
         // Use the authoritative Cube settings id. The cache mirror can
         // still be empty during local-vault startup.
@@ -235,7 +236,7 @@ impl App {
                     connect_registration_auth(shared_auth, tokens, &network_dir, &email_for_task)
                         .await;
                 if let Some(grpc_url) =
-                    crate::services::connect::client::resolve_connect_grpc_url().await
+                    crate::services::connect::client::resolve_connect_grpc_url_for(&base_url).await
                 {
                     // Same helper as every other registration path.
                     // `ensure_device_registered` short-circuits on a

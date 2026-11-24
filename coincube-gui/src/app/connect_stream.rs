@@ -14,6 +14,7 @@ impl App {
         // unavailable there no matter how often the user retries —
         // we say so and point them at local Wi-Fi pairing instead.
         let chain = self.cache.chain();
+        let base_url = self.connect_base_url();
         let datadir = self.cache.datadir_path.clone();
         let expected_email = self
             .connect_email
@@ -60,6 +61,7 @@ impl App {
             let cube_spark_stable_balance = self.cube_settings.spark_stable_balance;
             let cube_uuid = cube_uuid.clone();
             let registration_email = expected_email.clone();
+            let registration_base_url = base_url.clone();
             Task::perform(
                 async move {
                     use crate::services::coincube::{CoincubeClient, RegisterCubeRequest};
@@ -77,7 +79,7 @@ impl App {
                                  register the cube"
                                 .to_string()
                         })?;
-                    let mut client = CoincubeClient::new();
+                    let mut client = CoincubeClient::with_base_url(registration_base_url);
                     client.set_token(&account.tokens.access_token);
                     client
                         .register_cube(RegisterCubeRequest {
@@ -145,7 +147,7 @@ impl App {
                         .await;
 
                 let Some(grpc_url) =
-                    crate::services::connect::client::resolve_connect_grpc_url().await
+                    crate::services::connect::client::resolve_connect_grpc_url_for(&base_url).await
                 else {
                     // No gRPC endpoint for this network — Connect
                     // relay signing can't work here. Don't pretend
@@ -595,6 +597,17 @@ impl App {
 }
 
 impl App {
+    /// The Connect API this Cube's signer pipeline talks to: the base URL of
+    /// the Cube's own client. On a Bitcoin Cube that is the panel's client,
+    /// built on the app's configured API. A Bitcoin Blake2b Cube that was
+    /// opened with a session uses the endpoint that session was admitted on.
+    pub(super) fn connect_base_url(&self) -> String {
+        self.fork_connect_client
+            .as_ref()
+            .map(|client| client.base_url.clone())
+            .unwrap_or_else(|| self.panels.connect.account.client.base_url.clone())
+    }
+
     pub(super) fn connect_stream_ready(
         &mut self,
         cfg: Option<(
@@ -662,6 +675,7 @@ impl App {
                 // PSBT modal in particular) can spin up a
                 // GrpcSessionClient on demand.
                 self.cache.connect_grpc_url = Some(cfg.grpc_url.clone());
+                self.cache.connect_base_url = Some(self.connect_base_url());
                 self.cache.connect_tokens = Some(cfg.tokens.clone());
                 self.cache.connect_device_id = Some(cfg.device_id.clone());
                 self.cache.connect_email = Some(email);
@@ -738,7 +752,14 @@ impl App {
         self.cache.connect_tokens = Some(tokens.clone());
         self.cache.connect_email = Some(email.clone());
         self.cache.has_connect_session = true;
-        connect_stream_ready_task(chain, datadir, tokens, email, cube_uuid)
+        connect_stream_ready_task(
+            chain,
+            self.connect_base_url(),
+            datadir,
+            tokens,
+            email,
+            cube_uuid,
+        )
     }
 }
 
