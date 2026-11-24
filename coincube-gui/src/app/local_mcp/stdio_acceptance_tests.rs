@@ -82,7 +82,11 @@ async fn client(settings: &mut Settings, id: &str) -> stdio::Client {
         .update(Message::CopyPair(id.into()), None, None, true, CUBE)
         .unwrap();
     let configuration: Value = serde_json::from_str(&configuration).unwrap();
-    let environment: Vec<_> = configuration["mcpServers"]["tenshu"]["env"]
+    let servers = configuration["mcpServers"].as_object().unwrap();
+    assert_eq!(servers.len(), 1);
+    let (key, server) = servers.iter().next().unwrap();
+    assert_eq!(key, &format!("coincube-{}", &id[..8]));
+    let environment: Vec<_> = server["env"]
         .as_object()
         .unwrap()
         .iter()
@@ -93,7 +97,7 @@ async fn client(settings: &mut Settings, id: &str) -> stdio::Client {
     let mut client = stdio::Client::start(&executable, &environment).await;
     let discovered = client.request("tools/list", json!({})).await;
     assert_eq!(discovered["result"]["tools"].as_array().unwrap().len(), 10);
-    let caps = client.call("tenshu_get_capabilities", json!({})).await;
+    let caps = client.call("coincube_get_capabilities", json!({})).await;
     let caps = &caps["structuredContent"];
     assert_eq!(caps["schema_version"], 2);
     assert_eq!(caps["wallet_proposals"], true);
@@ -261,16 +265,16 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
                 let mut wrong = input.clone();
                 wrong["network"] = json!(other);
                 tool_error(
-                    client.call("tenshu_prepare_wallet_creation", wrong).await,
+                    client.call("coincube_prepare_wallet_creation", wrong).await,
                     "invalid_input",
                 );
             }
             let mut missing = input.clone();
             missing.as_object_mut().unwrap().remove("network");
-            invalid_schema(&mut client, "tenshu_prepare_wallet_creation", missing).await;
+            invalid_schema(&mut client, "coincube_prepare_wallet_creation", missing).await;
             let first = summary(
                 client
-                    .call("tenshu_prepare_wallet_creation", input.clone())
+                    .call("coincube_prepare_wallet_creation", input.clone())
                     .await,
             );
             assert!(
@@ -283,7 +287,7 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             assert_eq!(
                 summary(
                     client
-                        .call("tenshu_prepare_wallet_creation", input.clone())
+                        .call("coincube_prepare_wallet_creation", input.clone())
                         .await
                 ),
                 first
@@ -292,7 +296,7 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             assert_eq!(
                 summary(
                     client
-                        .call("tenshu_get_wallet_proposal", lookup.clone())
+                        .call("coincube_get_wallet_proposal", lookup.clone())
                         .await
                 ),
                 first
@@ -300,20 +304,21 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             let mut changed = input.clone();
             changed["request_id"] = json!("changed-request");
             assert_eq!(
-                client.call("tenshu_prepare_wallet_creation", changed).await["structuredContent"]
-                    ["error"]["code"],
+                client
+                    .call("coincube_prepare_wallet_creation", changed)
+                    .await["structuredContent"]["error"]["code"],
                 "proposal_conflict"
             );
-            denied(client.call("tenshu_list_wallets", json!({})).await);
+            denied(client.call("coincube_list_wallets", json!({})).await);
             denied(
                 client
                     .call(
-                        "tenshu_get_prepared_transaction",
+                        "coincube_get_prepared_transaction",
                         json!({"wallet_id":"foreign","draft_id":"foreign"}),
                     )
                     .await,
             );
-            for tool in ["tenshu_create_wallet", "tenshu_approve_wallet"] {
+            for tool in ["coincube_create_wallet", "coincube_approve_wallet"] {
                 assert_eq!(
                     client
                         .request("tools/call", json!({"name":tool,"arguments":{}}))
@@ -327,22 +332,22 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             let mut replacement = self::client(&mut settings, &replacement_id).await;
             denied(
                 replacement
-                    .call("tenshu_get_wallet_proposal", lookup.clone())
+                    .call("coincube_get_wallet_proposal", lookup.clone())
                     .await,
             );
             revoke(&mut settings, &id);
-            unavailable(client.call("tenshu_get_wallet_proposal", lookup).await);
+            unavailable(client.call("coincube_get_wallet_proposal", lookup).await);
             client.close().await;
             let before_lock = summary(
                 replacement
-                    .call("tenshu_prepare_wallet_creation", input.clone())
+                    .call("coincube_prepare_wallet_creation", input.clone())
                     .await,
             );
             session::close();
             denied(
                 replacement
                     .call(
-                        "tenshu_get_wallet_proposal",
+                        "coincube_get_wallet_proposal",
                         json!({"proposal_id":before_lock["proposal_id"]}),
                     )
                     .await,
@@ -353,14 +358,14 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             denied(
                 replacement
                     .call(
-                        "tenshu_get_wallet_proposal",
+                        "coincube_get_wallet_proposal",
                         json!({"proposal_id":before_lock["proposal_id"]}),
                     )
                     .await,
             );
             let current = summary(
                 replacement
-                    .call("tenshu_prepare_wallet_creation", input.clone())
+                    .call("coincube_prepare_wallet_creation", input.clone())
                     .await,
             );
             assert_ne!(current["proposal_id"], before_lock["proposal_id"]);
@@ -427,7 +432,7 @@ fn stdio_client_creation_reaches_native_review_on_every_chain() {
             denied(
                 replacement
                     .call(
-                        "tenshu_get_wallet_proposal",
+                        "coincube_get_wallet_proposal",
                         json!({"proposal_id":current["proposal_id"]}),
                     )
                     .await,
@@ -487,21 +492,21 @@ fn stdio_client_unsigned_transaction_reaches_native_review_on_every_chain() {
             let id = pair(&mut app.local_mcp, Some(wallet.clone()), Some(daemon.clone()));
             refresh(&mut app.local_mcp, &root, chain, Some(wallet.clone()), Some(daemon.clone()));
             let mut client = client(&mut app.local_mcp, &id).await;
-            let listed = summary(client.call("tenshu_list_wallets", json!({})).await);
+            let listed = summary(client.call("coincube_list_wallets", json!({})).await);
             assert_eq!(listed["wallets"][0]["network"], network.as_str());
             let wallet_id = listed["wallets"][0]["wallet_id"].clone();
-            denied(client.call("tenshu_get_wallet_summary", json!({"wallet_id":wallet_id})).await);
-            denied(client.call("tenshu_get_wallet_proposal", json!({"proposal_id":"foreign"})).await);
+            denied(client.call("coincube_get_wallet_summary", json!({"wallet_id":wallet_id})).await);
+            denied(client.call("coincube_get_wallet_proposal", json!({"proposal_id":"foreign"})).await);
             let recipient = Address::from_script(&ScriptBuf::new_p2wsh(&WScriptHash::all_zeros()), chain.bitcoin_network()).unwrap().to_string();
             let input = json!({"network":network,"wallet_id":wallet_id,"request_id":"client-payment",
                 "recipients":[{"address":recipient,"amount_sats":10000}],"fee_rate_sat_vb":2,"max_fee_sats":1000});
             for other in wire::Chain::ALL.iter().copied().filter(|other| *other != network) {
                 let mut wrong = input.clone(); wrong["network"] = json!(other);
-                denied(client.call("tenshu_prepare_transaction", wrong).await);
+                denied(client.call("coincube_prepare_transaction", wrong).await);
             }
             let mut missing = input.clone(); missing.as_object_mut().unwrap().remove("network");
-            invalid_schema(&mut client, "tenshu_prepare_transaction", missing).await;
-            let prepared = summary(client.call("tenshu_prepare_transaction", input.clone()).await);
+            invalid_schema(&mut client, "coincube_prepare_transaction", missing).await;
+            let prepared = summary(client.call("coincube_prepare_transaction", input.clone()).await);
             assert!(serde_json::from_value::<wire::transaction::Prepared>(prepared.clone()).is_ok(), "transaction summary contains unexpected fields");
             assert_eq!(prepared["network"], network.as_str());
             assert_eq!(prepared["status"], "unsigned_ready_for_native_review");
@@ -510,12 +515,12 @@ fn stdio_client_unsigned_transaction_reaches_native_review_on_every_chain() {
             assert_eq!(prepared["signing_required"], true);
             assert!(prepared["fee_sats"].as_u64().unwrap() <= 1000);
             assert!(prepared["fee_rate_sat_vb"].as_u64().unwrap() <= 2);
-            assert_eq!(summary(client.call("tenshu_prepare_transaction", input.clone()).await), prepared);
+            assert_eq!(summary(client.call("coincube_prepare_transaction", input.clone()).await), prepared);
             let lookup = json!({"wallet_id":wallet_id,"draft_id":prepared["draft_id"]});
-            assert_eq!(summary(client.call("tenshu_get_prepared_transaction", lookup.clone()).await), prepared);
+            assert_eq!(summary(client.call("coincube_get_prepared_transaction", lookup.clone()).await), prepared);
             let mut changed = input.clone(); changed["recipients"][0]["amount_sats"] = json!(10001);
-            assert_eq!(client.call("tenshu_prepare_transaction", changed).await["structuredContent"]["error"]["code"], "transaction_conflict");
-            denied(client.call("tenshu_get_prepared_transaction", json!({"wallet_id":wallet_id,"draft_id":"foreign"})).await);
+            assert_eq!(client.call("coincube_prepare_transaction", changed).await["structuredContent"]["error"]["code"], "transaction_conflict");
+            denied(client.call("coincube_get_prepared_transaction", json!({"wallet_id":wallet_id,"draft_id":"foreign"})).await);
             let service = app.local_mcp.transaction_service(&id, &wallet).unwrap();
             let native = service.native_checked(prepared["draft_id"].as_str().unwrap()).await.unwrap();
             drop(service);
@@ -544,20 +549,20 @@ fn stdio_client_unsigned_transaction_reaches_native_review_on_every_chain() {
             assert_eq!(app.panels.current, Menu::Vault(VaultSubMenu::Send));
             assert!(!app.panels.create_spend.as_ref().unwrap().keep_state());
             assert!(daemon.list_spend_txs().await.unwrap().spend_txs.is_empty());
-            for tool in ["tenshu_sign_transaction", "tenshu_broadcast_transaction"] {
+            for tool in ["coincube_sign_transaction", "coincube_broadcast_transaction"] {
                 assert_eq!(client.request("tools/call", json!({"name":tool,"arguments":{}})).await["error"]["code"], -32602);
             }
             session::close();
-            denied(client.call("tenshu_get_prepared_transaction", lookup.clone()).await);
+            denied(client.call("coincube_get_prepared_transaction", lookup.clone()).await);
             assert!(app.local_mcp.transaction_service(&id, &wallet).is_none());
             app.local_mcp.revoke();
             session::open_without_pin(CUBE);
             refresh(&mut app.local_mcp, &root, chain, Some(wallet.clone()), Some(daemon.clone()));
-            denied(client.call("tenshu_get_prepared_transaction", lookup).await);
-            let fresh = summary(client.call("tenshu_prepare_transaction", input).await);
+            denied(client.call("coincube_get_prepared_transaction", lookup).await);
+            let fresh = summary(client.call("coincube_prepare_transaction", input).await);
             assert_ne!(fresh["draft_id"], prepared["draft_id"]);
             revoke(&mut app.local_mcp, &id);
-            unavailable(client.call("tenshu_get_prepared_transaction", json!({"wallet_id":wallet_id,"draft_id":fresh["draft_id"]})).await);
+            unavailable(client.call("coincube_get_prepared_transaction", json!({"wallet_id":wallet_id,"draft_id":fresh["draft_id"]})).await);
             client.close().await;
             assert!(daemon.list_spend_txs().await.unwrap().spend_txs.is_empty());
             tokio::task::block_in_place(|| app.stop()); drop(app);

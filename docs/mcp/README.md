@@ -84,11 +84,12 @@ already signed application bundle.
 4. Choose **Pair client until revoked**. COINCUBE Desktop saves the exact client scope and a
    random bearer credential in a device-keystore-protected encrypted registry. The
    form closes and the new client's row opens.
-5. Choose **Copy private client configuration** and paste it into your trusted MCP
-   host's local configuration. COINCUBE Desktop confirms **Copied** beside the action. The
+5. Choose **Copy private client configuration** and add it to your trusted MCP
+   host's local configuration (see [STDIO client configuration](#stdio-client-configuration)
+   for merging it into an existing file). COINCUBE Desktop confirms **Copied** beside the action. The
    configuration contains a credential: never paste it into a chat, issue, shared
    document or repository. Clear your clipboard after setup.
-6. Restart/reconnect the MCP host. Discover tools, then call `tenshu_list_wallets`
+6. Restart/reconnect the MCP host. Discover tools, then call `coincube_list_wallets`
    and use the returned opaque `wallet_id` for subsequent calls.
 
 The copied command is derived from the running desktop executable's directory.
@@ -98,8 +99,9 @@ The adapter must be installed beside it. Each client row shows its status
 that client while the Cube is unlocked; neither the status nor the count is a verified
 host identity or a persistent-connection indicator (IPC connections are per request).
 
-Up to 16 independently revocable clients can be paired per Cube. Give separate
-clients and Cubes separate host entries. Anyone holding a copied configuration
+Up to 16 independently revocable clients can be paired per Cube. Each copied
+configuration names its own host entry, so separate clients and Cubes stay
+separate entries in one host configuration. Anyone holding a copied configuration
 can impersonate that client within its exact scope while the Cube is available.
 The registry is bound to the canonical data directory, chain, Cube, wallet storage
 identity and descriptor; a replaced Vault does not inherit its permissions.
@@ -131,6 +133,15 @@ variables. Neither exists any more: the adapter is `coincube-mcp` and reads only
 `COINCUBE_MCP_*`. Such a client fails to start its server. Remove its entry,
 revoke the old pairing in **AI access**, and pair the client again.
 
+Builds before the COINCUBE tool rename advertised the same tools as `tenshu_*`
+under a host entry named `tenshu`. Tools are now `coincube_*` with unchanged
+inputs, outputs and permissions, and each copied entry has its own name. A
+saved prompt, tool allowlist or automation that names a `tenshu_*` tool must use
+the `coincube_*` name instead; calling an old name returns `unknown_tool`. An
+existing `tenshu` host entry keeps working because the entry name is only a
+label. To move to the new name, copy the configuration again and replace the
+`tenshu` entry with it; keeping both lists every tool twice under one credential.
+
 ## STDIO client configuration
 
 The GUI produces this shape, with actual paths and a private pairing credential:
@@ -138,7 +149,7 @@ The GUI produces this shape, with actual paths and a private pairing credential:
 ```json
 {
   "mcpServers": {
-    "tenshu": {
+    "coincube-0f3a9c21": {
       "command": "/Applications/COINCUBE.app/Contents/MacOS/coincube-mcp",
       "env": {
         "COINCUBE_MCP_PAIRING": "/PRIVATE_DATADIR/regtest/mcp-pairings/CUBE_SCOPE/CLIENT.endpoint",
@@ -148,6 +159,24 @@ The GUI produces this shape, with actual paths and a private pairing credential:
   }
 }
 ```
+
+The entry name is `coincube-` and the first eight characters of the pairing id,
+which also appears in the private locator, so every paired client gets its own
+entry. The client name you entered stays in COINCUBE Desktop and is not part of
+the entry name: hosts such as Claude Code expose each tool as
+`mcp__<entry>__<tool>`, and several hosts cap that at 64 characters. With a
+17-character entry the longest tool fits (58 characters); a test bounds every
+tool name against it. COINCUBE Desktop does not show the pairing id, so if you
+keep several entries you may rename each to a short label of your own (letters,
+digits and hyphens, at most 17 characters keeps the same bound); the entry name
+is only a label in the host. A legacy one-hour session grant is always named
+`coincube-session`, so two such grants pasted into one host still replace each
+other; pair the client persistently instead.
+
+To start a new host configuration file, save the copied document as it is. If
+the file already has an `mcpServers` object, copy only the named entry (the key
+and its `{…}` value) into that object beside the existing entries, separated by
+a comma. Pasting the whole document inside an existing file makes it invalid.
 
 On Windows the copied command ends in `coincube-mcp.exe`; the MSI installs it beside
 `coincube.exe`. The private locator resolves to a local pipe name such as
@@ -183,22 +212,22 @@ arguments for paths, credentials, shell commands or daemon RPC methods.
 
 All outputs are structured JSON with advertised schemas. Balance and unsigned
 preparation amounts are satoshis; history rows omit exact amounts.
-Tool discovery and `tenshu_get_capabilities` are public static build metadata.
+Tool discovery and `coincube_get_capabilities` are public static build metadata.
 They do not inspect installed wallets or grant authority. Every wallet-data call is authenticated
 and scoped inside COINCUBE Desktop, regardless of what the adapter or host claims.
 
 | Tool | Input | Result / limitations |
 |---|---|---|
-| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Schema version 2 reports supported exact chains and build capabilities; direct MCP wallet creation is prohibited by design. |
-| `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
-| `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
-| `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed activities, newest first. Rows contain a session activity id, coarse kind (`incoming`, `outgoing`, `self_transfer`) and `confirmed` status. No exact amount, time, block height, chain id, pending history or pagination cursor. |
-| `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
-| `tenshu_prepare_wallet_proposal` | Exact `network`, explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in an empty unlocked Cube. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
-| `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
-| `tenshu_prepare_wallet_creation` | Exact `network`, public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
-| `tenshu_prepare_transaction` | Exact `network`, opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned PSBT stays in COINCUBE Desktop, only a summary is returned. |
-| `tenshu_get_prepared_transaction` | Opaque wallet and draft IDs | Current transaction pairing/session summary only; no PSBT or input/change-address export. |
+| `coincube_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Schema version 2 reports supported exact chains and build capabilities; direct MCP wallet creation is prohibited by design. |
+| `coincube_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
+| `coincube_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
+| `coincube_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed activities, newest first. Rows contain a session activity id, coarse kind (`incoming`, `outgoing`, `self_transfer`) and `confirmed` status. No exact amount, time, block height, chain id, pending history or pagination cursor. |
+| `coincube_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
+| `coincube_prepare_wallet_proposal` | Exact `network`, explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in an empty unlocked Cube. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
+| `coincube_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
+| `coincube_prepare_wallet_creation` | Exact `network`, public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
+| `coincube_prepare_transaction` | Exact `network`, opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned PSBT stays in COINCUBE Desktop, only a summary is returned. |
+| `coincube_get_prepared_transaction` | Opaque wallet and draft IDs | Current transaction pairing/session summary only; no PSBT or input/change-address export. |
 
 The history output schema removes the former `incoming_sats`, `outgoing_sats`,
 `timestamp` and `height` fields. They are absent, not optional or null. Clients
@@ -437,7 +466,7 @@ separate manual checkpoint when unavailable in local setup.
 ## AI-assisted wallet preparation
 
 With the default `mcp-proposals` GUI feature and matching `native-proposals`
-companion, a separately paired client can call `tenshu_prepare_wallet_creation`.
+companion, a separately paired client can call `coincube_prepare_wallet_creation`.
 It assembles one immutable 3-of-5 primary policy with an explicitly chosen timed recovery path
 and public account-key assignments. The desktop compiles the actual P2WSH
 descriptor using the existing wallet engine and fills the native builder. It does
@@ -488,7 +517,7 @@ No hardware command, secret access or remote request is performed by this tool.
 The returned minimized proposal identifies the topology and native descriptor
 validation result, without returning xpubs or descriptors. Exact retries return
 the same proposal; changed keys, topology or retry identity conflict. Use
-`tenshu_get_wallet_proposal` with its opaque ID to inspect that session's state.
+`coincube_get_wallet_proposal` with its opaque ID to inspect that session's state.
 Then open **Review prepared wallet in COINCUBE Desktop**. The ordinary builder is populated
 with the public keys and manual/unverified provenance. The user verifies hardware
 and fingerprints, handles seed/backup/PIN/passkey steps, reviews the exact
@@ -518,7 +547,7 @@ transaction client cannot read balances/history/policy. It can list only its
 paired Vault to obtain its opaque wallet ID. Pairing persists until revoked;
 unsigned drafts last only for that unlocked session.
 
-`tenshu_prepare_transaction` accepts:
+`coincube_prepare_transaction` accepts:
 
 ```json
 {
@@ -562,7 +591,7 @@ screen stays view-only until the user chooses Sign in COINCUBE Desktop. The raw 
 input identities and change address stay inside COINCUBE Desktop. Request IDs are immutable
 after an engine attempt: exact retries return the same draft or error without a
 new change reservation, and changed input conflicts. At most eight engine
-construction attempts (including failures) are retained per client/unlock. Use `tenshu_get_prepared_transaction` with the
+construction attempts (including failures) are retained per client/unlock. Use `coincube_get_prepared_transaction` with the
 returned draft ID and same opaque wallet ID to reread the summary; foreign IDs
 and other scopes are denied.
 

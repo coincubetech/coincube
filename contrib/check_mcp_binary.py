@@ -74,22 +74,22 @@ def check(binary, expect_proposals=True, expect_transactions=True):
                     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
                     expected_tools = {
-                        "tenshu_get_capabilities", "tenshu_list_wallets",
-                        "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                        "tenshu_get_wallet_policy_summary",
+                        "coincube_get_capabilities", "coincube_list_wallets",
+                        "coincube_get_wallet_summary", "coincube_get_transactions",
+                        "coincube_get_wallet_policy_summary",
                     }
                     if expect_proposals:
                         expected_tools |= {
-                            "tenshu_prepare_wallet_proposal", "tenshu_get_wallet_proposal",
-                            "tenshu_prepare_wallet_creation",
+                            "coincube_prepare_wallet_proposal", "coincube_get_wallet_proposal",
+                            "coincube_prepare_wallet_creation",
                         }
                     if expect_transactions:
                         expected_tools |= {
-                            "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
+                            "coincube_prepare_transaction", "coincube_get_prepared_transaction",
                         }
                     assert {tool["name"] for tool in receive(2)["tools"]} == expected_tools
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-                        "name": "tenshu_get_capabilities", "arguments": {}}})
+                        "name": "coincube_get_capabilities", "arguments": {}}})
                     capabilities = receive(3)["structuredContent"]
                     assert capabilities["schema_version"] == 2
                     assert capabilities["wallet_proposals"] is expect_proposals
@@ -103,7 +103,7 @@ def check(binary, expect_proposals=True, expect_transactions=True):
                         else:
                             assert field not in capabilities
                     send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
-                        "name": "tenshu_list_wallets", "arguments": {}}})
+                        "name": "coincube_list_wallets", "arguments": {}}})
                     wallet = receive(4)["structuredContent"]["wallets"][0]
                     assert wallet["wallet_id"] == "packaging-fixture"
                     assert wallet["network"] == "regtest"

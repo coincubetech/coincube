@@ -264,7 +264,7 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
     };
     let tool = tools()
         .into_iter()
-        .find(|t| t.name == "tenshu_prepare_wallet_proposal");
+        .find(|t| t.name == "coincube_prepare_wallet_proposal");
     assert_eq!(tool.is_some(), cfg!(feature = "native-proposals"));
     if let Some(tool) = tool {
         let annotations = tool.annotations.unwrap();
@@ -283,14 +283,14 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
         v[field] = serde_json::json!("untrusted");
         assert!(
             adapter
-                .invoke("tenshu_prepare_wallet_proposal", v)
+                .invoke("coincube_prepare_wallet_proposal", v)
                 .await
                 .is_err()
         );
     }
     let result = adapter
         .invoke(
-            "tenshu_prepare_wallet_proposal",
+            "coincube_prepare_wallet_proposal",
             serde_json::to_value(input()).unwrap(),
         )
         .await
@@ -299,7 +299,7 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
     assert_eq!(json["structuredContent"]["state"], "needs_keys");
     assert_eq!(json["structuredContent"]["descriptor_validated"], false);
     let result = adapter
-        .invoke("tenshu_list_wallets", serde_json::json!({}))
+        .invoke("coincube_list_wallets", serde_json::json!({}))
         .await
         .unwrap();
     let json = serde_json::to_value(result).unwrap();
@@ -334,10 +334,10 @@ async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|t| t["name"] == "tenshu_prepare_wallet_proposal")
+            .any(|t| t["name"] == "coincube_prepare_wallet_proposal")
     );
     let prepared = client
-        .call("tenshu_prepare_wallet_proposal", json!(input()))
+        .call("coincube_prepare_wallet_proposal", json!(input()))
         .await;
     let draft = &prepared["structuredContent"];
     assert_eq!(draft["state"], "needs_keys");
@@ -349,30 +349,30 @@ async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
     assert!(!prepared.to_string().contains(server.grant.credential()));
     assert_eq!(
         client
-            .call("tenshu_prepare_wallet_proposal", json!(input()))
+            .call("coincube_prepare_wallet_proposal", json!(input()))
             .await["structuredContent"],
         *draft
     );
     assert_eq!(
         client
             .call(
-                "tenshu_get_wallet_proposal",
+                "coincube_get_wallet_proposal",
                 json!({"proposal_id":draft["proposal_id"]})
             )
             .await["structuredContent"],
         *draft
     );
     assert_eq!(
-        client.call("tenshu_list_wallets", json!({})).await["structuredContent"],
+        client.call("coincube_list_wallets", json!({})).await["structuredContent"],
         json!({"error":{"code":"access_denied"}})
     );
-    let unavailable = client.request("tools/call", json!({"name":"tenshu_create_wallet", "arguments":{"proposal_id":draft["proposal_id"]}})).await;
+    let unavailable = client.request("tools/call", json!({"name":"coincube_create_wallet", "arguments":{"proposal_id":draft["proposal_id"]}})).await;
     assert_eq!(unavailable["error"]["code"], -32602);
     server.grant.revoke();
     assert_eq!(
         client
             .call(
-                "tenshu_get_wallet_proposal",
+                "coincube_get_wallet_proposal",
                 json!({"proposal_id":draft["proposal_id"]})
             )
             .await["structuredContent"],

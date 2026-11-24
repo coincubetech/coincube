@@ -83,7 +83,7 @@ impl PrepareInput {
 }
 
 /// Public account-key assignments supplied by an explicitly paired setup client.
-/// Device ownership and backups must still be verified by the user in Tenshu.
+/// Device ownership and backups must still be verified by the user in COINCUBE Desktop.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublicKeys {

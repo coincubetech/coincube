@@ -17,7 +17,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const FRAME_LIMIT: u64 = 65_536;
 const UNAVAILABLE: &str =
-    "Tenshu MCP unavailable. Check the desktop grant and private client configuration.";
+    "COINCUBE MCP unavailable. Check the desktop grant and private client configuration.";
 
 #[derive(Default)]
 struct Diagnostics {
