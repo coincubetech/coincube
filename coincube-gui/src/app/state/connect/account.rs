@@ -3171,16 +3171,33 @@ impl ConnectAccountPanel {
         iced::Task::none()
     }
 
+    /// Forget an admitted user load whose answer will arrive stale (the
+    /// App advanced the epoch over it), so the next `Init` checks the
+    /// session again instead of waiting for that answer forever.
+    pub(crate) fn abandon_admitted_load(&mut self) {
+        self.admitted_user_loading = false;
+    }
+
+    /// Whether an `AdmittedUserLoaded` spawned at `generation`/`epoch`
+    /// belongs to this panel's current admitted session — the condition
+    /// under which `apply_admitted_user` acts on it. The App reads it to
+    /// decide whether the load establishes a session (lifting a claim hold).
+    pub(crate) fn current_admitted_load(&self, generation: u64, epoch: u64) -> bool {
+        self.admitted_client
+            && !self.admitted_reopen_required
+            && generation == self.session_generation
+            && epoch >= self.auth_epoch
+    }
+
     fn apply_admitted_user(
         &mut self,
         user: Result<crate::services::coincube::User, (crate::user_error::UserError, bool)>,
         generation: u64,
         epoch: u64,
     ) -> iced::Task<Message> {
-        if !self.admitted_client
-            || generation != self.session_generation
-            || self.stale_completion(epoch, "AdmittedUserLoaded")
-        {
+        if !self.current_admitted_load(generation, epoch) {
+            // Logged with the same wording as before for a stale epoch.
+            let _ = self.stale_completion(epoch, "AdmittedUserLoaded");
             return iced::Task::none();
         }
         self.admitted_user_loading = false;

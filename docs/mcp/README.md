@@ -33,6 +33,12 @@ therefore applies at the user's next session; only signing out (or switching
 account) turns AI access off immediately. The flag fails closed: signed out,
 features not loaded, the API unreachable or the flag absent all read as off,
 and a failed fetch at sign-in leaves AI access off for that session.
+Signing out in another tab turns AI access off in every open Bitcoin Cube.
+Signing back in to the account such a Cube was signed in to, in another tab,
+brings AI access back there without reopening the Cube, once Connect confirms
+that account and its features (with `aiAccessEnabled`) reload. Signing in to a
+different account does not, and neither does anything for a Cube whose Connect
+session was revoked; sign in within that Cube or reopen it.
 
 For local development and test builds without a Connect account, the build
 override `COINCUBE_ENABLE_AI_ACCESS` (`1`, `true` or `yes`; see
