@@ -4998,11 +4998,13 @@ impl App {
     }
 
     /// Whether a sibling sign-in of `user_id` may be adopted by this held
-    /// tab: the panel still shows that account (or, its user emptied by an
-    /// adoption a re-hold dropped, was adopting it), the tab is an ordinary
-    /// Bitcoin Cube (a Bitcoin Blake2b Cube keeps its admitted credentials),
-    /// and its session was not revoked for good (`requires_authenticated_reopen`
-    /// is sticky and an adoption would clear it).
+    /// tab: the panel still shows that account, or its user was emptied by
+    /// an adoption of that account that is still pending (its check may have
+    /// failed or be in flight; the new adoption supersedes it) or that a
+    /// re-hold dropped. The tab must also be an ordinary Bitcoin Cube (a
+    /// Bitcoin Blake2b Cube keeps its admitted credentials) whose session was
+    /// not revoked for good (`requires_authenticated_reopen` is sticky and an
+    /// adoption would clear it).
     fn can_readopt_held_session(&self, user_id: u32) -> bool {
         self.claim_session_invalidated
             && !self.cache.chain().is_blake2b()
@@ -5014,6 +5016,7 @@ impl App {
                 .user
                 .as_ref()
                 .map(|u| u.id)
+                .or(self.claim_readoption)
                 .or(self.claim_readopt_account)
                 == Some(user_id)
     }

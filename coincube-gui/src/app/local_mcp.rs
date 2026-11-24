@@ -3472,7 +3472,8 @@ mod feature_flag_tests {
     /// confirming that account behind the adopted bearer lifts the hold and
     /// lets the account's AI access grant apply again. Another account
     /// signing in while that check is in flight re-holds, so the late check
-    /// cannot lift it.
+    /// cannot lift it. If the check fails, a later sign-in of the same
+    /// account is adopted again.
     fn held_session_readopts_only_a_same_account_sibling_sign_in() {
         use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
         use crate::app::{message::Message as AppMessage, App};
@@ -3658,6 +3659,53 @@ mod feature_flag_tests {
             load_features(&mut app);
             assert!(app.mcp_supported());
         }
+
+        // The adoption's own check fails (Connect unreachable, not an auth
+        // rejection): still held, the panel's user is empty and nothing was
+        // remembered by a re-hold, yet a later sign-in of the same account
+        // is adopted again and Connect's answer for it lifts the hold.
+        drop(app.on_global_auth_change(AuthChange::LogOut, false));
+        drop(app.on_global_auth_change(sign_in(7, "failing-bearer"), false));
+        assert_eq!(app.claim_readoption, Some(7));
+        let generation = app.panels.connect.account.session_generation();
+        let epoch = app.panels.connect.account.auth_epoch();
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Err((crate::user_error::UserError::unexpected("offline"), false)),
+                generation,
+                epoch,
+            },
+        ))));
+        assert!(
+            app.claim_session_invalidated,
+            "a failed check lifts nothing"
+        );
+        assert!(app.panels.connect.account.user.is_none());
+        assert_eq!(app.claim_readopt_account, None);
+        drop(app.on_global_auth_change(sign_in(7, "retry-bearer"), false));
+        assert_eq!(panel_token(&app).as_deref(), Some("retry-bearer"));
+        assert!(app.panels.connect.account.auth_epoch() > epoch);
+        assert_eq!(app.claim_readoption, Some(7));
+        verify(&mut app);
+        assert!(
+            !app.claim_session_invalidated,
+            "recovered after a failed check"
+        );
+        load_features(&mut app);
+        assert!(app.mcp_supported());
+
+        // Superseding a pending adoption with another of a different account
+        // still re-holds: only the pending account is re-adoptable.
+        drop(app.on_global_auth_change(AuthChange::LogOut, false));
+        drop(app.on_global_auth_change(sign_in(7, "pending-bearer"), false));
+        assert_eq!(app.claim_readoption, Some(7));
+        drop(app.on_global_auth_change(sign_in(8, "other-bearer"), false));
+        assert_eq!(app.claim_readoption, None);
+        assert_eq!(panel_token(&app).as_deref(), Some("pending-bearer"));
+        assert!(app.claim_session_invalidated);
+        drop(app.on_global_auth_change(sign_in(7, "final-bearer"), false));
+        verify(&mut app);
+        assert!(!app.claim_session_invalidated);
 
         // A session revoked for good is never re-adopted.
         drop(app.on_global_auth_change(AuthChange::LogOut, false));
