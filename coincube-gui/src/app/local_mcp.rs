@@ -3458,6 +3458,62 @@ mod feature_flag_tests {
         );
         load(&mut app, Some(true));
         assert!(!app.mcp_supported(), "a held session grants nothing");
+
+        // Signing in here lifts the hold in the same update that adopts the
+        // new session. The grant retained from the held session must not
+        // resume stored pairings, before this session's `SessionLoaded` and
+        // even if the held session's features fetch lands in between.
+        let held_generation = app.panels.connect.account.session_generation();
+        let epoch = app.connect_auth_epoch();
+        let next_user = crate::services::coincube::User {
+            id: 2,
+            email: "next@example.invalid".into(),
+            email_verified: Some(true),
+        };
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SetSession(
+                crate::services::coincube::LoginResponse {
+                    requires_2fa: false,
+                    token: "next-bearer".into(),
+                    refresh_token: "next-refresh".into(),
+                    user: next_user.clone(),
+                },
+                epoch,
+            ),
+        ))));
+        assert!(
+            !app.cache.ai_access_server_enabled,
+            "the held session's grant does not carry into the adopted one"
+        );
+        assert!(app.local_mcp.is_dormant(), "stored pairings stay suspended");
+        assert!(app.local_mcp.pairing_location.is_none());
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(features(true)), held_generation),
+        ))));
+        assert!(
+            !app.cache.ai_access_server_enabled,
+            "a features fetch from the held session restores nothing"
+        );
+        assert!(app.local_mcp.is_dormant());
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SessionLoaded {
+                user: next_user,
+                plan: None,
+                epoch,
+            },
+        ))));
+        assert_ne!(
+            app.panels.connect.account.session_generation(),
+            held_generation,
+            "the adopted session loads under a new generation"
+        );
+        assert!(
+            !app.mcp_supported(),
+            "off until this session's features load"
+        );
+        load(&mut app, Some(true));
+        assert!(app.mcp_supported(), "this session's own grant turns it on");
+        assert!(app.local_mcp.pairing_location.is_some());
         app.stop();
         drop(app);
         drop(daemon);

@@ -1506,6 +1506,12 @@ pub struct ConnectAccountPanel {
     /// panels retain their existing keyring-only completion path.
     defer_auth_cache_commit: bool,
     auth_commit_pending: bool,
+    /// Set when `post_login_tasks` adopts a session and cleared when its
+    /// `SessionLoaded` is applied. `session_generation` advances only at
+    /// `SessionLoaded`, so a features fetch begun under the previous session
+    /// still matches it in between; while this is set `FeaturesLoaded` is
+    /// dropped, so the previous session's AI access grant cannot return.
+    awaiting_session_load: bool,
     /// Invalidates delayed cooldown ticks and resend completions when the
     /// user leaves token entry or begins another OTP attempt.
     otp_attempt_generation: u64,
@@ -1630,6 +1636,7 @@ impl ConnectAccountPanel {
             auth_epoch: 0,
             defer_auth_cache_commit: false,
             auth_commit_pending: false,
+            awaiting_session_load: false,
             otp_attempt_generation: 0,
             features: None,
             selected_billing_cycle: BillingCycle::Monthly,
@@ -1886,6 +1893,7 @@ impl ConnectAccountPanel {
         self.user = None;
         self.plan = None;
         self.features = None;
+        self.awaiting_session_load = false;
         // The adopted session may be another account: nothing about the old
         // one's authenticator (an open setup key, codes on screen) carries over.
         self.two_factor.reset();
@@ -2151,6 +2159,9 @@ impl ConnectAccountPanel {
         if let Some(features) = self.features.as_mut() {
             features.ai_access_enabled = None;
         }
+        // A features fetch still in flight from the previous session must not
+        // restore its grant before this session's `SessionLoaded` runs.
+        self.awaiting_session_load = true;
 
         let user = session.login.user.clone();
         // A true login bootstraps the signer device and realtime stream.
@@ -2664,7 +2675,7 @@ impl ConnectAccountPanel {
 
             // ── Plan & Billing ──────────────────────────────────────────
             ConnectAccountMessage::FeaturesLoaded(features, gen) => {
-                if gen == self.session_generation {
+                if gen == self.session_generation && !self.awaiting_session_load {
                     self.features = features;
                     self.leave_hidden_duress_route();
                 }
@@ -3455,6 +3466,7 @@ impl ConnectAccountPanel {
             return iced::Task::none();
         }
         self.session_generation += 1;
+        self.awaiting_session_load = false;
         // Another account's session: nothing about this account's
         // authenticator carries over.
         if self.user.as_ref().is_some_and(|u| u.id != user.id) {
@@ -5759,6 +5771,7 @@ impl ConnectAccountPanel {
     /// a rejected session can't leave stale state behind for the next `Init`.
     fn clear_session(&mut self) {
         self.auth_commit_pending = false;
+        self.awaiting_session_load = false;
         self.unverified = None;
         let owns_saved_session = !self.admitted_client;
         self.session_generation += 1;
@@ -11058,6 +11071,8 @@ mod plan_lifecycle_tests {
         panel.features = Some(features(None));
         panel.features.as_mut().unwrap().ai_access_enabled = Some(true);
         panel.auth_commit_pending = true;
+        // The previous session's features fetch is still in flight.
+        let previous_generation = panel.session_generation();
         let _ = panel.update_message(ConnectAccountMessage::AuthCommitAccepted {
             login: crate::services::coincube::LoginResponse {
                 requires_2fa: false,
@@ -11080,6 +11095,45 @@ mod plan_lifecycle_tests {
         assert!(
             panel.features.is_some(),
             "other feature values are left in place"
+        );
+        // `session_generation` advances only at `SessionLoaded`, so the
+        // previous session's fetch still matches it here; it is dropped.
+        let mut stale = features(None);
+        stale.ai_access_enabled = Some(true);
+        let _ = panel.update_message(ConnectAccountMessage::FeaturesLoaded(
+            Some(stale.clone()),
+            previous_generation,
+        ));
+        assert!(
+            !panel.ai_access_server_enabled(),
+            "a fetch from the previous session restores nothing"
+        );
+        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+            user: User {
+                id: 2,
+                email: "next@example.invalid".into(),
+                email_verified: Some(true),
+            },
+            plan: None,
+            epoch: 0,
+        });
+        let _ = panel.update_message(ConnectAccountMessage::FeaturesLoaded(
+            Some(stale),
+            previous_generation,
+        ));
+        assert!(
+            !panel.ai_access_server_enabled(),
+            "still dropped once the new generation is current"
+        );
+        let mut granted = features(None);
+        granted.ai_access_enabled = Some(true);
+        let _ = panel.update_message(ConnectAccountMessage::FeaturesLoaded(
+            Some(granted),
+            panel.session_generation(),
+        ));
+        assert!(
+            panel.ai_access_server_enabled(),
+            "this session's own features apply"
         );
     }
 
