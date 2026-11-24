@@ -13,7 +13,7 @@ impl App {
         // ServiceConfig, meaning Connect/Keychain relay signing is
         // unavailable there no matter how often the user retries —
         // we say so and point them at local Wi-Fi pairing instead.
-        let network = self.cache.network;
+        let chain = self.cache.chain();
         let datadir = self.cache.datadir_path.clone();
         let expected_email = self
             .connect_email
@@ -46,7 +46,7 @@ impl App {
             self.panels.connect.ensure_cube_registered()
         } else if let Some(generation) = self.panels.connect.cube.begin_external_registration() {
             let datadir = datadir.clone();
-            let net_str = settings::network_to_api_string(network);
+            let net_str = settings::network_to_api_string(chain);
             let cube_name = self.cube_settings.name.clone();
             // Report this Cube's Vault presence so other devices can
             // evaluate the duress vault gate (PLAN-duress-vault-gate
@@ -69,7 +69,7 @@ impl App {
                         "EnsureConnectReady: no active Connect email to register the cube"
                             .to_string()
                     })?;
-                    let account = Account::from_cache(&datadir.network_directory(network), &email)
+                    let account = Account::from_cache(&datadir.network_directory(chain), &email)
                         .ok()
                         .flatten()
                         .ok_or_else(|| {
@@ -117,7 +117,7 @@ impl App {
                     Message::View(view::Message::ShowToast(log::Level::Info, msg.to_string()))
                 };
 
-                let network_dir = datadir.network_directory(network);
+                let network_dir = datadir.network_directory(chain);
                 let Some(expected_email) = expected_email else {
                     tracing::warn!(
                         "EnsureConnectReady: no active Connect email to match connect.json"
@@ -150,9 +150,7 @@ impl App {
                     // No gRPC endpoint for this network — Connect
                     // relay signing can't work here. Don't pretend
                     // a retry will help.
-                    tracing::info!(
-                        "EnsureConnectReady: no Connect gRPC URL available for {network}"
-                    );
+                    tracing::info!("EnsureConnectReady: no Connect gRPC URL available for {chain}");
                     return info_toast(
                         "Mobile signing over Connect isn't available on this network. \
                          Pair a phone over Wi-Fi to sign locally instead.",
@@ -161,7 +159,7 @@ impl App {
 
                 // Same helper as every other registration path — see
                 // the note on the in-app login path above.
-                let device_name = crate::utils::device::device_label();
+                let device_name = crate::utils::device::signer_device_label(chain);
                 let Some(_device_id) = ensure_device_registered_best_effort(
                     &grpc_url,
                     tokens_arc.clone(),
@@ -183,7 +181,7 @@ impl App {
                 // bring the stream up so the cache fields populate,
                 // then the user can retry Sign via Keychain.
                 Message::TriggerConnectStreamReady {
-                    network,
+                    chain,
                     datadir,
                     tokens: tokens_arc,
                     email,
@@ -631,7 +629,7 @@ impl App {
                 let network_dir = self
                     .cache
                     .datadir_path
-                    .network_directory(self.cache.network);
+                    .network_directory(self.cache.chain());
                 let cached_account =
                     crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                         .ok()
@@ -682,7 +680,7 @@ impl App {
 
     pub(super) fn trigger_connect_stream_ready(
         &mut self,
-        network: coincube_core::miniscript::bitcoin::Network,
+        chain: crate::chain::ChainId,
         datadir: CoincubeDirectory,
         tokens: Arc<
             tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>,
@@ -693,7 +691,7 @@ impl App {
         if self.in_app_refresh_commit.is_some() {
             self.deferred_connect_stream_triggers
                 .push(Message::TriggerConnectStreamReady {
-                    network,
+                    chain,
                     datadir,
                     tokens,
                     email,
@@ -710,7 +708,7 @@ impl App {
                     async move {
                         drop(wait_tokens.read().await);
                         Message::TriggerConnectStreamReady {
-                            network,
+                            chain,
                             datadir,
                             tokens: retry_tokens,
                             email,
@@ -721,7 +719,7 @@ impl App {
                 );
             }
         };
-        let network_dir = datadir.network_directory(network);
+        let network_dir = datadir.network_directory(chain);
         let owns_cached_session =
             crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                 .ok()
@@ -740,6 +738,101 @@ impl App {
         self.cache.connect_tokens = Some(tokens.clone());
         self.cache.connect_email = Some(email.clone());
         self.cache.has_connect_session = true;
-        connect_stream_ready_task(network, datadir, tokens, email, cube_uuid)
+        connect_stream_ready_task(chain, datadir, tokens, email, cube_uuid)
+    }
+}
+
+#[cfg(test)]
+mod chain_scope_tests {
+    use crate::app::settings::network_to_api_string;
+    use crate::chain::ChainId;
+    use crate::dir::CoincubeDirectory;
+
+    /// The signer pipeline resolves its Connect folder and the network name
+    /// it sends from the Cube's `ChainId`. On every chain that pre-dates the
+    /// fork that is exactly what the `bitcoin::Network` it used to carry
+    /// gave, so existing installs keep their folder, their `connect.json`
+    /// and their registration.
+    #[test]
+    fn a_bitcoin_family_cube_keeps_its_connect_folder_and_network_name() {
+        let root = CoincubeDirectory::new(std::path::PathBuf::from("/coincube"));
+        for chain in ChainId::ALL.iter().copied().filter(|c| !c.is_blake2b()) {
+            let network = chain.bitcoin_network();
+            assert_eq!(
+                root.network_directory(chain).path(),
+                root.network_directory(network).path(),
+                "{chain:?}"
+            );
+            assert_eq!(
+                network_to_api_string(chain),
+                network_to_api_string(network),
+                "{chain:?}"
+            );
+        }
+    }
+
+    /// A `bitcoin::Network` cannot tell Bitcoin Blake2b from Bitcoin: carried
+    /// through the pipeline it would point a Bitcoin Blake2b Cube at the
+    /// Bitcoin folder and register it as `mainnet`.
+    #[test]
+    fn a_bitcoin_blake2b_cube_gets_its_own_connect_folder_and_network_name() {
+        let root = CoincubeDirectory::new(std::path::PathBuf::from("/coincube"));
+        for (chain, dir, name) in [
+            (
+                ChainId::BitcoinBlake2b,
+                "bitcoin-blake2b",
+                "bitcoin-blake2b",
+            ),
+            (
+                ChainId::BitcoinBlake2bTestnet4,
+                "bitcoin-blake2b-testnet4",
+                "bitcoin-blake2b-testnet4",
+            ),
+        ] {
+            assert_eq!(
+                root.network_directory(chain).path(),
+                root.path().join(dir),
+                "{chain:?}"
+            );
+            assert_eq!(network_to_api_string(chain), name, "{chain:?}");
+
+            let lossy = chain.bitcoin_network();
+            assert_ne!(
+                root.network_directory(lossy).path(),
+                root.network_directory(chain).path()
+            );
+            assert_ne!(network_to_api_string(lossy), name);
+        }
+    }
+
+    /// A tripwire for three files, not a proof: the pipeline's own files must
+    /// not go back to the lossy network. It matches the accessor written on
+    /// one line, so a reformatted or aliased read slips past it, and it does
+    /// not cover `app/mod.rs` or `gui/tab.rs`, which have legitimate uses of
+    /// the lossy network (the duress check in `gui/tab.rs` among them, left
+    /// on it deliberately so a Bitcoin sign-in keeps confirming a clear).
+    /// `a_fork_cube_snapshots_the_connect_cache_of_its_own_chain_folder` in
+    /// `app/mod.rs` covers a call site there.
+    #[test]
+    fn the_signer_pipeline_never_reads_the_lossy_cache_network() {
+        for (file, source) in [
+            ("app/connect_stream.rs", include_str!("connect_stream.rs")),
+            ("app/connect_auth.rs", include_str!("connect_auth.rs")),
+            (
+                "app/state/settings/connections.rs",
+                include_str!("state/settings/connections.rs"),
+            ),
+        ] {
+            // Built at run time so this test's own text is not a match.
+            let lossy = ["cache", "network"].join(".");
+            for (number, line) in source.lines().enumerate() {
+                assert!(
+                    !line.contains(&lossy),
+                    "{file}:{} reads the lossy network: {}",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
     }
 }

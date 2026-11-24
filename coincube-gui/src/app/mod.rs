@@ -2779,7 +2779,7 @@ async fn connect_registration_auth(
 }
 
 fn connect_stream_ready_task(
-    network: coincube_core::miniscript::bitcoin::Network,
+    chain: crate::chain::ChainId,
     datadir: CoincubeDirectory,
     tokens: Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
     email: String,
@@ -2796,7 +2796,7 @@ fn connect_stream_ready_task(
                 tracing::info!("Connect stream bootstrap: no Connect gRPC URL available");
                 return None;
             };
-            let network_dir = datadir.network_directory(network);
+            let network_dir = datadir.network_directory(chain);
             let cache_account = Account::from_cache(&network_dir, &email).ok().flatten();
             let Some(device_id) = cache_account.as_ref().and_then(|a| a.device_id.clone()) else {
                 tracing::info!(
@@ -3699,7 +3699,7 @@ impl App {
         };
         if let (Some(auth), Some(email)) = (connect_auth_arc.as_ref(), connect_email.as_deref()) {
             tasks.push(connect_stream_ready_task(
-                cache.network,
+                cache.chain(),
                 data_dir.clone(),
                 auth.clone(),
                 email.to_string(),
@@ -6398,8 +6398,8 @@ impl App {
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
-        // Legacy signer bootstrap persists Bitcoin-family connect.json and uses
-        // unbound gRPC registration. A fork Cube must retain its admitted client;
+        // The signer bootstrap uses gRPC registration that is not bound to the
+        // Cube's admitted client. A fork Cube must retain its admitted client;
         // neither direct requests nor late completions may enter that pipeline.
         if self.cache.chain().is_blake2b()
             && matches!(
@@ -6753,7 +6753,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             let auth = self
                 .connect_auth
                 .as_ref()
@@ -6801,7 +6801,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             self.in_app_otp_cache_snapshot = match ConnectCache::from_file(&network_dir) {
                 Ok(cache) => Some(cache),
                 Err(ConnectCacheError::NotFound) => Some(ConnectCache::default()),
@@ -7024,7 +7024,7 @@ impl App {
             let network_dir = self
                 .cache
                 .datadir_path
-                .network_directory(self.cache.network);
+                .network_directory(self.cache.chain());
             let still_current =
                 crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                     .ok()
@@ -8856,14 +8856,13 @@ impl App {
                 return self.connect_login_completed(token, refresh_token, email, epoch);
             }
             Message::TriggerConnectStreamReady {
-                network,
+                chain,
                 datadir,
                 tokens,
                 email,
                 cube_uuid,
             } => {
-                return self
-                    .trigger_connect_stream_ready(network, datadir, tokens, email, cube_uuid);
+                return self.trigger_connect_stream_ready(chain, datadir, tokens, email, cube_uuid);
             }
             Message::EnsureConnectReady => return self.ensure_connect_ready(),
             Message::InstallStats(_) => {
@@ -12051,6 +12050,64 @@ pub(crate) mod tests {
         app
     }
 
+    /// A call site, not an accessor: the Connect cache snapshot a Bitcoin
+    /// Blake2b Cube takes before a session restore is read from its own chain
+    /// folder. The lossy network would read the Bitcoin Cube's `connect.json`
+    /// and load that session's tokens.
+    #[tokio::test]
+    async fn a_fork_cube_snapshots_the_connect_cache_of_its_own_chain_folder() {
+        use crate::services::connect::client::cache::CONNECT_CACHE_FILENAME;
+
+        let root = std::env::temp_dir().join(format!(
+            "coincube-fork-connect-folder-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut app = fork_app(&root, false);
+        let chain = app.cache.chain();
+        let datadir = app.cache.datadir_path.clone();
+        for (dir, email) in [
+            (datadir.network_directory(chain), "fork@example.invalid"),
+            (
+                datadir.network_directory(chain.bitcoin_network()),
+                "bitcoin@example.invalid",
+            ),
+        ] {
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&serde_json::json!({
+                    "active_email": email,
+                    "accounts": [{
+                        "email": email,
+                        "tokens": {
+                            "access_token": "access",
+                            "refresh_token": "refresh",
+                            "expires_at": 1000
+                        }
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "keyring-refresh".into(),
+            },
+        ))));
+
+        let snapshot = app
+            .in_app_restore_cache_snapshot
+            .as_ref()
+            .expect("a signed-out fork panel snapshots the cache");
+        assert_eq!(
+            snapshot.cache.active_account().map(|a| a.email.as_str()),
+            Some("fork@example.invalid")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn admitted_fork_session_does_not_invalidate_itself_on_same_session_completion() {
         let root = std::env::temp_dir().join(format!(
@@ -12524,7 +12581,7 @@ pub(crate) mod tests {
             },
             Message::EnsureConnectReady,
             Message::TriggerConnectStreamReady {
-                network: chain.bitcoin_network(),
+                chain,
                 datadir: CoincubeDirectory::new(root.clone()),
                 tokens: legacy_tokens,
                 email: "other@example.invalid".into(),
@@ -14792,10 +14849,10 @@ pub(crate) mod shell_tests {
                 expires_at: 2000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         drop(app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: sibling.clone(),
             email: "alice@example.com".into(),
@@ -14887,10 +14944,10 @@ pub(crate) mod shell_tests {
                 expires_at: 2000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         drop(app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: valid_stream_auth.clone(),
             email: "alice@example.com".into(),
@@ -15099,10 +15156,10 @@ pub(crate) mod shell_tests {
                 expires_at: 1000,
             },
         ));
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         let task = app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: stale,
             email: "alice@example.com".into(),
@@ -15141,10 +15198,10 @@ pub(crate) mod shell_tests {
         app.connect_auth = Some(shared.clone());
         app.connect_email = Some("alice@example.com".into());
         let held = shared.write().await;
-        let network = app.cache.network;
+        let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
         let task = app.update(Message::TriggerConnectStreamReady {
-            network,
+            chain,
             datadir,
             tokens: shared.clone(),
             email: "alice@example.com".into(),
@@ -19756,7 +19813,7 @@ mod stream_startup_routing_tests {
             let root = tempfile::tempdir().unwrap();
             let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
             seed_cached_session(&mut app, root.path());
-            let dir = app.cache.datadir_path.network_directory(app.cache.network);
+            let dir = app.cache.datadir_path.network_directory(app.cache.chain());
             // Positive fixture control: this is a valid populated cache, not a
             // missing-file refusal masking the account ownership check.
             assert!(
