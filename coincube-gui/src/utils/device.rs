@@ -45,6 +45,10 @@ pub fn get_or_create_device_fingerprint() -> String {
 /// server. The chain is appended there so the two can be told apart. On every
 /// other chain this is [`device_label`], unchanged: the first registration
 /// names a device for good, so the name must not move for existing installs.
+///
+/// The suffix is the chain's user-facing `ChainIdExt::label`, so that label is
+/// also sent to Connect and stored there. Rewording it changes the name a new
+/// Bitcoin Blake2b registration uses; devices already registered keep theirs.
 pub fn signer_device_label(chain: crate::chain::ChainId) -> String {
     use crate::chain::ChainIdExt;
 
@@ -110,13 +114,19 @@ mod tests {
     /// Blake2b Cube, which registers a device of its own, says its chain.
     #[test]
     fn signer_device_label_names_the_chain_only_on_bitcoin_blake2b() {
-        use crate::chain::{ChainId, ChainIdExt};
+        use crate::chain::ChainId;
 
         let plain = super::device_label();
         for chain in ChainId::ALL {
             let label = super::signer_device_label(chain);
             if chain.is_blake2b() {
-                assert_eq!(label, format!("{plain} · {}", chain.label()));
+                // The literal, not `chain.label()`: this string is sent to
+                // Connect, so a change to it should be seen here.
+                let suffix = match chain {
+                    ChainId::BitcoinBlake2b => " · Bitcoin Blake2b",
+                    _ => " · Bitcoin Blake2b Testnet4",
+                };
+                assert_eq!(label, format!("{}{}", plain, suffix));
             } else {
                 assert_eq!(label, plain, "{chain:?}");
             }
