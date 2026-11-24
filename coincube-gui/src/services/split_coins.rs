@@ -836,7 +836,7 @@ pub async fn prepare(
     }
     let key = match (method, key) {
         (Method::SplitKey, Some(key)) => Some(key),
-        (Method::SplitKey, None) => return Err("This split needs a split key.".into()),
+        (Method::SplitKey, None) => return Err("This split needs a split coin.".into()),
         (Method::Signature, _) if !chain.is_blake2b() => {
             return Err("Bitcoin can't split with a replay-protected signature.".into())
         }
@@ -857,7 +857,7 @@ pub async fn prepare(
     }
     if let Some(key) = &key {
         if !requested.insert(key.outpoint) {
-            return Err("The split key can't also be a coin to split.".into());
+            return Err("The split coin can't also be a coin to split.".into());
         }
     }
     let requested: Vec<OutPoint> = requested.into_iter().collect();
@@ -952,17 +952,29 @@ pub async fn requalify(
 ) -> Result<(), String> {
     check_key(client, chain, key, generation, live)
         .await
-        .map_err(|error| error.message)
+        .map_err(|error| {
+            if error.rejected {
+                // The split is already built with this coin.
+                format!("{} {}", error.message, KEY_REJECTED_BUILD_AGAIN)
+            } else {
+                error.message
+            }
+        })
 }
 
 /// Why a split coin was rejected, as the user reads it. The reason in
-/// detail goes to the log. Both are in the Spanish catalogue, alone and with
-/// each of the App's next steps.
-pub const KEY_REJECTED_HISTORY: &str = "The split coin this split was using can no longer be used: its history no longer shows it exists on one chain only.";
-pub const KEY_REJECTED_PROOF: &str = "The split coin this split was using can no longer be used: its saved history is no longer valid.";
+/// detail goes to the log. Both are in the Spanish catalogue with each of
+/// the next steps below.
+pub const KEY_REJECTED_HISTORY: &str = "The split coin for this split can no longer be used: its history no longer shows it exists on one chain only.";
+pub const KEY_REJECTED_PROOF: &str =
+    "The split coin for this split can no longer be used: its saved history is no longer valid.";
 /// What happens after a rejection, by whether another split coin is held.
 pub const KEY_REJECTED_SEND_ANOTHER: &str = "Send another split coin.";
 pub const KEY_REJECTED_USES_ANOTHER: &str = "The split now uses another split coin.";
+/// The next step where the split is already built: the PSBT screen.
+pub const KEY_REJECTED_BUILD_AGAIN: &str = "Build the split again.";
+/// The check couldn't finish, which says nothing about the split coin.
+pub const KEY_CHECK_UNFINISHED: &str = "The split coin couldn't be checked right now.";
 
 /// [`requalify`], telling a path that no longer qualifies from a check that
 /// could not finish.
@@ -974,12 +986,16 @@ pub async fn check_key(
     live: tokio::sync::watch::Receiver<u64>,
 ) -> Result<(), KeyCheckError> {
     use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
-    let rejected = |message: &str| KeyCheckError {
-        message: message.to_string(),
-        rejected: true,
+    let rejected = |message: &str| {
+        // Which coin, for support: at debug, like the background check.
+        tracing::debug!("split coin {} rejected", key.outpoint);
+        KeyCheckError {
+            message: message.to_string(),
+            rejected: true,
+        }
     };
-    let unfinished = |message: String| KeyCheckError {
-        message,
+    let unfinished = || KeyCheckError {
+        message: KEY_CHECK_UNFINISHED.to_string(),
         rejected: false,
     };
     if key.path.selected() != key.outpoint {
@@ -995,7 +1011,10 @@ pub async fn check_key(
             generation: live,
         },
     )
-    .map_err(|e| unfinished(format!("Couldn't check the split key: {:?}", e)))?;
+    .map_err(|e| {
+        tracing::info!("A split coin's check could not start: {:?}", e);
+        unfinished()
+    })?;
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
     };
@@ -1004,14 +1023,14 @@ pub async fn check_key(
     } else {
         source.requalify_ancestry(&key.path, policy).await
     }
-    .map_err(|e| KeyCheckError {
-        rejected: path_rejected(&e),
-        message: if path_rejected(&e) {
+    .map_err(|e| {
+        if path_rejected(&e) {
             tracing::info!("A split coin's history no longer qualifies: {:?}", e);
-            KEY_REJECTED_HISTORY.to_string()
+            rejected(KEY_REJECTED_HISTORY)
         } else {
-            format!("The split key couldn't be verified right now: {:?}", e)
-        },
+            tracing::info!("A split coin's check did not finish: {:?}", e);
+            unfinished()
+        }
     })?;
     let path = refreshed.retained_path().map_err(|e| {
         tracing::info!("A split coin's refreshed history is invalid: {:?}", e);
@@ -2397,6 +2416,28 @@ mod tests {
                 run(vec![], Method::SplitKey, vec![shared()[0]], Some(key)).await;
             assert_eq!(result.unwrap_err(), KEY_REJECTED_PROOF);
             assert_eq!(stages, [BuildStage::CheckingKey]);
+        }
+    }
+
+    /// Every message a key check or a rejection can show is in the Spanish
+    /// catalogue, with each next step: a reworded constant can't silently
+    /// fall back to English.
+    #[test]
+    fn key_check_messages_are_in_the_spanish_catalogue() {
+        use coincube_ui::locale::{notice, render_in, Language};
+        let mut shown = vec![KEY_CHECK_UNFINISHED.to_string()];
+        for reason in [KEY_REJECTED_HISTORY, KEY_REJECTED_PROOF] {
+            for next in [
+                KEY_REJECTED_SEND_ANOTHER,
+                KEY_REJECTED_USES_ANOTHER,
+                KEY_REJECTED_BUILD_AGAIN,
+            ] {
+                shown.push(format!("{reason} {next}"));
+            }
+        }
+        for english in shown {
+            let spanish = render_in(Language::Spanish, || notice(english.clone()));
+            assert_ne!(spanish, english);
         }
     }
 

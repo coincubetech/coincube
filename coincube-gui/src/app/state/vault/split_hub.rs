@@ -1138,6 +1138,15 @@ mod tests {
         assert_eq!(panel.flow(&cache).error, None);
     }
 
+    /// A rejection with nothing to mark (the error didn't land on a step
+    /// that shows it) is not an error.
+    #[test]
+    fn a_rejection_with_no_error_held_changes_nothing() {
+        let (mut panel, cache, _) = fixture();
+        panel.split_key_was_rejected();
+        assert_eq!(panel.flow(&cache).error, None);
+    }
+
     /// The message is about the method the build used.
     #[test]
     fn a_build_error_goes_with_the_method_it_was_about() {

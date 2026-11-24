@@ -65,8 +65,11 @@ history too deep or too large to search) never pass.
 
 A finished answer replaces the path, including a
 completed search that found none. A failed check that was not holding a path
-is not written, so the next launch retries it. A verified path from this
-session is not replaced by a later miss or failure.
+is not written, so the next launch retries it. A background check never
+replaces a path verified in this session with a later miss or failure; only
+the split build's own rejection does. A background check already in flight
+when the build rejects a coin is older than that answer, so its result is
+dropped.
 
 ## Decision and safety invariant
 
