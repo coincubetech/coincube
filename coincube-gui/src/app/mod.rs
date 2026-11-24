@@ -7958,7 +7958,18 @@ impl App {
         self.cache
             .split_key_rejected(key, std::time::SystemTime::now());
         self.save_chain_proofs();
-        self.route_split_prepared(Err(message))
+        // What happens next depends on whether another split coin is held.
+        use crate::services::split_coins::{KEY_REJECTED_SEND_ANOTHER, KEY_REJECTED_USES_ANOTHER};
+        let next = if self.cache.split_keys().is_empty() {
+            KEY_REJECTED_SEND_ANOTHER
+        } else {
+            KEY_REJECTED_USES_ANOTHER
+        };
+        let task = self.route_split_prepared(Err(format!("{message} {next}")));
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.split_key_was_rejected();
+        }
+        task
     }
 
     fn route_split_key_check(
@@ -14366,6 +14377,44 @@ pub(crate) mod shell_tests {
         assert_eq!(stage(&app), None, "the result clears the stage");
         drop(app.update(Message::SplitBuildStage(BuildStage::Building)));
         assert_eq!(stage(&app), None, "a late stage doesn't come back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A rejected split coin stops being offered, and Split coins hears
+    /// why with what to do next.
+    #[test]
+    fn a_rejected_split_coin_is_recorded_and_reported() {
+        use crate::services::chain_status::ProofEntry;
+        use crate::services::split_coins::{KEY_REJECTED_HISTORY, KEY_REJECTED_SEND_ANOTHER};
+        let root = std::env::temp_dir().join(format!("split-rejected-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        app.panels
+            .split_hub
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        let key: bitcoin::OutPoint = format!("{}:0", "07".repeat(32)).parse().unwrap();
+        drop(app.update(Message::SplitKeyRejected {
+            key,
+            message: KEY_REJECTED_HISTORY.to_string(),
+        }));
+        assert!(matches!(
+            app.cache.chain_proofs.get(&key),
+            Some(ProofEntry::NoQualifyingAncestry { .. })
+        ));
+        assert_eq!(
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test(),
+            (
+                false,
+                Some(format!(
+                    "{KEY_REJECTED_HISTORY} {KEY_REJECTED_SEND_ANOTHER}"
+                ))
+            ),
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

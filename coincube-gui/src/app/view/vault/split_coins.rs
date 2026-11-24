@@ -310,6 +310,8 @@ pub struct SplitFlow {
     pub working: bool,
     /// Where the build in flight is, once it says.
     pub stage: Option<BuildStage>,
+    /// Why the last build failed, while that still applies. Drawn on the
+    /// review and on step one.
     pub error: Option<String>,
     pub copy: CopyCard,
     /// Another split waiting to be signed, while the flow goes on with the
@@ -628,7 +630,7 @@ fn key_step<'a>(
             localized_copy("Still couldn't check this coin").to_string(),
             localized_format!(
                 "{} · its history still can't be read. This Vault keeps trying, but a split coin from another source may be quicker.",
-                "{} · su historial sigue sin poder leerse. Este Vault lo sigue intentando, pero una moneda separada de otro origen puede ser más rápido.",
+                "{} · su historial sigue sin poder leerse. Este Vault lo sigue intentando, pero una moneda separada de otro origen puede ser más rápida.",
                 flow.money(amount)
             ),
             Tone::Busy,
@@ -1397,6 +1399,30 @@ mod tests {
             "dark",
             coincube_ui::theme::Theme::dark(),
         )
+    }
+
+    /// Why the last build failed is drawn on step one as well as on the
+    /// review, in the user's language.
+    #[test]
+    fn a_build_error_shows_on_step_one_and_on_the_review() {
+        use crate::services::split_coins::{KEY_REJECTED_HISTORY, KEY_REJECTED_SEND_ANOTHER};
+        let message = format!("{KEY_REJECTED_HISTORY} {KEY_REJECTED_SEND_ANOTHER}");
+        let review = SplitFlow {
+            error: Some(message.clone()),
+            ..flow()
+        };
+        assert!(mount("vault-split-error-review", &review, (1280, 900)).contains(&message));
+        let key = SplitFlow {
+            step: Step::Key(KeyStatus::Waiting),
+            key: None,
+            ..review
+        };
+        assert!(mount("vault-split-error-key", &key, (1280, 900)).contains(&message));
+        let spanish = render_in(Language::Spanish, || {
+            mount("vault-split-error-key-es", &key, (1280, 900))
+        });
+        assert!(!spanish.contains(&message));
+        assert!(spanish.contains("Envía otra moneda separada."));
     }
 
     /// A build in flight names its stage with moving dots; the slow split

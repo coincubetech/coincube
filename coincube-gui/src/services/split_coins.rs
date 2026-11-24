@@ -955,6 +955,15 @@ pub async fn requalify(
         .map_err(|error| error.message)
 }
 
+/// Why a split coin was rejected, as the user reads it. The reason in
+/// detail goes to the log. Both are in the Spanish catalogue, alone and with
+/// each of the App's next steps.
+pub const KEY_REJECTED_HISTORY: &str = "The split coin this split was using can no longer be used: its history no longer shows it exists on one chain only.";
+pub const KEY_REJECTED_PROOF: &str = "The split coin this split was using can no longer be used: its saved history is no longer valid.";
+/// What happens after a rejection, by whether another split coin is held.
+pub const KEY_REJECTED_SEND_ANOTHER: &str = "Send another split coin.";
+pub const KEY_REJECTED_USES_ANOTHER: &str = "The split now uses another split coin.";
+
 /// [`requalify`], telling a path that no longer qualifies from a check that
 /// could not finish.
 pub async fn check_key(
@@ -974,7 +983,8 @@ pub async fn check_key(
         rejected: false,
     };
     if key.path.selected() != key.outpoint {
-        return Err(rejected("The split key's proof doesn't match it."));
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     let source = HttpObservationSource::new(
         client.clone(),
@@ -997,20 +1007,19 @@ pub async fn check_key(
     .map_err(|e| KeyCheckError {
         rejected: path_rejected(&e),
         message: if path_rejected(&e) {
-            format!(
-                "This split coin can no longer be used: its history no longer shows it exists on one chain only ({:?}). Use another split coin.",
-                e
-            )
+            tracing::info!("A split coin's history no longer qualifies: {:?}", e);
+            KEY_REJECTED_HISTORY.to_string()
         } else {
             format!("The split key couldn't be verified right now: {:?}", e)
         },
     })?;
-    let path = refreshed.retained_path().map_err(|e| KeyCheckError {
-        message: format!("The split key's proof is invalid: {:?}", e),
-        rejected: true,
+    let path = refreshed.retained_path().map_err(|e| {
+        tracing::info!("A split coin's refreshed history is invalid: {:?}", e);
+        rejected(KEY_REJECTED_PROOF)
     })?;
     if path.selected() != key.outpoint {
-        return Err(rejected("The split key's proof doesn't match it."));
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     Ok(())
 }
@@ -2386,7 +2395,7 @@ mod tests {
             };
             let (result, stages) =
                 run(vec![], Method::SplitKey, vec![shared()[0]], Some(key)).await;
-            assert!(result.unwrap_err().contains("doesn't match"));
+            assert_eq!(result.unwrap_err(), KEY_REJECTED_PROOF);
             assert_eq!(stages, [BuildStage::CheckingKey]);
         }
     }
