@@ -3466,6 +3466,180 @@ mod feature_flag_tests {
     }
 
     #[test]
+    /// A tab held by a log-out elsewhere stays fail-closed through sibling
+    /// sign-ins. Another account's sign-in leaves the hold as it is. A
+    /// sign-in of the account this tab shows is adopted, and only Connect
+    /// confirming that account behind the adopted bearer lifts the hold and
+    /// lets the account's AI access grant apply again. Another account
+    /// signing in while that check is in flight re-holds, so the late check
+    /// cannot lift it.
+    fn held_session_readopts_only_a_same_account_sibling_sign_in() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use crate::app::{message::Message as AppMessage, App};
+        use crate::gui::tab::AuthChange;
+        let _session_guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = tests::fixture();
+        let _no_build_override = crate::feature_flags::test_override::ai_access(false);
+        let (mut app, startup) = App::new_inner(
+            crate::app::Cache::default(),
+            wallet,
+            None,
+            None,
+            crate::app::Config::new(false),
+            daemon.clone(),
+            crate::app::CoincubeDirectory::new(root.clone()),
+            None,
+            crate::app::settings::CubeSettings::new(
+                "MCP fixture".into(),
+                crate::chain::ChainId::Bitcoin,
+            ),
+            None,
+        );
+        drop(startup);
+        crate::app::session::open_without_pin(app.cube_settings.id.clone());
+        let user = |id: u32| crate::services::coincube::User {
+            id,
+            email: format!("user{id}@example.invalid"),
+            email_verified: Some(true),
+        };
+        let load_features = |app: &mut App| {
+            let features: crate::services::coincube::FeaturesResponse =
+                serde_json::from_value(serde_json::json!({"plans": [], "aiAccessEnabled": true}))
+                    .unwrap();
+            let generation = app.panels.connect.account.session_generation();
+            drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::FeaturesLoaded(Some(features), generation),
+            ))));
+        };
+        let sign_in = |user_id: u32, token: &str| AuthChange::SignIn {
+            user_id,
+            token: zeroize::Zeroizing::new(token.into()),
+        };
+        let panel_token = |app: &App| app.panels.connect.account.client.token().map(str::to_owned);
+        let ai_access = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+
+        // Account 7 signed in here, with the grant, serving a client.
+        app.panels.connect.account.user = Some(user(7));
+        app.panels.connect.account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+        app.panels.connect.account.client.set_token("tab-bearer");
+        load_features(&mut app);
+        assert!(app.mcp_supported());
+        drop(app.update(AppMessage::View(view::Message::Menu(ai_access.clone()))));
+        for message in [
+            Message::Enable(true),
+            Message::Wallet(true),
+            Message::ClientName("client".into()),
+            Message::Capability(0, true),
+            Message::Approve,
+        ] {
+            drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
+        }
+        let grant = app.local_mcp.server.as_ref().unwrap().grant.clone();
+        assert!(grant.active());
+
+        // Log-out in another tab: held, AI access closed.
+        drop(app.on_global_auth_change(AuthChange::LogOut, false));
+        assert!(app.claim_session_invalidated);
+        assert!(!grant.active());
+        assert!(!app.mcp_supported());
+
+        // Another account signs in elsewhere: the hold is untouched — no
+        // adoption, no new epoch, no AI access.
+        let epoch = app.panels.connect.account.auth_epoch();
+        drop(app.on_global_auth_change(sign_in(8, "other-bearer"), false));
+        assert!(app.claim_session_invalidated);
+        assert_eq!(app.claim_readoption, None);
+        assert_eq!(app.panels.connect.account.auth_epoch(), epoch);
+        assert_eq!(panel_token(&app).as_deref(), Some("tab-bearer"));
+        load_features(&mut app);
+        assert!(
+            !app.mcp_supported(),
+            "another account's sign-in grants nothing"
+        );
+
+        // The same account signs in elsewhere: this tab adopts the accepted
+        // bearer under a new epoch, but stays held until Connect confirms it.
+        drop(app.on_global_auth_change(sign_in(7, "fresh-bearer"), false));
+        assert!(app.panels.connect.account.auth_epoch() > epoch);
+        assert_eq!(panel_token(&app).as_deref(), Some("fresh-bearer"));
+        assert_eq!(app.claim_readoption, Some(7));
+        assert!(app.claim_session_invalidated, "unverified: still held");
+        load_features(&mut app);
+        assert!(
+            !app.mcp_supported(),
+            "an unverified adoption grants nothing"
+        );
+
+        // A load from before the adoption cannot lift the hold.
+        let generation = app.panels.connect.account.session_generation();
+        let epoch = app.panels.connect.account.auth_epoch();
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Ok(user(7)),
+                generation: generation.wrapping_sub(1),
+                epoch,
+            },
+        ))));
+        assert!(app.claim_session_invalidated, "a stale load lifts nothing");
+
+        // Connect confirms account 7 behind the adopted bearer: lifted, and
+        // the account's own grant applies again once its features load.
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Ok(user(7)),
+                generation,
+                epoch,
+            },
+        ))));
+        assert!(
+            !app.claim_session_invalidated,
+            "the verified adoption lifts the hold"
+        );
+        assert_eq!(app.claim_readoption, None);
+        assert_eq!(
+            app.panels.connect.account.user.as_ref().map(|u| u.id),
+            Some(7)
+        );
+        load_features(&mut app);
+        assert!(app.cache.ai_access_server_enabled);
+        assert!(app.mcp_supported(), "AI access returns without reopening");
+
+        // Race: held again, the same account is adopted, then another
+        // account signs in before Connect answers. The re-hold drops the
+        // adoption, so its late answer lifts nothing.
+        drop(app.on_global_auth_change(AuthChange::LogOut, false));
+        drop(app.on_global_auth_change(sign_in(7, "second-bearer"), false));
+        assert_eq!(app.claim_readoption, Some(7));
+        let generation = app.panels.connect.account.session_generation();
+        let epoch = app.panels.connect.account.auth_epoch();
+        drop(app.on_global_auth_change(sign_in(8, "other-bearer"), false));
+        assert!(app.claim_session_invalidated);
+        assert_eq!(app.claim_readoption, None);
+        assert!(app.panels.connect.account.auth_epoch() > epoch);
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::AdmittedUserLoaded {
+                user: Ok(user(7)),
+                generation,
+                epoch,
+            },
+        ))));
+        assert!(
+            app.claim_session_invalidated,
+            "the dropped adoption lifts nothing"
+        );
+        load_features(&mut app);
+        assert!(!app.mcp_supported());
+
+        app.stop();
+        drop(app);
+        drop(daemon);
+        crate::app::session::close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     /// Suspending AI access (the account flag turned off) keeps a registry
     /// poisoned by a storage failure locked, so a revocation that could not
     /// be saved is not served again when AI access returns.

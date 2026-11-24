@@ -754,19 +754,29 @@ pub struct App {
     /// Set at the global Connect auth boundary (`Tab::invalidate_fork_session`
     /// → [`Self::on_global_auth_change`]): the session this tab's Connect
     /// panel still shows is not one a claim may work under. Lifted only by
-    /// a completion (`SetSession` or `SessionLoaded`) of an authentication
-    /// operation this tab's own Connect panel began *after* the hold — the
-    /// completion carries the panel's authentication epoch from when the
-    /// operation was spawned, compared with `claim_hold_epoch`. A cached
-    /// account callback, re-entering the panel, a Refresh, a sibling tab's
-    /// sign-in, or a completion of an operation begun before the hold cannot
-    /// lift it. Claim-scoped: the Connect panel itself is not synchronised
-    /// across tabs here.
+    /// a completion (`SetSession`, `SessionLoaded`, or a successful
+    /// `AdmittedUserLoaded` of the current panel session) of an
+    /// authentication operation this tab's own Connect panel began *after*
+    /// the hold — the completion carries the panel's authentication epoch
+    /// from when the operation was spawned, compared with
+    /// `claim_hold_epoch`. A cached account callback, re-entering the
+    /// panel, a Refresh, or a completion of an operation begun before the
+    /// hold cannot lift it, and neither can a sibling tab's sign-in by
+    /// itself. A sibling sign-in of the account this panel still shows
+    /// makes the panel adopt that sign-in's accepted bearer — a new
+    /// operation under a new epoch — and only Connect confirming the user
+    /// behind that bearer lifts the hold. Claim-scoped: the Connect panel
+    /// itself is not synchronised across tabs here.
     claim_session_invalidated: bool,
     /// The account panel's authentication epoch as advanced by the most
     /// recent hold; a completion lifts the hold only if its epoch is at
     /// least this.
     claim_hold_epoch: u64,
+    /// The Connect user whose sibling sign-in this held tab is adopting
+    /// (see `on_global_auth_change`). Only that user's verified load lifts
+    /// the hold; a sibling sign-in of anyone else meanwhile re-holds,
+    /// which drops the adoption. Cleared by every hold and by the lift.
+    claim_readoption: Option<u32>,
     /// True while an off-thread daemon backend switch ([`Self::spawn_daemon_switch`])
     /// is in flight. The config isn't updated until the switch completes, so
     /// without this guard the next sync probe would keep re-firing the switch
@@ -3752,6 +3762,7 @@ impl App {
             node_history_epoch: 0,
             node_history_request_epoch: 0,
             claim_session_invalidated: false,
+            claim_readoption: None,
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
             background_node_attempt: None,
@@ -4028,6 +4039,7 @@ impl App {
                 node_history_epoch: 0,
                 node_history_request_epoch: 0,
                 claim_session_invalidated: false,
+                claim_readoption: None,
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
                 background_node_attempt: None,
@@ -4844,6 +4856,7 @@ impl App {
         self.revoke_claim();
         self.claim_hold_epoch = self.panels.connect.account.invalidate_auth();
         self.claim_session_invalidated = true;
+        self.claim_readoption = None;
     }
 
     /// The global Connect auth boundary for a log-out in any tab: hold.
@@ -4907,7 +4920,19 @@ impl App {
     /// - A log-out from any tab holds the claim (`invalidate_claim_session`).
     /// - A sign-in this tab originated is its own hook's business
     ///   (`claim_replaced`, and the epoch-correlated lift): nothing here.
-    /// - A sibling sign-in never lifts an existing hold, and adds nothing to it.
+    /// - A sibling sign-in never lifts an existing hold by itself. While
+    ///   held, a sibling sign-in of the account this tab's panel still
+    ///   shows is adopted: the panel takes that sign-in's accepted bearer
+    ///   under a new authentication epoch and asks Connect for its user
+    ///   (`adopt_shared_connect_client`). The hold, and with it the AI
+    ///   access gate, stays closed until that check completes; its
+    ///   completion is an operation this tab began after the hold, so it
+    ///   lifts the hold through the ordinary epoch rule
+    ///   (`sync_connect_claim_session`). A sibling sign-in of another
+    ///   account, or one this tab cannot adopt (a revoked admitted
+    ///   session, a Bitcoin Blake2b Cube), leaves the hold as it is — and
+    ///   if an adoption is pending, re-holds, so that adoption cannot lift
+    ///   the hold under an account that is no longer the signed-in one.
     /// - A sibling sign-in or refresh of the *same* Connect user as this
     ///   tab's account leaves this tab's session standing: the claim is
     ///   revoked for a re-read (its coordinator was bound before that
@@ -4927,7 +4952,25 @@ impl App {
         match change {
             AuthChange::LogOut => self.invalidate_claim_session(),
             AuthChange::SignIn { .. } if originated => {}
-            AuthChange::SignIn { .. } if self.claim_session_invalidated => {}
+            AuthChange::SignIn { user_id, token } if self.claim_session_invalidated => {
+                if self.can_readopt_held_session(user_id) {
+                    let mut client = self.panels.connect.account.client.clone();
+                    client.set_token(&token);
+                    let adopt = self.adopt_shared_connect_client(client);
+                    self.claim_readoption = Some(user_id);
+                    self.sync_panel_derived_cache_fields();
+                    let enforce = self.enforce_ai_access_flag().unwrap_or_else(Task::none);
+                    return Task::batch([adopt, enforce]);
+                }
+                if self
+                    .claim_readoption
+                    .is_some_and(|pending| pending != user_id)
+                {
+                    // Another account signed in while this tab was adopting:
+                    // that adoption no longer matches the global account.
+                    self.hold_claim();
+                }
+            }
             AuthChange::SignIn { user_id, .. } => {
                 let mine = self.panels.connect.account.user.as_ref().map(|u| u.id);
                 if mine == Some(user_id) {
@@ -4939,6 +4982,18 @@ impl App {
         }
         self.sync_panel_derived_cache_fields();
         self.enforce_ai_access_flag().unwrap_or_else(Task::none)
+    }
+
+    /// Whether a sibling sign-in of `user_id` may be adopted by this held
+    /// tab: the panel still shows that account, the tab is an ordinary
+    /// Bitcoin Cube (a Bitcoin Blake2b Cube keeps its admitted credentials),
+    /// and its session was not revoked for good (`requires_authenticated_reopen`
+    /// is sticky and an adoption would clear it).
+    fn can_readopt_held_session(&self, user_id: u32) -> bool {
+        self.claim_session_invalidated
+            && !self.cache.chain().is_blake2b()
+            && !self.panels.connect.account.requires_authenticated_reopen()
+            && self.panels.connect.account.user.as_ref().map(|u| u.id) == Some(user_id)
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -6894,6 +6949,7 @@ impl App {
         // else acts on the change, and advances the generation.
         if session_epoch.is_some_and(|epoch| epoch >= self.claim_hold_epoch) {
             self.claim_session_invalidated = false;
+            self.claim_readoption = None;
         }
         let claim_signed_in =
             !explicit_logout && self.panels.connect.account.bitcoin_blake2b_enabled();
@@ -7116,12 +7172,32 @@ impl App {
         // re-entry) lifts a hold on the claim's session, and neither
         // does a completion of an operation begun before the hold
         // (see `claim_session_invalidated`).
+        // A held tab's adoption of a sibling's bearer (see
+        // `on_global_auth_change`) is established by its user load: the
+        // panel turns a current, successful one into `SessionLoaded`
+        // internally. It counts here only when the panel will accept it
+        // and it loaded the very account being re-adopted.
         let session_epoch = match &msg {
             Message::View(view::Message::ConnectAccount(
                 view::ConnectAccountMessage::SetSession(_, epoch)
                 | view::ConnectAccountMessage::AuthCommitAccepted { epoch, .. }
                 | view::ConnectAccountMessage::SessionLoaded { epoch, .. },
             )) => Some(*epoch),
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::AdmittedUserLoaded {
+                    user: Ok(user),
+                    generation,
+                    epoch,
+                },
+            )) if self.claim_readoption == Some(user.id)
+                && self
+                    .panels
+                    .connect
+                    .account
+                    .current_admitted_load(*generation, *epoch) =>
+            {
+                Some(*epoch)
+            }
             _ => None,
         };
         // Features and the post-login account check complete independently.
