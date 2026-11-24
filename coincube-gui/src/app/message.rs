@@ -353,6 +353,13 @@ pub enum Message {
     SplitBuildStage(crate::services::split_coins::BuildStage),
     /// The split was built and stored with the daemon, or why not.
     SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
+    /// The split builder's fresh check answered that this split key's path
+    /// no longer qualifies: stop offering the coin, then report `message`
+    /// like any failed build.
+    SplitKeyRejected {
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        message: String,
+    },
     /// Open Send with exactly these coins chosen.
     SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
     /// The daemon's copies of this Vault's recorded split transactions, for

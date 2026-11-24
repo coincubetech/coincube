@@ -284,6 +284,13 @@ impl ProofEntry {
         self.failed_attempts() > 0
     }
 
+    /// Whether the check has failed so many times in a row that it is down
+    /// to the longest wait. Some failures never pass (a history too deep or
+    /// too large to search), so by now another coin may be the way forward.
+    pub fn retries_backed_off(&self) -> bool {
+        usize::from(self.failed_attempts()) > FAILED_RETRY_STEPS.len()
+    }
+
     fn retry_due(&self, now: SystemTime) -> bool {
         let (at, after) = match self {
             Self::Verified(_) => return false,
@@ -391,7 +398,10 @@ pub async fn check_ancestry(
         },
     ) {
         Ok(source) => source,
-        Err(_) => return failed(&outpoints),
+        Err(error) => {
+            tracing::info!("Ancestry checks could not start: {:?}", error);
+            return failed(&outpoints);
+        }
     };
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
@@ -406,7 +416,10 @@ pub async fn check_ancestry(
         let entry = match found {
             Ok(Some(discovered)) => match discovered.retained_path() {
                 Ok(path) => ProofEntry::Verified(path),
-                Err(_) => ProofEntry::failed(SystemTime::now()),
+                Err(error) => {
+                    tracing::info!("An ancestry check's path did not verify: {:?}", error);
+                    ProofEntry::failed(SystemTime::now())
+                }
             },
             Ok(None) => ProofEntry::NoQualifyingAncestry {
                 checked_at: SystemTime::now(),
@@ -604,6 +617,12 @@ mod tests {
         }
         assert_eq!(waits, [1, 2, 5, 15, 30, 30]);
         assert!(entry.is_waiting_to_retry());
+        assert!(entry.retries_backed_off());
+        let fourth = (0..3).fold(ProofEntry::failed(now), |entry, _| {
+            ProofEntry::after_check(Some(&entry), ProofEntry::failed(now))
+        });
+        assert_eq!(fourth.failed_attempts(), 4);
+        assert!(!fourth.retries_backed_off(), "still on the quick retries");
 
         let answered = ProofEntry::after_check(
             Some(&entry),

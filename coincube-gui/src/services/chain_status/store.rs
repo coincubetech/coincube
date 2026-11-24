@@ -306,6 +306,12 @@ mod tests {
             "the path is kept"
         );
         assert_eq!(entry.outcome(), None, "still shown as checking");
+        assert_eq!(entry.failed_attempts(), 1);
+        let again = ProofEntry::after_check(Some(&entry), ProofEntry::failed(failed_at));
+        assert!(
+            matches!(&again, ProofEntry::SavedRetry { path, attempts: 2, .. } if path.selected() == selected),
+            "a second failure keeps the path and counts on"
+        );
 
         let proofs: HashMap<_, _> = [(selected, entry)].into();
         let due = |now| {

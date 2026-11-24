@@ -7936,8 +7936,29 @@ impl App {
                 .await
             }),
             Message::SplitBuildStage,
-            |result| Message::SplitPrepared(result.map(|prepared| Box::new(prepared.record))),
+            |result| match result {
+                Ok(prepared) => Message::SplitPrepared(Ok(Box::new(prepared.record))),
+                Err(crate::services::split_coins::PrepareError {
+                    message,
+                    rejected_key: Some(key),
+                }) => Message::SplitKeyRejected { key, message },
+                Err(error) => Message::SplitPrepared(Err(error.message)),
+            },
         )
+    }
+
+    /// The build's fresh check rejected its split key: stop offering that
+    /// coin (the flow falls back to another split coin, or to asking for
+    /// one), then report the failed build.
+    fn route_split_key_rejected(
+        &mut self,
+        key: bitcoin::OutPoint,
+        message: String,
+    ) -> Task<Message> {
+        self.cache
+            .split_key_rejected(key, std::time::SystemTime::now());
+        self.save_chain_proofs();
+        self.route_split_prepared(Err(message))
     }
 
     fn route_split_key_check(
@@ -8911,6 +8932,9 @@ impl App {
             }
             Message::SplitPrepared(result) => {
                 return self.route_split_prepared(result);
+            }
+            Message::SplitKeyRejected { key, message } => {
+                return self.route_split_key_rejected(key, message);
             }
             // To Split coins whichever panel is showing, like the result.
             Message::SplitBuildStage(stage) => return self.route_split_build_stage(stage),

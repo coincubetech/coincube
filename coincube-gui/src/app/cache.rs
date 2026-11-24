@@ -804,6 +804,32 @@ impl Cache {
             .collect()
     }
 
+    /// Whether a check in this session verified `key`'s path. A split key
+    /// offered on a kept or derived path is not: the build checks it.
+    pub fn split_key_verified(&self, key: &coincube_core::miniscript::bitcoin::OutPoint) -> bool {
+        matches!(
+            self.chain_proofs.get(key),
+            Some(crate::services::chain_status::ProofEntry::Verified(_))
+        )
+    }
+
+    /// The split builder's fresh check answered that `key`'s path no longer
+    /// qualifies (a reorg moved its root, or the root is now on both
+    /// chains). That is a finished answer, so it replaces whatever was held:
+    /// the coin stops being offered as a split key, and a derived path can't
+    /// fill back in. The background check looks again when a no-path answer
+    /// is next due.
+    pub fn split_key_rejected(
+        &mut self,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        now: std::time::SystemTime,
+    ) {
+        self.chain_proofs.insert(
+            key,
+            crate::services::chain_status::ProofEntry::NoQualifyingAncestry { checked_at: now },
+        );
+    }
+
     /// The proof to re-qualify for `key` as a split key of the spend `spend`:
     /// the path a check verified in this session, else the one the split's
     /// journal record was built with (a restart leaves only a
@@ -1212,7 +1238,7 @@ mod entangled_cache_tests {
     /// Only a coin holding an ancestry path is a split key; a coin the twin
     /// Cube's split separated shows as one-chain but is not a key.
     #[test]
-    fn split_keys_need_a_verified_path_not_a_separated_status() {
+    fn split_keys_need_a_path_not_a_separated_status() {
         use crate::services::chain_status::{ChainStatus, ProofEntry};
         use coincube_core::{
             claim_ancestry::{retained::RetainedPath, search::OwnedLink},
@@ -1304,7 +1330,54 @@ mod entangled_cache_tests {
             cache.chain_proofs.insert(key, none);
             assert!(cache.split_keys().is_empty());
         }
-        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        // A key verified in this session comes before a smaller one whose
+        // path is only kept, so the build starts from the checked one.
+        let kept = Transaction {
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+            ..coinbase.clone()
+        };
+        let small = OutPoint::new(kept.compute_txid(), 0);
+        let small_path = RetainedPath::new(
+            small,
+            vec![OwnedLink {
+                transaction: serialize(&kept),
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        cache.daemon_cache.coins.push(Coin {
+            amount: Amount::from_sat(10_000),
+            ..coin(small)
+        });
+        cache
+            .chain_proofs
+            .insert(small, ProofEntry::Saved(small_path.clone()));
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::Verified(path.clone()));
+        assert!(cache.split_key_verified(&key) && !cache.split_key_verified(&small));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key, small], "verified first, despite its size");
+        cache
+            .chain_proofs
+            .insert(key, ProofEntry::Saved(path.clone()));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![small, key], "then the smallest");
+
+        // A key the build's check rejected is no longer offered, and a
+        // derived path can't bring it back.
+        cache.split_key_rejected(small, now);
+        assert!(!crate::services::split_coins::merge_proofs(
+            &mut cache.chain_proofs,
+            vec![(small, ProofEntry::Saved(small_path))]
+        ));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key]);
+        assert_eq!(cache.chain_status(&small), ChainStatus::CouldntVerify);
+
         cache.record_entanglement(
             key.txid,
             crate::services::entangled::Entanglement::Entangled,

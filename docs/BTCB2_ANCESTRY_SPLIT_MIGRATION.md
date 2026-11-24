@@ -52,8 +52,18 @@ already holds a split coin goes straight to the review after a restart or
 while the background check cannot finish. That is no fresh observation, and
 none is needed to offer it: `split_coins::prepare` re-qualifies the chosen
 key's path against both chains before anything is built, and the PSBT screen
-does so again before the split may be signed or sent. A path that no longer
-holds stops the build with an error. A finished answer replaces the path, including a
+does so again, for the split this Cube's journal records, before it may be
+signed or sent. Until a check in this session verifies it, the review labels
+that coin "Checked when you sign" rather than as only on this chain. A read
+that cannot finish stops the build and leaves the coin on offer. An answer
+that the path no longer qualifies (its root moved in a reorg, or is now on
+both chains) stops the build and records a no-path answer for the coin
+(`Cache::split_key_rejected`), so the flow moves on to another split coin or
+back to asking for one. Once a coin's check has failed five times in a row,
+the split-coin step stops saying another coin isn't needed: some failures (a
+history too deep or too large to search) never pass.
+
+A finished answer replaces the path, including a
 completed search that found none. A failed check that was not holding a path
 is not written, so the next launch retries it. A verified path from this
 session is not replaced by a later miss or failure.

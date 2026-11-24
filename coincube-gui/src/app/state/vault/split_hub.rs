@@ -133,12 +133,21 @@ pub fn key_status(cache: &Cache, address: Option<&str>) -> KeyStatus {
         match cache.chain_status(&coin.outpoint) {
             ChainStatus::BothChains => KeyStatus::BothChains { amount },
             ChainStatus::CouldntVerify => KeyStatus::CouldntVerify { amount },
-            _ if cache
-                .chain_proofs
-                .get(&coin.outpoint)
-                .is_some_and(|entry| entry.is_waiting_to_retry()) =>
+            // Only a coin with no answer yet: one a split is spending, or one
+            // already shown as on this chain only, isn't waiting on a retry.
+            ChainStatus::NotSeen | ChainStatus::NotChecked
+                if cache
+                    .chain_proofs
+                    .get(&coin.outpoint)
+                    .is_some_and(|entry| entry.is_waiting_to_retry()) =>
             {
-                KeyStatus::Retrying { amount }
+                KeyStatus::Retrying {
+                    amount,
+                    stalled: cache
+                        .chain_proofs
+                        .get(&coin.outpoint)
+                        .is_some_and(|entry| entry.retries_backed_off()),
+                }
             }
             _ => KeyStatus::Checking {
                 amount,
@@ -351,6 +360,10 @@ impl SplitHubPanel {
             step,
             coins,
             key: cache.split_keys().first().map(|(coin, _)| coin.amount),
+            key_verified: cache
+                .split_keys()
+                .first()
+                .is_some_and(|(coin, _)| cache.split_key_verified(&coin.outpoint)),
             method,
             signature_available: facts.signature_available,
             address: self.address.clone(),
@@ -791,6 +804,7 @@ mod tests {
         let (panel, cache, [a, b, _]) = fixture();
         let flow = panel.flow(&cache);
         assert_eq!(flow.step, Step::Review);
+        assert!(flow.key_verified);
         assert_eq!(flow.method, Method::SplitKey, "Bitcoin splits with a coin");
         assert_eq!(flow.key, Some(Amount::from_sat(30_000)));
         assert_eq!(
@@ -813,6 +827,7 @@ mod tests {
         let flow = panel.flow(&cache);
         assert_eq!(flow.step, Step::Review);
         assert_eq!(flow.key, Some(Amount::from_sat(30_000)));
+        assert!(!flow.key_verified, "not shown as only on this chain yet");
 
         let failed = ProofEntry::after_check(
             cache.chain_proofs.get(&key),
@@ -833,9 +848,38 @@ mod tests {
         assert_eq!(
             panel.flow(&cache).step,
             Step::Key(KeyStatus::Retrying {
-                amount: Amount::from_sat(30_000)
+                amount: Amount::from_sat(30_000),
+                stalled: false,
             })
         );
+        // Down to the longest wait, it stops saying another coin isn't
+        // needed: some failures never pass.
+        let now = std::time::SystemTime::now();
+        let stalled = (0..4).fold(ProofEntry::failed(now), |entry, _| {
+            ProofEntry::after_check(Some(&entry), ProofEntry::failed(now))
+        });
+        cache.chain_proofs.insert(key, stalled);
+        assert_eq!(
+            panel.flow(&cache).step,
+            Step::Key(KeyStatus::Retrying {
+                amount: Amount::from_sat(30_000),
+                stalled: true,
+            })
+        );
+    }
+
+    /// The build's fresh check rejected the split coin: it is no longer
+    /// offered, so the flow asks for one instead of failing on every Sign.
+    #[test]
+    fn a_split_coin_the_build_rejected_sends_the_flow_back_to_step_one() {
+        let (panel, mut cache, [_, _, key]) = fixture();
+        let path = cache.chain_proofs[&key].path().unwrap().clone();
+        cache.chain_proofs.insert(key, ProofEntry::Saved(path));
+        assert_eq!(panel.flow(&cache).step, Step::Review);
+        cache.split_key_rejected(key, std::time::SystemTime::now());
+        let flow = panel.flow(&cache);
+        assert!(matches!(flow.step, Step::Key(_)), "{:?}", flow.step);
+        assert_eq!(flow.key, None);
     }
 
     fn fee(generation: u64, rate: Option<u64>) -> Message {
