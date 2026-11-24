@@ -5895,6 +5895,17 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_routed(message);
+        // After every message, whichever panel is showing: Split coins
+        // hears little while it isn't, and a build error that went stale
+        // must not come back.
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.drop_stale_error(&self.cache);
+        }
+        task
+    }
+
+    fn update_routed(&mut self, message: Message) -> Task<Message> {
         if self.takes_detached_psbt_delete(&message) {
             if let Some(psbts) = self.panels.psbts.as_mut() {
                 return psbts.update(self.daemon.clone(), &self.cache, message);
@@ -7940,6 +7951,7 @@ impl App {
         };
         let generation = *self.panels.session_generation.borrow();
         let live = self.panels.session_generation.subscribe();
+        let app = self.cache.app_generation;
         Task::sip(
             iced::task::sipper(async move |progress| {
                 crate::services::split_coins::prepare(
@@ -7949,8 +7961,65 @@ impl App {
                 .await
             }),
             Message::SplitBuildStage,
-            |result| Message::SplitPrepared(result.map(|prepared| Box::new(prepared.record))),
+            move |result| Message::SplitBuilt {
+                app,
+                result: result.map(|prepared| Box::new(prepared.record)),
+            },
         )
+    }
+
+    /// A split build finished. One from another `App` (its Cube was locked
+    /// or switched meanwhile) changes nothing here: its record belongs to
+    /// that `App`'s Vault, and its failure to that `App`'s review.
+    fn route_split_built(
+        &mut self,
+        app: cache::AppGeneration,
+        result: Result<
+            Box<crate::services::split_coins::SplitRecord>,
+            crate::services::split_coins::PrepareError,
+        >,
+    ) -> Task<Message> {
+        if app != self.cache.app_generation {
+            return Task::none();
+        }
+        match result {
+            Ok(record) => self.route_split_prepared(Ok(record)),
+            Err(crate::services::split_coins::PrepareError {
+                message,
+                rejected_key: Some(key),
+            }) => self.route_split_key_rejected(key, message),
+            Err(error) => self.route_split_prepared(Err(error.message)),
+        }
+    }
+
+    /// The build's fresh check rejected its split key: stop offering that
+    /// coin (the flow falls back to another split coin, or to asking for
+    /// one), then report the failed build.
+    fn route_split_key_rejected(
+        &mut self,
+        key: bitcoin::OutPoint,
+        message: String,
+    ) -> Task<Message> {
+        self.cache
+            .split_key_rejected(key, std::time::SystemTime::now());
+        // A background check of this coin still in flight is older than
+        // this answer and must not undo it.
+        if self.chain_proofs_in_flight.contains(&key) {
+            self.cache.supersede_proof_check(key);
+        }
+        self.save_chain_proofs();
+        // What happens next depends on whether another split coin is held.
+        use crate::services::split_coins::{KEY_REJECTED_SEND_ANOTHER, KEY_REJECTED_USES_ANOTHER};
+        let next = if self.cache.split_keys().is_empty() {
+            KEY_REJECTED_SEND_ANOTHER
+        } else {
+            KEY_REJECTED_USES_ANOTHER
+        };
+        let task = self.route_split_prepared(Err(format!("{message} {next}")));
+        if let Some(panel) = self.panels.split_hub.as_mut() {
+            panel.split_key_was_rejected();
+        }
+        task
     }
 
     fn route_split_key_check(
@@ -8924,6 +8993,9 @@ impl App {
             }
             Message::SplitPrepared(result) => {
                 return self.route_split_prepared(result);
+            }
+            Message::SplitBuilt { app, result } => {
+                return self.route_split_built(app, result);
             }
             // To Split coins whichever panel is showing, like the result.
             Message::SplitBuildStage(stage) => return self.route_split_build_stage(stage),
@@ -14370,10 +14442,131 @@ pub(crate) mod shell_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A coin on both chains, so Split coins is on a step that shows why a
+    /// build failed.
+    fn coin_on_both_chains(app: &mut App) {
+        let outpoint: bitcoin::OutPoint = format!("{}:0", "08".repeat(32)).parse().unwrap();
+        app.cache.daemon_cache.blockheight = 110;
+        app.cache.daemon_cache.coins = vec![coincubed::commands::ListCoinsEntry {
+            outpoint,
+            amount: bitcoin::Amount::from_sat(100_000),
+            block_height: Some(100),
+            spend_info: None,
+            is_immature: false,
+            address: "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg"
+                .parse::<bitcoin::Address<_>>()
+                .unwrap()
+                .assume_checked(),
+            derivation_index: 0.into(),
+            is_change: false,
+            is_from_self: false,
+        }];
+        app.cache.record_entanglement(
+            outpoint.txid,
+            crate::services::entangled::Entanglement::Entangled,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// A rejected split coin stops being offered, and Split coins hears
+    /// why with what to do next.
+    #[test]
+    fn a_rejected_split_coin_is_recorded_and_reported() {
+        use crate::services::chain_status::ProofEntry;
+        use crate::services::split_coins::{KEY_REJECTED_HISTORY, KEY_REJECTED_SEND_ANOTHER};
+        let root = std::env::temp_dir().join(format!("split-rejected-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        coin_on_both_chains(&mut app);
+        app.panels
+            .split_hub
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        let key: bitcoin::OutPoint = format!("{}:0", "07".repeat(32)).parse().unwrap();
+        let rejected = || {
+            Err(crate::services::split_coins::PrepareError {
+                message: KEY_REJECTED_HISTORY.to_string(),
+                rejected_key: Some(key),
+            })
+        };
+        let progress = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+        };
+        // A result from another App's build changes nothing here: not a
+        // rejection, and not an ordinary failure.
+        let other = crate::app::cache::AppGeneration::next();
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: rejected(),
+        }));
+        assert!(!app.cache.chain_proofs.contains_key(&key));
+        drop(app.update(Message::SplitBuilt {
+            app: other,
+            result: Err("Couldn't build".to_string().into()),
+        }));
+        assert_eq!(progress(&app), (true, None), "still this App's build");
+        // A background check of the coin is in flight when it is rejected.
+        app.chain_proofs_in_flight.insert(key);
+        drop(app.update(Message::SplitBuilt {
+            app: app.cache.app_generation,
+            result: rejected(),
+        }));
+        assert!(app.cache.superseded_proof_checks.contains(&key));
+        assert!(matches!(
+            app.cache.chain_proofs.get(&key),
+            Some(ProofEntry::NoQualifyingAncestry { .. })
+        ));
+        assert_eq!(
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test(),
+            (
+                false,
+                Some(format!(
+                    "{KEY_REJECTED_HISTORY} {KEY_REJECTED_SEND_ANOTHER}"
+                ))
+            ),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A build error that goes stale while another panel is showing is
+    /// dropped then, so it isn't back when the flow looks the same again.
+    #[test]
+    fn a_stale_split_error_is_dropped_from_another_panel() {
+        let root = std::env::temp_dir().join(format!("split-stale-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let error = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+                .1
+        };
+        coin_on_both_chains(&mut app);
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        drop(app.update(Message::SplitPrepared(Err("Couldn't build".into()))));
+        assert!(error(&app).is_some());
+        // The coin goes: the flow is on another step.
+        app.cache.daemon_cache.coins.clear();
+        // Any message, to a panel that isn't Split coins.
+        drop(app.update(Message::View(view::Message::Close)));
+        assert_eq!(error(&app), None, "dropped while stale");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_split_result_reaches_split_coins_from_another_panel() {
         let root = std::env::temp_dir().join(format!("split-result-{}", uuid::Uuid::new_v4()));
         let (mut app, _) = bitcoin_app(&root);
+        coin_on_both_chains(&mut app);
         app.panels
             .split_hub
             .as_mut()
@@ -16002,6 +16195,9 @@ pub(crate) mod shell_tests {
         let refusal = |messages: Vec<Message>| {
             messages.into_iter().find_map(|message| match message {
                 Message::SplitPrepared(Err(error)) => Some(error),
+                Message::SplitBuilt {
+                    result: Err(error), ..
+                } => Some(error.message),
                 _ => None,
             })
         };
