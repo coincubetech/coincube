@@ -355,6 +355,7 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         network: cache.chain(),
         p2p_test_coordinator: cache.p2p_test_coordinator,
         marketplace_flags: cache.marketplace_flags,
+        ai_access: cache.ai_access_enabled(),
         btcb2_server_enabled: cache.btcb2_server_enabled,
         btcb2_already_claimed: cache.btcb2_already_claimed,
         cube_name: &cache.cube_name,

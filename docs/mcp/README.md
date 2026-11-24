@@ -11,32 +11,57 @@ No Connect API or COINCUBE Mobile changes are needed.
 
 ## Feature flag and release status
 
-AI access is **off by default** behind the build-time flag
-`COINCUBE_ENABLE_AI_ACCESS` (`feature_flags::AI_ACCESS_ENABLED`). It stays off
-for launch until signed-release, real-client and security acceptance pass
-(issue #1535). Build with it on by setting the variable in `.env` or the
-environment (`1`, `true` or `yes`) and rebuilding:
+AI access is **off by default** and switched **per account** by the Connect
+`ai_access` feature flag, which COINCUBE Desktop reads as `aiAccessEnabled` from
+`GET /connect/features`. It stays off for launch until signed-release,
+real-client and security acceptance pass (issue #1535).
+
+To let a user try it, grant the flag to their account. Use the admin console's
+feature-flag page or the admin API:
+
+```sh
+# Turn AI access on for one account (null clears the override).
+curl -X PUT "$API/api/v1/admin/users/$USER_ID/feature-flags" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"ai_access": true}'
+```
+
+The user must be signed in to Connect in COINCUBE Desktop. The desktop reads
+the flag once per Connect session, when features load after sign-in, app start
+with a saved session, or opening a Cube. Granting or withdrawing the flag
+therefore applies at the user's next session; only signing out (or switching
+account) turns AI access off immediately. The flag fails closed: signed out,
+features not loaded, the API unreachable or the flag absent all read as off,
+and a failed fetch at sign-in leaves AI access off for that session.
+
+For local development and test builds without a Connect account, the build
+override `COINCUBE_ENABLE_AI_ACCESS` (`1`, `true` or `yes`; see
+`feature_flags::AI_ACCESS_ENABLED`) forces AI access on for every Cube in that
+build. Release builds must leave it unset.
 
 ```sh
 COINCUBE_ENABLE_AI_ACCESS=1 make run
 ```
 
-With the flag off:
+While AI access is off for the signed-in account:
 
-- **Cube → Settings** shows no AI access tab, and a restored route to it opens
-  General instead.
+- **Cube → Settings** shows no AI access tab, and a route to it opens General
+  instead.
 - The desktop never opens the pairing registry or publishes an endpoint, so no
-  MCP client is answered. Pairings already stored on disk are left untouched
-  and inert; they resume only in a build with the flag on, and still require
-  the Cube-wide switch.
+  MCP client is answered. If AI access turns off during a session (sign-out or
+  an account change), the desktop stops the clients it was serving, releases
+  the pairing registry and leaves the AI access page. A pairing registry locked
+  after a storage failure stays locked until the app restarts.
+- Pairings already stored on the device are left untouched and inert. They
+  resume once AI access is on again, and still require the Cube-wide switch.
 - `coincube-mcp` is still built and packaged, and its static tool discovery
   and `tenshu_get_capabilities` still work. They describe the companion build,
-  not whether this desktop build serves AI access. A well-formed wallet call
+  not whether this desktop serves AI access. A well-formed wallet call
   returns `wallet_unavailable`.
 
-The code is on `master`. Packaged-client interoperability, signed-artifact
-checks and independent security review remain release gates before the flag
-is turned on.
+Packaged-client interoperability, signed-artifact checks and independent
+security review remain release gates before the flag is turned on for
+everyone.
 
 ## Build and install
 

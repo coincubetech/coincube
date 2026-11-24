@@ -1186,6 +1186,13 @@ pub struct FeaturesResponse {
         alias = "card_payments_enabled"
     )]
     pub card_payments_enabled: Option<bool>,
+    /// AI access (local MCP) is available to this account
+    /// (`aiAccessEnabled`, the Connect `ai_access` flag). Fails closed:
+    /// absent, unloaded or unreachable reads as off, so AI access stays
+    /// hidden and no local AI client is served. See
+    /// `ConnectAccountPanel::ai_access_server_enabled`.
+    #[serde(default, alias = "aiAccessEnabled", alias = "ai_access_enabled")]
+    pub ai_access_enabled: Option<bool>,
 }
 
 // ── Checkout / Billing ──────────────────────────────────────────────────────

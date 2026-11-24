@@ -1449,7 +1449,11 @@ impl Tab {
             // does not depend on the session — but a claim in flight does.
             // The App decides from the kind of change and who made it: see
             // `App::on_global_auth_change`.
-            State::App(app) => app.on_global_auth_change(change.clone(), originated),
+            State::App(app) => {
+                command = app
+                    .on_global_auth_change(change.clone(), originated)
+                    .map(Message::Run);
+            }
             State::Home(home) => {
                 command = Self::apply_launcher_auth_change(home, &change, originated);
             }

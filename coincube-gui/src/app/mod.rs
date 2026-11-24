@@ -4950,7 +4950,14 @@ impl App {
     ///   or entry — no sign-out copy, no log-out needed.
     /// - A sibling sign-in of another account, or while this tab has none,
     ///   holds the claim, and says why.
-    pub fn on_global_auth_change(&mut self, change: crate::gui::tab::AuthChange, originated: bool) {
+    /// - A hold ends the account's AI access grant before this returns: the
+    ///   gate closes, running AI clients stop, and the returned task leaves
+    ///   the AI access page if it is open (`enforce_ai_access_flag`).
+    pub fn on_global_auth_change(
+        &mut self,
+        change: crate::gui::tab::AuthChange,
+        originated: bool,
+    ) -> Task<Message> {
         use crate::gui::tab::AuthChange;
         match change {
             AuthChange::LogOut => self.invalidate_claim_session(),
@@ -4965,6 +4972,8 @@ impl App {
                 }
             }
         }
+        self.sync_panel_derived_cache_fields();
+        self.enforce_ai_access_flag().unwrap_or_else(Task::none)
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -5141,9 +5150,7 @@ impl App {
         menu: &Menu,
         option: &menu::CubeSettingsOption,
     ) -> Task<Message> {
-        if *option == menu::CubeSettingsOption::AiAccess
-            && !crate::feature_flags::ai_access_enabled()
-        {
+        if *option == menu::CubeSettingsOption::AiAccess && !self.cache.ai_access_enabled() {
             // A restored or deep-linked route to a hidden page opens General.
             let general = menu::CubeSettingsOption::General;
             return self.open_cube_settings_page(
@@ -6091,7 +6098,7 @@ impl App {
     }
 
     fn route_local_mcp(&mut self, message: local_mcp::Message) -> Task<Message> {
-        if !crate::feature_flags::ai_access_enabled() {
+        if !self.cache.ai_access_enabled() {
             return Task::none();
         }
         let focus_after = match &message {
@@ -6200,6 +6207,7 @@ impl App {
         if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
             self.local_mcp.revoke();
         }
+        let ai_access_before = self.cache.ai_access_enabled();
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
         // `self.panels.connect.cube.server_cube_id` (e.g. a
@@ -6208,7 +6216,48 @@ impl App {
         // A pre-dispatch sync would miss those same-call mutations
         // and leave view layers one full message cycle behind.
         self.sync_panel_derived_cache_fields();
-        task
+        // The refresh at the top ran against the previous flag: an update
+        // that just turned AI access on resumes stored pairings now.
+        if !ai_access_before && self.cache.ai_access_enabled() {
+            self.refresh_mcp_pairings();
+        }
+        // Batch only when the gate has work, so an update with nothing to do
+        // still returns an empty task.
+        match self.enforce_ai_access_flag() {
+            Some(leave_page) => Task::batch([task, leave_page]),
+            None => task,
+        }
+    }
+
+    /// Applies the AI access gate after the flag may have changed. The
+    /// account flag is fetched once per Connect session (sign-in, app start
+    /// with a restored session, opening a Cube), so within a session it
+    /// turns off on sign-out or an account change; a grant withdrawn by an
+    /// admin applies at the next session. While AI access is off, stop every
+    /// AI client this session started and release the pairing registry
+    /// ([`local_mcp::Settings::suspend`]), without revoking or deleting
+    /// stored pairings and keeping any storage-failure lock, and leave the
+    /// AI access page if it is open. Turning the flag back on resumes stored
+    /// pairings through the normal refresh, still behind the Cube-wide switch.
+    fn enforce_ai_access_flag(&mut self) -> Option<Task<Message>> {
+        if self.cache.ai_access_enabled() {
+            return None;
+        }
+        if !self.local_mcp.is_dormant() {
+            self.local_mcp.suspend();
+        }
+        let general = menu::CubeSettingsOption::General;
+        if self.panels.current
+            == Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess,
+            ))
+        {
+            return Some(self.open_cube_settings_page(
+                &Menu::Cube(menu::CubeSubMenu::Settings(general)),
+                &general,
+            ));
+        }
+        None
     }
 
     /// Mirrors panel-owned state into `Cache` for cheap read access
@@ -6230,6 +6279,14 @@ impl App {
         // Connect" and "Sign with Connect" — never see a stale value after
         // a launch-time session restore.
         self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+
+        // The account's AI access flag, every tick: features load after
+        // sign-in, and logout or a revoked grant must reach the gate on
+        // the next render. A log-out or account change in another tab
+        // holds this tab's session without clearing the panel's features,
+        // so a held session grants nothing. See `enforce_ai_access_flag`.
+        self.cache.ai_access_server_enabled = !self.claim_session_invalidated
+            && self.panels.connect.account.ai_access_server_enabled();
 
         // The side panel's wallet names follow the Cube settings and the
         // loaded Vault, whichever message changed them (a Vault created or
@@ -7183,7 +7240,7 @@ impl App {
             &msg,
             Message::View(view::Message::ConnectAccount(
                 view::ConnectAccountMessage::FeaturesLoaded(features, generation)
-            )) if *generation == self.panels.connect.account.session_generation()
+            )) if self.panels.connect.account.is_current_features_load(*generation)
                 && !crate::app::features::bitcoin_blake2b_enabled(
                     features.as_ref().and_then(|f| f.bitcoin_blake2b_enabled).unwrap_or(false),
                     self.panels.connect.account.bitcoin_blake2b_opt_in,
@@ -9799,7 +9856,7 @@ impl App {
             .is_some();
         match &self.panels.current {
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess))
-                if crate::feature_flags::ai_access_enabled() =>
+                if self.cache.ai_access_enabled() =>
             {
                 Some(self.local_mcp.view_for_cube(self.mcp_supported(), false))
             }
@@ -9860,7 +9917,7 @@ impl App {
 
     pub(crate) fn mcp_proposals_supported(&self) -> bool {
         cfg!(feature = "mcp-proposals")
-            && crate::feature_flags::ai_access_enabled()
+            && self.cache.ai_access_enabled()
             && self
                 .cube_settings
                 .network
@@ -9876,7 +9933,7 @@ impl App {
     }
 
     fn refresh_mcp_pairings(&mut self) {
-        if !crate::feature_flags::ai_access_enabled() {
+        if !self.cache.ai_access_enabled() {
             // Never open the registry or publish an endpoint: stored
             // pairings stay on disk, inert, for a build with the flag on.
             return;
@@ -9913,7 +9970,7 @@ impl App {
     }
 
     fn mcp_supported(&self) -> bool {
-        crate::feature_flags::ai_access_enabled()
+        self.cache.ai_access_enabled()
             && self.wallet.as_ref().is_some_and(|wallet| {
                 wallet.chain == self.cube_settings.network
                     && wallet.main_descriptor.as_vault().is_some()
@@ -10020,7 +10077,7 @@ impl App {
                 &self.cache,
                 self.received_celebration_view(),
             )
-        } else if crate::feature_flags::ai_access_enabled()
+        } else if self.cache.ai_access_enabled()
             && matches!(
                 self.panels.current,
                 Menu::Cube(menu::CubeSubMenu::Settings(
@@ -12631,6 +12688,39 @@ pub(crate) mod tests {
         assert!(app.authenticated_coincube_client().is_none());
         assert!(!app.cache.btcb2_server_enabled);
         assert_ne!(*app.panels.session_generation.borrow(), session_generation);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// While a newly adopted session waits for its `SessionLoaded`, the panel
+    /// drops a features load begun under the previous session. The fork gate
+    /// must not act on a denial the panel ignored.
+    #[test]
+    fn global_beta_gate_ignores_a_denial_the_panel_drops_after_adoption() {
+        let root = std::env::temp_dir().join(format!(
+            "coincube-beta-adoption-window-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = granted_fork_app(&root, Some(true));
+        assert!(app.requires_connect());
+        let generation = app.panels.connect.account.session_generation();
+        let session_generation = *app.panels.session_generation.borrow();
+        app.panels.connect.account.begin_session_load_for_test();
+        let denied =
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":false}))
+                .unwrap();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(denied), generation),
+        ))));
+        assert!(
+            app.authenticated_coincube_client().is_some(),
+            "a denial from before the adoption revokes nothing"
+        );
+        assert!(
+            app.panels.connect.account.bitcoin_blake2b_enabled(),
+            "the panel kept its features"
+        );
+        assert_eq!(*app.panels.session_generation.borrow(), session_generation);
         std::fs::remove_dir_all(root).unwrap();
     }
 

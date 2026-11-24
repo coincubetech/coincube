@@ -4009,6 +4009,7 @@ mod renewal_banner_tests {
             duress_enabled: None,
             bitcoin_blake2b_enabled: None,
             card_payments_enabled: None,
+            ai_access_enabled: None,
         }
     }
 
@@ -4062,6 +4063,7 @@ mod renewal_banner_tests {
             duress_enabled: Some(true),
             bitcoin_blake2b_enabled: None,
             card_payments_enabled: None,
+            ai_access_enabled: None,
         }
     }
 

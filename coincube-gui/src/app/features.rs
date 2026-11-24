@@ -304,6 +304,24 @@ pub struct BitcoinBlake2bServerFlag {
     pub server_enabled: bool,
 }
 
+/// Whether AI access (Cube → Settings → AI access, local MCP) is available.
+///
+/// `server_enabled` is the signed-in account's `aiAccessEnabled` from
+/// `/connect/features` (the Connect `ai_access` flag, default off and granted
+/// per account through the admin feature-flag API). It fails closed: not
+/// signed in, features unloaded or unreachable, or the flag absent all read
+/// as off. The developer build override
+/// ([`crate::feature_flags::AI_ACCESS_ENABLED`]) forces it on for local and
+/// test builds.
+///
+/// While this is false the app hides AI access, opens no pairing registry,
+/// publishes no endpoint and answers no MCP client. Pairings already stored
+/// on the device stay untouched and inert, and resume (behind the Cube-wide
+/// switch) once it is true again.
+pub fn ai_access_enabled(server_enabled: bool) -> bool {
+    server_enabled || crate::feature_flags::ai_access_build_override()
+}
+
 /// The local beta preference never grants a server capability on its own.
 pub(crate) fn bitcoin_blake2b_enabled(server_enabled: bool, opted_in: bool) -> bool {
     server_enabled && opted_in
