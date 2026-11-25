@@ -514,6 +514,7 @@ mod tests {
             is_own_key: false,
             used_by_vault: false,
             recovery_role: String::new(),
+            btcb2_signing: None,
         }
     }
 

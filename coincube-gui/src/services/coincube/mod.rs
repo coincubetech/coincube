@@ -1795,6 +1795,62 @@ pub struct CubeKeyRaw {
     /// `#[serde(default)]` so a pre-annotation backend deserialises as before.
     #[serde(default)]
     pub recovery_role: String,
+    /// Whether this key's phone can sign Bitcoin Blake2b (`btcb2Signing`,
+    /// coincube-api#526). Connect sends it only on a Bitcoin Blake2b Cube and
+    /// omits it on every other Cube. Read it through
+    /// [`Self::btcb2_signing_refusal`], which applies the Cube's chain and
+    /// fails closed when the field is missing where it is expected.
+    #[serde(default, rename = "btcb2Signing")]
+    pub btcb2_signing: Option<Btcb2Signing>,
+}
+
+/// What Connect says about a key's phone on a Bitcoin Blake2b Cube: the same
+/// answer `ResolveSigners` gives at signing time for that key and device
+/// (coincube-api#526).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Btcb2Signing {
+    /// `can_sign`: the key's phone is registered to its owner and its
+    /// COINCUBE Mobile has Bitcoin Blake2b signing.
+    CanSign,
+    /// `cannot_sign`: the phone's COINCUBE Mobile is too old.
+    CannotSign,
+    /// `unavailable`: the phone was removed, or is now another account's.
+    Unavailable,
+    /// `unknown`: the key names no phone, so Connect cannot tell yet.
+    Unknown,
+    /// A value this build does not know. Treated as [`Self::Unknown`]: a newer
+    /// server's answer never makes a key addable.
+    Unrecognised(String),
+}
+
+impl Btcb2Signing {
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "can_sign" => Self::CanSign,
+            "cannot_sign" => Self::CannotSign,
+            "unavailable" => Self::Unavailable,
+            "unknown" => Self::Unknown,
+            other => Self::Unrecognised(other.to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Btcb2Signing {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|value| Self::from_wire(&value))
+    }
+}
+
+/// Why a Mobile key cannot be added to a new Vault on a Bitcoin Blake2b Cube.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Btcb2SigningRefusal {
+    /// `cannot_sign`: COINCUBE Mobile on the phone needs updating.
+    AppOutdated,
+    /// `unavailable`: the phone is no longer registered.
+    PhoneUnregistered,
+    /// `unknown`, an unrecognised value, or no value at all (an API older
+    /// than coincube-api#526): the phone could not be confirmed.
+    PhoneUnconfirmed,
 }
 
 /// `recoveryRole` value marking a key as the Cube's owner-self recovery
@@ -1834,6 +1890,46 @@ impl CubeKeyRaw {
     /// be placed in a Vault until its owner re-shares it.
     pub fn is_envelope_invalid(&self) -> bool {
         self.status == KEY_STATUS_ENVELOPE_INVALID
+    }
+
+    /// Whether this key may be added to a new Vault on `chain`, as far as its
+    /// phone goes: `None` when it may, else why not.
+    ///
+    /// Off Bitcoin Blake2b the field is not consulted, so every Bitcoin key
+    /// stays as addable as before. On Bitcoin Blake2b only `can_sign` is
+    /// addable; everything else fails closed, including a missing field, which
+    /// means the server predates the field and cannot vouch for the phone.
+    pub fn btcb2_signing_refusal(
+        &self,
+        chain: crate::chain::ChainId,
+    ) -> Option<Btcb2SigningRefusal> {
+        if !chain.is_blake2b() {
+            return None;
+        }
+        match self.btcb2_signing {
+            Some(Btcb2Signing::CanSign) => None,
+            Some(Btcb2Signing::CannotSign) => Some(Btcb2SigningRefusal::AppOutdated),
+            Some(Btcb2Signing::Unavailable) => Some(Btcb2SigningRefusal::PhoneUnregistered),
+            Some(Btcb2Signing::Unknown) | Some(Btcb2Signing::Unrecognised(_)) | None => {
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed)
+            }
+        }
+    }
+
+    /// Whether this key is listed for a Cube on `chain`: the one chain filter
+    /// on the key list the Vault editor shares across chains.
+    ///
+    /// On Bitcoin Blake2b only a key on exactly this chain is listed (the
+    /// phone's Bitcoin Blake2b key). On a Bitcoin-family Cube a key on either
+    /// Bitcoin Blake2b chain is left out and every other key is listed as
+    /// before, so a Bitcoin network string this build does not parse is not
+    /// newly hidden.
+    pub fn listed_on_chain(&self, chain: crate::chain::ChainId) -> bool {
+        if chain.is_blake2b() {
+            self.network == chain.api_str()
+        } else {
+            !crate::chain::ChainId::from_api_str(&self.network).is_some_and(|c| c.is_blake2b())
+        }
     }
 }
 
@@ -5630,5 +5726,105 @@ mod two_factor_tests {
             client.get_two_factor_status().await,
             Err(CoincubeError::NotFound)
         ));
+    }
+}
+
+#[cfg(test)]
+mod btcb2_signing_tests {
+    use super::{Btcb2Signing, Btcb2SigningRefusal, CubeKeyRaw};
+    use crate::chain::ChainId;
+
+    /// A `/keys` element as coincube-api#526 serves it; `btcb2Signing` only
+    /// when given.
+    fn key_json(network: &str, btcb2_signing: Option<serde_json::Value>) -> CubeKeyRaw {
+        let mut value = serde_json::json!({
+            "id": 1,
+            "name": "Pixel",
+            "fingerprint": "8a550171",
+            "derivationPath": "m/48'/0'/0'/2'",
+            "network": network,
+            "status": "active",
+        });
+        if let Some(signing) = btcb2_signing {
+            value["btcb2Signing"] = signing;
+        }
+        serde_json::from_value(value).expect("a /keys element parses")
+    }
+
+    #[test]
+    fn btcb2_signing_parses_each_value_and_fails_closed() {
+        for (wire, parsed) in [
+            ("can_sign", Btcb2Signing::CanSign),
+            ("cannot_sign", Btcb2Signing::CannotSign),
+            ("unavailable", Btcb2Signing::Unavailable),
+            ("unknown", Btcb2Signing::Unknown),
+            (
+                "CAN_SIGN",
+                Btcb2Signing::Unrecognised("CAN_SIGN".to_string()),
+            ),
+            ("", Btcb2Signing::Unrecognised(String::new())),
+        ] {
+            let key = key_json("bitcoin-blake2b", Some(serde_json::json!(wire)));
+            assert_eq!(key.btcb2_signing, Some(parsed), "{wire}");
+        }
+        // Absent (Connect omits it off Bitcoin Blake2b) and null both read as
+        // no value.
+        assert_eq!(key_json("mainnet", None).btcb2_signing, None);
+        assert_eq!(
+            key_json("mainnet", Some(serde_json::Value::Null)).btcb2_signing,
+            None
+        );
+    }
+
+    #[test]
+    fn btcb2_signing_refusal_per_value_and_chain() {
+        let cases = [
+            (Some("can_sign"), None),
+            (Some("cannot_sign"), Some(Btcb2SigningRefusal::AppOutdated)),
+            (
+                Some("unavailable"),
+                Some(Btcb2SigningRefusal::PhoneUnregistered),
+            ),
+            (Some("unknown"), Some(Btcb2SigningRefusal::PhoneUnconfirmed)),
+            (
+                Some("phone_on_fire"),
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed),
+            ),
+            // An API older than coincube-api#526 cannot vouch for the phone.
+            (None, Some(Btcb2SigningRefusal::PhoneUnconfirmed)),
+        ];
+        for chain in ChainId::ALL {
+            for (wire, refusal) in &cases {
+                let key = key_json(chain.api_str(), wire.map(|w| serde_json::json!(w)));
+                let expected = if chain.is_blake2b() { *refusal } else { None };
+                assert_eq!(
+                    key.btcb2_signing_refusal(chain),
+                    expected,
+                    "{chain:?} {wire:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn listed_on_chain_matches_the_cube_chain() {
+        for key_chain in ChainId::ALL {
+            let key = key_json(key_chain.api_str(), None);
+            for cube_chain in ChainId::ALL {
+                let expected = if cube_chain.is_blake2b() {
+                    key_chain == cube_chain
+                } else {
+                    !key_chain.is_blake2b()
+                };
+                assert_eq!(
+                    key.listed_on_chain(cube_chain),
+                    expected,
+                    "key {key_chain:?} on Cube {cube_chain:?}"
+                );
+            }
+        }
+        // A Bitcoin-family Cube does not newly hide a string it can't parse.
+        assert!(key_json("bitcoin", None).listed_on_chain(ChainId::Bitcoin));
+        assert!(!key_json("bitcoin", None).listed_on_chain(ChainId::BitcoinBlake2b));
     }
 }
