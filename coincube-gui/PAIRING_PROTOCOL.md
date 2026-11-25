@@ -6,6 +6,8 @@ The stored row (`paired-phones.json`, one row per phone certificate) records the
 
 Which rows a Vault dials is one predicate, `exact_signer_against` (shared by signing, the hardware refresh and the settings list), which takes the Vault's chain: the row's `network` must be that chain ("Paired for <label>. Pair again to use it here."), and on Bitcoin Blake2b the row's `capabilities` must hold `chain-identity-v1` and `btcb2-unified-v2` ("This phone's COINCUBE Mobile needs updating before it can sign on Bitcoin Blake2b."). A refused row is not dialled; the settings list and the signer list show the refusal for this Vault's rows. Bitcoin Blake2b has no other Wi-Fi gate.
 
+Every signing request's `PresentSession.session.network` is the Vault's chain, and every `PartialSignature.network` must equal it. An empty or different value is discarded before the signature is decrypted, verified or merged: "Your signature wasn't accepted and nothing was broadcast from it. Update COINCUBE Mobile and pair again." (empty) or "… The signature COINCUBE Mobile returned is for a different network. Pair again." (different).
+
 The QR PSK, TLS identity, chain, exact selected xpub/origin and descriptor commitment checks precede staging. PairingComplete.completion_protocol must equal 1. Pong is exclusively liveness. Old peers must update both applications and create a fresh offer.
 
 Desktop has three durable journal states:

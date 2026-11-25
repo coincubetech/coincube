@@ -29,8 +29,10 @@ copy, and pairing the same phone for another chain replaces its row, which the p
 screen says before the user scans. Desktop PR 8c puts the dial predicate (§4.5) in `exact_signer_against` with the
 Vault's chain: another chain's row gives R2.7, a Bitcoin Blake2b row without both
 capabilities gives the R2.6 capability copy, the settings and signer lists show them,
-and the blanket Bitcoin Blake2b Wi-Fi refusals are gone. The network on
-`PresentSession`/`PartialSignature` follows in PR 8d. The v3 known-answer vector
+and the blanket Bitcoin Blake2b Wi-Fi refusals are gone. Desktop PR 8d sets
+`PresentSession.session.network` to the Vault's chain and requires
+`PartialSignature.network` to equal it on every response, checked before anything is
+decrypted, verified or merged (R2.13, with the contract's two copies). The v3 known-answer vector
 is `phone_signer/pairing.rs::pairing_proof_known_answer_vector`: psk = the 16 bytes
 `0x00..0x0f` (`AAECAwQFBgcICQoLDA0ODw`), desktop fp `"aa"×32`, phone fp `"bb"×32`;
 `net = bitcoin-blake2b` →
