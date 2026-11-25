@@ -371,6 +371,7 @@ impl App {
             source
         );
         let root = self.datadir.path().to_path_buf();
+        let activating_account = self.duress_activating_account();
         Task::perform(
             async move {
                 // load() already maps a missing file to Ok(default); a
@@ -392,6 +393,9 @@ impl App {
                 };
                 st.active = true;
                 st.unlock_at = unlock_at;
+                // The locked screen then trusts only this account's saved
+                // sessions to confirm the clear (decision 26).
+                st.record_remote_lock_account(activating_account);
                 // Retry: a failed persist would let a relaunch reconcile
                 // (which keys off st.active) drop back to the normal Home
                 // flow with Cube data intact while the server is still in
@@ -409,6 +413,13 @@ impl App {
             },
             |_| Message::View(view::Message::DuressLockRemote),
         )
+    }
+
+    /// The Connect user id of the account this App's stream runs on: the
+    /// panel's signed-in user when it is the stream's account, else none.
+    pub(crate) fn duress_activating_account(&self) -> Option<String> {
+        let user = self.panels.connect.account.user.as_ref()?;
+        (self.connect_email.as_deref() == Some(user.email.as_str())).then(|| user.id.to_string())
     }
 
     fn handle_connect_duress_cleared(&self) -> Task<Message> {
@@ -855,5 +866,71 @@ mod chain_scope_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_duress_tests {
+    use crate::services::coincube::User;
+    use crate::services::duress::clear_check::tests::{crate_dir_entries, write_lock, TempRoot};
+    use crate::services::duress::DuressLocalState;
+
+    fn signed_in_app(root: &TempRoot) -> super::App {
+        let mut app = crate::app::shell_tests::bitcoin_app_with_id(&root.0, "remote-duress");
+        app.connect_email = Some("a@example.com".into());
+        app.panels.connect.account.user = Some(User {
+            id: 7,
+            email: "a@example.com".into(),
+            email_verified: Some(true),
+        });
+        app
+    }
+
+    fn persist_remote_lock(app: &super::App) {
+        use iced::futures::StreamExt;
+        let task = app.handle_connect_duress_activated(None, "remote".into());
+        if let Some(stream) = iced_runtime::task::into_stream(task) {
+            drop(iced::futures::executor::block_on(
+                stream.collect::<Vec<_>>(),
+            ));
+        }
+    }
+
+    #[test]
+    fn a_remote_lock_records_the_account_whose_stream_delivered_it() {
+        let before = crate_dir_entries();
+        let root = TempRoot::new("remote-lock-account");
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.account_id.as_deref(), Some("7"));
+        drop(app);
+        assert_eq!(crate_dir_entries(), before);
+    }
+
+    #[test]
+    fn a_remote_lock_keeps_the_enrolling_account() {
+        let root = TempRoot::new("remote-lock-enrolled");
+        write_lock(&root.0, Some("3"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.active = false;
+        state.save(&root.0).unwrap();
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn a_panel_user_that_is_not_the_streams_account_is_not_recorded() {
+        let root = TempRoot::new("remote-lock-mismatch");
+        let mut app = signed_in_app(&root);
+        app.connect_email = Some("b@example.com".into());
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.account_id, None);
     }
 }
