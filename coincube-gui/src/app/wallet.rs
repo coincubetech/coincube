@@ -554,36 +554,22 @@ impl Wallet {
     /// never has one. An unrecorded Vault may still hold one, so it is not
     /// counted here.
     ///
-    /// The record is a snapshot taken when the Vault was built, so this
-    /// hides the Wi-Fi pairing entry only; the Connect signing flow still
-    /// asks Connect who the signers are (`build_keychain_if_ready`).
+    /// The record is written by the descriptor editor when the Vault is
+    /// built, or later by the Local Signing backfill from Connect's key list
+    /// (`keychain_backfill`), so it can lag behind Connect. It hides the
+    /// Wi-Fi pairing entry only; the Connect signing flow still asks Connect
+    /// who the signers are (`build_keychain_if_ready`).
     pub fn lacks_keychain_key(&self) -> bool {
         self.is_imported() || (self.keychain_keys_recorded && self.keychain_key_ids.is_empty())
     }
 
-    /// Whether `fingerprint` could be a key held in COINCUBE Mobile and so
-    /// worth offering Connect for. Certain once the Vault recorded which keys
-    /// came from it. On a Bitcoin chain a Vault without that record may still
-    /// hold one, so any of its keys could be. An imported wallet never has one.
-    ///
-    /// On Bitcoin Blake2b only a key recorded as a Mobile key counts. Mobile
-    /// keys sign only on Vaults created in a Bitcoin Blake2b Cube, whose
-    /// editor records them (master decision 17); an unrecorded Vault there is
-    /// a restore, import or copy of an existing Vault, whose phone keys are
-    /// Bitcoin keys that Connect cannot ask to sign on this chain. Offering
-    /// Connect for them would lead nowhere, so their rows read as an
-    /// unconnected signing device.
+    /// Whether `fingerprint` could be a key held in COINCUBE Mobile, and so
+    /// reachable through Connect. Certain once the Vault recorded which keys
+    /// came from it; a Vault without that record may still hold one, so any
+    /// of its keys could be. An imported wallet never has one.
     pub fn may_hold_keychain_key(&self, fingerprint: &Fingerprint) -> bool {
-        if self.is_imported() {
-            return false;
-        }
-        let recorded_as_mobile =
-            self.keychain_keys_recorded && self.keychain_key_ids.contains_key(fingerprint);
-        if self.chain.is_blake2b() {
-            recorded_as_mobile
-        } else {
-            !self.keychain_keys_recorded || recorded_as_mobile
-        }
+        !self.is_imported()
+            && (!self.keychain_keys_recorded || self.keychain_key_ids.contains_key(fingerprint))
     }
 
     /// Record which keys came from the COINCUBE Keychain, and whether that

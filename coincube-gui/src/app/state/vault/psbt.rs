@@ -1900,10 +1900,11 @@ fn build_keychain_if_ready(
     // An imported wallet has no Mobile key, and the flow refuses it:
     // launching it would only show that refusal in the picker. A Vault
     // recorded with no Mobile key still launches it, because the record
-    // is a snapshot and Connect decides who the signers are. The rows trust
-    // the record where the launch does not (`Wallet::may_hold_keychain_key`):
-    // a row only decides whether to offer Connect before Connect has
-    // answered, and a key Connect resolves becomes signable either way.
+    // can lag behind Connect, which decides who the signers are. The rows
+    // trust the record where the launch does not
+    // (`Wallet::may_hold_keychain_key`): a row only decides whether to offer
+    // Connect before Connect has answered, and a key Connect resolves
+    // becomes signable either way.
     if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() {
         return (None, Task::none());
     }
@@ -4731,97 +4732,12 @@ mod tests {
         }
     }
 
-    /// A Bitcoin Blake2b Vault that its Cube's editor did not build (a
-    /// restore, import or copy of an existing Vault) has no Mobile key that
-    /// can sign on this chain (master decision 17). Its rows never offer a
-    /// Connect action that leads nowhere; the same unrecorded Vault on a
-    /// Bitcoin chain still offers Connect, as today.
-    #[test]
-    fn a_btcb2_copy_of_a_vault_never_offers_connect_for_its_keys() {
-        use crate::chain::ChainId;
-        use view::vault::psbt::SigningKeyState;
-
-        for status in [
-            ConnectAccountStatus::SignedOut,
-            ConnectAccountStatus::Owner,
-            ConnectAccountStatus::OtherAccount,
-            ConnectAccountStatus::SignedInUnknownOwner,
-        ] {
-            for chain in [
-                ChainId::Signet,
-                ChainId::BitcoinBlake2b,
-                ChainId::BitcoinBlake2bTestnet4,
-            ] {
-                let wallet = Arc::new(wallet().with_chain(chain));
-                assert!(!wallet.keychain_keys_recorded);
-                for keychain in [
-                    None,
-                    // A flow still resolving shows no neutral lookup either.
-                    Some(super::super::keychain_sign::KeychainSignModal::new(
-                        wallet.clone(),
-                        crate::services::coincube::CoincubeClient::new(),
-                        tokens(),
-                        "https://grpc.example.test".to_string(),
-                        "desktop-device".to_string(),
-                        42,
-                        "cube-local".to_string(),
-                        empty_psbt(),
-                        None,
-                    )),
-                ] {
-                    let loading = keychain.is_some();
-                    let rows = SignModal::new(
-                        HashSet::new(),
-                        wallet.clone(),
-                        CoincubeDirectory::new(PathBuf::new()),
-                        chain.bitcoin_network(),
-                        false,
-                        None,
-                        keychain,
-                        true,
-                    )
-                    .with_connect_account(status.clone())
-                    .signing_paths()
-                    .into_iter()
-                    .find(|p| p.is_primary)
-                    .unwrap()
-                    .keys;
-                    for row in rows {
-                        if chain.is_blake2b() {
-                            assert!(
-                                matches!(
-                                    &row.state,
-                                    SigningKeyState::Disabled(reason)
-                                        if reason == "Connect this signing device to sign."
-                                ),
-                                "{} {:?}",
-                                chain,
-                                status
-                            );
-                        } else if loading {
-                            assert!(matches!(
-                                &row.state,
-                                SigningKeyState::Disabled(reason)
-                                    if reason.contains("Looking up Mobile signers")
-                            ));
-                        } else {
-                            assert!(matches!(
-                                row.state,
-                                SigningKeyState::NeedsSignIn(_)
-                                    | SigningKeyState::NeedsAccountSwitch(_)
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// A Vault recorded with no Mobile key while the Connect flow is live
     /// (coincubetech/coincube#1543, follow-up N1): while it resolves no row
     /// claims a lookup, and a key Connect then resolves becomes signable even
-    /// though the record says it is not a Mobile key, because the record is a
-    /// snapshot and Connect decides who the signers are.
+    /// though the record says it is not a Mobile key, because the record can
+    /// lag behind Connect, which decides who the signers are. One body for a
+    /// Bitcoin and a Bitcoin Blake2b Vault.
     #[test]
     fn a_recorded_empty_vault_with_a_live_flow_follows_connect() {
         use super::super::keychain_sign::{KeychainSignModal, PendingSessionStatus};
