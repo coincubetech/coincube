@@ -1100,3 +1100,64 @@ fn a_remote_lock_on_a_connect_served_cube_records_the_cubes_host_and_folder() {
         assert_eq!(bitcoin.duress_lock_origin(), None);
     });
 }
+
+/// A Connect-served Cube's sign-in saved its host's session on the account's
+/// entry. A local Cube of the same account presents none of it to its own
+/// Connect API: `EnsureConnectReady` registers neither the device nor the
+/// Cube with that token and says no session was found.
+#[test]
+fn a_local_cube_never_presents_another_hosts_saved_session() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        write_fork_cache(
+            root.path(),
+            serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": tokens(CUBE_TOKEN, "cube-refresh"),
+                    "device_id": "cube-host-device", "api_base_url": cube_issuer()}]
+            }),
+        );
+        let mut app = tests::fork_app(root.path(), false);
+        assert!(!app.cache.connect_served);
+        assert!(app.fork_connect_client.is_none());
+        assert_eq!(
+            crate::services::connect::client::cache::issuing_api(
+                &app.connect_base_url(),
+                &crate::services::coincube_api_base_url(),
+            ),
+            None,
+            "the local Cube talks to the configured API"
+        );
+        app.connect_email = Some(EMAIL.into());
+        app.cube_settings.id = "local-cube".into();
+
+        let answered = outputs(app.update(Message::EnsureConnectReady)).await;
+        assert!(
+            answered.iter().any(|m| matches!(
+                m,
+                Message::View(view::Message::ShowToast(_, text))
+                    if text.starts_with("Couldn't find this Connect session")
+            )),
+            "the bootstrap stops at the session lookup"
+        );
+        assert!(
+            answered.iter().any(|m| matches!(
+                m,
+                Message::View(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::CubeRegistered { result: Err(e), .. }
+                )) if e.message.contains("no cached Connect session")
+            )),
+            "the Cube registration finds no session either"
+        );
+        assert!(!answered
+            .iter()
+            .any(|m| matches!(m, Message::TriggerConnectStreamReady { .. })));
+        // The entry stays the other host's, untouched.
+        let entry = fork_entry(root.path()).unwrap();
+        assert_eq!(entry.tokens.access_token, CUBE_TOKEN);
+        assert_eq!(entry.device_id.as_deref(), Some("cube-host-device"));
+        assert_bitcoin_untouched(root.path(), &before);
+    });
+}

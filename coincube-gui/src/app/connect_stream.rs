@@ -75,6 +75,13 @@ impl App {
         // tokens (the same source the device bootstrap uses) and feed
         // the result back through the normal `CubeRegistered` path so
         // `current_cube_server_id` still populates.
+        // Only an entry this host issued (`Account::api_base_url`) gives a
+        // token, device id or cursor here: a session another host issued is
+        // never presented to this one.
+        let issuer = crate::services::connect::client::cache::issuing_api(
+            &base_url,
+            &crate::services::coincube_api_base_url(),
+        );
         let cube_registration = if self.cache.current_cube_server_id.is_some() {
             Task::none()
         } else if self.panels.connect.account.is_authenticated() {
@@ -99,6 +106,7 @@ impl App {
             let registration_pin = pinned_tokens
                 .as_ref()
                 .map(|tokens| tokens.access_token.clone());
+            let registration_issuer = issuer.clone();
             Task::perform(
                 async move {
                     use crate::services::coincube::{CoincubeClient, RegisterCubeRequest};
@@ -114,6 +122,7 @@ impl App {
                             Account::from_cache(&datadir.network_directory(chain), &email)
                                 .ok()
                                 .flatten()
+                                .filter(|account| account.issued_by(registration_issuer.as_deref()))
                                 .ok_or_else(|| {
                                     "EnsureConnectReady: no cached Connect session to \
                                  register the cube"
@@ -182,6 +191,7 @@ impl App {
                         let Some(account) = Account::from_cache(&network_dir, &expected_email)
                             .ok()
                             .flatten()
+                            .filter(|account| account.issued_by(issuer.as_deref()))
                         else {
                             tracing::warn!(
                                 "EnsureConnectReady: no cached Connect account for active email"
@@ -219,11 +229,7 @@ impl App {
                 // still serves a Connect-served Cube pinned to its session;
                 // every other Cube needs it saved, as before.
                 // A cached device id is reused only from an entry the same host
-                // issued (`Account::api_base_url`).
-                let issuer = crate::services::connect::client::cache::issuing_api(
-                    &base_url,
-                    &crate::services::coincube_api_base_url(),
-                );
+                // issued (`issuer` above).
                 let Some(registered) = ensure_device_registered_best_effort(
                     &grpc_url,
                     tokens_arc.clone(),
