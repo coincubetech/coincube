@@ -556,10 +556,31 @@ fn a_local_cube_saves_its_opening_session_only_with_its_refresh_token() {
             email_verified: Some(true),
         });
         app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
-        // The keyring holds another session (seed_bitcoin's), not this one.
+        // The saved sign-in is another session: a later one of the account.
+        let mut other = login();
+        other.token = "a-later-sign-in".into();
+        state::connect::write_connect_secret(
+            state::connect::CONNECT_KEYRING_USER,
+            &serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
         assert!(iced_runtime::task::into_stream(app.save_served_session()).is_none());
         assert_eq!(app.served_session, ServedSession::NotSaved);
+        assert_eq!(
+            app.cache.signer_pipeline_start,
+            cache::SignerPipelineStart::Idle
+        );
         assert!(!chain_dir(&app).path().join(CONNECT_CACHE_FILENAME).exists());
-        assert_bitcoin_untouched(root.path(), &before);
+        // "Sign with Connect" then takes the Bitcoin path, which says it
+        // found no session for this Cube rather than doing nothing.
+        let answered = outputs(app.update(Message::EnsureConnectReady)).await;
+        assert!(answered.iter().any(|m| matches!(
+            m,
+            Message::View(view::Message::ShowToast(_, text)) if text.contains("Connect session")
+        )));
+        assert!(!chain_dir(&app).path().join(CONNECT_CACHE_FILENAME).exists());
+        let now = bitcoin_state(root.path());
+        assert_eq!(now.connect_json, before.connect_json);
+        assert_eq!(now.transport_key, before.transport_key);
     });
 }

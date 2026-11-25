@@ -13,7 +13,14 @@ impl App {
                 ServedSession::Saving => return Task::none(),
                 ServedSession::NotSaved | ServedSession::Failed => {
                     self.served_session = ServedSession::NotSaved;
-                    return self.save_served_session();
+                    let save = self.save_served_session();
+                    // A local Cube that cannot save a whole session (no
+                    // matching saved sign-in) takes the Bitcoin path below,
+                    // which uses the session in `connect.json` or says none
+                    // was found, instead of doing nothing.
+                    if self.cache.connect_served || self.served_session == ServedSession::Saving {
+                        return save;
+                    }
                 }
             }
         }

@@ -11597,7 +11597,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn local_gui_logout_signin_and_stale_account_results_preserve_wallet() {
+    fn local_gui_logout_and_signin_preserve_wallet_and_sibling_sessions() {
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
