@@ -714,14 +714,9 @@ async fn scan_lan_phones(
     // paired but currently unreachable (mDNS silent or dial
     // failed) surface as `Unsupported(AppIsNotOpen)` so the user
     // sees "phone offline" rather than silence.
-    let lan_chain = state.wallet.as_ref().map(|w| w.chain);
-    let phone_store = if lan_chain.is_some_and(crate::phone_signer::lan_signing_allowed) {
-        crate::phone_signer::pairing_store::load(&state.datadir_path)
-    } else {
-        // No discovery, identity creation or dial for an unsupported chain.
-        Ok(Default::default())
-    };
-    match phone_store {
+    // Which rows may be dialled for the loaded Vault, chain included, is
+    // decided per phone below by the shared pairing predicate.
+    match crate::phone_signer::pairing_store::load(&state.datadir_path) {
         Ok(store) if !store.phones.is_empty() || !store.pending_unpairs.is_empty() => {
             let discovered = crate::phone_signer::mdns::browse();
             let identity = match crate::phone_signer::identity::load_or_create(&state.datadir_path)
