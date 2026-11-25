@@ -7065,6 +7065,31 @@ impl App {
             .filter(|email| !email.is_empty());
     }
 
+    /// Drop everything this App holds for a Connect session that has ended:
+    /// the realtime stream and what the signer pipeline recorded for it. The
+    /// stream's subscription is keyed on `connect_stream_config`, so clearing
+    /// that stops it on the next `subscription()` tick.
+    ///
+    /// Shared by a Bitcoin Cube's sign-out and both Bitcoin Blake2b
+    /// teardowns, so the three cannot drift apart. `connect_auth` is not in
+    /// the list: the fork teardowns drop it themselves and a Bitcoin sign-out
+    /// leaves it, as before. The session saved in `connect.json` is not
+    /// touched either.
+    fn clear_connect_session_state(&mut self) {
+        self.connect_renewal = Renewal::default();
+        self.connect_stream_config = None;
+        self.connect_email = None;
+        self.cache.connect_grpc_url = None;
+        self.cache.connect_base_url = None;
+        self.cache.connect_tokens = None;
+        self.cache.connect_device_id = None;
+        self.cache.connect_email = None;
+        self.cache.has_connect_session = false;
+        self.cache.lightning_address = None;
+        self.panels.spark_receive.sync_lightning_address_qr(None);
+        self.cache.connect_stream_status = ConnectionStatus::Inactive;
+    }
+
     fn sync_connect_stream_after_auth(&mut self, was_authenticated: bool) {
         // Connect logout: tear down the realtime stream. The
         // subscription is keyed on `connect_stream_config`, so
@@ -7079,19 +7104,8 @@ impl App {
             self.cache.connect_signed_out_by = None;
         }
         if was_authenticated && !self.cache.connect_authenticated {
-            self.connect_renewal = Renewal::default();
             self.cache.connect_panel_open = false;
-            self.connect_stream_config = None;
-            self.connect_email = None;
-            self.cache.connect_grpc_url = None;
-            self.cache.connect_base_url = None;
-            self.cache.connect_tokens = None;
-            self.cache.connect_device_id = None;
-            self.cache.connect_email = None;
-            self.cache.has_connect_session = false;
-            self.cache.lightning_address = None;
-            self.panels.spark_receive.sync_lightning_address_qr(None);
-            self.cache.connect_stream_status = ConnectionStatus::Inactive;
+            self.clear_connect_session_state();
             // Drop the previous session's vault-monitoring config so
             // it can't leak into the next account and so the
             // heartbeat's lazy `loaded_once` re-hydration re-fetches
@@ -9603,17 +9617,11 @@ impl App {
         self.fork_connect_client = None;
         self.panels.global_home.set_fork_connect_client(None);
         self.panels.connect.account.use_local_backend();
-        self.cache.has_connect_session = false;
-        self.cache.lightning_address = None;
-        self.panels.spark_receive.sync_lightning_address_qr(None);
+        self.clear_connect_session_state();
         self.cache.restorable_connect_session = false;
         self.cache.connect_authenticated = false;
-        self.cache.connect_tokens = None;
-        self.cache.connect_email = None;
         self.cache.btcb2_server_enabled = false;
         self.connect_auth = None;
-        self.connect_email = None;
-        self.connect_stream_config = None;
         self.cache.clear_btcb2_fiat();
     }
 
@@ -9629,16 +9637,10 @@ impl App {
             self.fork_connect_client = None;
             self.panels.global_home.set_fork_connect_client(None);
             self.panels.connect.revoke_admitted_client();
-            self.cache.has_connect_session = false;
-            self.cache.lightning_address = None;
-            self.panels.spark_receive.sync_lightning_address_qr(None);
+            self.clear_connect_session_state();
             self.cache.restorable_connect_session = false;
             self.cache.connect_authenticated = false;
-            self.cache.connect_tokens = None;
-            self.cache.connect_email = None;
             self.connect_auth = None;
-            self.connect_email = None;
-            self.connect_stream_config = None;
             self.cache.cube_encryption_key = None;
             self.cache.clear_btcb2_fiat();
         }
@@ -12635,6 +12637,109 @@ pub(crate) mod tests {
             grant == Some(true)
         );
         app
+    }
+
+    /// Everything `clear_connect_session_state` drops, set to something.
+    fn seed_connect_session_state(app: &mut App) {
+        let tokens = Arc::new(tokio::sync::RwLock::new(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: "access".into(),
+                refresh_token: "refresh".into(),
+                expires_at: 1000,
+            },
+        ));
+        app.connect_auth = Some(tokens.clone());
+        app.connect_email = Some("alice@example.invalid".into());
+        app.connect_renewal = Renewal {
+            attempts: RENEWAL_ATTEMPTS,
+            in_flight: true,
+        };
+        app.connect_stream_config = Some(
+            crate::services::connect::grpc::stream::ConnectStreamConfig {
+                base_url: "https://connect.example.invalid".into(),
+                grpc_url: "https://grpc.example.invalid".into(),
+                tokens: tokens.clone(),
+                device_id: "device-1".into(),
+                user_agent: "test".into(),
+                vault_ids: Vec::new(),
+                last_seen_seq: 0,
+            },
+        );
+        app.cache.connect_grpc_url = Some("https://grpc.example.invalid".into());
+        app.cache.connect_base_url = Some("https://connect.example.invalid".into());
+        app.cache.connect_tokens = Some(tokens);
+        app.cache.connect_device_id = Some("device-1".into());
+        app.cache.connect_email = Some("alice@example.invalid".into());
+        app.cache.has_connect_session = true;
+        app.cache.connect_stream_status = ConnectionStatus::Connected;
+    }
+
+    fn assert_connect_session_state_cleared(app: &App) {
+        assert_eq!(app.connect_renewal, Renewal::default());
+        assert!(app.connect_stream_config.is_none());
+        assert!(app.connect_email.is_none());
+        assert!(app.cache.connect_grpc_url.is_none());
+        assert!(app.cache.connect_base_url.is_none());
+        assert!(app.cache.connect_tokens.is_none());
+        assert!(app.cache.connect_device_id.is_none());
+        assert!(app.cache.connect_email.is_none());
+        assert!(!app.cache.has_connect_session);
+        assert!(app.cache.lightning_address.is_none());
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Inactive);
+    }
+
+    /// A Bitcoin Cube's sign-out drops the stream and what the pipeline
+    /// recorded for it, and keeps `connect_auth`, as it did before the
+    /// field list was shared with the Bitcoin Blake2b teardowns.
+    #[tokio::test]
+    async fn a_bitcoin_cube_sign_out_clears_the_connect_session_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+        seed_connect_session_state(&mut app);
+        app.cache.connect_panel_open = true;
+
+        // Still signed in: nothing is dropped.
+        app.cache.connect_authenticated = true;
+        app.sync_connect_stream_after_auth(true);
+        assert!(app.connect_stream_config.is_some());
+        assert!(app.cache.connect_grpc_url.is_some());
+
+        app.cache.connect_authenticated = false;
+        app.sync_connect_stream_after_auth(true);
+        assert_connect_session_state_cleared(&app);
+        assert!(!app.cache.connect_panel_open);
+        assert!(app.connect_auth.is_some());
+    }
+
+    /// Both Bitcoin Blake2b teardowns drop the same state a Bitcoin sign-out
+    /// does, including the gRPC address, endpoint, device id, stream status
+    /// and renewal state they used to leave set, and their own token.
+    #[test]
+    fn both_fork_teardowns_clear_the_connect_session_state() {
+        let root = std::env::temp_dir().join(format!(
+            "coincube-fork-connect-teardown-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+
+        let mut app = fork_app(&root, true);
+        seed_connect_session_state(&mut app);
+        app.revoke_local_connect_services();
+        assert_connect_session_state_cleared(&app);
+        assert!(app.connect_auth.is_none());
+        assert!(app.fork_connect_client.is_none());
+
+        let mut app = fork_app(&root, true);
+        seed_connect_session_state(&mut app);
+        app.invalidate_fork_session();
+        assert_connect_session_state_cleared(&app);
+        assert!(app.connect_auth.is_none());
+        assert!(app.fork_connect_client.is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The pipeline's endpoint is the Cube's own client's: the session a
