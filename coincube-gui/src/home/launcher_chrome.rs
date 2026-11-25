@@ -2525,7 +2525,7 @@ mod top_bar_tests {
         let brand = live
             .text
             .iter()
-            .find(|(value, _)| value == "COIN")
+            .find(|(value, _)| value == "COINCUBE")
             .unwrap()
             .1;
         // The 20px cube and its 8px gap sit at the gutter.

@@ -299,7 +299,20 @@ impl App {
                     // out drops the stream.
                     Refusal::DeviceRevoked => {
                         log::warn!("[CONNECT] This computer was removed from the Connect account");
+                        // Its signer devices are revoked too, in every chain
+                        // folder: discard their ids so the next sign-in
+                        // registers afresh and none is replayed. Read the
+                        // account before the teardown below clears it.
+                        let discard = self.discard_connect_device_ids();
+                        // The stream is parked for good after this refusal
+                        // and waits for the App to drop it. The sign-out below
+                        // does that only when the panel was signed in; at
+                        // start-up the stream runs from the saved session
+                        // before the panel has authenticated, and on a removed
+                        // computer it never will. So drop it here.
+                        self.clear_connect_session_state();
                         Task::batch([
+                            discard,
                             Task::done(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)),
                             Task::done(Message::View(view::Message::ConnectAccount(
                                 view::ConnectAccountMessage::LogOut,
@@ -425,6 +438,7 @@ impl App {
             source
         );
         let root = self.datadir.path().to_path_buf();
+        let activating_account = self.duress_activating_account();
         Task::perform(
             async move {
                 // load() already maps a missing file to Ok(default); a
@@ -446,6 +460,9 @@ impl App {
                 };
                 st.active = true;
                 st.unlock_at = unlock_at;
+                // The locked screen then trusts only this account's saved
+                // sessions to confirm the clear (decision 26).
+                st.record_remote_lock_account(activating_account);
                 // Retry: a failed persist would let a relaunch reconcile
                 // (which keys off st.active) drop back to the normal Home
                 // flow with Cube data intact while the server is still in
@@ -463,6 +480,22 @@ impl App {
             },
             |_| Message::View(view::Message::DuressLockRemote),
         )
+    }
+
+    /// The Connect user id of the account this App's stream runs on: the
+    /// panel's signed-in user when it is the stream's account, else the saved
+    /// keyring sign-in when that is the stream's account (the panel's user is
+    /// not loaded yet while a restored session's stream already runs), else
+    /// none.
+    pub(crate) fn duress_activating_account(&self) -> Option<String> {
+        let email = self.connect_email.as_deref()?;
+        if let Some(user) = self.panels.connect.account.user.as_ref() {
+            if user.email == email {
+                return Some(user.id.to_string());
+            }
+        }
+        let saved = crate::app::state::connect::account::load_session_from_keyring()?;
+        (saved.email() == email).then(|| saved.user_id().to_string())
     }
 
     fn handle_connect_duress_cleared(&self) -> Task<Message> {
@@ -484,13 +517,55 @@ impl App {
                         return;
                     }
                 };
-                st.active = false;
-                st.unlock_at = None;
+                st.clear_lock();
                 if let Err(e) = st.save(&root) {
                     log::warn!("[CONNECT GRPC] Failed to clear remote duress state: {e}");
                 }
             },
             |_| Message::CacheUpdated,
+        )
+    }
+
+    /// Discard the signer device ids stored for the signed-in account, in
+    /// every chain folder; on a Connect-served Cube, in its own chain folder
+    /// only, since the same email elsewhere may be an account on another
+    /// Connect host and the Cube never writes another chain's state (I3).
+    /// The account is read now, before the sign-out that follows a removal
+    /// clears it.
+    fn discard_connect_device_ids(&self) -> Task<Message> {
+        use crate::services::connect::client::cache::{
+            discard_device_id_in_chain_folders, DeviceIdDiscard,
+        };
+        let Some(email) = self
+            .connect_email
+            .clone()
+            .or_else(|| self.cache.connect_email.clone())
+        else {
+            return Task::none();
+        };
+        let datadir = self.cache.datadir_path.clone();
+        let chains: Vec<crate::chain::ChainId> = if self.cache.connect_served {
+            vec![self.cache.chain()]
+        } else {
+            crate::chain::ChainId::ALL.to_vec()
+        };
+        Task::perform(
+            async move {
+                for (chain, outcome) in
+                    discard_device_id_in_chain_folders(&datadir, &email, chains).await
+                {
+                    match outcome {
+                        DeviceIdDiscard::Discarded => {
+                            log::info!("[CONNECT] Discarded the revoked device id for {chain}")
+                        }
+                        DeviceIdDiscard::Kept => log::warn!(
+                            "[CONNECT] The revoked device id for {chain} is still stored; \
+                             it will be refused again when a Cube on that chain opens"
+                        ),
+                    }
+                }
+            },
+            |()| Message::ConnectDeviceIdsDiscarded,
         )
     }
 
@@ -514,6 +589,7 @@ impl App {
                     Task::none()
                 }
             }
+            Message::ConnectDeviceIdsDiscarded => Task::none(),
             Message::ConnectSignedOutBy(reason) => {
                 self.cache.connect_signed_out_by = Some(reason);
                 self.cache.connect_panel_open = false;
@@ -1186,5 +1262,149 @@ mod chain_scope_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_duress_tests {
+    use crate::services::coincube::User;
+    use crate::services::duress::clear_check::tests::{crate_dir_entries, write_lock, TempRoot};
+    use crate::services::duress::DuressLocalState;
+
+    fn signed_in_app(root: &TempRoot) -> super::App {
+        let mut app = crate::app::shell_tests::bitcoin_app_with_id(&root.0, "remote-duress");
+        app.connect_email = Some("b@example.com".into());
+        app.panels.connect.account.user = Some(User {
+            id: 7,
+            email: "b@example.com".into(),
+            email_verified: Some(true),
+        });
+        app
+    }
+
+    fn run(task: iced::Task<super::Message>) {
+        use iced::futures::StreamExt;
+        if let Some(stream) = iced_runtime::task::into_stream(task) {
+            drop(iced::futures::executor::block_on(
+                stream.collect::<Vec<_>>(),
+            ));
+        }
+    }
+
+    fn persist_remote_lock(app: &super::App) {
+        run(app.handle_connect_duress_activated(None, "remote".into()));
+    }
+
+    /// Account 3 enrolled duress on this computer and is not locked.
+    fn enrolled_as_3(root: &TempRoot) {
+        write_lock(&root.0, Some("3"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.active = false;
+        state.enrolled = true;
+        state.save(&root.0).unwrap();
+    }
+
+    #[test]
+    fn a_remote_lock_records_the_account_whose_stream_delivered_it() {
+        let before = crate_dir_entries();
+        let root = TempRoot::new("remote-lock-account");
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(
+            state.account_id, None,
+            "the enrolment's identity is untouched"
+        );
+        assert_eq!(state.lock_account(), Some("7"));
+        drop(app);
+        assert_eq!(crate_dir_entries(), before);
+    }
+
+    #[test]
+    fn a_remote_lock_by_another_account_leaves_the_enrolment_on_its_own_account() {
+        let root = TempRoot::new("remote-lock-enrolled");
+        enrolled_as_3(&root);
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(state.lock_account(), Some("7"));
+
+        // The remote-disable reconcile still acts on the enrolling account,
+        // and not on the account that raised the lock.
+        let disarm = |account: &str| {
+            iced::futures::executor::block_on(crate::app::reconcile_duress_disarm(
+                root.dir(),
+                account.to_string(),
+            ))
+            .unwrap()
+        };
+        assert!(!disarm("7"));
+        assert_eq!(
+            DuressLocalState::load(&root.0)
+                .unwrap()
+                .account_id
+                .as_deref(),
+            Some("3")
+        );
+        assert!(disarm("3"));
+    }
+
+    #[test]
+    fn a_panel_user_that_is_not_the_streams_account_is_not_recorded() {
+        let root = TempRoot::new("remote-lock-mismatch");
+        let mut app = signed_in_app(&root);
+        app.connect_email = Some("someone-else@example.com".into());
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.lock_account(), None);
+    }
+
+    #[test]
+    fn before_the_panel_loads_its_user_the_keyring_names_the_streams_account() {
+        let save = |id: u32, email: &str| {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "requires_2fa": false, "token": "synthetic", "refresh_token": "synthetic-refresh",
+                "user": {"id": id, "email": email},
+            }))
+            .unwrap();
+            crate::app::state::connect::write_connect_secret(
+                crate::app::state::connect::CONNECT_KEYRING_USER,
+                &bytes,
+            )
+            .unwrap();
+        };
+        let root = TempRoot::new("remote-lock-keyring");
+        let mut app = signed_in_app(&root);
+        app.panels.connect.account.user = None;
+        save(5, "someone-else@example.com");
+        assert_eq!(app.duress_activating_account(), None);
+        save(7, "b@example.com");
+        assert_eq!(app.duress_activating_account().as_deref(), Some("7"));
+        persist_remote_lock(&app);
+        crate::app::state::connect::delete_connect_secret(
+            crate::app::state::connect::CONNECT_KEYRING_USER,
+        );
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn a_remote_clear_forgets_the_account_that_raised_the_lock() {
+        let root = TempRoot::new("remote-lock-cleared");
+        enrolled_as_3(&root);
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        run(app.handle_connect_duress_cleared());
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(!state.active);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
     }
 }

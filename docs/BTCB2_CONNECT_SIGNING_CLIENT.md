@@ -7,15 +7,20 @@ network identity and target capabilities without changing encrypted payloads.
 
 The authenticated client states Wallet.chain.api_str() on every create. A
 nonempty resolve identity must match literally; aliases and unknown networks
-refuse. Empty resolve/session identity is tolerated only for Bitcoin-family
-Cubes during the existing compatibility window. BTCB2 rejects an empty resolve
-before creating anything. Created or fetched sessions with an incorrect identity
+refuse. An empty resolve or session identity is refused on every chain
+(signing identity contract Amendment 1, A3; master plan decision 30): an empty
+resolve creates nothing, and an empty created or fetched session is cancelled.
+The copy names the Vault's chain by its display label. Before this, an empty
+identity was tolerated on Bitcoin-family Cubes during a compatibility window,
+which is closed before launch. Created or fetched sessions with an incorrect identity
 are discarded and cancellation is requested. No returned signature from that
 session is opened, verified, merged or persisted by the desktop. Cancellation
 is best effort; a phone may already have received the session.
 
-BTCB2 targets must advertise both chain-identity-v1 and btcb2-unified-v1 before
-any PSBT preparation or sealing. Registration still advertises only this
+BTCB2 targets must advertise both chain-identity-v1 and btcb2-unified-v2 before
+any PSBT preparation or sealing. The retired btcb2-unified-v1, which released
+COINCUBE Mobile builds send without being able to sign, admits nothing: a target
+that stores it without btcb2-unified-v2 reads as an outdated app. Registration still advertises only this
 desktop's chain-identity capability because the desktop is not the signing
 target. A resolved phone carrying both capabilities may classify that exact
 Mobile signer as replay-capable for signer/path selection. Existing

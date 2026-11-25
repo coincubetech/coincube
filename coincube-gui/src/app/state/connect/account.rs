@@ -32,9 +32,34 @@ use super::{
 
 /// Stored session for per-cube auto-connect
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredSession {
+pub(crate) struct StoredSession {
     #[serde(flatten)]
     login: LoginResponse,
+}
+
+impl StoredSession {
+    /// The Connect user id the session was issued to.
+    pub(crate) fn user_id(&self) -> u32 {
+        self.login.user.id
+    }
+
+    /// The session's access token.
+    pub(crate) fn access_token(&self) -> &str {
+        &self.login.token
+    }
+
+    /// The email of the account the session was issued to.
+    pub(crate) fn email(&self) -> &str {
+        &self.login.user.email
+    }
+}
+
+/// The saved sign-in in the OS keyring, if one is there and parses. The one
+/// reader of that entry: the Connect panel restores from it, and the duress
+/// locked screen, which has no panel, checks with it.
+pub(crate) fn load_session_from_keyring() -> Option<StoredSession> {
+    let bytes = read_connect_secret(CONNECT_KEYRING_USER)?;
+    serde_json::from_slice::<StoredSession>(&bytes).ok()
 }
 
 /// A stored session waiting to be checked (see `ConnectAccountPanel::unverified`).
@@ -1971,7 +1996,7 @@ impl ConnectAccountPanel {
     /// `Init` silently falls back to the Login step, leaving the user
     /// stuck on an inline prompt with no login form.
     pub fn has_stored_session(&self) -> bool {
-        self.load_session_from_keyring().is_some()
+        load_session_from_keyring().is_some()
     }
 
     pub fn session_generation(&self) -> u64 {
@@ -2145,14 +2170,9 @@ impl ConnectAccountPanel {
     /// Cube saves it with its own session; for any other saved session it
     /// saves none, since that refresh token is not its session's.
     pub(crate) fn saved_refresh_token_for(&self, access_token: &str) -> Option<String> {
-        self.load_session_from_keyring()
+        load_session_from_keyring()
             .filter(|session| session.login.token == access_token)
             .map(|session| session.login.refresh_token)
-    }
-
-    fn load_session_from_keyring(&self) -> Option<StoredSession> {
-        let bytes = read_connect_secret(CONNECT_KEYRING_USER)?;
-        serde_json::from_slice::<StoredSession>(&bytes).ok()
     }
 
     fn save_session_to_keyring(&self, session: &StoredSession) {
@@ -3167,7 +3187,7 @@ impl ConnectAccountPanel {
         // Clearing here (and in SubmitLogin) confines redemption to the
         // uninterrupted signup → verify → SessionLoaded path.
         self.pending_campaign_code = None;
-        if let Some(session) = self.load_session_from_keyring() {
+        if let Some(session) = load_session_from_keyring() {
             let refresh_token = session.login.refresh_token.clone();
             // Transition out of CheckingSession so re-navigation
             // won't re-trigger Init while the refresh is in flight.
@@ -3283,9 +3303,7 @@ impl ConnectAccountPanel {
         }
         // Keep the stored session (L1): leave the sign-in form idle,
         // remember whose session it is, and check it again later.
-        let Some(email) = self
-            .load_session_from_keyring()
-            .map(|session| session.login.user.email)
+        let Some(email) = load_session_from_keyring().map(|session| session.login.user.email)
         else {
             self.step = ConnectFlowStep::Login {
                 email: String::new(),
@@ -6526,8 +6544,7 @@ impl ConnectAccountPanel {
                         let root = dir.path();
                         match crate::services::duress::DuressLocalState::load(root) {
                             Ok(mut st) if st.active => {
-                                st.active = false;
-                                st.unlock_at = None;
+                                st.clear_lock();
                                 if let Err(e) = st.save(root) {
                                     log::warn!(
                                         "[CONNECT] failed to clear local duress \
