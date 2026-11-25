@@ -456,6 +456,9 @@ pub enum Message {
     ConnectStream(crate::services::connect::grpc::ConnectStreamMessage),
     /// The wait between automatic renewal attempts is over (C1).
     ConnectRenewalRetry,
+    /// The stored signer device ids were discarded after Connect said this
+    /// computer was removed. Nothing follows from it; the outcome is logged.
+    ConnectDeviceIdsDiscarded,
     /// Flips the pulsing Connect light between its bright and dim phase.
     ConnectLightTick,
     /// Connect, not the user, ended the session: shown as Signed out by

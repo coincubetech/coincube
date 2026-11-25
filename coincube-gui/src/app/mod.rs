@@ -12742,6 +12742,71 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Connect says this computer was removed: besides signing out, the App
+    /// discards the signer device id stored in every chain folder, so a Cube
+    /// on another chain does not replay a revoked id after the next sign-in.
+    #[tokio::test]
+    async fn a_removed_computer_discards_the_stored_device_ids_of_every_chain() {
+        use crate::services::connect::client::cache::{Account, CONNECT_CACHE_FILENAME};
+        use crate::services::connect::grpc::trouble::Refusal;
+        use crate::services::connect::grpc::ConnectStreamMessage as M;
+        use iced::futures::StreamExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+        let datadir = app.cache.datadir_path.clone();
+        assert!(datadir.path().is_absolute());
+        let email = "alice@example.invalid";
+        let folders = [
+            datadir.network_directory(app.cache.chain()),
+            datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b),
+        ];
+        for (dir, device_id) in folders.iter().zip(["device-here", "device-fork"]) {
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&serde_json::json!({
+                    "active_email": email,
+                    "accounts": [{
+                        "email": email,
+                        "tokens": {
+                            "access_token": "access",
+                            "refresh_token": "refresh",
+                            "expires_at": 1000
+                        },
+                        "device_id": device_id
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        app.connect_email = Some(email.into());
+
+        let task = app.update(Message::ConnectStream(M::Refused(Refusal::DeviceRevoked)));
+        let mut outputs = Vec::new();
+        let mut stream = iced_runtime::task::into_stream(task).expect("tasks to run");
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                outputs.push(message);
+            }
+        }
+
+        assert!(outputs
+            .iter()
+            .any(|m| matches!(m, Message::ConnectDeviceIdsDiscarded)));
+        assert!(outputs
+            .iter()
+            .any(|m| matches!(m, Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved))));
+        for dir in &folders {
+            let account = Account::from_cache(dir, email).unwrap().unwrap();
+            assert_eq!(account.device_id, None, "{:?}", dir.path());
+            assert_eq!(account.tokens.access_token, "access");
+        }
+        // Handling the completion changes nothing further.
+        assert_eq!(app.update(Message::ConnectDeviceIdsDiscarded).units(), 0);
+    }
+
     /// The pipeline's endpoint is the Cube's own client's: the session a
     /// Bitcoin Blake2b Cube was opened with when it has one, otherwise the
     /// Connect panel's client.
