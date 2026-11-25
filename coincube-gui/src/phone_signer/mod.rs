@@ -467,8 +467,6 @@ impl HWI for PhoneSigner {
     }
 }
 
-/// Error code a peer sends when its stored pairing no longer matches: the
-/// phone's key, account or transport key changed since the QR was scanned.
 /// Contract R2.13: a returned `PartialSignature.network` is required and must
 /// equal the session's, on every chain and every response. Anything else is
 /// discarded before verification and merge.
@@ -489,6 +487,8 @@ fn check_partial_network(session: &str, partial: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Error code a peer sends when its stored pairing no longer matches: the
+/// phone's key, account or transport key changed since the QR was scanned.
 /// Retrying over the local network cannot succeed until the user pairs again.
 pub(crate) const PAIR_AGAIN_CODE: &str = "pair_again";
 

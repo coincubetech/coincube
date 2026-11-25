@@ -150,10 +150,6 @@ fn fake_phone_server_config(
         .expect("single cert")
 }
 
-/// Fake phone harness that accepts the pairing connection first and
-/// then a second steady-state connection on the same listener. Both
-/// accepts use the same `ServerConfig`, so a wrong `trust_desktop_pin`
-/// fails the first handshake and the function returns early.
 /// How the fake phone signs a request it decoded.
 type PhoneSign = Box<dyn FnOnce(&Psbt) -> Psbt + Send>;
 
@@ -180,6 +176,10 @@ impl PhoneCase {
     }
 }
 
+/// Fake phone harness that accepts the pairing connection first and
+/// then a second steady-state connection on the same listener. Both
+/// accepts use the same `ServerConfig`, so a wrong `trust_desktop_pin`
+/// fails the first handshake and the function returns early.
 async fn fake_phone_pair_then_sign(
     listener: TcpListener,
     phone_cert: CertificateDer<'static>,
