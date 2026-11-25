@@ -203,6 +203,12 @@ impl App {
         // moved on) still serves it. Every other Cube reads its id from the
         // file, as before.
         let carry_unsaved_id = self.cache.connect_served;
+        // For the same reason such a Cube does not need to own the file's
+        // active account to start: another Cube of the same account may have
+        // saved its own session between this Cube's save and here. The
+        // token is still the Cube's own (checked above against its client),
+        // and the stream trigger pins it again.
+        let pinned_to_own_session = self.cache.connect_served;
 
         Task::perform(
             async move {
@@ -226,16 +232,19 @@ impl App {
                 let network_dir = datadir.network_directory(chain);
                 // Both tokens: a Connect-served Bitcoin Blake2b Cube can save
                 // its session with an empty refresh token, and two opens of
-                // one account then differ in their access tokens only.
-                let owns_cached_session =
-                    crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
-                        .ok()
-                        .and_then(|cache| cache.active_account().cloned())
-                        .is_some_and(|account| {
-                            account.email == email_for_task
-                                && account.tokens.refresh_token == tokens.refresh_token
-                                && account.tokens.access_token == tokens.access_token
-                        });
+                // one account then differ in their access tokens only. Such a
+                // Cube is pinned to its own session and skips the check.
+                let owns_cached_session = pinned_to_own_session
+                    || crate::services::connect::client::cache::ConnectCache::from_file(
+                        &network_dir,
+                    )
+                    .ok()
+                    .and_then(|cache| cache.active_account().cloned())
+                    .is_some_and(|account| {
+                        account.email == email_for_task
+                            && account.tokens.refresh_token == tokens.refresh_token
+                            && account.tokens.access_token == tokens.access_token
+                    });
                 if !owns_cached_session {
                     return (chain, datadir, None, email_for_task, cube_uuid, None);
                 }

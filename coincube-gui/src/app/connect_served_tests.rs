@@ -678,6 +678,51 @@ fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
     });
 }
 
+/// The shared file moved on between the save at open and the login
+/// completion's check (another Cube of the account saved its own session).
+/// The first start still triggers the stream on the Cube's own token; it is
+/// not answered with `ConnectStreamReady(None)`.
+#[test]
+fn the_first_start_survives_the_file_moving_on_after_the_save() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        let mut app = tests::fork_app(root.path(), true);
+        let completion = save_at_open(&mut app).await;
+        // Another Cube of the account signs in and moves the file on before
+        // the completion reads it.
+        write_fork_cache(
+            root.path(),
+            serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": tokens("local-cube-token", "local-refresh")}]
+            }),
+        );
+        let answered = outputs(completion).await;
+        assert!(
+            !answered
+                .iter()
+                .any(|m| matches!(m, Message::ConnectStreamReady(None))),
+            "the first start must not fail on the shared file"
+        );
+        let Some(Message::TriggerConnectStreamReady { tokens, email, .. }) = answered
+            .into_iter()
+            .find(|m| matches!(m, Message::TriggerConnectStreamReady { .. }))
+        else {
+            panic!("the login completion triggers the stream");
+        };
+        assert_eq!(email, EMAIL);
+        assert_eq!(tokens.read().await.access_token, CUBE_TOKEN);
+        // The file keeps the other Cube's token; this Cube adopted none.
+        assert_eq!(
+            fork_entry(root.path()).unwrap().tokens.access_token,
+            "local-cube-token"
+        );
+        assert_bitcoin_untouched(root.path(), &before);
+    });
+}
+
 /// An id held only in memory goes with the session when Connect refuses the
 /// device as revoked, as a stored one does.
 #[test]
