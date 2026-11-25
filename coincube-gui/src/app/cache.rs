@@ -644,6 +644,19 @@ impl Cache {
         self.fiat_chain
     }
 
+    /// The Connect API a panel's own REST client sends this Cube's bearer
+    /// to: the endpoint the signer pipeline recorded
+    /// ([`Self::connect_base_url`]). Before the stream is up, a Bitcoin Cube's
+    /// session is on the configured API, as it always was. A Bitcoin Blake2b
+    /// Cube's session may have been admitted on another endpoint, so it gets
+    /// none until the pipeline records one: its bearer never goes to the
+    /// default host by fallback.
+    pub fn connect_api_base_url(&self) -> Option<String> {
+        self.connect_base_url
+            .clone()
+            .or_else(|| (!self.chain().is_blake2b()).then(crate::services::coincube_api_base_url))
+    }
+
     /// The cached entanglement answer for a deposit, [`Entanglement::Unknown`]
     /// when none has been resolved yet. A stale negative still reads as
     /// *not entangled* here — the refresh is the sync task's job and the
@@ -2011,4 +2024,42 @@ pub enum LightningAddressSetup {
     Assigning,
     /// The last attempt failed; the message says why.
     Failed(String),
+}
+
+#[cfg(test)]
+mod connect_api_base_url_tests {
+    use super::Cache;
+    use crate::chain::ChainId;
+
+    /// Before the stream records an endpoint, a Bitcoin Cube's panels talk to
+    /// the configured API, as they always did; a Bitcoin Blake2b Cube's get
+    /// none, so its bearer never reaches the default host by fallback.
+    #[test]
+    fn only_a_bitcoin_cube_falls_back_to_the_configured_api() {
+        for chain in ChainId::ALL.iter().copied() {
+            let cache = Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            };
+            if chain.is_blake2b() {
+                assert_eq!(cache.connect_api_base_url(), None, "{chain:?}");
+            } else {
+                assert_eq!(
+                    cache.connect_api_base_url(),
+                    Some(crate::services::coincube_api_base_url()),
+                    "{chain:?}"
+                );
+            }
+            let recorded = Cache {
+                connect_base_url: Some("https://connect.example.invalid".into()),
+                ..cache
+            };
+            assert_eq!(
+                recorded.connect_api_base_url().as_deref(),
+                Some("https://connect.example.invalid"),
+                "{chain:?}"
+            );
+        }
+    }
 }

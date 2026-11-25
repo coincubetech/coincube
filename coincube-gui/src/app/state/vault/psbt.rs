@@ -587,7 +587,11 @@ impl PsbtState {
             };
             return Task::none();
         }
-        let Some(tokens) = cache.connect_tokens.clone() else {
+        // The endpoint comes with the session: a Bitcoin Blake2b Cube's bearer
+        // is never sent to the configured API by fallback.
+        let (Some(tokens), Some(base_url)) =
+            (cache.connect_tokens.clone(), cache.connect_api_base_url())
+        else {
             // No Connect session: the check cannot run. Say so; the
             // acknowledgement path stays open. `revalidated_for` is left
             // unset, so the check runs once a session arrives on this same
@@ -610,7 +614,7 @@ impl PsbtState {
         let spend = self.tx.psbt.unsigned_tx.compute_txid();
         Task::perform(
             async move {
-                let mut client = crate::services::coincube::CoincubeClient::new();
+                let mut client = crate::services::coincube::CoincubeClient::with_base_url(base_url);
                 let access_token = tokens.read().await.access_token.clone();
                 client.set_token(&access_token);
                 crate::services::entangled::lookup_all(client, chain, txids).await
@@ -1901,7 +1905,12 @@ fn build_keychain_if_ready(
     // launching it would only show that refusal in the picker. A Vault
     // recorded with no Keychain key still launches it, because the record
     // is a snapshot and Connect decides who the signers are.
-    if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() {
+    // The REST client goes to the endpoint the Cube's signer pipeline uses,
+    // which the stream bootstrap records beside the gRPC address. A Bitcoin
+    // Blake2b Cube without one is not ready: its bearer never goes to the
+    // configured API by fallback.
+    let base_url = cache.connect_api_base_url();
+    if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() || base_url.is_none() {
         return (None, Task::none());
     }
     let grpc_url = cache.connect_grpc_url.clone().expect("checked above");
@@ -1911,14 +1920,8 @@ fn build_keychain_if_ready(
     // The REST client's bearer is set asynchronously inside
     // `KeychainSignModal::launch()` (an async context) rather than here on
     // the synchronous `update` path, which can't `blocking_read` the token.
-    // On the endpoint the Cube's signer pipeline is using, which the stream
-    // bootstrap records beside the gRPC address.
-    let coincube_client = crate::services::coincube::CoincubeClient::with_base_url(
-        cache
-            .connect_base_url
-            .clone()
-            .unwrap_or_else(crate::services::coincube_api_base_url),
-    );
+    let coincube_client =
+        crate::services::coincube::CoincubeClient::with_base_url(base_url.expect("checked above"));
     let modal = super::keychain_sign::KeychainSignModal::new(
         wallet.clone(),
         coincube_client,
