@@ -2851,7 +2851,16 @@ fn connect_stream_ready_task(
                 return None;
             };
             let network_dir = datadir.network_directory(chain);
-            let cache_account = Account::from_cache(&network_dir, &email).ok().flatten();
+            // The device id and cursor of an entry another host issued are
+            // not this host's.
+            let issuer = crate::services::connect::client::cache::issuing_api(
+                &base_url,
+                &crate::services::coincube_api_base_url(),
+            );
+            let cache_account = Account::from_cache(&network_dir, &email)
+                .ok()
+                .flatten()
+                .filter(|account| account.issued_by(issuer.as_deref()));
             let Some(device_id) = cache_account
                 .as_ref()
                 .and_then(|a| a.device_id.clone())
@@ -2865,8 +2874,10 @@ fn connect_stream_ready_task(
                 );
                 return None;
             };
+            // This Cube's own cursor, never one another Cube of the account
+            // moved past an event this one has not received.
             let last_seen_seq = cache_account
-                .and_then(|a| a.last_seen_event_seq)
+                .map(|a| a.event_seq_for(cube_uuid.as_deref()))
                 .unwrap_or(0);
 
             // Look up the cube's vault id so the server can scope this
@@ -15512,7 +15523,11 @@ pub(crate) mod shell_tests {
             "another App's split is not this Vault's"
         );
         assert!(!journal.exists(), "the journal is not written");
-        assert_eq!(progress(&app), (true, None), "this review is still building");
+        assert_eq!(
+            progress(&app),
+            (true, None),
+            "this review is still building"
+        );
 
         drop(app.update(Message::SplitBuilt {
             app: app.cache.app_generation,
@@ -15532,7 +15547,11 @@ pub(crate) mod shell_tests {
                 .contains(&txid.to_string()),
             "this App's split is journaled"
         );
-        assert_eq!(progress(&app), (false, None), "the review hears its own result");
+        assert_eq!(
+            progress(&app),
+            (false, None),
+            "the review hears its own result"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

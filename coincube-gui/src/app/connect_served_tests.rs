@@ -18,6 +18,16 @@ const EMAIL: &str = "synthetic@example.invalid";
 const CUBE_TOKEN: &str = "synthetic-test-token";
 const CUBE_BASE: &str = "https://connect.example/";
 
+/// How `connect.json` records the fixture Cube's host (`CUBE_BASE`), which
+/// is not the configured Connect API.
+fn cube_issuer() -> String {
+    crate::services::connect::client::cache::issuing_api(
+        CUBE_BASE,
+        &crate::services::coincube_api_base_url(),
+    )
+    .expect("the fixture Cube's host is not the configured API")
+}
+
 fn tokens(access: &str, refresh: &str) -> AccessTokenResponse {
     AccessTokenResponse {
         access_token: access.into(),
@@ -238,7 +248,8 @@ fn a_connect_served_cube_saves_exactly_its_own_session_at_open() {
                 "active_email": "other@example.invalid",
                 "accounts": [
                     {"email": EMAIL, "tokens": tokens("older-open", "older-refresh"),
-                        "device_id": "stored-device", "last_seen_event_seq": 9},
+                        "device_id": "stored-device", "last_seen_event_seq": 9,
+                        "api_base_url": cube_issuer()},
                     {"email": "other@example.invalid", "tokens": tokens("other-access", "other-refresh")}
                 ]
             }),
@@ -268,6 +279,7 @@ fn a_connect_served_cube_saves_exactly_its_own_session_at_open() {
         assert_eq!(entry.tokens.refresh_token, "saved-refresh");
         assert_eq!(entry.device_id.as_deref(), Some("stored-device"));
         assert_eq!(entry.last_seen_event_seq, Some(9));
+        assert_eq!(entry.api_base_url.as_deref(), Some(cube_issuer().as_str()));
         let other = file
             .accounts
             .iter()
@@ -320,7 +332,8 @@ fn a_connect_served_cube_fills_the_same_stream_fields_as_a_bitcoin_cube() {
             serde_json::json!({
                 "active_email": EMAIL,
                 "accounts": [{"email": EMAIL, "tokens": tokens("older-open", ""),
-                    "device_id": "stored-device", "last_seen_event_seq": 12}]
+                    "device_id": "stored-device", "last_seen_event_seq": 12,
+                    "api_base_url": cube_issuer()}]
             }),
         );
         let app = served_cube_with_stream(root.path(), "").await;
@@ -615,17 +628,26 @@ fn an_ended_session_ends_a_connect_served_stream_without_a_reconnect_loop() {
 }
 
 /// The shared file moved on before the stream started. The stream still
-/// starts on the Cube's own token: with the id stored for the account, or
-/// with the id registration returned when none was stored, or the signer
-/// list says Mobile signing could not start.
+/// starts on the Cube's own token: with the id stored for the account when
+/// the entry is the Cube's host's, or with the id registration returned, or
+/// the signer list says Mobile signing could not start. An id another host
+/// stored (a local Cube's sign-in on the configured API) is never used.
 #[test]
 fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
     let _guard = crate::app::session::test_guard();
     runtime().block_on(async {
-        for (stored, carried, expected) in [
-            (Some("stored-device"), "", Some("stored-device")),
-            (None, "returned-device", Some("returned-device")),
-            (None, "", None),
+        let cube_host = Some(cube_issuer());
+        for (stored, issuer, carried, expected) in [
+            (Some("stored-device"), cube_host.clone(), "", Some("stored-device")),
+            (Some("stored-device"), None, "", None),
+            (
+                Some("stored-device"),
+                None,
+                "returned-device",
+                Some("returned-device"),
+            ),
+            (None, None, "returned-device", Some("returned-device")),
+            (None, None, "", None),
         ] {
             let root = tempfile::tempdir().unwrap();
             let before = seed_bitcoin(root.path(), CUBE_TOKEN);
@@ -641,7 +663,7 @@ fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
                 serde_json::json!({
                     "active_email": EMAIL,
                     "accounts": [{"email": EMAIL, "tokens": tokens("local-cube-token", "local-refresh"),
-                        "device_id": stored}]
+                        "device_id": stored, "api_base_url": issuer}]
                 }),
             );
             drop(app.update(trigger));
@@ -675,6 +697,48 @@ fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
             );
             assert_bitcoin_untouched(root.path(), &before);
         }
+    });
+}
+
+/// Another Cube of the account received later events: this Cube's stream
+/// resumes from its own cursor, not past events it has not received.
+#[test]
+fn the_stream_resumes_from_this_cubes_own_cursor() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        let mut app = tests::fork_app(root.path(), true);
+        let cube_id = app.cube_settings.id.clone();
+        assert!(!cube_id.is_empty());
+        let completion = outputs(save_at_open(&mut app).await).await;
+        let trigger = completion
+            .into_iter()
+            .find(|m| matches!(m, Message::TriggerConnectStreamReady { .. }))
+            .unwrap();
+        write_fork_cache(
+            root.path(),
+            serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": tokens(CUBE_TOKEN, ""),
+                    "device_id": "stored-device", "last_seen_event_seq": 50,
+                    "cube_event_seqs": {"a-sibling-cube": 50, cube_id: 12},
+                    "api_base_url": cube_issuer()}]
+            }),
+        );
+        drop(app.update(trigger));
+        let auth = app.connect_auth.clone().unwrap();
+        drop(app.update(Message::ConnectStreamReady(Some((
+            stream_config(auth, CUBE_BASE, ""),
+            EMAIL.into(),
+        )))));
+        let cfg = app
+            .connect_stream_config
+            .as_ref()
+            .expect("the stream mounts");
+        assert_eq!(cfg.device_id, "stored-device");
+        assert_eq!(cfg.last_seen_seq, 12);
+        assert_bitcoin_untouched(root.path(), &before);
     });
 }
 
@@ -724,7 +788,10 @@ fn the_first_start_survives_the_file_moving_on_after_the_save() {
 }
 
 /// An id held only in memory goes with the session when Connect refuses the
-/// device as revoked, as a stored one does.
+/// device as revoked, as a stored one does. Only the Cube's own chain folder
+/// is touched: the same email in `bitcoin/` may be an account on another
+/// Connect host, so a Bitcoin Cube clears that id itself when its own stream
+/// is refused.
 #[test]
 fn an_unsaved_device_id_is_dropped_on_a_revoked_device() {
     use crate::services::connect::grpc::trouble::Refusal;
@@ -1001,6 +1068,59 @@ fn a_global_auth_change_closes_the_connect_served_tab_and_leaves_the_bitcoin_one
     });
 }
 
+/// A remote duress lock delivered by a Connect-served Cube's stream records
+/// the account that stream runs on, so the locked screen trusts only that
+/// account's sessions to clear it. The Cube's session was saved from its
+/// panel's user, so the panel names the account even when the saved keyring
+/// sign-in is another account's; nothing falls back to the launch folder.
+#[test]
+fn a_remote_lock_from_a_connect_served_stream_names_the_cubes_account() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        seed_bitcoin(root.path(), CUBE_TOKEN);
+        // The saved sign-in is now a different account's.
+        let other = crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: "other-access".into(),
+            refresh_token: "other-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 5,
+                email: "other@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        };
+        state::connect::write_connect_secret(
+            state::connect::CONNECT_KEYRING_USER,
+            &serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        let before = bitcoin_state(root.path());
+
+        let mut app = served_cube_with_stream(root.path(), "cube-device").await;
+        assert_eq!(app.connect_email.as_deref(), Some(EMAIL));
+        assert_eq!(app.duress_activating_account().as_deref(), Some("7"));
+
+        let answered = outputs(app.update(Message::ConnectStream(
+            crate::services::connect::grpc::ConnectStreamMessage::DuressActivated {
+                unlock_at: None,
+                source: "remote".into(),
+            },
+        )))
+        .await;
+        assert!(answered
+            .iter()
+            .any(|m| matches!(m, Message::View(view::Message::DuressLockRemote))));
+
+        let lock = crate::services::duress::DuressLocalState::load(root.path()).unwrap();
+        assert!(lock.active);
+        assert!(lock.remote_lock);
+        assert_eq!(lock.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(lock.lock_account(), Some("7"));
+        assert_bitcoin_untouched(root.path(), &before);
+    });
+}
+
 /// A remote duress lock delivered on a Connect-served Cube's stream records
 /// where its account lives, the Cube's Connect API and chain folder, so the
 /// locked screen asks that host and reads that folder rather than the
@@ -1034,5 +1154,66 @@ fn a_remote_lock_on_a_connect_served_cube_records_the_cubes_host_and_folder() {
         let bitcoin_root = tempfile::tempdir().unwrap();
         let (bitcoin, _) = super::shell_tests::bitcoin_app(bitcoin_root.path());
         assert_eq!(bitcoin.duress_lock_origin(), None);
+    });
+}
+
+/// A Connect-served Cube's sign-in saved its host's session on the account's
+/// entry. A local Cube of the same account presents none of it to its own
+/// Connect API: `EnsureConnectReady` registers neither the device nor the
+/// Cube with that token and says no session was found.
+#[test]
+fn a_local_cube_never_presents_another_hosts_saved_session() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        write_fork_cache(
+            root.path(),
+            serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": tokens(CUBE_TOKEN, "cube-refresh"),
+                    "device_id": "cube-host-device", "api_base_url": cube_issuer()}]
+            }),
+        );
+        let mut app = tests::fork_app(root.path(), false);
+        assert!(!app.cache.connect_served);
+        assert!(app.fork_connect_client.is_none());
+        assert_eq!(
+            crate::services::connect::client::cache::issuing_api(
+                &app.connect_base_url(),
+                &crate::services::coincube_api_base_url(),
+            ),
+            None,
+            "the local Cube talks to the configured API"
+        );
+        app.connect_email = Some(EMAIL.into());
+        app.cube_settings.id = "local-cube".into();
+
+        let answered = outputs(app.update(Message::EnsureConnectReady)).await;
+        assert!(
+            answered.iter().any(|m| matches!(
+                m,
+                Message::View(view::Message::ShowToast(_, text))
+                    if text.starts_with("Couldn't find this Connect session")
+            )),
+            "the bootstrap stops at the session lookup"
+        );
+        assert!(
+            answered.iter().any(|m| matches!(
+                m,
+                Message::View(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::CubeRegistered { result: Err(e), .. }
+                )) if e.message.contains("no cached Connect session")
+            )),
+            "the Cube registration finds no session either"
+        );
+        assert!(!answered
+            .iter()
+            .any(|m| matches!(m, Message::TriggerConnectStreamReady { .. })));
+        // The entry stays the other host's, untouched.
+        let entry = fork_entry(root.path()).unwrap();
+        assert_eq!(entry.tokens.access_token, CUBE_TOKEN);
+        assert_eq!(entry.device_id.as_deref(), Some("cube-host-device"));
+        assert_bitcoin_untouched(root.path(), &before);
     });
 }

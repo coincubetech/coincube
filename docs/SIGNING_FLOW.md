@@ -84,6 +84,14 @@ stays pinned to that session while it is open
 (on its own node, or with no Vault yet) writes it from its in-Cube sign-in,
 exactly as a Bitcoin Cube does.
 
+When Connect refuses the stream because this computer was removed
+(`DEVICE_REVOKED` or `COMPUTER_REMOVED`), the removal revokes the account's
+signer device on every chain, so the stored device id is discarded in every
+chain folder that holds one; the sessions there stay. A Connect-served Bitcoin
+Blake2b Cube discards it only in its own folder: the same email in another
+folder may be an account on another Connect host, and that folder's own Cube
+clears its id when its stream is refused.
+
 ## Happy-path sequence
 
 User has a Vault with two Mobile signers (themselves on this

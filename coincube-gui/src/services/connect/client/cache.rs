@@ -3,7 +3,7 @@ use async_fd_lock::LockWrite;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::SeekFrom;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
@@ -156,14 +156,41 @@ impl ConnectCache {
             .is_some_and(|account| account.email == email)
     }
 
+    /// [`Self::upsert_credential_from`] with the host the action implies.
+    #[cfg(test)]
     fn upsert_credential(
         &mut self,
         email: &str,
         tokens: AccessTokenResponse,
         action: CacheAccountAction,
     ) {
+        self.upsert_credential_from(email, tokens, action, Issuer::for_action(action))
+    }
+
+    fn upsert_credential_from(
+        &mut self,
+        email: &str,
+        tokens: AccessTokenResponse,
+        action: CacheAccountAction,
+        issuer: Issuer<'_>,
+    ) {
         if let Some(c) = self.accounts.iter_mut().find(|c| c.email == email) {
             c.tokens = tokens;
+            if let Issuer::Set(api) = issuer {
+                // The device id and the event cursor were issued by the
+                // previous session's host: another host knows neither, so
+                // they go with it.
+                if c.api_base_url.as_deref() != api {
+                    c.device_id = None;
+                    c.last_seen_event_seq = None;
+                    c.cube_event_seqs.clear();
+                    // A re-registration started for the previous host's
+                    // session is superseded, as by a new sign-in: its
+                    // completion must not install that host's id here.
+                    c.reregister_claim = None;
+                    c.api_base_url = api.map(str::to_string);
+                }
+            }
         } else {
             self.accounts.push(Account {
                 email: email.to_string(),
@@ -171,6 +198,11 @@ impl ConnectCache {
                 device_id: None,
                 last_seen_event_seq: None,
                 reregister_claim: None,
+                cube_event_seqs: BTreeMap::new(),
+                api_base_url: match issuer {
+                    Issuer::Set(api) => api.map(str::to_string),
+                    Issuer::Keep => None,
+                },
             })
         }
         if action != CacheAccountAction::PreserveSelection {
@@ -206,6 +238,37 @@ impl ConnectCache {
     }
 }
 
+/// Which Connect API issued the tokens a write stores
+/// ([`Account::api_base_url`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Issuer<'a> {
+    /// The same session as the entry's (a refresh): its host is unchanged.
+    Keep,
+    /// A session issued by this host: `None` is the configured Connect API,
+    /// `Some` another one, as [`issuing_api`] gives it.
+    Set(Option<&'a str>),
+}
+
+impl Issuer<'_> {
+    /// Every write but the served-session save stores a session of the
+    /// configured API: a sign-in, or the OS keyring's saved sign-in. A
+    /// refresh keeps the entry's host.
+    fn for_action(action: CacheAccountAction) -> Self {
+        match action {
+            CacheAccountAction::PreserveSelection => Issuer::Keep,
+            CacheAccountAction::Activate | CacheAccountAction::NewLogin => Issuer::Set(None),
+        }
+    }
+}
+
+/// How an entry records the API at `api_base_url`: `None` when it is the
+/// configured Connect API (`configured_api_base_url`), else the URL without
+/// a trailing slash.
+pub fn issuing_api(api_base_url: &str, configured_api_base_url: &str) -> Option<String> {
+    let api = api_base_url.trim_end_matches('/');
+    (api != configured_api_base_url.trim_end_matches('/')).then(|| api.to_string())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CacheAccountAction {
     PreserveSelection,
@@ -223,9 +286,48 @@ pub struct Account {
     pub last_seen_event_seq: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reregister_claim: Option<String>,
+    /// The Connect API that issued `tokens`, when it is not the configured
+    /// one ([`issuing_api`]). Only a Bitcoin Blake2b Cube's opening session
+    /// can come from another host; every other entry, and every entry
+    /// written before this field, is the configured API's. The device id and
+    /// the event cursor belong to this host too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base_url: Option<String>,
+    /// Each Cube's own event cursor, by Cube id. Several Cubes of one
+    /// account share this entry, and one must not resume past an event
+    /// another received and it did not: each resumes from its own cursor
+    /// ([`Self::event_seq_for`]). `last_seen_event_seq` is still written,
+    /// for an older build reading the file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cube_event_seqs: BTreeMap<String, i64>,
 }
 
 impl Account {
+    /// Whether this entry's session, device id and cursor were issued by the
+    /// API that [`issuing_api`] records as `api`. A token, a device id or a
+    /// cursor is only ever used with the host that issued it.
+    pub fn issued_by(&self, api: Option<&str>) -> bool {
+        self.api_base_url.as_deref() == api
+    }
+
+    /// Where the Cube `cube_id` resumes its event stream: its own cursor,
+    /// never another Cube's. A Cube with none yet starts from 0 (a full
+    /// replay of its events, as on a first launch), except while no Cube has
+    /// a cursor of its own here: the entry was last written by a build with
+    /// one cursor per account, and the Cube resumes from it, as it did then.
+    /// A Cube without an id reads the account's cursor, as before.
+    pub fn event_seq_for(&self, cube_id: Option<&str>) -> i64 {
+        let account = self.last_seen_event_seq.unwrap_or(0);
+        match cube_id.filter(|id| !id.is_empty()) {
+            Some(id) => match self.cube_event_seqs.get(id) {
+                Some(own) => *own,
+                None if self.cube_event_seqs.is_empty() => account,
+                None => 0,
+            },
+            None => account,
+        }
+    }
+
     /// A fresh account record for the opt-in Testnet4 provisioning runner.
     #[cfg(feature = "integration-tests")]
     pub fn new_for_integration(email: String, tokens: AccessTokenResponse) -> Self {
@@ -235,6 +337,8 @@ impl Account {
             device_id: None,
             last_seen_event_seq: None,
             reregister_claim: None,
+            api_base_url: None,
+            cube_event_seqs: BTreeMap::new(),
         }
     }
 
@@ -253,7 +357,15 @@ pub async fn update_connect_cache(
     email: &str,
     action: CacheAccountAction,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    update_connect_cache_inner(network_dir, current_tokens, email, action, None).await
+    update_connect_cache_inner(
+        network_dir,
+        current_tokens,
+        email,
+        action,
+        None,
+        Issuer::for_action(action),
+    )
+    .await
 }
 
 enum CacheUpdateGuard<'a> {
@@ -276,6 +388,7 @@ pub async fn persist_refreshed_tokens(
         email,
         CacheAccountAction::PreserveSelection,
         Some(CacheUpdateGuard::RefreshToken(previous_refresh_token)),
+        Issuer::Keep,
     )
     .await
 }
@@ -295,6 +408,29 @@ pub async fn persist_restored_tokens(
         email,
         CacheAccountAction::Activate,
         Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
+        Issuer::Set(None),
+    )
+    .await
+}
+
+/// Save a Bitcoin Blake2b Cube's opening session, issued by the API that
+/// [`issuing_api`] records as `issuer`, under the same guard as
+/// [`persist_restored_tokens`]. An entry for the account from another host
+/// loses its device id and event cursor, which that host issued.
+pub async fn persist_served_tokens(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    tokens: &AccessTokenResponse,
+    started_from: &ConnectCache,
+    issuer: Option<&str>,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
+    update_connect_cache_inner(
+        network_dir,
+        tokens,
+        email,
+        CacheAccountAction::Activate,
+        Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
+        Issuer::Set(issuer),
     )
     .await
 }
@@ -313,6 +449,7 @@ pub async fn update_connect_cache_for_login(
         email,
         CacheAccountAction::NewLogin,
         Some(CacheUpdateGuard::LoginSnapshot(started_from)),
+        Issuer::Set(None),
     )
     .await
 }
@@ -323,6 +460,7 @@ async fn update_connect_cache_inner(
     email: &str,
     action: CacheAccountAction,
     guard: Option<CacheUpdateGuard<'_>>,
+    issuer: Issuer<'_>,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -365,6 +503,11 @@ async fn update_connect_cache_inner(
         .iter()
         .find(|cred| cred.email == *email)
         .filter(|account| !guarded && current_tokens.expires_at < account.tokens.expires_at)
+        // Newer tokens from another host are not a newer copy of this session.
+        .filter(|account| match issuer {
+            Issuer::Keep => true,
+            Issuer::Set(api) => account.issued_by(api),
+        })
         .map(|account| account.tokens.clone());
 
     let tokens = if let Some(tokens) = newer_cached_tokens {
@@ -374,7 +517,7 @@ async fn update_connect_cache_inner(
         current_tokens.clone()
     };
 
-    cache.upsert_credential(email, tokens.clone(), action);
+    cache.upsert_credential_from(email, tokens.clone(), action, issuer);
 
     let content = serde_json::to_vec_pretty(&cache).map_err(|e| {
         ConnectCacheError::WritingFile(format!("Failed to serialize settings: {}", e))
@@ -801,10 +944,17 @@ fn apply_unclaimed_device_registration(
 /// account matching `email`. Idempotent — only writes when the new value is
 /// strictly greater, so concurrent stream writers can't move the cursor
 /// backwards.
+///
+/// `issuer` is the host of the stream the event came from
+/// ([`issuing_api`]): an entry another host issued keeps its own cursor.
+/// `cube_id` is the Cube whose stream received it: its own cursor moves
+/// ([`Account::cube_event_seqs`]), never another Cube's.
 pub async fn set_last_seen_event_seq_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
     event_seq: i64,
+    issuer: Option<&str>,
+    cube_id: Option<&str>,
 ) -> Result<(), ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -838,13 +988,29 @@ pub async fn set_last_seen_event_seq_for_email(
         }
     };
 
-    let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
+    let Some(account) = cache
+        .accounts
+        .iter_mut()
+        .find(|a| a.email == email && a.issued_by(issuer))
+    else {
         return Ok(());
     };
-    if account.last_seen_event_seq.unwrap_or(0) >= event_seq {
+    let mut moved = false;
+    if let Some(id) = cube_id.filter(|id| !id.is_empty()) {
+        let cursor = account.cube_event_seqs.entry(id.to_string()).or_insert(0);
+        if *cursor < event_seq {
+            *cursor = event_seq;
+            moved = true;
+        }
+    }
+    // The account's cursor, for an older build reading the file.
+    if account.last_seen_event_seq.unwrap_or(0) < event_seq {
+        account.last_seen_event_seq = Some(event_seq);
+        moved = true;
+    }
+    if !moved {
         return Ok(());
     }
-    account.last_seen_event_seq = Some(event_seq);
 
     let content = serde_json::to_vec_pretty(&cache)
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to serialize cache: {}", e)))?;
@@ -969,6 +1135,255 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         NetworkDirectory::new(path)
+    }
+
+    /// A session from another host replaces the entry's tokens and drops the
+    /// device id and event cursor the previous host issued; a session from
+    /// the same host keeps them, and a refresh keeps the entry's host.
+    #[tokio::test]
+    async fn an_entry_keeps_its_device_and_cursor_only_while_its_host_does() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let cube = super::issuing_api("https://cube.example/", "https://configured.example");
+        assert_eq!(cube.as_deref(), Some("https://cube.example"));
+        assert_eq!(
+            super::issuing_api("https://configured.example/", "https://configured.example"),
+            None
+        );
+        let seed = |api: Option<&str>| {
+            let mut cache = ConnectCache::default();
+            cache.upsert_credential(email, tokens("seed"), CacheAccountAction::NewLogin);
+            cache.accounts[0].device_id = Some("seed-device".into());
+            cache.accounts[0].last_seen_event_seq = Some(41);
+            cache.accounts[0].api_base_url = api.map(str::to_string);
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&cache).unwrap(),
+            )
+            .unwrap();
+            cache
+        };
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // The configured API's entry; the Cube's host saves its session.
+        let snapshot = seed(None);
+        super::persist_served_tokens(&dir, email, &tokens("cube"), &snapshot, cube.as_deref())
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.tokens.access_token, "cube-access");
+        assert_eq!(saved.api_base_url.as_deref(), Some("https://cube.example"));
+        assert!(saved.issued_by(cube.as_deref()) && !saved.issued_by(None));
+        assert_eq!((saved.device_id, saved.last_seen_event_seq), (None, None));
+
+        // The same host: the device id and cursor stay.
+        let snapshot = seed(cube.as_deref());
+        super::persist_served_tokens(&dir, email, &tokens("cube2"), &snapshot, cube.as_deref())
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.device_id.as_deref(), Some("seed-device"));
+        assert_eq!(saved.last_seen_event_seq, Some(41));
+
+        // A refresh of the Cube host's session keeps its host and device.
+        persist_refreshed_tokens(&dir, email, "cube2-refresh", &tokens("cube3"))
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.api_base_url.as_deref(), Some("https://cube.example"));
+        assert_eq!(saved.device_id.as_deref(), Some("seed-device"));
+
+        // A sign-in on the configured API takes the entry back from the
+        // Cube's host, without its device id or cursor.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        update_connect_cache_for_login(&dir, &tokens("login"), email, &snapshot)
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.api_base_url, None);
+        assert_eq!((saved.device_id, saved.last_seen_event_seq), (None, None));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A stream's event cursor is written only to an entry its host issued,
+    /// and a host change supersedes a re-registration started for the
+    /// previous host's session.
+    #[tokio::test]
+    async fn the_cursor_and_a_reregistration_stay_with_their_host() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("seed"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(3);
+        cache.accounts[0].reregister_claim = Some("about-claim".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Another host's stream leaves the configured API's cursor alone.
+        super::set_last_seen_event_seq_for_email(
+            &dir,
+            email,
+            50,
+            Some("https://cube.example"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(3));
+        super::set_last_seen_event_seq_for_email(&dir, email, 4, None, None)
+            .await
+            .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(4));
+
+        // The Cube's host takes the entry over: the claim goes with the
+        // previous host's device id and cursor.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        let taken = entry();
+        assert_eq!(taken.reregister_claim, None);
+        assert_eq!(taken.last_seen_event_seq, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// Each Cube resumes from its own cursor: a sibling Cube of the account
+    /// that received later events does not move it, and a Cube with none
+    /// starts from 0 once any Cube has its own. Before that, the account's
+    /// cursor (all an older build wrote) is where every Cube resumes.
+    #[tokio::test]
+    async fn each_cube_resumes_from_its_own_cursor() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(7);
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Written by a build with one cursor per account: every Cube
+        // resumes from it, and a Cube without an id always does.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 7);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 7);
+        assert_eq!(entry().event_seq_for(None), 7);
+
+        // Cube A receives events up to 20.
+        super::set_last_seen_event_seq_for_email(&dir, email, 20, None, Some("cube-a"))
+            .await
+            .unwrap();
+        // B has not received them: it does not resume past them.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 20);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 0);
+        // B's own events move only B's cursor; an older event moves nothing.
+        super::set_last_seen_event_seq_for_email(&dir, email, 9, None, Some("cube-b"))
+            .await
+            .unwrap();
+        super::set_last_seen_event_seq_for_email(&dir, email, 5, None, Some("cube-a"))
+            .await
+            .unwrap();
+        let both = entry();
+        assert_eq!(both.event_seq_for(Some("cube-a")), 20);
+        assert_eq!(both.event_seq_for(Some("cube-b")), 9);
+        // The account's cursor is still written, for an older build.
+        assert_eq!(both.last_seen_event_seq, Some(20));
+
+        // A host change clears every Cube's cursor with the entry's.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        assert!(entry().cube_event_seqs.is_empty());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// An unguarded write keeps the file's tokens only when they are a newer
+    /// copy of the same host's session.
+    #[tokio::test]
+    async fn newer_tokens_from_another_host_are_not_adopted() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        let mut newer = tokens("cube");
+        newer.expires_at = 999;
+        cache.upsert_credential(email, newer, CacheAccountAction::NewLogin);
+        cache.accounts[0].api_base_url = Some("https://cube.example".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let stored = update_connect_cache(
+            &dir,
+            &tokens("configured"),
+            email,
+            CacheAccountAction::Activate,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.access_token, "configured-access");
+        let entry = Account::from_cache(&dir, email).unwrap().unwrap();
+        assert_eq!(entry.api_base_url, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// The registration shortcut reuses a cached device id only from an
+    /// entry the registering session's host issued; otherwise it registers
+    /// (here: reaches for the network and fails, never returning the id).
+    #[tokio::test]
+    async fn the_registration_shortcut_ignores_another_hosts_device_id() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("cube-device".into());
+        cache.accounts[0].api_base_url = Some("https://cube.example".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let register = |issuer: Option<&'static str>| {
+            let dir = dir.clone();
+            async move {
+                crate::services::connect::grpc::bootstrap::ensure_device_registered(
+                    "invalid://must-not-reach-network",
+                    std::sync::Arc::new(tokio::sync::RwLock::new(tokens("a"))),
+                    &dir,
+                    email,
+                    "test desktop".into(),
+                    "test".into(),
+                    "test".into(),
+                    issuer,
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            register(Some("https://cube.example")).await.unwrap(),
+            "cube-device"
+        );
+        assert!(register(None).await.is_err());
+        std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
     #[tokio::test]
@@ -1578,6 +1993,7 @@ mod tests {
             "test desktop".into(),
             "test".into(),
             "test".into(),
+            None,
         )
         .await;
         assert!(matches!(
@@ -1731,6 +2147,7 @@ mod tests {
             "test desktop".into(),
             "test".into(),
             "test".into(),
+            None,
         )
         .await;
         assert!(matches!(

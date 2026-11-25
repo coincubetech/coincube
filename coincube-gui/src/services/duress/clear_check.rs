@@ -30,6 +30,11 @@
 //! network's (a Bitcoin Blake2b Cube's session is never in `bitcoin/`). The
 //! keyring's session was issued by the configured API, so it is not asked
 //! on another host.
+//!
+//! A saved session is only ever sent to the host that issued it: each
+//! `connect.json` entry records its host ([`Account::api_base_url`], none for
+//! the configured API), and the check passes over every entry another host
+//! issued, whichever API it is asking.
 
 use std::collections::HashSet;
 
@@ -38,7 +43,7 @@ use coincube_core::miniscript::bitcoin::Network;
 use crate::chain::ChainId;
 use crate::dir::CoincubeDirectory;
 use crate::services::coincube::{CoincubeClient, DuressCheckOutcome};
-use crate::services::connect::client::cache::{Account, ConnectCache};
+use crate::services::connect::client::cache::{issuing_api, Account, ConnectCache};
 
 use super::DuressLocalState;
 
@@ -77,20 +82,24 @@ pub async fn duress_still_active(
         }
     };
     let origin = state.lock_origin();
+    let configured_api_base_url = api_base_url;
     let (api_base_url, keyring) = match origin {
         Some(origin) if origin.api_base_url != api_base_url => (origin.api_base_url.as_str(), None),
         _ => (api_base_url, keyring),
     };
+    // Only entries this host issued are sent to it.
+    let issuer = issuing_api(api_base_url, configured_api_base_url);
+    let issuer = issuer.as_deref();
     match state.lock_account() {
         Some(account_id) => {
-            recorded_account_check(datadir, account_id, keyring, api_base_url).await
+            recorded_account_check(datadir, account_id, keyring, api_base_url, issuer).await
         }
         None => {
             let chain = match origin {
                 Some(origin) => origin.chain,
                 None => ChainId::from(launch_network?),
             };
-            launch_folder_check(datadir, chain, api_base_url).await
+            launch_folder_check(datadir, chain, api_base_url, issuer).await
         }
     }
 }
@@ -101,9 +110,12 @@ async fn launch_folder_check(
     datadir: &CoincubeDirectory,
     chain: ChainId,
     api_base_url: &str,
+    issuer: Option<&str>,
 ) -> Option<bool> {
     let cache = ConnectCache::from_file(&datadir.network_directory(chain)).ok()?;
-    let account = cache.active_account()?;
+    let account = cache
+        .active_account()
+        .filter(|account| account.issued_by(issuer))?;
     let client = client_for(api_base_url, &account.tokens.access_token);
     client.get_duress_state().await.ok().map(|s| s.active)
 }
@@ -150,6 +162,7 @@ async fn recorded_account_check(
     account_id: &str,
     keyring: Option<KeyringSession>,
     api_base_url: &str,
+    issuer: Option<&str>,
 ) -> Option<bool> {
     // One question per token: the keyring's session is usually also saved in
     // a folder, and the same account may be saved in several folders.
@@ -172,6 +185,10 @@ async fn recorded_account_check(
             continue;
         };
         for account in accounts_active_first(&cache) {
+            // Another host's session is never presented to this one.
+            if !account.issued_by(issuer) {
+                continue;
+            }
             let token = &account.tokens.access_token;
             if token.is_empty() || !asked.insert(token.clone()) {
                 continue;
@@ -279,6 +296,18 @@ pub(crate) mod tests {
         active: Option<&str>,
         accounts: &[(&str, &str)],
     ) {
+        write_connect_json_issued_by(root, chain, active, accounts, None)
+    }
+
+    /// As [`write_connect_json`], every entry issued by `issuer`
+    /// ([`Account::api_base_url`]; `None`: the configured API).
+    pub(crate) fn write_connect_json_issued_by(
+        root: &std::path::Path,
+        chain: ChainId,
+        active: Option<&str>,
+        accounts: &[(&str, &str)],
+        issuer: Option<&str>,
+    ) {
         let dir = root.join(chain.dir_name());
         std::fs::create_dir_all(&dir).unwrap();
         let accounts: Vec<_> = accounts
@@ -287,6 +316,7 @@ pub(crate) mod tests {
                 json!({
                     "email": email,
                     "tokens": {"access_token": token, "expires_at": 0, "refresh_token": ""},
+                    "api_base_url": issuer,
                 })
             })
             .collect();
@@ -855,11 +885,13 @@ pub(crate) mod tests {
             Some("other@example.com"),
             &[("other@example.com", "configured")],
         );
-        write_connect_json(
+        let cube_issuer = issuing_api(&cube_host.base_url(), "https://configured.invalid");
+        write_connect_json_issued_by(
             &root.0,
             ChainId::BitcoinBlake2b,
             Some("cube@example.com"),
             &[("cube@example.com", "cube")],
+            cube_issuer.as_deref(),
         );
         // On the configured API, user 9 is a different account that is not
         // in duress, and the keyring's sign-in is user 9 there too.
@@ -867,8 +899,8 @@ pub(crate) mod tests {
         let configured_user = mock_user(&configured, "configured", 9);
         let configured_clear = mock_duress(&configured, "configured", false);
         let keyring_clear = mock_duress(&configured, "kr", false);
-        // On the Cube's host the configured API's token is not a session.
-        mock_status(&cube_host, "/api/v1/user", "configured", 401);
+        // The configured API's token is never presented to the Cube's host.
+        let configured_on_cube_host = mock_user(&cube_host, "configured", 9);
         let cube_keyring = mock_duress(&cube_host, "kr", false);
         mock_user(&cube_host, "cube", 9);
         let cube_active = mock_duress(&cube_host, "cube", true);
@@ -878,9 +910,61 @@ pub(crate) mod tests {
         );
         cube_active.assert();
         cube_keyring.assert_hits(0);
+        configured_on_cube_host.assert_hits(0);
         configured_user.assert_hits(0);
         configured_clear.assert_hits(0);
         keyring_clear.assert_hits(0);
+    }
+
+    /// In the Cube's own folder, an entry the configured API issued (a local
+    /// Cube's session of the same account) is never presented to the Cube's
+    /// host either: the folder alone does not say which host issued a token.
+    #[tokio::test]
+    async fn a_served_cubes_lock_never_sends_the_configured_apis_entries_to_its_host() {
+        let root = TempRoot::new("clear-served-same-folder");
+        let cube_host = MockServer::start();
+        remote_lock_from_served_cube(&root, Some("9"), &cube_host);
+        write_connect_json(
+            &root.0,
+            ChainId::BitcoinBlake2b,
+            Some("cube@example.com"),
+            &[("cube@example.com", "configured-local")],
+        );
+        let configured = MockServer::start();
+        let sent_to_cube_host = mock_user(&cube_host, "configured-local", 9);
+        let cube_clear = mock_duress(&cube_host, "configured-local", false);
+        assert_eq!(
+            check(&root, Some(Network::Bitcoin), None, &configured).await,
+            None,
+            "no session of the Cube's host: the lock stays"
+        );
+        sent_to_cube_host.assert_hits(0);
+        cube_clear.assert_hits(0);
+    }
+
+    /// A lock asked of the configured API never presents a session another
+    /// host issued, wherever it is saved.
+    #[tokio::test]
+    async fn the_configured_api_is_never_sent_another_hosts_session() {
+        let root = TempRoot::new("clear-configured-other-host");
+        write_lock(&root.0, Some("9"));
+        let configured = MockServer::start();
+        let elsewhere = issuing_api("https://cube.example", &configured.base_url());
+        write_connect_json_issued_by(
+            &root.0,
+            ChainId::BitcoinBlake2b,
+            Some("cube@example.com"),
+            &[("cube@example.com", "cube-host-token")],
+            elsewhere.as_deref(),
+        );
+        let lookup = mock_user(&configured, "cube-host-token", 9);
+        let clear = mock_duress(&configured, "cube-host-token", false);
+        assert_eq!(
+            check(&root, Some(Network::Bitcoin), None, &configured).await,
+            None
+        );
+        lookup.assert_hits(0);
+        clear.assert_hits(0);
     }
 
     #[tokio::test]
@@ -898,11 +982,13 @@ pub(crate) mod tests {
             Some("other@example.com"),
             &[("other@example.com", "launch")],
         );
-        write_connect_json(
+        let cube_issuer = issuing_api(&cube_host.base_url(), "https://configured.invalid");
+        write_connect_json_issued_by(
             &root.0,
             ChainId::BitcoinBlake2b,
             Some("cube@example.com"),
             &[("cube@example.com", "cube")],
+            cube_issuer.as_deref(),
         );
         let configured = MockServer::start();
         let launch_clear = mock_duress(&configured, "launch", false);

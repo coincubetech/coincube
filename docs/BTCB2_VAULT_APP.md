@@ -72,9 +72,11 @@ kind of Cube, recorded once when the App is built (`Cache::connect_served`).
 **Connect-served** (a Vault on a Connect backend; the daemon is bound to the
 session it was opened with). Once its admitted panel reaches its dashboard,
 the App writes that session to the chain folder's `connect.json` with the
-guarded writer a keyring restore uses (`persist_restored_tokens`): exactly
+guarded writer a keyring restore uses (`persist_served_tokens`): exactly
 the Cube's access token, the saved sign-in's refresh token when that is the
-same session and otherwise an empty one, which this Cube never sends. It
+same session and otherwise an empty one, which this Cube never sends, and the
+host that issued it (`Account::api_base_url`, empty for the configured
+Connect API). It
 then runs the Bitcoin login completion (`connect_login_completed`). The
 admitted panel is never sent the login messages. A write the guarded writer
 refuses leaves the Cube open; the signer list says Mobile signing could not
@@ -85,8 +87,18 @@ this one is open. So every pipeline entry (`ensure_connect_ready`,
 `trigger_connect_stream_ready`, `connect_stream_ready`) takes the access
 token from the Cube's own client and refuses any other, compared by
 `connect_session::same_session`; nothing adopts or overwrites a different
-token found later. The device id is the one stored for the account; if none
-is stored and the registration's write is refused, the id registration
+token found later. The device id is the one stored for the account, and with
+the event cursor it is used only while the entry is this Cube's host's: a
+token, device id or cursor is only ever used with the host that issued it,
+so an entry another host wrote, or one the Cube's save took over from another
+host, gives neither (`Account::issued_by`; the registration shortcut checks
+the same). The event cursor is also each Cube's own
+(`Account::cube_event_seqs`, by Cube id): a Cube resumes from its own
+position, so another Cube of the account that received later events never
+moves it past an event this one has not received. A Cube with none starts
+from 0 once any Cube has its own, and until then resumes from the account's
+single cursor that older builds wrote, which is still written for them
+(`Account::event_seq_for`). If none is stored and the registration's write is refused, the id registration
 returned is used for this session only and dropped with it. Such an id
 cannot be renewed in place (renewal claims the id stored in the file), so if
 Connect later stops recognising it the Cube shows "Couldn't reconnect this
