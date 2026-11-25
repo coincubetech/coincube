@@ -2867,6 +2867,7 @@ impl Tab {
         let datadir = app.datadir().clone();
         let network = app.cache().network;
         let activating_account = app.duress_activating_account();
+        let origin = app.duress_lock_origin();
         let root = datadir.path();
         // Skip the persist on a real read error (vs a missing
         // file) rather than clobbering valid state with a default.
@@ -2875,7 +2876,7 @@ impl Tab {
         match crate::services::duress::DuressLocalState::load(root) {
             Ok(mut st) if !st.active => {
                 st.active = true;
-                st.record_remote_lock_account(activating_account);
+                st.record_remote_lock_account(activating_account, origin);
                 let mut saved = false;
                 for attempt in 1..=3 {
                     match st.save(root) {
@@ -10281,7 +10282,7 @@ mod duress_clear_check_tests {
         let root = TempRoot::new(label);
         write_lock(&root.0, None);
         let mut state = crate::services::duress::DuressLocalState::load(&root.0).unwrap();
-        state.record_remote_lock_account(Some("7".into()));
+        state.record_remote_lock_account(Some("7".into()), None);
         state.save(&root.0).unwrap();
         std::fs::create_dir_all(root.0.join("bitcoin-blake2b")).unwrap();
         root

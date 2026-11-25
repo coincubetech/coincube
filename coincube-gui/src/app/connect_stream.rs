@@ -439,6 +439,7 @@ impl App {
         );
         let root = self.datadir.path().to_path_buf();
         let activating_account = self.duress_activating_account();
+        let origin = self.duress_lock_origin();
         Task::perform(
             async move {
                 // load() already maps a missing file to Ok(default); a
@@ -462,7 +463,7 @@ impl App {
                 st.unlock_at = unlock_at;
                 // The locked screen then trusts only this account's saved
                 // sessions to confirm the clear (decision 26).
-                st.record_remote_lock_account(activating_account);
+                st.record_remote_lock_account(activating_account, origin);
                 // Retry: a failed persist would let a relaunch reconcile
                 // (which keys off st.active) drop back to the normal Home
                 // flow with Cube data intact while the server is still in
@@ -486,7 +487,9 @@ impl App {
     /// panel's signed-in user when it is the stream's account, else the saved
     /// keyring sign-in when that is the stream's account (the panel's user is
     /// not loaded yet while a restored session's stream already runs), else
-    /// none.
+    /// none. The keyring sign-in was issued by the configured API, so a
+    /// Connect-served Cube on another host never takes its user id: that id
+    /// names an account on a different server.
     pub(crate) fn duress_activating_account(&self) -> Option<String> {
         let email = self.connect_email.as_deref()?;
         if let Some(user) = self.panels.connect.account.user.as_ref() {
@@ -494,8 +497,29 @@ impl App {
                 return Some(user.id.to_string());
             }
         }
+        if self
+            .duress_lock_origin()
+            .is_some_and(|origin| origin.api_base_url != crate::services::coincube_api_base_url())
+        {
+            return None;
+        }
         let saved = crate::app::state::connect::account::load_session_from_keyring()?;
         (saved.email() == email).then(|| saved.user_id().to_string())
+    }
+
+    /// Where this App's stream account lives, for a remote lock it raises:
+    /// on a Connect-served Cube, the Cube's Connect API and chain folder
+    /// (see [`crate::services::duress::DuressLocalState::locked_by_origin`]);
+    /// elsewhere none, and the locked screen keeps using the configured API
+    /// and the launch network's folder.
+    pub(crate) fn duress_lock_origin(&self) -> Option<crate::services::duress::LockOrigin> {
+        if !self.cache.connect_served {
+            return None;
+        }
+        Some(crate::services::duress::LockOrigin {
+            api_base_url: self.cache.connect_api_base_url()?,
+            chain: self.cache.chain(),
+        })
     }
 
     fn handle_connect_duress_cleared(&self) -> Task<Message> {

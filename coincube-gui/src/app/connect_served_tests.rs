@@ -960,3 +960,39 @@ fn a_global_auth_change_closes_the_connect_served_tab_and_leaves_the_bitcoin_one
         }
     });
 }
+
+/// A remote duress lock delivered on a Connect-served Cube's stream records
+/// where its account lives, the Cube's Connect API and chain folder, so the
+/// locked screen asks that host and reads that folder rather than the
+/// configured API and `bitcoin/`. A Bitcoin Cube's lock records none.
+#[test]
+fn a_remote_lock_on_a_connect_served_cube_records_the_cubes_host_and_folder() {
+    use crate::services::connect::grpc::ConnectStreamMessage as M;
+    use crate::services::duress::{DuressLocalState, LockOrigin};
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        let mut app = served_cube_with_stream(root.path(), "returned-device").await;
+        assert_eq!(
+            app.duress_lock_origin(),
+            Some(LockOrigin {
+                api_base_url: CUBE_BASE.into(),
+                chain: crate::chain::ChainId::BitcoinBlake2b,
+            })
+        );
+        let lock = app.update(Message::ConnectStream(M::DuressActivated {
+            unlock_at: None,
+            source: "test".into(),
+        }));
+        drop(outputs(lock).await);
+        let state = DuressLocalState::load(app.datadir.path()).unwrap();
+        assert!(state.active);
+        assert_eq!(state.lock_origin(), app.duress_lock_origin().as_ref());
+        assert_bitcoin_untouched(root.path(), &before);
+
+        let bitcoin_root = tempfile::tempdir().unwrap();
+        let (bitcoin, _) = super::shell_tests::bitcoin_app(bitcoin_root.path());
+        assert_eq!(bitcoin.duress_lock_origin(), None);
+    });
+}
