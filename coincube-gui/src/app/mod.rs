@@ -7066,7 +7066,8 @@ impl App {
     }
 
     /// Drop everything this App holds for a Connect session that has ended:
-    /// the realtime stream and what the signer pipeline recorded for it. The
+    /// the realtime stream, what the signer pipeline recorded for it, and the
+    /// account's Lightning address with its receive QR. The
     /// stream's subscription is keyed on `connect_stream_config`, so clearing
     /// that stops it on the next `subscription()` tick.
     ///
@@ -12672,6 +12673,7 @@ pub(crate) mod tests {
         app.cache.connect_email = Some("alice@example.invalid".into());
         app.cache.has_connect_session = true;
         app.cache.connect_stream_status = ConnectionStatus::Connected;
+        app.cache.lightning_address = Some("alice@example.invalid".into());
     }
 
     fn assert_connect_session_state_cleared(app: &App) {
@@ -12726,7 +12728,10 @@ pub(crate) mod tests {
             .unwrap();
         let _enter = runtime.enter();
 
+        // `fork_app` leaves the cache's data directory relative; bind it to
+        // the temp root so nothing here can reach the crate directory.
         let mut app = fork_app(&root, true);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         seed_connect_session_state(&mut app);
         app.revoke_local_connect_services();
         assert_connect_session_state_cleared(&app);
@@ -12734,6 +12739,7 @@ pub(crate) mod tests {
         assert!(app.fork_connect_client.is_none());
 
         let mut app = fork_app(&root, true);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         seed_connect_session_state(&mut app);
         app.invalidate_fork_session();
         assert_connect_session_state_cleared(&app);
