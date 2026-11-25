@@ -2662,13 +2662,18 @@ pub(crate) mod tests {
         use crate::chain::ChainId;
         use crate::services::connect::grpc::connect_v1::SignerTarget;
         let cases = [
-            ("both", vec!["chain-identity-v1", "btcb2-unified-v1"], true),
+            ("both", vec!["chain-identity-v1", "btcb2-unified-v2"], true),
             ("identity-only", vec!["chain-identity-v1"], false),
-            ("unified-only", vec!["btcb2-unified-v1"], false),
+            ("unified-only", vec!["btcb2-unified-v2"], false),
+            (
+                "retired-name",
+                vec!["chain-identity-v1", "btcb2-unified-v1"],
+                false,
+            ),
             ("neither", vec![], false),
             (
                 "malformed-equivalent",
-                vec![" chain-identity-v1", "BTCB2-UNIFIED-V1"],
+                vec![" chain-identity-v1", "BTCB2-UNIFIED-V2"],
                 false,
             ),
         ];
@@ -2734,11 +2739,15 @@ pub(crate) mod tests {
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             for (name, capabilities) in [
                 ("identity-only", vec!["chain-identity-v1"]),
-                ("unified-only", vec!["btcb2-unified-v1"]),
+                ("unified-only", vec!["btcb2-unified-v2"]),
+                (
+                    "retired-name",
+                    vec!["chain-identity-v1", "btcb2-unified-v1"],
+                ),
                 ("neither", vec![]),
                 (
                     "malformed-equivalent",
-                    vec!["chain-identity-v1 ", "BTcb2-unified-v1"],
+                    vec!["chain-identity-v1 ", "BTcb2-unified-v2"],
                 ),
             ] {
                 let mut m = modal();
@@ -2793,13 +2802,17 @@ pub(crate) mod tests {
             ChainId::Regtest,
         ] {
             for (name, capabilities) in [
-                ("both", vec!["chain-identity-v1", "btcb2-unified-v1"]),
+                ("both", vec!["chain-identity-v1", "btcb2-unified-v2"]),
                 ("identity-only", vec!["chain-identity-v1"]),
-                ("unified-only", vec!["btcb2-unified-v1"]),
+                ("unified-only", vec!["btcb2-unified-v2"]),
+                (
+                    "retired-name",
+                    vec!["chain-identity-v1", "btcb2-unified-v1"],
+                ),
                 ("neither", vec![]),
                 (
                     "malformed-equivalent",
-                    vec!["chain-identity-v1 ", "BTcb2-unified-v1"],
+                    vec!["chain-identity-v1 ", "BTcb2-unified-v2"],
                 ),
             ] {
                 let mut m = modal();
