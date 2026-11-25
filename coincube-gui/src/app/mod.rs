@@ -15512,7 +15512,11 @@ pub(crate) mod shell_tests {
             "another App's split is not this Vault's"
         );
         assert!(!journal.exists(), "the journal is not written");
-        assert_eq!(progress(&app), (true, None), "this review is still building");
+        assert_eq!(
+            progress(&app),
+            (true, None),
+            "this review is still building"
+        );
 
         drop(app.update(Message::SplitBuilt {
             app: app.cache.app_generation,
@@ -15532,7 +15536,11 @@ pub(crate) mod shell_tests {
                 .contains(&txid.to_string()),
             "this App's split is journaled"
         );
-        assert_eq!(progress(&app), (false, None), "the review hears its own result");
+        assert_eq!(
+            progress(&app),
+            (false, None),
+            "the review hears its own result"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
