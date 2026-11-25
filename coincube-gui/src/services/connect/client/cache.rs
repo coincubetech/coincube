@@ -499,19 +499,88 @@ pub async fn set_device_id_for_email(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: None,
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
 }
 
+/// What [`discard_device_id_in_every_chain_folder`] did in one chain folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceIdDiscard {
+    /// The folder held an id for the account and it is gone.
+    Discarded,
+    /// The folder held an id and it is still there: a re-registration holds
+    /// the claim, or the file could not be updated. The id may be replayed.
+    Kept,
+}
+
+/// Discard the signer device id stored for `email` in every chain folder
+/// under `datadir`, for a computer that Connect says was removed from the
+/// account.
+///
+/// Removing a computer retires every signer device it registered, and each
+/// chain folder keeps its own. Nothing else clears them: a new sign-in keeps
+/// a stored id unless a re-registration was in progress, and registration
+/// short-circuits on a stored id. Left in place, a revoked id is replayed by
+/// the next Cube that opens on that chain, which is signed out again for it.
+///
+/// Returns what happened in each folder that held an id for the account;
+/// folders with no `connect.json`, no such account or no id are not listed.
+/// See [`set_device_id_for_email`] for when a clear is refused.
+pub async fn discard_device_id_in_every_chain_folder(
+    datadir: &crate::dir::CoincubeDirectory,
+    email: &str,
+) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
+    discard_device_id_in_chain_folders(datadir, email, crate::chain::ChainId::ALL).await
+}
+
+/// [`discard_device_id_in_every_chain_folder`] limited to `chains`. A
+/// Connect-served Bitcoin Blake2b Cube discards only its own chain's id: the
+/// same email in another folder may be an account on another Connect host,
+/// and the Cube never writes another chain's state (master invariant I3).
+pub async fn discard_device_id_in_chain_folders(
+    datadir: &crate::dir::CoincubeDirectory,
+    email: &str,
+    chains: impl IntoIterator<Item = crate::chain::ChainId>,
+) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
+    let mut outcomes = Vec::new();
+    for chain in chains {
+        let dir = datadir.network_directory(chain);
+        // Reading first also keeps the clear from creating an empty
+        // `connect.json` in a chain folder that never had one.
+        let held = Account::from_cache(&dir, email)
+            .ok()
+            .flatten()
+            .is_some_and(|account| account.device_id.is_some());
+        if !held {
+            continue;
+        }
+        let outcome = match set_device_id_for_email(&dir, email, None).await {
+            Ok(true) => DeviceIdDiscard::Discarded,
+            Ok(false) => DeviceIdDiscard::Kept,
+            Err(error) => {
+                tracing::warn!("Cannot discard the Connect device id for {chain}: {error}");
+                DeviceIdDiscard::Kept
+            }
+        };
+        outcomes.push((chain, outcome));
+    }
+    outcomes
+}
+
 /// Commit a plain registration only for the same active bearer that started
 /// its RPC. A later login cannot inherit an earlier RPC's device ID.
+///
+/// Both tokens are compared. A Bitcoin Blake2b Cube served by Connect saves
+/// its session with an empty refresh token when the saved sign-in is another
+/// session, so two opens of one account differ only in their access tokens.
+/// Elsewhere the two tokens always travel together.
 pub async fn set_device_id_for_email_if_token(
     network_dir: &NetworkDirectory,
     email: &str,
     device_id: &str,
-    expected_refresh_token: &str,
+    expected: &AccessTokenResponse,
 ) -> Result<bool, ConnectCacheError> {
     mutate_device_registration(
         network_dir,
@@ -519,7 +588,7 @@ pub async fn set_device_id_for_email_if_token(
         DeviceRegistrationUpdate::Set {
             device_id: Some(device_id),
             claim: None,
-            expected_refresh_token: Some(expected_refresh_token),
+            expected_tokens: Some(expected),
         },
     )
     .await
@@ -568,7 +637,7 @@ pub async fn finish_device_reregistration(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: Some(claim),
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
@@ -582,7 +651,7 @@ enum DeviceRegistrationUpdate<'a> {
     Set {
         device_id: Option<&'a str>,
         claim: Option<&'a str>,
-        expected_refresh_token: Option<&'a str>,
+        expected_tokens: Option<&'a AccessTokenResponse>,
     },
 }
 
@@ -672,7 +741,7 @@ fn apply_device_registration_update(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim,
-            expected_refresh_token,
+            expected_tokens,
         } => {
             if let Some(claim) = claim {
                 if account.reregister_claim.as_deref() != Some(claim) {
@@ -694,7 +763,7 @@ fn apply_device_registration_update(
                     account,
                     is_active,
                     device_id,
-                    expected_refresh_token,
+                    expected_tokens,
                 )
             }
         }
@@ -706,11 +775,13 @@ fn apply_unclaimed_device_registration(
     account: &mut Account,
     is_active: bool,
     device_id: Option<&str>,
-    expected_refresh_token: Option<&str>,
+    expected_tokens: Option<&AccessTokenResponse>,
 ) -> DeviceRegistrationMutation {
-    if expected_refresh_token
-        .is_some_and(|expected| !is_active || account.tokens.refresh_token != expected)
-    {
+    if expected_tokens.is_some_and(|expected| {
+        !is_active
+            || account.tokens.refresh_token != expected.refresh_token
+            || account.tokens.access_token != expected.access_token
+    }) {
         return DeviceRegistrationMutation::Unchanged(false);
     }
     if has_live_reregister_claim_for_account(network_dir, account) {
@@ -875,10 +946,11 @@ impl std::fmt::Display for ConnectCacheError {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_device_reregistration, finish_device_reregistration, persist_refreshed_tokens,
-        persist_restored_tokens, set_device_id_for_email, set_device_id_for_email_if_token,
-        update_connect_cache, update_connect_cache_for_login, AccessTokenResponse,
-        CacheAccountAction, ConnectCache, CONNECT_CACHE_FILENAME,
+        begin_device_reregistration, discard_device_id_in_every_chain_folder,
+        finish_device_reregistration, persist_refreshed_tokens, persist_restored_tokens,
+        set_device_id_for_email, set_device_id_for_email_if_token, update_connect_cache,
+        update_connect_cache_for_login, AccessTokenResponse, Account, CacheAccountAction,
+        ConnectCache, DeviceIdDiscard, CONNECT_CACHE_FILENAME,
     };
     use crate::dir::NetworkDirectory;
 
@@ -1183,6 +1255,56 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
+    /// A Connect-served Bitcoin Blake2b Cube saves its session with an empty
+    /// refresh token when the saved sign-in is another session. Two opens of
+    /// one account then share the refresh token (empty) and differ only in
+    /// their access tokens: the guard must still tell them apart.
+    #[tokio::test]
+    async fn two_opens_with_an_empty_refresh_token_are_told_apart() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let open = |access: &str| AccessTokenResponse {
+            access_token: access.into(),
+            refresh_token: String::new(),
+            expires_at: 123,
+        };
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, open("second-open"), CacheAccountAction::Activate);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "first-device",
+            &open("first-open")
+        )
+        .await
+        .unwrap());
+        assert!(super::Account::from_cache(&dir, email)
+            .unwrap()
+            .unwrap()
+            .device_id
+            .is_none());
+        assert!(set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "second-device",
+            &open("second-open")
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            super::Account::from_cache(&dir, email)
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("second-device")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
     #[tokio::test]
     async fn late_plain_registration_cannot_write_into_new_login() {
         let dir = test_network_dir();
@@ -1197,7 +1319,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            !set_device_id_for_email_if_token(&dir, email, "late-device", "old-refresh")
+            !set_device_id_for_email_if_token(&dir, email, "late-device", &tokens("old"))
                 .await
                 .unwrap()
         );
@@ -1840,14 +1962,11 @@ mod tests {
         assert_eq!(account.tokens.refresh_token, was.tokens.refresh_token);
         assert_eq!(account.last_seen_event_seq, Some(42));
 
-        assert!(set_device_id_for_email_if_token(
-            &dir,
-            email,
-            "fresh-device",
-            &was.tokens.refresh_token
-        )
-        .await
-        .unwrap());
+        assert!(
+            set_device_id_for_email_if_token(&dir, email, "fresh-device", &was.tokens)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             ConnectCache::from_file(&dir)
                 .unwrap()
@@ -1894,5 +2013,113 @@ mod tests {
         assert_eq!(account.device_id, None);
         assert_eq!(account.reregister_claim, None);
         std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+    fn write_cache(dir: &NetworkDirectory, accounts: &[(&str, Option<&str>)]) {
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let mut cache = ConnectCache::default();
+        for (email, device_id) in accounts {
+            cache.upsert_credential(email, tokens(email), CacheAccountAction::NewLogin);
+            cache
+                .accounts
+                .iter_mut()
+                .find(|a| a.email == *email)
+                .unwrap()
+                .device_id = device_id.map(str::to_string);
+        }
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn device_id(dir: &NetworkDirectory, email: &str) -> Option<String> {
+        Account::from_cache(dir, email)
+            .unwrap()
+            .and_then(|account| account.device_id)
+    }
+
+    /// A removed computer loses every signer device it registered, one per
+    /// chain folder. All of the account's ids go; another account's stay;
+    /// and a chain folder with no cache is not given one.
+    #[tokio::test]
+    async fn a_removed_computer_discards_its_device_id_in_every_chain_folder() {
+        use crate::chain::ChainId;
+        use crate::dir::CoincubeDirectory;
+
+        let root = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(root.path().to_path_buf());
+        let (alice, bob) = ("alice@example.com", "bob@example.com");
+        let bitcoin = datadir.network_directory(ChainId::Bitcoin);
+        let fork = datadir.network_directory(ChainId::BitcoinBlake2b);
+        let testnet4 = datadir.network_directory(ChainId::Testnet4);
+        let signet = datadir.network_directory(ChainId::Signet);
+        write_cache(&bitcoin, &[(alice, Some("alice-bitcoin"))]);
+        write_cache(
+            &fork,
+            &[(bob, Some("bob-fork")), (alice, Some("alice-fork"))],
+        );
+        write_cache(&testnet4, &[(bob, Some("bob-testnet4")), (alice, None)]);
+        std::fs::create_dir_all(signet.path()).unwrap();
+
+        let outcomes = discard_device_id_in_every_chain_folder(&datadir, alice).await;
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (ChainId::Bitcoin, DeviceIdDiscard::Discarded),
+                (ChainId::BitcoinBlake2b, DeviceIdDiscard::Discarded),
+            ]
+        );
+        assert_eq!(device_id(&bitcoin, alice), None);
+        assert_eq!(device_id(&fork, alice), None);
+        assert_eq!(device_id(&fork, bob).as_deref(), Some("bob-fork"));
+        assert_eq!(device_id(&testnet4, bob).as_deref(), Some("bob-testnet4"));
+        // The session is kept: only the id went.
+        assert!(Account::from_cache(&bitcoin, alice).unwrap().is_some());
+        assert!(!signet.path().join(CONNECT_CACHE_FILENAME).exists());
+        assert!(!datadir.network_directory(ChainId::Regtest).path().exists());
+    }
+
+    /// Why the discard is needed even in the folder the next sign-in is
+    /// written to: a new sign-in keeps the stored id, so a revoked one would
+    /// be replayed.
+    #[tokio::test]
+    async fn a_new_sign_in_keeps_a_stored_device_id() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        write_cache(&dir, &[(email, Some("revoked-id"))]);
+
+        update_connect_cache(&dir, &tokens("new"), email, CacheAccountAction::NewLogin)
+            .await
+            .unwrap();
+
+        assert_eq!(device_id(&dir, email).as_deref(), Some("revoked-id"));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A folder whose id is held by a live re-registration is reported as
+    /// kept, so the caller knows that id may be replayed.
+    #[tokio::test]
+    async fn a_device_id_under_a_live_claim_is_reported_as_kept() {
+        use crate::chain::ChainId;
+        use crate::dir::CoincubeDirectory;
+
+        let root = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(root.path().to_path_buf());
+        let email = "alice@example.com";
+        let bitcoin = datadir.network_directory(ChainId::Bitcoin);
+        write_cache(&bitcoin, &[(email, Some("device-a"))]);
+        let claim = begin_device_reregistration(&bitcoin, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            discard_device_id_in_every_chain_folder(&datadir, email).await,
+            vec![(ChainId::Bitcoin, DeviceIdDiscard::Kept)]
+        );
+        assert_eq!(device_id(&bitcoin, email).as_deref(), Some("device-a"));
+        drop(claim);
     }
 }

@@ -19,6 +19,7 @@
 //! crash never leaves a half-written JSON document on disk.
 
 pub mod cipher;
+pub mod clear_check;
 pub mod drain;
 pub mod enroll;
 pub mod journal;
@@ -136,6 +137,30 @@ pub struct DuressLocalState {
     /// (no-Connect) enrollment — that path wipes locally with no server POST.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// The Connect account whose stream delivered a remote duress activation
+    /// that locked this device. Set only by the remote path and cleared with
+    /// the lock ([`Self::clear_lock`]). Kept apart from [`Self::account_id`],
+    /// which is the on-device enrolment's identity: a remote lock raised by
+    /// another account must not redirect that enrolment's activation POST or
+    /// its remote-disable reconcile.
+    #[serde(default)]
+    pub locked_by_account_id: Option<String>,
+    /// The current lock was raised remotely, over a Connect stream. Such a
+    /// lock is never judged by the enrolling account: when the raising
+    /// account could not be told, it takes the check for a lock with no
+    /// recorded account. Cleared with the lock.
+    #[serde(default)]
+    pub remote_lock: bool,
+    /// Where the remote lock's account lives, when the stream that delivered
+    /// it belonged to a Connect-served Cube: that Cube's Connect API and
+    /// chain folder. A user id is only meaningful on the host that issued
+    /// it, and the Cube's session is saved in its own chain's folder, so the
+    /// locked screen asks that host and reads that folder instead of the
+    /// configured API and the launch network's folder. `None` for a lock
+    /// raised on the configured API. Recorded with
+    /// [`Self::locked_by_account_id`] and cleared with the lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_by_origin: Option<LockOrigin>,
     /// Set immediately **before** enrollment starts arming Cubes, cleared once
     /// the enrollment is fully recorded. `arming && !enrolled` is an orphan: a
     /// crash left live duress markers behind with no enrollment to explain
@@ -159,6 +184,17 @@ pub struct DuressLocalState {
     /// between still leaves the next one to say so.
     #[serde(default)]
     pub migration_disarm_notice: bool,
+}
+
+/// The Connect host and chain folder a remote lock's account belongs to
+/// ([`DuressLocalState::locked_by_origin`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockOrigin {
+    /// The Connect API base URL that issued the account's sessions.
+    pub api_base_url: String,
+    /// The chain folder whose `connect.json` holds the Cube's session.
+    pub chain: crate::chain::ChainId,
 }
 
 /// A durably-enqueued activation `POST` that must eventually reach Connect.
@@ -211,11 +247,78 @@ impl DuressLocalState {
             || self.migration_disarm_notice
             || self.duress_code.is_some()
             || self.account_id.is_some()
+            || self.locked_by_account_id.is_some()
+            || self.remote_lock
+            || self.locked_by_origin.is_some()
             || self.pending_activation.is_some()
             || self.unlock_at.is_some()
             || self.last_activation_attempt.is_some();
         let bytes = cipher::seal_json(coincube_dir, &json, sensitive)?;
         write_bytes_atomic(&Self::path(coincube_dir), &bytes)
+    }
+
+    /// Marks the lock as raised remotely and records the account whose
+    /// Connect stream delivered the activation, so the locked screen trusts
+    /// only that account's sessions to confirm a clear (decision 26). An
+    /// unknown account (`None`) does not replace one already recorded for
+    /// this lock. [`Self::account_id`] is left alone.
+    ///
+    /// `origin` is where that account lives ([`Self::locked_by_origin`]). It
+    /// is recorded together with the account, so the two always describe the
+    /// same stream; an unknown account records it only when no account is
+    /// recorded yet, so the check for such a lock reads the right folder on
+    /// the right host.
+    pub fn record_remote_lock_account(
+        &mut self,
+        activating_account: Option<String>,
+        origin: Option<LockOrigin>,
+    ) {
+        self.remote_lock = true;
+        if activating_account.is_some() {
+            self.locked_by_account_id = activating_account;
+            self.locked_by_origin = origin;
+        } else if self.locked_by_account_id.is_none() {
+            self.locked_by_origin = origin;
+        }
+    }
+
+    /// Where the current lock's account lives, for a remote lock raised from
+    /// a Connect-served Cube ([`Self::locked_by_origin`]).
+    pub fn lock_origin(&self) -> Option<&LockOrigin> {
+        if self.remote_lock {
+            self.locked_by_origin.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Marks the lock as raised on this computer (a duress PIN or code):
+    /// judged by the enrolling account, whatever an earlier remote lock left.
+    pub fn record_local_lock(&mut self) {
+        self.remote_lock = false;
+        self.locked_by_account_id = None;
+        self.locked_by_origin = None;
+    }
+
+    /// The account whose sessions alone may confirm that this lock was
+    /// cleared: for a remote lock, the account that raised it; for a local
+    /// one, the enrolling account. `None` when that account is unknown.
+    pub fn lock_account(&self) -> Option<&str> {
+        if self.remote_lock {
+            self.locked_by_account_id.as_deref()
+        } else {
+            self.account_id.as_deref()
+        }
+    }
+
+    /// Lifts the lock: not active, no unlock time, nothing recorded about
+    /// who raised it.
+    pub fn clear_lock(&mut self) {
+        self.active = false;
+        self.unlock_at = None;
+        self.locked_by_account_id = None;
+        self.locked_by_origin = None;
+        self.remote_lock = false;
     }
 
     /// Resets this state to the un-enrolled baseline for a duress *disable*
@@ -277,6 +380,12 @@ mod tests {
             }),
             duress_code: Some("enc:cafebabe".to_string()),
             account_id: Some("acct_123".to_string()),
+            locked_by_account_id: Some("acct_456".to_string()),
+            remote_lock: true,
+            locked_by_origin: Some(LockOrigin {
+                api_base_url: "https://connect.example".to_string(),
+                chain: crate::chain::ChainId::BitcoinBlake2b,
+            }),
             arming: false,
             migration_disarm_notice: false,
         }

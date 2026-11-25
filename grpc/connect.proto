@@ -317,8 +317,8 @@ message SubmitPartialSignatureRequest {
   // on a historical row whose stored network is empty it must equal the Cube's
   // canonical network (the row is not rewritten). Empty is accepted only inside
   // the compatibility window — a Bitcoin-family session while
-  // SIGNING_REQUIRE_CHAIN_IDENTITY is off; it is required on every Bitcoin
-  // Blake2b session and on every session once that flag is on.
+  // SIGNING_REQUIRE_CHAIN_IDENTITY is explicitly off; it is required on every
+  // Bitcoin Blake2b session and, by default, on every session.
   string network = 5;
 }
 
@@ -333,6 +333,14 @@ message RegisterDeviceRequest {
   string app_version = 4;
   string os_version = 5;
   string device_pubkey = 6;
+  // What this build can do, as free-form names. Stored on the device and
+  // REPLACED by every registration, so it always describes the installed
+  // build; sending none clears it. Names the server reads today:
+  // "chain-identity-v1" (states and checks the session's chain) and
+  // "btcb2-unified-v2" (can produce a unified signature; sent only by Mobile
+  // builds that load the unified signing library). A Bitcoin Blake2b session
+  // targets a device only when it stores both. "btcb2-unified-v1" is retired:
+  // builds released before that library send it, and it grants nothing.
   repeated string capabilities = 7;
   // transport_pubkey is this device's ECIES recipient key for the signing rail
   // (33-byte compressed secp256k1). BOTH sides register one: the desktop (which
@@ -467,10 +475,13 @@ message UnresolvedSigner {
   // "enrolled_device_unavailable" (the key is bound to a device Connect can no
   // longer target — revoked, gone, or another account's; the owner opens
   // Keychain on the handset holding the key, which re-claims it).
-  // Reserved by docs/signing-identity-btcb2.md §3.3 (emitted once that check
-  // ships): "signer_app_outdated" — a target device whose capabilities cannot
-  // take part in the session's chain. "owner_unknown" was documented here
-  // earlier and is matched by the desktop, but the server does not emit it.
+  // Also emitted today: "signer_app_outdated" — a target device whose stored
+  // capabilities cannot take part in the session's chain. On a Bitcoin Blake2b
+  // Vault that is a device lacking "chain-identity-v1" or "btcb2-unified-v2"
+  // (docs/signing-identity-btcb2.md §5); "btcb2-unified-v1", sent by Mobile
+  // builds released before the unified signing library, does not count.
+  // "owner_unknown" was documented here earlier and is matched by the desktop,
+  // but the server does not emit it.
   string reason = 4;
 }
 

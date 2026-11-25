@@ -407,6 +407,10 @@ pub enum SpendTxMessage {
     /// Connect bootstrap (device registration + stream) via
     /// `Message::EnsureConnectReady`.
     KeychainEnsureConnect,
+    /// From a signer row on a Cube whose Mobile signing could not start from
+    /// the session it was opened with: run `Message::EnsureConnectReady`
+    /// again, keeping the picker open.
+    RetryConnectSigning,
     /// From the "Keychain signing needs Connect" modal: dismiss it and
     /// jump to Vault → Settings → Pair so the user can pair a phone over
     /// Wi-Fi and sign locally without Connect.

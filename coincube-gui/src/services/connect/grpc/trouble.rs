@@ -8,7 +8,10 @@
 //! Server contract (coincube-api, "S1"): a missing or wrong-owner device row
 //! answers `NOT_FOUND` with reason `DEVICE_UNKNOWN`; a revoked row answers
 //! `PERMISSION_DENIED` with reason `DEVICE_REVOKED`; a lookup that didn't
-//! complete answers `UNAVAILABLE`. The reason travels in the
+//! complete answers `UNAVAILABLE`. Removing a computer also ends its session,
+//! so a call made after the removal answers `UNAUTHENTICATED` with reason
+//! `COMPUTER_REMOVED`; any other ended session answers `UNAUTHENTICATED` with
+//! `SESSION_ENDED` or no reason, and is not a refusal. The reason travels in the
 //! [`REASON_METADATA`] trailer or as the first word of the status message.
 //! Servers from before S1 answer a bare `PERMISSION_DENIED` for all three,
 //! which is [`Refusal::Unexplained`] here and is never renewed on its own:
@@ -23,7 +26,9 @@ pub enum Refusal {
     /// Connect has no record of this id for the account. Safe to renew.
     DeviceUnknown,
     /// The computer was removed from the account. Never renewed; the user
-    /// signs in again.
+    /// signs in again. Connect says so in two ways, depending on which call
+    /// meets the removal first: `DEVICE_REVOKED` for the device row, or
+    /// `COMPUTER_REMOVED` for the session the removal ended.
     DeviceRevoked,
     /// A bare `PERMISSION_DENIED` from a server without reasons. It may be
     /// any of the above or a failed lookup, so Tenshu re-checks slowly and
@@ -51,10 +56,14 @@ fn reason(status: &tonic::Status) -> Option<String> {
         .message()
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .next()?;
-    first
-        .starts_with("DEVICE_")
+    // Matched as the server writes them, in upper case. A trailer may be in
+    // any case; the first word of a message is not loosened the same way.
+    (first.starts_with("DEVICE_") || first == COMPUTER_REMOVED || first == SESSION_ENDED)
         .then(|| first.to_ascii_uppercase())
 }
+
+const COMPUTER_REMOVED: &str = "COMPUTER_REMOVED";
+const SESSION_ENDED: &str = "SESSION_ENDED";
 
 /// The refusal a status carries, if it is one.
 pub fn refusal(status: &tonic::Status) -> Option<Refusal> {
@@ -66,6 +75,11 @@ pub fn refusal(status: &tonic::Status) -> Option<Refusal> {
             Some("DEVICE_REVOKED") => Refusal::DeviceRevoked,
             _ => Refusal::Unexplained,
         }),
+        // An ended session is a refusal of this computer only when Connect
+        // says the session ended because the computer was removed.
+        tonic::Code::Unauthenticated => {
+            (reason.as_deref() == Some(COMPUTER_REMOVED)).then_some(Refusal::DeviceRevoked)
+        }
         _ => None,
     }
 }
@@ -149,6 +163,60 @@ mod tests {
             .metadata_mut()
             .insert(REASON_METADATA, "device_revoked".parse().unwrap());
         assert_eq!(refusal(&status), Some(Refusal::DeviceRevoked));
+    }
+
+    /// Removing a computer retires its device rows and ends its session. The
+    /// call that meets the ended session first is told `COMPUTER_REMOVED`,
+    /// and that is the same refusal as a revoked device row.
+    #[test]
+    fn a_session_ended_by_removing_the_computer_is_a_revoked_device() {
+        assert_eq!(
+            refusal(&tonic::Status::unauthenticated(
+                "COMPUTER_REMOVED: this computer was removed"
+            )),
+            Some(Refusal::DeviceRevoked)
+        );
+        let mut status = tonic::Status::unauthenticated("session ended");
+        status
+            .metadata_mut()
+            .insert(REASON_METADATA, "computer_removed".parse().unwrap());
+        assert_eq!(refusal(&status), Some(Refusal::DeviceRevoked));
+    }
+
+    /// Any other ended session is not a refusal of this computer: signing in
+    /// again is the whole remedy, and nothing about the device is discarded.
+    #[test]
+    fn any_other_ended_session_is_not_a_refusal() {
+        for status in [
+            tonic::Status::unauthenticated("SESSION_ENDED: signed out"),
+            tonic::Status::unauthenticated("token expired"),
+            tonic::Status::unauthenticated(""),
+            // A reason that belongs to another status code changes nothing.
+            tonic::Status::unauthenticated("DEVICE_REVOKED: device was removed"),
+        ] {
+            assert_eq!(refusal(&status), None, "{:?}", status.message());
+        }
+        let mut status = tonic::Status::unauthenticated("session ended");
+        status
+            .metadata_mut()
+            .insert(REASON_METADATA, "session_ended".parse().unwrap());
+        assert_eq!(refusal(&status), None);
+        // The first word of a message is matched as the server writes it.
+        assert_eq!(
+            refusal(&tonic::Status::unauthenticated(
+                "computer_removed: this computer was removed"
+            )),
+            None
+        );
+        assert_eq!(
+            refusal(&tonic::Status::permission_denied("device_revoked: gone")),
+            Some(Refusal::Unexplained)
+        );
+        // And the reason alone, on a code that is not a refusal, is nothing.
+        assert_eq!(
+            refusal(&tonic::Status::unavailable("COMPUTER_REMOVED: later")),
+            None
+        );
     }
 
     #[test]
