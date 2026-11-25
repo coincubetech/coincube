@@ -513,7 +513,7 @@ mod tests {
         h.orch.local_state.account_id = Some("acct_enrolled".to_string());
         h.orch
             .local_state
-            .record_remote_lock_account(Some("acct_other".to_string()));
+            .record_remote_lock_account(Some("acct_other".to_string()), None);
         h.orch.activate(None).await.unwrap();
         h.notify.notified().await;
         assert_eq!(

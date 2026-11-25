@@ -2402,6 +2402,10 @@ pub enum SigningKeyState {
     /// account than the one that created it. Carries the explanation and a
     /// "Switch account" affordance that leads to the Connect overview.
     NeedsAccountSwitch(String),
+    /// Unidentified key on a Cube whose Mobile signing could not start from
+    /// the session it was opened with. Carries the reason and a "Try again"
+    /// affordance.
+    StartFailed(String),
     /// A Keychain phone's last attempt over the local network failed. Offers
     /// Connect instead when it has resolved this key, and another local
     /// attempt unless the phone asked to be paired again.
@@ -2553,6 +2557,20 @@ fn signing_key_row(
             .push(
                 secondary_action(row_id("switch-account"), localized_copy("Switch account"))
                     .on_press(Message::OpenConnectSwitchAccount),
+            )
+            .into(),
+        SigningKeyState::StartFailed(reason) => Column::new()
+            .spacing(6)
+            .align_x(Alignment::End)
+            .push(p1_regular(notice(reason.clone())).style(theme::text::secondary))
+            .push(
+                button::secondary_action(
+                    row_id("retry-connect"),
+                    Some(icon::reload_icon()),
+                    CopyText::Retry.get(),
+                    Message::FocusAction,
+                )
+                .on_press(Message::Spend(SpendTxMessage::RetryConnectSigning)),
             )
             .into(),
         SigningKeyState::Retry(idx) => button::secondary_action(

@@ -28,6 +28,15 @@ cryptographic verification under Wallet.chain remains authoritative for the
 transaction's post-signing replay status; capability metadata alone never marks
 a spend replay protected.
 
+On a Connect-served BTCB2 Cube the signer bootstrap now feeds this client:
+the Cube's own session is saved in its chain folder's `connect.json`, and
+device registration and the stream run on that session, pinned to it
+(`BTCB2_VAULT_APP.md`, "Connect signer bootstrap"). The signing window's REST
+client uses the endpoint the pipeline recorded; on BTCB2 there is no
+fallback to the configured API, so the Cube's bearer never reaches the
+default host. A local BTCB2 Cube runs the same bootstrap from its own
+sign-in, as a Bitcoin Cube does.
+
 LAN now has explicit BTCB2 refusal independent of the global dormant flag:
 pairing Start/Pick refuses, hardware discovery skips phone browsing/dialing,
 and PhoneSigner::sign_tx refuses before inspecting or sealing a PSBT. Switching

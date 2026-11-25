@@ -21,6 +21,15 @@
 //! * **No account is recorded.** The check stays exactly as it was before
 //!   decision 26: the active account of the launch network's folder, and
 //!   nothing else. Another account's "not active" must not clear the lock.
+//!
+//! A remote lock raised from a Connect-served Cube also records where its
+//! account lives ([`DuressLocalState::lock_origin`]): that Cube's Connect API
+//! and chain folder. The check then asks that API instead of the configured
+//! one, since a user id means nothing on another host, and for a lock with no
+//! recorded account reads that chain's folder instead of the launch
+//! network's (a Bitcoin Blake2b Cube's session is never in `bitcoin/`). The
+//! keyring's session was issued by the configured API, so it is not asked
+//! on another host.
 
 use std::collections::HashSet;
 
@@ -67,11 +76,22 @@ pub async fn duress_still_active(
             return None;
         }
     };
+    let origin = state.lock_origin();
+    let (api_base_url, keyring) = match origin {
+        Some(origin) if origin.api_base_url != api_base_url => (origin.api_base_url.as_str(), None),
+        _ => (api_base_url, keyring),
+    };
     match state.lock_account() {
         Some(account_id) => {
             recorded_account_check(datadir, account_id, keyring, api_base_url).await
         }
-        None => launch_folder_check(datadir, launch_network?, api_base_url).await,
+        None => {
+            let chain = match origin {
+                Some(origin) => origin.chain,
+                None => ChainId::from(launch_network?),
+            };
+            launch_folder_check(datadir, chain, api_base_url).await
+        }
     }
 }
 
@@ -79,10 +99,10 @@ pub async fn duress_still_active(
 /// decision 26.
 async fn launch_folder_check(
     datadir: &CoincubeDirectory,
-    network: Network,
+    chain: ChainId,
     api_base_url: &str,
 ) -> Option<bool> {
-    let cache = ConnectCache::from_file(&datadir.network_directory(network)).ok()?;
+    let cache = ConnectCache::from_file(&datadir.network_directory(chain)).ok()?;
     let account = cache.active_account()?;
     let client = client_for(api_base_url, &account.tokens.access_token);
     client.get_duress_state().await.ok().map(|s| s.active)
@@ -720,7 +740,7 @@ pub(crate) mod tests {
     fn remote_lock_by_9_enrolled_as_7(root: &TempRoot) {
         write_lock(&root.0, Some("7"));
         let mut state = DuressLocalState::load(&root.0).unwrap();
-        state.record_remote_lock_account(Some("9".into()));
+        state.record_remote_lock_account(Some("9".into()), None);
         state.save(&root.0).unwrap();
     }
 
@@ -781,7 +801,7 @@ pub(crate) mod tests {
         let root = TempRoot::new("clear-remote-unknown");
         write_lock(&root.0, Some("7"));
         let mut state = DuressLocalState::load(&root.0).unwrap();
-        state.record_remote_lock_account(None);
+        state.record_remote_lock_account(None, None);
         state.save(&root.0).unwrap();
         assert_eq!(state.lock_account(), None);
         write_connect_json(
@@ -805,11 +825,129 @@ pub(crate) mod tests {
         keyring_enrolling.assert_hits(0);
     }
 
+    /// A remote lock raised from a Connect-served Bitcoin Blake2b Cube whose
+    /// Connect API is `cube_host`, by `account` (unknown when `None`).
+    fn remote_lock_from_served_cube(
+        root: &TempRoot,
+        account: Option<&str>,
+        cube_host: &MockServer,
+    ) {
+        write_lock(&root.0, Some("7"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.record_remote_lock_account(
+            account.map(str::to_string),
+            Some(super::super::LockOrigin {
+                api_base_url: cube_host.base_url(),
+                chain: ChainId::BitcoinBlake2b,
+            }),
+        );
+        state.save(&root.0).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_served_cubes_lock_is_asked_of_the_cubes_host_not_the_configured_one() {
+        let root = TempRoot::new("clear-served-host");
+        let cube_host = MockServer::start();
+        remote_lock_from_served_cube(&root, Some("9"), &cube_host);
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            Some("other@example.com"),
+            &[("other@example.com", "configured")],
+        );
+        write_connect_json(
+            &root.0,
+            ChainId::BitcoinBlake2b,
+            Some("cube@example.com"),
+            &[("cube@example.com", "cube")],
+        );
+        // On the configured API, user 9 is a different account that is not
+        // in duress, and the keyring's sign-in is user 9 there too.
+        let configured = MockServer::start();
+        let configured_user = mock_user(&configured, "configured", 9);
+        let configured_clear = mock_duress(&configured, "configured", false);
+        let keyring_clear = mock_duress(&configured, "kr", false);
+        // On the Cube's host the configured API's token is not a session.
+        mock_status(&cube_host, "/api/v1/user", "configured", 401);
+        let cube_keyring = mock_duress(&cube_host, "kr", false);
+        mock_user(&cube_host, "cube", 9);
+        let cube_active = mock_duress(&cube_host, "cube", true);
+        assert_eq!(
+            check(&root, Some(Network::Bitcoin), keyring(9, "kr"), &configured).await,
+            Some(true)
+        );
+        cube_active.assert();
+        cube_keyring.assert_hits(0);
+        configured_user.assert_hits(0);
+        configured_clear.assert_hits(0);
+        keyring_clear.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn a_served_cubes_lock_with_no_account_reads_the_cubes_folder_on_its_host() {
+        let root = TempRoot::new("clear-served-folder");
+        let cube_host = MockServer::start();
+        remote_lock_from_served_cube(&root, None, &cube_host);
+        assert_eq!(
+            DuressLocalState::load(&root.0).unwrap().lock_account(),
+            None
+        );
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            Some("other@example.com"),
+            &[("other@example.com", "launch")],
+        );
+        write_connect_json(
+            &root.0,
+            ChainId::BitcoinBlake2b,
+            Some("cube@example.com"),
+            &[("cube@example.com", "cube")],
+        );
+        let configured = MockServer::start();
+        let launch_clear = mock_duress(&configured, "launch", false);
+        let launch_on_cube_host = mock_duress(&cube_host, "launch", false);
+        let cube_active = mock_duress(&cube_host, "cube", true);
+        assert_eq!(
+            check(&root, Some(Network::Bitcoin), keyring(7, "kr"), &configured).await,
+            Some(true)
+        );
+        cube_active.assert();
+        launch_clear.assert_hits(0);
+        launch_on_cube_host.assert_hits(0);
+    }
+
+    #[test]
+    fn a_lock_origin_is_recorded_with_its_account_and_cleared_with_the_lock() {
+        let origin = |url: &str| super::super::LockOrigin {
+            api_base_url: url.to_string(),
+            chain: ChainId::BitcoinBlake2b,
+        };
+        let mut state = DuressLocalState::default();
+        // An unknown account records where to look while none is recorded.
+        state.record_remote_lock_account(None, Some(origin("https://a")));
+        assert_eq!(state.lock_origin(), Some(&origin("https://a")));
+        // A known account replaces the origin with its own, even none.
+        state.record_remote_lock_account(Some("9".into()), Some(origin("https://b")));
+        assert_eq!(state.lock_origin(), Some(&origin("https://b")));
+        // An unknown account then changes neither.
+        state.record_remote_lock_account(None, Some(origin("https://c")));
+        assert_eq!(state.lock_origin(), Some(&origin("https://b")));
+        state.record_remote_lock_account(Some("8".into()), None);
+        assert_eq!(state.lock_origin(), None);
+        state.record_remote_lock_account(Some("9".into()), Some(origin("https://b")));
+        state.record_local_lock();
+        assert_eq!(state.lock_origin(), None);
+        state.record_remote_lock_account(Some("9".into()), Some(origin("https://b")));
+        state.clear_lock();
+        assert_eq!(state.locked_by_origin, None);
+    }
+
     #[test]
     fn an_unknown_account_does_not_replace_the_one_recorded_for_the_lock() {
         let mut state = DuressLocalState::default();
-        state.record_remote_lock_account(Some("9".into()));
-        state.record_remote_lock_account(None);
+        state.record_remote_lock_account(Some("9".into()), None);
+        state.record_remote_lock_account(None, None);
         assert_eq!(state.lock_account(), Some("9"));
         state.clear_lock();
         assert!(!state.remote_lock);
@@ -828,6 +966,7 @@ pub(crate) mod tests {
         assert_eq!(state.locked_by_account_id, None);
         assert!(!state.remote_lock);
         assert_eq!(state.lock_account(), Some("7"));
+        assert_eq!(state.lock_origin(), None);
     }
 
     #[tokio::test]
