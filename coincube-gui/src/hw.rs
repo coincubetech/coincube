@@ -741,6 +741,16 @@ async fn scan_lan_phones(
     }
 }
 
+/// The folder the Wi-Fi rail's transport key lives in: the loaded wallet's
+/// chain folder, the one the Connect rail uses for the same Cube. With no
+/// wallet nothing is dialled, and the launch network's folder is kept.
+fn lan_transport_key_directory(state: &State) -> crate::dir::NetworkDirectory {
+    match state.wallet.as_ref() {
+        Some(wallet) => state.datadir_path.network_directory(wallet.chain),
+        None => state.datadir_path.network_directory(state.network),
+    }
+}
+
 async fn scan_lan_phone_store(
     state: &mut State,
     hws: &mut Vec<HardwareWallet>,
@@ -776,9 +786,13 @@ async fn scan_lan_phone_store(
     // it just can't be sent a session. `sign_tx` turns the
     // absence into an actionable error rather than a silent
     // plaintext downgrade.
+    //
+    // From the Cube's chain folder, as the Connect rail loads it (master
+    // decision 14): one transport key per Cube. `state.network` is the lossy
+    // Bitcoin projection and would name `bitcoin/` for a Bitcoin Blake2b Cube.
     let lan_transport_key =
         match crate::services::connect::crypto::DeviceTransportKey::load_or_create(
-            &state.datadir_path.network_directory(state.network),
+            &lan_transport_key_directory(state),
         ) {
             Ok(k) => Some(Arc::new(k)),
             Err(e) => {
@@ -1821,6 +1835,51 @@ mod tests {
         assert_eq!(listed_registration(Some(&vault), false), Some(false));
         assert_eq!(listed_registration(Some(&vault), true), Some(true));
         assert_eq!(listed_registration(None, false), Some(false));
+    }
+
+    /// Master decision 14: the Wi-Fi rail seals with the transport key in the
+    /// Cube's own chain folder, never the lossy network's. A Bitcoin Blake2b
+    /// Vault uses `bitcoin-blake2b-testnet4/`, not `testnet4/`; a Bitcoin
+    /// Vault keeps its folder; no wallet keeps the launch network's.
+    #[test]
+    fn the_lan_transport_key_comes_from_the_cubes_chain_folder() {
+        use crate::chain::ChainId;
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use std::str::FromStr;
+        let root = std::env::temp_dir().join(format!("coincube-lan-key-{}", uuid::Uuid::new_v4()));
+        let state = |wallet: Option<Arc<Wallet>>| State {
+            network: Network::Testnet4,
+            keys_aliases: HashMap::new(),
+            wallet,
+            connected_supported_hws: Vec::new(),
+            api: None,
+            datadir_path: CoincubeDirectory::new(root.clone()),
+            persist_pairing: false,
+            split_policy: None,
+            unlock_retry: UnlockRetry::default(),
+            phone_cooldowns: HashMap::new(),
+            phone_signers: HashMap::new(),
+        };
+        let vault = |chain: ChainId| {
+            Some(Arc::new(
+                Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()).with_chain(chain),
+            ))
+        };
+        for (wallet, folder) in [
+            (
+                vault(ChainId::BitcoinBlake2bTestnet4),
+                "bitcoin-blake2b-testnet4",
+            ),
+            (vault(ChainId::Testnet4), "testnet4"),
+            (None, "testnet4"),
+        ] {
+            assert_eq!(
+                lan_transport_key_directory(&state(wallet)).path(),
+                root.join(folder)
+            );
+        }
+        // Resolving the folder writes nothing.
+        assert!(!root.exists());
     }
 
     /// A Jade that never answers, as one probed while it boots.
