@@ -221,6 +221,9 @@ pub struct NavContext<'a> {
     /// (Spark on the primary rail, Buy/Sell + P2P in Marketplace)
     /// via [`crate::app::features`].
     pub network: crate::chain::ChainId,
+    /// Whether the Connect panel shows the live-updates status
+    /// ([`crate::app::live_updates_apply`]).
+    pub live_updates: bool,
     /// Whether a non-mainnet Mostro coordinator is configured. Only
     /// affects P2P on test networks (mainnet P2P is always available).
     pub p2p_test_coordinator: bool,
@@ -289,6 +292,7 @@ impl<'a> NavContext<'a> {
             has_imported_bitcoin: cache.has_imported_bitcoin,
             has_p2p: cache.has_p2p,
             network: cache.chain(),
+            live_updates: crate::app::live_updates_apply(cache.chain(), cache.connect_served),
             p2p_test_coordinator: cache.p2p_test_coordinator,
             marketplace_flags: cache.marketplace_flags,
             ai_access: cache.ai_access_enabled(),

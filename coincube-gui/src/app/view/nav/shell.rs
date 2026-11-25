@@ -420,7 +420,7 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         }
         None => {
             let status = *ctx.connect_stream_status;
-            if crate::app::live_updates_apply(ctx.network) {
+            if ctx.live_updates {
                 body_empty = false;
                 let kind = match status {
                     ConnectionStatus::Connected => page::Status::Ok,

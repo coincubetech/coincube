@@ -99,7 +99,7 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
 
     let status = cache.connect_stream_status;
     // A Bitcoin Blake2b Cube never starts live updates.
-    if crate::app::live_updates_apply(cache.chain()) {
+    if crate::app::live_updates_apply(cache.chain(), cache.connect_served) {
         let (kind, word) = live_updates_status(status);
         let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
         if let Some(line) = status.line() {

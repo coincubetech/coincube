@@ -145,6 +145,7 @@ impl Fixture {
             has_imported_bitcoin: false,
             has_p2p: false,
             network: ChainId::Bitcoin,
+            live_updates: true,
             p2p_test_coordinator: false,
             marketplace_flags: MarketplaceServerFlags::OFF,
             ai_access: false,

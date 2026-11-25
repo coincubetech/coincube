@@ -2140,6 +2140,16 @@ impl ConnectAccountPanel {
         }
     }
 
+    /// The saved sign-in's refresh token, when the saved sign-in is the
+    /// session `access_token` belongs to. A Connect-served Bitcoin Blake2b
+    /// Cube saves it with its own session; for any other saved session it
+    /// saves none, since that refresh token is not its session's.
+    pub(crate) fn saved_refresh_token_for(&self, access_token: &str) -> Option<String> {
+        self.load_session_from_keyring()
+            .filter(|session| session.login.token == access_token)
+            .map(|session| session.login.refresh_token)
+    }
+
     fn load_session_from_keyring(&self) -> Option<StoredSession> {
         let bytes = read_connect_secret(CONNECT_KEYRING_USER)?;
         serde_json::from_slice::<StoredSession>(&bytes).ok()

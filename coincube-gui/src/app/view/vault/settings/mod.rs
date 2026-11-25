@@ -299,7 +299,9 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
     // Mobile signing reaches a Bitcoin Vault through Connect's live updates.
     // A Bitcoin Blake2b Vault never starts them; its signing window checks
     // Connect itself, so there is no status to show.
-    if cache.connect_authenticated && crate::app::live_updates_apply(cache.chain()) {
+    if cache.connect_authenticated
+        && crate::app::live_updates_apply(cache.chain(), cache.connect_served)
+    {
         let status = cache.connect_stream_status;
         let (kind, word) = live_updates_status(status);
         let line = match status {

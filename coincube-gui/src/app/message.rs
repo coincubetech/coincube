@@ -509,6 +509,21 @@ pub enum Message {
         >,
         email: String,
         cube_uuid: Option<String>,
+        /// The id registration returned without saving it
+        /// (`RegisteredDevice::persisted == false`). Only a Connect-served
+        /// Bitcoin Blake2b Cube carries one, pinned to its own session; every
+        /// other Cube leaves it `None` and reads its id from `connect.json`.
+        device_id: Option<String>,
+    },
+    /// A Connect-served Bitcoin Blake2b Cube's own session was written to its
+    /// chain folder's `connect.json` at open (`saved`), or the guarded
+    /// writer refused it. `epoch` is the panel's authentication epoch when
+    /// the write started.
+    ConnectServedSessionSaved {
+        email: String,
+        tokens: crate::services::connect::client::auth::AccessTokenResponse,
+        epoch: u64,
+        saved: bool,
     },
     /// On-demand Connect signing bootstrap for an already-authenticated
     /// session. Fired from the "Sign with Connect" action in the

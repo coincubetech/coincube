@@ -353,6 +353,7 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         has_imported_bitcoin: cache.has_imported_bitcoin,
         has_p2p: cache.has_p2p,
         network: cache.chain(),
+        live_updates: crate::app::live_updates_apply(cache.chain(), cache.connect_served),
         p2p_test_coordinator: cache.p2p_test_coordinator,
         marketplace_flags: cache.marketplace_flags,
         ai_access: cache.ai_access_enabled(),

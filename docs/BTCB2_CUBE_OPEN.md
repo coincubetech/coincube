@@ -41,14 +41,15 @@ ends it. The panel then becomes an ordinary local one: signing in or restoring
 the saved session finishes in the panel, as on Home, without the Bitcoin
 `connect.json` commit or the legacy device and stream bootstrap.
 
-Without that bootstrap a fork Cube never starts Connect's live updates, and a
-Bitcoin Cube fills the header's account email only from its login commit or
-that startup. So the fork App mirrors the email of the account its panel is
-signed in as (`sync_fork_connect_email`), and `live_updates_apply` leaves the
-live-updates status out of the Connect menu, Cube connections and Vault
-connections, where it would otherwise read "Connecting…" for good. A fork
-Vault's Mobile signing window checks Connect for signatures itself while it
-is open.
+Without that bootstrap a local fork Cube never starts Connect's live
+updates, and a Bitcoin Cube fills the header's account email only from its
+login commit or that startup. So a local fork App mirrors the email of the
+account its panel is signed in as (`sync_fork_connect_email`), and
+`live_updates_apply` leaves the live-updates status out of the Connect menu,
+Cube connections and Vault connections, where it would otherwise read
+"Connecting…" for good. A Connect-served fork Cube runs the signer pipeline
+from the session it was opened with (`BTCB2_VAULT_APP.md`), so its live
+updates and email work as on a Bitcoin Cube.
 
 A pending fork PIN screen receives a candidate from the exact current completed
 Connect login after its account safety gates, scoped to its data root and API

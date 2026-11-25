@@ -23,7 +23,11 @@ client and encryption key, and clears fiat data. Global Home authentication
 changes must invoke the same invalidation through every open tab and pending
 unlock/Loader. Reopening uses a new authenticated context. Generic backend
 switches cannot reuse fork authority and instruct the user to reopen instead.
-Persisted daemon configuration is sanitized; no bearer token belongs on disk.
+Persisted daemon configuration is sanitized: no bearer token belongs in it.
+The Connect session itself is saved as a Bitcoin Cube saves its own, in the
+chain folder's `connect.json` (`bitcoin-blake2b/` or
+`bitcoin-blake2b-testnet4/`, never `bitcoin/`); see "Connect signer
+bootstrap" below.
 
 Anchor freshness is measured on this desktop's clock. When Connect sends
 `served_at`, the client shifts `observed_at` by the skew between that stamp
@@ -41,7 +45,9 @@ external signers remain gated.
 
 The admitted client is installed into both Connect account and Cube consumers
 before the initialization task runs. Its bootstrap loads user information from
-that exact endpoint/token and never restores a saved keyring session. Late user
+that exact endpoint/token and never restores a saved keyring session. When it
+saves its session to the chain folder it reads the saved sign-in only to
+reuse its refresh token, and only when the saved sign-in is that same session. Late user
 responses are generation-checked. Both generic App constructors return a typed
 refusal for fork Cube settings; a seed-only fork App cannot be constructed.
 
@@ -53,15 +59,48 @@ keyring session, so its refusal does not delete unrelated saved credentials.
 Unit-test account secrets use thread-local memory; direct legacy test keyring
 consumers use a separate unit-test namespace.
 
-Legacy Connect signer bootstrap is refused for BTCB2, including direct retry/login
-messages and delayed stream completions. It cannot persist Bitcoin-family
-`connect.json`, register a device through the legacy gRPC bootstrap, or replace
-the admitted session. Reopen the Cube through authenticated Connect startup to
-change its session; this launch uses local Cube keys for signing. A Cube that
-does not require Connect (no Vault, or a managed local node) signs in through
-its own panel instead (`BTCB2_CUBE_OPEN.md`): the gate refuses that sign-in's
-bootstrap tail without an error, and answers a deferred commit with
+## Connect signer bootstrap
+
+The signer pipeline is the Bitcoin one, carrying the Cube's `ChainId` and its
+Connect endpoint: it registers this computer as a signer device with the
+chain folder's transport key, opens the realtime stream, and hands the Mobile
+signing window its gRPC address, tokens and device id. What differs is the
+kind of Cube, recorded once when the App is built (`Cache::connect_served`).
+
+**Connect-served** (a Vault on a Connect backend; the daemon is bound to the
+session it was opened with). Once its admitted panel reaches its dashboard,
+the App writes that session to the chain folder's `connect.json` with the
+guarded writer a keyring restore uses (`persist_restored_tokens`): exactly
+the Cube's access token, the saved sign-in's refresh token when that is the
+same session and otherwise an empty one, which this Cube never sends. It
+then runs the Bitcoin login completion (`connect_login_completed`). The
+admitted panel is never sent the login messages. A write the guarded writer
+refuses leaves the Cube open; the signer list says Mobile signing could not
+start and offers to try again.
+
+The file is shared with any other Cube of the account and can move on while
+this one is open. So every pipeline entry (`ensure_connect_ready`,
+`trigger_connect_stream_ready`, `connect_stream_ready`) takes the access
+token from the Cube's own client and refuses any other, compared by
+`connect_session::same_session`; nothing adopts or overwrites a different
+token found later. The device id is the one stored for the account; if none
+is stored and the registration's write is refused, the id registration
+returned is used for this session only and dropped with it. A sign-in started
+inside the Cube stays refused: `InAppConnectAuthReady`,
+`InAppConnectAuthPersisted` and `InAppConnectLoginCompleted` are refused
+whatever sends them, and a deferred commit is answered with
+`AuthCommitRejected`. When the stream reports the session ended, the Cube is
+torn down with the reopen notice instead of retrying; one promoted to its
+managed node loses its Connect services only. A Cube opened Connect-served
+keeps that kind for as long as it is open.
+
+**Local** (no Vault, or a managed local node). It signs in through its own
+panel (`BTCB2_CUBE_OPEN.md`). Until it runs the Bitcoin path too, all seven
+bootstrap and login messages stay refused for it: the gate refuses that
+sign-in's bootstrap tail without an error, and answers a deferred commit with
 `AuthCommitRejected` so the panel never waits on it.
+
+## Lost authorization
 
 Once an admitted Cube loses authorization (401, logout, or account/token change),
 its account panel requires closing and reopening the Cube. It shows no OTP/login

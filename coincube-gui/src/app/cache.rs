@@ -488,6 +488,15 @@ pub struct Cache {
     /// with [`Self::connect_grpc_url`]. A panel that builds its own REST
     /// client for signing takes it from here, not from the global default.
     pub connect_base_url: Option<String>,
+    /// Recorded once, when the App is built: a Bitcoin Blake2b Cube with a
+    /// Vault on a Connect backend, whose daemon is bound to the session it
+    /// was opened with. It keeps this kind for as long as it is open, even
+    /// when promoted to its managed node. False on every other Cube.
+    pub connect_served: bool,
+    /// Where a Connect-served Bitcoin Blake2b Cube's signer pipeline is in
+    /// coming up from the session it was opened with. Only such a Cube moves
+    /// it off `Idle`; on every other Cube the signer list reads as before.
+    pub signer_pipeline_start: SignerPipelineStart,
     /// Shared `Arc<RwLock<AccessTokenResponse>>` for the Connect session,
     /// mirrored into Cache so deep panels (PsbtState et al.) can spin up
     /// a `GrpcSessionClient` on demand without re-plumbing the auth
@@ -606,6 +615,8 @@ impl std::default::Default for Cache {
             recovery_kit_password_backed_up: false,
             connect_grpc_url: None,
             connect_base_url: None,
+            connect_served: false,
+            signer_pipeline_start: SignerPipelineStart::Idle,
             connect_tokens: None,
             connect_stream_status: crate::app::ConnectionStatus::default(),
             connect_signed_out_by: None,
@@ -615,6 +626,21 @@ impl std::default::Default for Cache {
             connect_email: None,
         }
     }
+}
+
+/// See [`Cache::signer_pipeline_start`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SignerPipelineStart {
+    /// Nothing is starting, or the pipeline is up: the signer list reads
+    /// the Connect fields as it always has.
+    #[default]
+    Idle,
+    /// The Cube's session is being saved or its signer device and stream are
+    /// coming up: the signer list says it is looking up Mobile signers.
+    Starting,
+    /// The pipeline could not start (the session could not be saved, or no
+    /// signer device id is known): the signer list offers to try again.
+    Failed,
 }
 
 impl Cache {

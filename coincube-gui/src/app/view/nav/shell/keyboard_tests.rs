@@ -15,6 +15,7 @@ fn fixture_context() -> NavContext<'static> {
         has_imported_bitcoin: false,
         has_p2p: false,
         network: ChainId::Bitcoin,
+        live_updates: true,
         p2p_test_coordinator: false,
         marketplace_flags: features::MarketplaceServerFlags::OFF,
         ai_access: false,
@@ -1750,9 +1751,23 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
             ][..],
             &[][..],
         ),
+        // A Connect-served Cube runs the stream from the session it was
+        // opened with, so its live updates show as on Bitcoin.
+        (
+            "blake2b-connect-served",
+            ChainId::BitcoinBlake2bTestnet4,
+            None,
+            &[
+                "alex@example.test",
+                "Live updates on this computer",
+                "Connecting…",
+            ][..],
+            &[][..],
+        ),
     ] {
         let mut ctx = fixture_context();
         ctx.network = chain;
+        ctx.live_updates = crate::app::live_updates_apply(chain, name == "blake2b-connect-served");
         ctx.connect_authenticated = true;
         ctx.connect_email = Some("alex@example.test");
         ctx.connect.vault_alert = vault;

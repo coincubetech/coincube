@@ -119,6 +119,7 @@ mod tests {
             has_imported_bitcoin: false,
             has_p2p: false,
             network,
+            live_updates: crate::app::live_updates_apply(network, false),
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             ai_access: false,
