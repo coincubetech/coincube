@@ -44,17 +44,6 @@ pub enum ReplayProtection {
     UserMarked(bool),
 }
 
-/// The capability a phone sends when it implements the signing identity
-/// contract (chain stated and checked on every session).
-pub const CHAIN_IDENTITY_CAPABILITY: &str = "chain-identity-v1";
-
-/// The capability a phone sends only when it has loaded the unified signing
-/// library and can produce `ALL|UNIFIED` signatures (contract §2.6, master
-/// decisions 16 and 22). It replaces `btcb2-unified-v1`, which builds released
-/// before the library shipped send without being able to sign: a phone that
-/// stores only the old name reads as an outdated app.
-pub const BTCB2_UNIFIED_CAPABILITY: &str = "btcb2-unified-v2";
-
 /// Classify one authenticated Connect target for signer/path selection. This
 /// never describes the transaction itself: post-signing replay status remains
 /// derived only from verified signatures retained in the PSBT.
@@ -62,13 +51,7 @@ pub fn resolved_keychain_replay_protection(
     chain: crate::chain::ChainId,
     capabilities: &[String],
 ) -> ReplayProtection {
-    let has_chain_identity = capabilities
-        .iter()
-        .any(|value| value == CHAIN_IDENTITY_CAPABILITY);
-    let has_unified_signing = capabilities
-        .iter()
-        .any(|value| value == BTCB2_UNIFIED_CAPABILITY);
-    if chain.is_blake2b() && has_chain_identity && has_unified_signing {
+    if chain.is_blake2b() && crate::mobile_signing::btcb2_signing_capable(capabilities) {
         ReplayProtection::Capable
     } else {
         ReplayProtection::Legacy

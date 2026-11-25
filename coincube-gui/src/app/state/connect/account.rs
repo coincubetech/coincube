@@ -1875,12 +1875,8 @@ impl ConnectAccountPanel {
         self.admitted_client = false;
         self.shared_client = false;
         self.admitted_reopen_required = false;
-        // A local fork Cube keeps no Bitcoin-family `connect.json` for the App
-        // to commit a login into first, and the App refuses that commit for
-        // the fork. Its sign-in, OTP and session restore therefore finish here,
-        // as on Home, instead of waiting on an `InAppConnectAuthReady` that
-        // never answers.
-        self.defer_auth_cache_commit = false;
+        // Its sign-in commits through the App as on Bitcoin, into the Cube's
+        // own chain folder: the commit stays deferred.
     }
 
     /// Discard this tab's account memory without touching the shared keyring.
@@ -2010,6 +2006,14 @@ impl ConnectAccountPanel {
     /// denial only under the same test, so the two never disagree.
     pub fn is_current_features_load(&self, generation: u64) -> bool {
         generation == self.session_generation && !self.awaiting_session_load
+    }
+
+    /// Marks a deferred sign-in commit as this panel's own, as an OTP
+    /// verification or keyring refresh does before it emits
+    /// `InAppConnectAuthReady`, for App tests that drive the commit directly.
+    #[cfg(test)]
+    pub(crate) fn begin_auth_commit_for_test(&mut self) {
+        self.auth_commit_pending = true;
     }
 
     /// Opens the adoption window without a real sign-in, for App tests that
@@ -2163,6 +2167,16 @@ impl ConnectAccountPanel {
             Some(_) => RecoveryAlertEligibility::NotIncluded,
             None => RecoveryAlertEligibility::Unknown,
         }
+    }
+
+    /// The saved sign-in's refresh token, when the saved sign-in is the
+    /// session `access_token` belongs to. A Connect-served Bitcoin Blake2b
+    /// Cube saves it with its own session; for any other saved session it
+    /// saves none, since that refresh token is not its session's.
+    pub(crate) fn saved_refresh_token_for(&self, access_token: &str) -> Option<String> {
+        load_session_from_keyring()
+            .filter(|session| session.login.token == access_token)
+            .map(|session| session.login.refresh_token)
     }
 
     fn save_session_to_keyring(&self, session: &StoredSession) {

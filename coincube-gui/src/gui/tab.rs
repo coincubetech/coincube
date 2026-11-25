@@ -302,6 +302,30 @@ fn duress_drain_task(root: &std::path::Path) -> Task<Message> {
     }
 }
 
+/// The Connect session a Cube with a Vault restores at open: the active
+/// account of its chain folder's `connect.json`, saved by an earlier sign-in.
+/// A Bitcoin Cube and a Bitcoin Blake2b Cube on its own node share it; each
+/// reads only its own chain's folder.
+pub(crate) fn saved_connect_session(
+    datadir: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+) -> Option<(
+    Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+    String,
+)> {
+    crate::services::connect::client::cache::ConnectCache::from_file(
+        &datadir.network_directory(chain),
+    )
+    .ok()
+    .and_then(|c| c.active_account().cloned())
+    .map(|account| {
+        (
+            Arc::new(tokio::sync::RwLock::new(account.tokens)),
+            account.email,
+        )
+    })
+}
+
 /// Asks Connect whether duress has been cleared, with a session already saved
 /// on this computer (the locked screen offers no sign-in). Which saved
 /// sessions are tried, and which are trusted, is
@@ -1475,6 +1499,19 @@ impl Tab {
         originated: bool,
         capability_revoked: bool,
     ) -> Task<Message> {
+        // A local Bitcoin Blake2b App follows the account as a Bitcoin App
+        // does (Desktop plan PR 5): it stays open, keeps its own Connect
+        // session, and its in-flight work is not cancelled. A revoked feature
+        // still closes it through the arm below.
+        if !capability_revoked {
+            if let State::App(app) = &mut self.state {
+                if app.is_local_fork() {
+                    return app
+                        .on_global_auth_change(change, originated)
+                        .map(Message::Run);
+                }
+            }
+        }
         if !capability_revoked && self.clear_local_fork_auth(originated) {
             return Task::none();
         }
@@ -1606,6 +1643,9 @@ impl Tab {
 
     fn clear_local_fork_auth(&mut self, originated: bool) -> bool {
         match &mut self.state {
+            // Only a Cube opened Connect-served and since promoted to its
+            // managed node: it loses its Connect services and keeps its node
+            // and its reopen notice. A local App never reaches here.
             State::App(app)
                 if app.cube_settings().network.is_blake2b() && !app.requires_connect() =>
             {
@@ -2867,6 +2907,7 @@ impl Tab {
         let datadir = app.datadir().clone();
         let network = app.cache().network;
         let activating_account = app.duress_activating_account();
+        let origin = app.duress_lock_origin();
         let root = datadir.path();
         // Skip the persist on a real read error (vs a missing
         // file) rather than clobbering valid state with a default.
@@ -2875,7 +2916,7 @@ impl Tab {
         match crate::services::duress::DuressLocalState::load(root) {
             Ok(mut st) if !st.active => {
                 st.active = true;
-                st.record_remote_lock_account(activating_account);
+                st.record_remote_lock_account(activating_account, origin);
                 let mut saved = false;
                 for attempt in 1..=3 {
                     match st.save(root) {
@@ -3126,6 +3167,9 @@ impl Tab {
                     bitcoind,
                 )
             } else {
+                // The same restore a Bitcoin Cube's open runs
+                // (`finish_loader_wallets`), from this chain's own folder.
+                let connect_auth = saved_connect_session(&loader.datadir_path, cache.chain());
                 App::new_local_fork(
                     cache,
                     wallet,
@@ -3135,6 +3179,7 @@ impl Tab {
                     loader.datadir_path.clone(),
                     cube_settings,
                     bitcoind,
+                    connect_auth,
                 )
             };
             match opened {
@@ -3210,17 +3255,7 @@ impl Tab {
         // (The stream bootstrap still no-ops until a `device_id`
         // is registered for the account; the Connect-tab sign-in
         // flow handles that registration.)
-        let connect_auth = crate::services::connect::client::cache::ConnectCache::from_file(
-            &datadir.network_directory(cache.chain()),
-        )
-        .ok()
-        .and_then(|c| c.active_account().cloned())
-        .map(|account| {
-            (
-                Arc::new(tokio::sync::RwLock::new(account.tokens)),
-                account.email,
-            )
-        });
+        let connect_auth = saved_connect_session(&datadir, cache.chain());
 
         let admitted_app = App::new(
             cache,
@@ -10281,7 +10316,7 @@ mod duress_clear_check_tests {
         let root = TempRoot::new(label);
         write_lock(&root.0, None);
         let mut state = crate::services::duress::DuressLocalState::load(&root.0).unwrap();
-        state.record_remote_lock_account(Some("7".into()));
+        state.record_remote_lock_account(Some("7".into()), None);
         state.save(&root.0).unwrap();
         std::fs::create_dir_all(root.0.join("bitcoin-blake2b")).unwrap();
         root

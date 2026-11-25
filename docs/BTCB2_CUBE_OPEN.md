@@ -36,19 +36,12 @@ never persists it. Without it Connect has no recipient key for the Cube, and
 COINCUBE Mobile cannot share a key with it.
 
 A Vault-less or managed-local fork Cube opened signed in keeps that session in
-its account panel until a log-out, an account change or another tab's sign-in
-ends it. The panel then becomes an ordinary local one: signing in or restoring
-the saved session finishes in the panel, as on Home, without the Bitcoin
-`connect.json` commit or the legacy device and stream bootstrap.
-
-Without that bootstrap a fork Cube never starts Connect's live updates, and a
-Bitcoin Cube fills the header's account email only from its login commit or
-that startup. So the fork App mirrors the email of the account its panel is
-signed in as (`sync_fork_connect_email`), and `live_updates_apply` leaves the
-live-updates status out of the Connect menu, Cube connections and Vault
-connections, where it would otherwise read "Connecting…" for good. A fork
-Vault's Mobile signing window checks Connect for signatures itself while it
-is open.
+its account panel until a log-out or an account change ends it, and brings
+Mobile signing up from it at open. The panel then becomes an ordinary one
+and signs in through the Bitcoin path: the session is committed to the chain
+folder's `connect.json`, the signer device is registered and the stream
+started (`BTCB2_VAULT_APP.md`, "Connect signer bootstrap"). Live updates and
+the account email work as on a Bitcoin Cube.
 
 A pending fork PIN screen receives a candidate from the exact current completed
 Connect login after its account safety gates, scoped to its data root and API
@@ -66,8 +59,10 @@ local node. Startup retries are user-triggered, one attempt per click, with a
 Loader-owned 30-second minimum interval; failed admission cannot lose that bound
 when its temporary provider is dropped.
 
-Home or App logout/token replacement invalidates every open fork tab before the
-account change propagates. The fork App is dropped into a fresh Home, removing
+Home or App logout/token replacement invalidates every open Connect-served fork
+tab before the account change propagates. A local fork tab (no Vault, or a
+managed local node) stays open and keeps its own session, as a Bitcoin tab
+does; a revoked feature still closes it. The fork App is dropped into a fresh Home, removing
 its wallet, signing/export panels and matching Cube PIN session. App tasks are
 owned and cancelled; task, subscription and view callbacks carry the session
 generation so stale signing results cannot affect a later reopened App. A CPU

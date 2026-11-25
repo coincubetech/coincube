@@ -182,6 +182,8 @@ fn imported_pairing(
         vault_fingerprint: policy.transport_id(),
         transport_pubkey,
         fallback_addr: None,
+        network: Some(wallet.chain().api_str().into()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -412,6 +414,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Checked by the desktop from PR 8d.
+                        network: String::new(),
                         session_id,
                         // Empty under ECIES_V1.
                         signed_psbt: if plaintext { psbt_bytes } else { Vec::new() },
@@ -467,6 +471,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Checked by the desktop from PR 8d.
+                        network: String::new(),
                         session_id,
                         signed_psbt: Vec::new(),
                         signed_key_ids: vec!["10".into()],
@@ -556,6 +562,8 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some(coincube_core::chain::ChainId::Regtest.api_str().into()),
+        capabilities: Vec::new(),
     };
     let signer = PhoneSigner::new(
         transport,
@@ -583,9 +591,13 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         "echo-back PSBT bytes should be byte-identical"
     );
 
-    // Drain the server task. It returns once the single envelope
-    // round-trip is done.
-    let _ = phone_handle.await;
+    // The server task returns once the single envelope round-trip is done:
+    // the phone must have received and answered the session, and a refusal
+    // before the send fails here instead of hanging.
+    tokio::time::timeout(std::time::Duration::from_secs(10), phone_handle)
+        .await
+        .expect("the phone answered in time")
+        .expect("join");
 
     // Sanity: the test also exercises the fingerprint helper.
     let _hex = pin_hex8(&phone_pin);
@@ -601,8 +613,28 @@ async fn signer_against_response(
     signer_against_chain_response(coincube_core::chain::ChainId::Regtest, response).await
 }
 
+/// A pairing made for `chain` by a phone that reported every capability
+/// this desktop knows, so only the case under test can refuse it.
 async fn signer_against_chain_response(
     chain: coincube_core::chain::ChainId,
+    response: FakeResponse,
+) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
+    signer_against_pairing(
+        chain,
+        chain.api_str(),
+        vec![
+            coincube_gui::mobile_signing::CHAIN_IDENTITY_CAPABILITY.into(),
+            coincube_gui::mobile_signing::BTCB2_UNIFIED_CAPABILITY.into(),
+        ],
+        response,
+    )
+    .await
+}
+
+async fn signer_against_pairing(
+    chain: coincube_core::chain::ChainId,
+    paired_network: &str,
+    capabilities: Vec<String>,
     response: FakeResponse,
 ) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
     let (desk_cert, desk_key) = mint_ed25519_cert("Coincube Desktop (test)");
@@ -646,6 +678,8 @@ async fn signer_against_chain_response(
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some(paired_network.into()),
+        capabilities,
     };
     let signer = PhoneSigner::new(
         transport,
@@ -787,57 +821,117 @@ fn stale_or_wrong_exact_pairing_identity_is_not_a_capability() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: Vec::new(),
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     };
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_ok());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_ok());
     let valid = phone.signer_binding.clone();
     phone.signer_binding = None;
     assert!(phone
-        .exact_signer(TEST_DESCRIPTOR)
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
         .unwrap_err()
         .contains("again"));
     phone.signer_binding = valid.clone();
     phone.signer_binding.as_mut().unwrap().xpub = "another-key".into();
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
     phone.signer_binding = valid.clone();
     phone.signer_binding.as_mut().unwrap().descriptor_sha256[0] ^= 1;
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
     phone.signer_binding = valid;
     phone.vault_fingerprint = Fingerprint::default();
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
+}
+
+/// The chain rules refuse in the caller, before `PresentSession`: the fake
+/// phone completes as soon as it reads one, so it must still be waiting.
+async fn assert_refused_before_a_session(
+    chain: coincube_core::chain::ChainId,
+    paired_network: &str,
+    capabilities: Vec<String>,
+    expected: &str,
+) {
+    let (signer, mut phone) = signer_against_pairing(
+        chain,
+        paired_network,
+        capabilities,
+        FakeResponse::Error {
+            code: "UNEXPECTED_SESSION".into(),
+            message: "A refused pairing reached the phone".into(),
+        },
+    )
+    .await;
+    let mut psbt = empty_psbt();
+    let before = psbt.serialize();
+    let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(expected), "{}: {}", chain, error);
+    assert_eq!(psbt.serialize(), before);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut phone)
+            .await
+            .is_err(),
+        "{}: a session reached the phone",
+        chain
+    );
+    phone.abort();
+    drop(signer);
 }
 
 #[tokio::test]
-async fn btcb2_lan_refuses_before_a_session_is_sent() {
+async fn a_pairing_for_another_chain_refuses_before_a_session_is_sent() {
     use coincube_core::chain::ChainId;
-    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-        let (signer, mut phone) = signer_against_chain_response(
+    // Contract R2.7, both ways round between a Bitcoin chain and its twin.
+    for (chain, paired_for) in [
+        (ChainId::Regtest, ChainId::BitcoinBlake2bTestnet4),
+        (ChainId::BitcoinBlake2bTestnet4, ChainId::Regtest),
+        (ChainId::BitcoinBlake2b, ChainId::Bitcoin),
+    ] {
+        let both = vec![
+            coincube_gui::mobile_signing::CHAIN_IDENTITY_CAPABILITY.into(),
+            coincube_gui::mobile_signing::BTCB2_UNIFIED_CAPABILITY.into(),
+        ];
+        assert_refused_before_a_session(
             chain,
-            FakeResponse::Error {
-                code: "UNEXPECTED_SESSION".into(),
-                message: "A BTCB2 session reached LAN".into(),
-            },
+            paired_for.api_str(),
+            both,
+            "Pair again to use it here",
         )
         .await;
-        let mut psbt = empty_psbt();
-        let before = psbt.serialize();
-        let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("chain-bound pairing"),
-            "{}",
-            error
-        );
-        assert_eq!(psbt.serialize(), before);
-        // The fake phone completes immediately after processing PresentSession.
-        // It must remain waiting for a frame; the refusal happens in the caller.
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), &mut phone)
-                .await
-                .is_err()
-        );
-        phone.abort();
-        drop(signer);
+    }
+}
+
+#[tokio::test]
+async fn a_btcb2_pairing_without_both_capabilities_refuses_before_a_session_is_sent() {
+    use coincube_core::chain::ChainId;
+    use coincube_gui::mobile_signing::{BTCB2_UNIFIED_CAPABILITY, CHAIN_IDENTITY_CAPABILITY};
+    use coincube_gui::phone_signer::pairing_store::BTCB2_PHONE_OUTDATED;
+    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+        for capabilities in [
+            Vec::new(),
+            vec![CHAIN_IDENTITY_CAPABILITY.to_string()],
+            vec![
+                CHAIN_IDENTITY_CAPABILITY.to_string(),
+                "btcb2-unified-v1".to_string(),
+            ],
+            vec![BTCB2_UNIFIED_CAPABILITY.to_string()],
+        ] {
+            assert_refused_before_a_session(
+                chain,
+                chain.api_str(),
+                capabilities,
+                BTCB2_PHONE_OUTDATED,
+            )
+            .await;
+        }
     }
 }
 

@@ -199,6 +199,23 @@ impl Default for LocalSigningState {
 }
 
 impl LocalSigningState {
+    /// The loaded Vault's chain, which a new pairing is made for.
+    pub fn wallet_chain(&self) -> Option<crate::chain::ChainId> {
+        self.wallet_chain
+    }
+
+    /// What pairing the phone `fp8` here would replace, said before the
+    /// user scans: its stored pairing is for another chain or predates v3
+    /// (one pairing per phone and desktop, master decision 19).
+    pub fn replaced_pairing_notice(&self, fp8: &str) -> Option<String> {
+        let chain = self.wallet_chain?;
+        self.phones
+            .phones
+            .iter()
+            .find(|p| crate::phone_signer::identity::pin_hex8(&p.cert_pin) == fp8)
+            .and_then(|p| p.replaced_by_pairing_for(chain))
+    }
+
     fn refresh_phones(&mut self, cache: &Cache) {
         self.refresh_phones_from(&cache.datadir_path);
     }
@@ -348,7 +365,13 @@ impl LocalSigningState {
         {
             return Task::none();
         }
-        let Some(tokens) = cache.connect_tokens.clone() else {
+        // The endpoint the pipeline recorded; before the stream is up, a
+        // Bitcoin Cube's restored session is on the configured API. A Bitcoin
+        // Blake2b Cube waits for the pipeline: its bearer never goes to the
+        // configured API by fallback.
+        let (Some(tokens), Some(base_url)) =
+            (cache.connect_tokens.clone(), cache.connect_api_base_url())
+        else {
             return Task::none();
         };
         if cache.cube_id.is_empty() {
@@ -361,12 +384,7 @@ impl LocalSigningState {
             super::keychain_backfill::lookup(
                 cache.datadir_path.clone(),
                 wallet,
-                // The endpoint the pipeline recorded; before the stream is
-                // up, a restored session is on the configured API.
-                cache
-                    .connect_base_url
-                    .clone()
-                    .unwrap_or_else(crate::services::coincube_api_base_url),
+                base_url,
                 tokens,
                 cache.cube_id.clone(),
                 persist,
@@ -670,11 +688,7 @@ impl LocalSigningState {
             return Task::none();
         }
         self.refresh_phones_from(dir);
-        if self.sync_in_flight
-            || self
-                .wallet_chain
-                .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
-        {
+        if self.sync_in_flight {
             return Task::none();
         }
         self.sync_in_flight = true;
@@ -759,6 +773,13 @@ impl LocalSigningState {
                 return Task::none();
             }
         };
+        let Some(chain) = self.wallet_chain else {
+            self.flow = PairingFlow::Error(PairingError::InternalError(
+                "Couldn't tell which network this Vault is on; reload the wallet and try again."
+                    .into(),
+            ));
+            return Task::none();
+        };
         let GeneratedOffer { offer } = crate::phone_signer::pairing::generate_offer(
             fingerprint,
             &identity,
@@ -767,6 +788,7 @@ impl LocalSigningState {
                 signer_xpub: selected_key,
                 descriptor_sha256: self.descriptor_sha256.clone(),
             },
+            chain,
         );
         // Build the QR up front and fail closed if it can't be
         // rendered. Entering `Waiting` with `qr: None` would
@@ -821,6 +843,7 @@ impl LocalSigningState {
                     expected_vault_id,
                     signer_fps,
                     expected_signer_fp,
+                    chain,
                     &dir,
                     &run,
                 )
@@ -894,20 +917,6 @@ impl State for LocalSigningState {
             Message::View(view::Message::Settings(view::SettingsMessage::LocalSigning(m))) => m,
             _ => return Task::none(),
         };
-        if self
-            .wallet_chain
-            .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
-            && matches!(
-                msg,
-                LocalSigningMessage::StartPairing | LocalSigningMessage::PickPhone(_)
-            )
-        {
-            self.start_pairing_run();
-            self.flow = PairingFlow::Error(PairingError::InternalError(
-                crate::phone_signer::BTCB2_LAN_UNAVAILABLE.to_string(),
-            ));
-            return Task::none();
-        }
         match msg {
             LocalSigningMessage::SelectKey(key) => {
                 if matches!(self.flow, PairingFlow::Idle)
@@ -1130,6 +1139,8 @@ mod tests {
             vault_fingerprint: Fingerprint::default(),
             transport_pubkey: Vec::new(),
             fallback_addr: fallback.map(|s| s.to_string()),
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 
@@ -2049,6 +2060,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2094,6 +2106,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2179,6 +2192,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2217,6 +2231,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2244,7 +2259,7 @@ mod tests {
     /// offer generated afterwards then carried the wrong vault id.
     /// `apply_wallet` is the helper both paths now go through.
     #[test]
-    fn bitcoin_twin_switch_revokes_pairing_and_btcb2_cannot_start_or_pick() {
+    fn bitcoin_twin_switch_revokes_pairing_and_btcb2_pairs_as_bitcoin() {
         use crate::chain::ChainId;
         let bitcoin =
             Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap()).with_chain(ChainId::Bitcoin);
@@ -2258,24 +2273,42 @@ mod tests {
         assert!(state.apply_wallet_update(&btcb2));
         assert_ne!(state.pairing_id, old_id);
         assert!(matches!(state.flow, PairingFlow::Idle));
-        state.initialised = true; // no fixture needs a real pairing-store read
-        for message in [
-            LocalSigningMessage::StartPairing,
-            LocalSigningMessage::PickPhone("fixture".into()),
-        ] {
-            let task = state.update(
+        assert_eq!(state.wallet_chain(), Some(ChainId::BitcoinBlake2b));
+
+        // Picking a phone offers a code for the Vault's own chain, on
+        // Bitcoin and on its Bitcoin Blake2b twin alike.
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let dir = fresh_dir();
+            let cache = Cache {
+                datadir_path: dir.clone(),
+                ..Cache::default()
+            };
+            let mut state = LocalSigningState::default();
+            state.initialised = true;
+            state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true).with_chain(chain));
+            let phone = crate::phone_signer::mdns::DiscoveredPhone {
+                cert_fp8: "01010101".into(),
+                addr: "127.0.0.1:0".parse().unwrap(),
+                instance_name: "fixture".into(),
+            };
+            state.flow = PairingFlow::PhonePicker {
+                discovered: vec![phone],
+            };
+            let _ = state.update(
                 None,
-                &Cache::default(),
+                &cache,
                 Message::View(view::Message::Settings(
-                    view::SettingsMessage::LocalSigning(message),
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::PickPhone(
+                        "01010101".into(),
+                    )),
                 )),
             );
-            assert!(iced_runtime::task::into_stream(task).is_none());
             match &state.flow {
-                PairingFlow::Error(PairingError::InternalError(error)) => {
-                    assert!(error.contains("chain-bound pairing"))
+                PairingFlow::Waiting { offer, .. } => {
+                    assert_eq!(offer.network, chain.api_str(), "{}", chain);
                 }
-                _ => panic!("BTCB2 pairing should be unavailable"),
+                PairingFlow::Error(error) => panic!("{}: {}", chain, error),
+                _ => panic!("{}: picking a phone should show the code", chain),
             }
         }
     }
@@ -2433,6 +2466,7 @@ mod tests {
                 offer: crate::phone_signer::pairing::PairingOffer {
                     signer_xpub: String::new(),
                     descriptor_sha256: String::new(),
+                    network: String::new(),
                     version: 1,
                     cert_der_b64: String::new(),
                     cert_fp: String::new(),
@@ -2635,6 +2669,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2667,6 +2702,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 2,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),

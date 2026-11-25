@@ -66,6 +66,24 @@ Three independent gRPC services on the API:
 - **RealtimeService** — a single long-lived bidi stream that pushes
   `SessionEvent`s to the desktop.
 
+## One pipeline, a folder per chain
+
+Every Cube runs the same signer bootstrap and stream, and keeps its Connect
+session, signer device id and event cursor in one file shape, the
+`connect.json` of its chain's folder: `bitcoin/` (and the other Bitcoin
+networks' folders) for a Bitcoin Cube, `bitcoin-blake2b/` or
+`bitcoin-blake2b-testnet4/` for a Bitcoin Blake2b Cube. The transport key
+sits beside it, so a Bitcoin Blake2b Cube registers its own signer device,
+named with its chain. The pipeline's inputs are the Cube's `ChainId` (folder
+and network name) and its Connect endpoint (`App::connect_base_url`).
+
+A Bitcoin Cube's file is written by its in-Cube sign-in. A Connect-served
+Bitcoin Blake2b Cube writes its own session there at open and its pipeline
+stays pinned to that session while it is open
+([`BTCB2_VAULT_APP.md`](BTCB2_VAULT_APP.md)). A local Bitcoin Blake2b Cube
+(on its own node, or with no Vault yet) writes it from its in-Cube sign-in,
+exactly as a Bitcoin Cube does.
+
 ## Happy-path sequence
 
 User has a Vault with two Mobile signers (themselves on this

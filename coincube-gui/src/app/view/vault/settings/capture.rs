@@ -154,6 +154,7 @@ fn pair_state(scenario: &str) -> LocalSigningState {
             offer: PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 2,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -183,6 +184,8 @@ fn pair_state(scenario: &str) -> LocalSigningState {
             vault_fingerprint: vault_id,
             transport_pubkey: Vec::new(),
             fallback_addr: None,
+            network: None,
+            capabilities: Vec::new(),
         });
     }
     state

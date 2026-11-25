@@ -147,8 +147,8 @@ assessment this paragraph referred to was removed in S7b with the paired
 Claim and Split flows; Split coins replaces them.) Dynamic RDTS expiry uses chain
 MTP, never hard-coded expiry or the machine clock. Six confirmations must be
 rechecked with reorg handling. Missing transactions and post-fork timestamps
-never prove permanent chain exclusivity. Mobile LAN signing remains gated until
-chain-bound pairing and signing prerequisites are accepted.
+never prove permanent chain exclusivity. Mobile LAN signing was gated until
+chain-bound pairing shipped; since Desktop PR 8c it follows the v3 pairing rules.
 
 Rollback is operator-controlled feature disable plus reverting the reviewed app
 release as needed. Do not remap fork data into Bitcoin directories, rewrite

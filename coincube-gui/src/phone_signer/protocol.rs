@@ -297,6 +297,8 @@ mod tests {
         LocalEnvelope {
             payload: Some(local_v1::local_envelope::Payload::Partial(
                 local_v1::PartialSignature {
+                    // Checked by the desktop from PR 8d.
+                    network: String::new(),
                     session_id: session_id.into(),
                     signed_psbt: psbt.into(),
                     signed_key_ids: Vec::new(),

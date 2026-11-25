@@ -280,6 +280,8 @@ async fn fake_phone_pair_then_sign(
         let reply = LocalEnvelope {
             payload: Some(local_v1::local_envelope::Payload::Partial(
                 local_v1::PartialSignature {
+                    // Checked by the desktop from PR 8d.
+                    network: String::new(),
                     session_id,
                     // Empty under ECIES_V1.
                     signed_psbt: Vec::new(),
@@ -327,6 +329,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
             signer_xpub: lan_binding::binding(DESC).xpub,
             descriptor_sha256: hex::encode(lan_binding::binding(DESC).descriptor_sha256),
         },
+        coincube_gui::chain::ChainId::Bitcoin,
     );
     let encoded = encode_offer(&g.offer).expect("encode offer");
     let decoded = decode_offer(&encoded).expect("decode offer");
@@ -337,8 +340,13 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     // Proof-of-QR-scan over the round-tripped offer's psk — the phone
     // computes this after scanning, and the desktop verifies it before
     // pinning.
-    let proof =
-        pairing_proof(&decoded.psk_b64, &decoded.cert_fp, &phone_cert_fp_hex).expect("proof");
+    let proof = pairing_proof(
+        &decoded.psk_b64,
+        &decoded.cert_fp,
+        &phone_cert_fp_hex,
+        &decoded.network,
+    )
+    .expect("proof");
     let phone_cert_for_server = phone_cert.clone();
     let phone_handle = tokio::spawn(fake_phone_pair_then_sign(
         listener,
@@ -367,6 +375,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         vec![lan_binding::binding(DESC).fingerprint],
         lan_binding::binding(DESC).fingerprint,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -394,6 +403,8 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         vault_fingerprint: paired.vault_fingerprint,
         transport_pubkey: paired.transport_pubkey.clone(),
         fallback_addr: paired.fallback_addr.clone(),
+        network: paired.network.clone(),
+        capabilities: paired.capabilities.clone(),
     };
     // A real descriptor, so the fake phone's fingerprint check is meaningful.
 
@@ -406,9 +417,12 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         None,
         paired_clone,
+        // The chain it was paired for: a pairing for another chain is never
+        // dialled (contract R2.7), so a mismatch here would refuse before the
+        // phone saw the session.
         coincube_gui::phone_signer::policy::PhonePolicy::vault(
             DESC,
-            coincube_core::chain::ChainId::Regtest,
+            coincube_gui::chain::ChainId::Bitcoin,
         )
         .expect("vault policy"),
         durable_pairing_test_dir(),
@@ -427,7 +441,11 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     );
 
     drop(signer);
-    let _ = phone_handle.await;
+    // The phone read the session and answered: the pairing was dialled.
+    phone_handle
+        .await
+        .expect("join")
+        .expect("the phone received and answered the session");
 }
 
 #[tokio::test]
@@ -481,6 +499,7 @@ async fn handshake_fails_when_phone_pins_a_different_cert() {
             signer_xpub: lan_binding::binding(DESC).xpub,
             descriptor_sha256: hex::encode(lan_binding::binding(DESC).descriptor_sha256),
         },
+        coincube_gui::chain::ChainId::Bitcoin,
     );
     // Shorten the offer TTL: `run_pairing` now retries failed dials
     // until the offer expires (so a user has time to scan the QR
@@ -501,6 +520,7 @@ async fn handshake_fails_when_phone_pins_a_different_cert() {
         wallet_fp,
         vec![lan_binding::binding(DESC).fingerprint],
         lan_binding::binding(DESC).fingerprint,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )

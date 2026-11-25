@@ -70,8 +70,9 @@ coincube #568, so this lift needs the same owner sign-off before merge.
   `KeySource::replay_capable` counts it for the path advice only then. That
   is a snapshot for path selection: a loaded Vault classifies the phone at
   sign time, and Connect re-resolves it there.
-- **Still separate.** Mobile LAN signing on BTCB2 stays refused
-  (`BTCB2_CONNECT_SIGNING_CLIENT.md`).
+- **Wi-Fi signing** on BTCB2 follows the chain-bound v3 pairing: a phone paired for
+  the Vault's chain with both capabilities is dialled as on Bitcoin
+  (`BTCB2_CONNECT_SIGNING_CLIENT.md`, `BTCB2_SIGNING_IDENTITY.md`).
 
 **Being allowed at creation is not replay evidence.** Only verified unified
 witnesses make the replay pill say "protected"; neither the key source nor

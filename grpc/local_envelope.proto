@@ -63,14 +63,14 @@ message PairingComplete {
   //
   //   pairing_proof = HMAC-SHA256(
   //     key = psk_bytes,                         (from the QR's `psk` field)
-  //     msg = "coincube-pair-v2" ||
+  //     msg = "coincube-pair-v3" ||
   //           desktop_cert_fp_hex_ascii ||       (lowercase, 64 chars)
-  //           phone_cert_fp_hex_ascii            (lowercase, 64 chars)
+  //           phone_cert_fp_hex_ascii ||         (lowercase, 64 chars)
+  //           net_utf8                           (the QR's `net` field)
   //   )
   //
-  // Emitted as lowercase hex (64 chars). Empty for v1 PairingOffer peers
-  // (no psk in the QR → no proof to compute). The desktop must verify
-  // before pinning the cert.
+  // Emitted as lowercase hex (64 chars). Every pairing is v3 (the QR's
+  // `v`); the desktop verifies with its own `net` before pinning the cert.
   string pairing_proof           = 5;
   // The phone's ECIES transport public key (33-byte compressed secp256k1).
   // Required for descriptor-blinded LAN signing: the desktop seals both the
@@ -78,7 +78,7 @@ message PairingComplete {
   // re-pair; it must never select a descriptor_id-only fallback.
   bytes transport_pubkey         = 6;
   // Exact local key selected by the scanned QR. Authenticated by the same
-  // TLS channel and v2 QR proof; never inferred from a master fingerprint.
+  // TLS channel and v3 QR proof; never inferred from a master fingerprint.
   // Missing identity requires re-pairing. Only the selected vault key is shared.
   SignerBinding signer_binding   = 7;
   uint32 completion_protocol = 8; // must be 1; older peers must update/re-pair
@@ -106,6 +106,15 @@ message PartialSignature {
   // The ECIES_V1 signed PSBT, sealed to
   // SigningSession.creator_transport_pubkey with request_id-bound AAD.
   connect.v1.PayloadEnvelope signature_envelope = 4;
+  // The chain the phone signed for: the presented session's network, which the
+  // desktop always states. Required: the desktop refuses an empty or different
+  // value before verifying or merging.
+  //
+  // Desktop status: the three lines above quote the contract (§4.3) and are
+  // its target. Until desktop PR 8d, the LAN SigningSession carries an empty
+  // network and the desktop does not read this field; PR 8d states the paired
+  // record's chain on the session and adds the refusal above.
+  string network = 5;
 }
 
 message ErrorEnvelope {
@@ -114,6 +123,9 @@ message ErrorEnvelope {
   //   "unknown_session"  — desktop sent an id this device doesn't have
   //   "unauthorized"     — peer cert not in the pairing store
   //   "internal"         — unexpected local failure
+  //   "pair_again"       — the stored pairing no longer matches; pair again
+  //   "network_mismatch" — session refused: its chain does not match the
+  //                        pairing or the phone's record
   string code       = 1;
   string message    = 2;
   string session_id = 3;
@@ -125,6 +137,10 @@ message SignerBinding {
   string xpub = 2;               // Exact extended public key, no origin/suffix.
   string fingerprint = 3;        // Display/routing metadata, not authority.
   bytes descriptor_sha256 = 4;   // All 32 bytes over canonical descriptor UTF-8.
+  // Connect network id of the local record selected for this pairing. Must equal
+  // the scanned offer's `net`; the desktop refuses otherwise. Required: every
+  // pairing is v3, and the desktop refuses an empty value.
+  string network = 5;
 }
 
 // One TLS peer and one transaction ID own the whole exchange. No signing

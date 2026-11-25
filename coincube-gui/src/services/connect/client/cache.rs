@@ -499,7 +499,7 @@ pub async fn set_device_id_for_email(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: None,
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
@@ -532,8 +532,20 @@ pub async fn discard_device_id_in_every_chain_folder(
     datadir: &crate::dir::CoincubeDirectory,
     email: &str,
 ) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
+    discard_device_id_in_chain_folders(datadir, email, crate::chain::ChainId::ALL).await
+}
+
+/// [`discard_device_id_in_every_chain_folder`] limited to `chains`. A
+/// Connect-served Bitcoin Blake2b Cube discards only its own chain's id: the
+/// same email in another folder may be an account on another Connect host,
+/// and the Cube never writes another chain's state (master invariant I3).
+pub async fn discard_device_id_in_chain_folders(
+    datadir: &crate::dir::CoincubeDirectory,
+    email: &str,
+    chains: impl IntoIterator<Item = crate::chain::ChainId>,
+) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
     let mut outcomes = Vec::new();
-    for chain in crate::chain::ChainId::ALL {
+    for chain in chains {
         let dir = datadir.network_directory(chain);
         // Reading first also keeps the clear from creating an empty
         // `connect.json` in a chain folder that never had one.
@@ -559,11 +571,16 @@ pub async fn discard_device_id_in_every_chain_folder(
 
 /// Commit a plain registration only for the same active bearer that started
 /// its RPC. A later login cannot inherit an earlier RPC's device ID.
+///
+/// Both tokens are compared. A Bitcoin Blake2b Cube served by Connect saves
+/// its session with an empty refresh token when the saved sign-in is another
+/// session, so two opens of one account differ only in their access tokens.
+/// Elsewhere the two tokens always travel together.
 pub async fn set_device_id_for_email_if_token(
     network_dir: &NetworkDirectory,
     email: &str,
     device_id: &str,
-    expected_refresh_token: &str,
+    expected: &AccessTokenResponse,
 ) -> Result<bool, ConnectCacheError> {
     mutate_device_registration(
         network_dir,
@@ -571,7 +588,7 @@ pub async fn set_device_id_for_email_if_token(
         DeviceRegistrationUpdate::Set {
             device_id: Some(device_id),
             claim: None,
-            expected_refresh_token: Some(expected_refresh_token),
+            expected_tokens: Some(expected),
         },
     )
     .await
@@ -620,7 +637,7 @@ pub async fn finish_device_reregistration(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: Some(claim),
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
@@ -634,7 +651,7 @@ enum DeviceRegistrationUpdate<'a> {
     Set {
         device_id: Option<&'a str>,
         claim: Option<&'a str>,
-        expected_refresh_token: Option<&'a str>,
+        expected_tokens: Option<&'a AccessTokenResponse>,
     },
 }
 
@@ -724,7 +741,7 @@ fn apply_device_registration_update(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim,
-            expected_refresh_token,
+            expected_tokens,
         } => {
             if let Some(claim) = claim {
                 if account.reregister_claim.as_deref() != Some(claim) {
@@ -746,7 +763,7 @@ fn apply_device_registration_update(
                     account,
                     is_active,
                     device_id,
-                    expected_refresh_token,
+                    expected_tokens,
                 )
             }
         }
@@ -758,11 +775,13 @@ fn apply_unclaimed_device_registration(
     account: &mut Account,
     is_active: bool,
     device_id: Option<&str>,
-    expected_refresh_token: Option<&str>,
+    expected_tokens: Option<&AccessTokenResponse>,
 ) -> DeviceRegistrationMutation {
-    if expected_refresh_token
-        .is_some_and(|expected| !is_active || account.tokens.refresh_token != expected)
-    {
+    if expected_tokens.is_some_and(|expected| {
+        !is_active
+            || account.tokens.refresh_token != expected.refresh_token
+            || account.tokens.access_token != expected.access_token
+    }) {
         return DeviceRegistrationMutation::Unchanged(false);
     }
     if has_live_reregister_claim_for_account(network_dir, account) {
@@ -1236,6 +1255,56 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
+    /// A Connect-served Bitcoin Blake2b Cube saves its session with an empty
+    /// refresh token when the saved sign-in is another session. Two opens of
+    /// one account then share the refresh token (empty) and differ only in
+    /// their access tokens: the guard must still tell them apart.
+    #[tokio::test]
+    async fn two_opens_with_an_empty_refresh_token_are_told_apart() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let open = |access: &str| AccessTokenResponse {
+            access_token: access.into(),
+            refresh_token: String::new(),
+            expires_at: 123,
+        };
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, open("second-open"), CacheAccountAction::Activate);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "first-device",
+            &open("first-open")
+        )
+        .await
+        .unwrap());
+        assert!(super::Account::from_cache(&dir, email)
+            .unwrap()
+            .unwrap()
+            .device_id
+            .is_none());
+        assert!(set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "second-device",
+            &open("second-open")
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            super::Account::from_cache(&dir, email)
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("second-device")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
     #[tokio::test]
     async fn late_plain_registration_cannot_write_into_new_login() {
         let dir = test_network_dir();
@@ -1250,7 +1319,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            !set_device_id_for_email_if_token(&dir, email, "late-device", "old-refresh")
+            !set_device_id_for_email_if_token(&dir, email, "late-device", &tokens("old"))
                 .await
                 .unwrap()
         );
@@ -1893,14 +1962,11 @@ mod tests {
         assert_eq!(account.tokens.refresh_token, was.tokens.refresh_token);
         assert_eq!(account.last_seen_event_seq, Some(42));
 
-        assert!(set_device_id_for_email_if_token(
-            &dir,
-            email,
-            "fresh-device",
-            &was.tokens.refresh_token
-        )
-        .await
-        .unwrap());
+        assert!(
+            set_device_id_for_email_if_token(&dir, email, "fresh-device", &was.tokens)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             ConnectCache::from_file(&dir)
                 .unwrap()

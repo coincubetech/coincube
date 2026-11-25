@@ -18,6 +18,27 @@ window on the LAN rail: v3 only, a pre-v3 pairing is never used on any chain;
 every chain. Where this mirror and the canonical copy differ, the canonical copy
 wins.
 
+**Implementation status (Rail 2).** Desktop PR 8a implements §4.1 to §4.3 and the
+listener's network check in §4.4: the desktop emits v3 only with `net`, computes and
+verifies the `coincube-pair-v3` proof over `net`, and refuses a missing or different
+`SignerBinding.network`; `grpc/local_envelope.proto` carries the two `network` fields
+with the comments quoted in §4.3 and the `network_mismatch` code. Desktop PR 8b stores
+the row's `network` and `capabilities` (§4.4): a row without a network is a pre-v3
+pairing, kept listed and removable and refused for every Vault with the R2.6 legacy
+copy, and pairing the same phone for another chain replaces its row, which the pairing
+screen says before the user scans. Desktop PR 8c puts the dial predicate (§4.5) in `exact_signer_against` with the
+Vault's chain: another chain's row gives R2.7, a Bitcoin Blake2b row without both
+capabilities gives the R2.6 capability copy, the settings and signer lists show them,
+and the blanket Bitcoin Blake2b Wi-Fi refusals are gone. The network on
+`PresentSession`/`PartialSignature` follows in PR 8d. The v3 known-answer vector
+is `phone_signer/pairing.rs::pairing_proof_known_answer_vector`: psk = the 16 bytes
+`0x00..0x0f` (`AAECAwQFBgcICQoLDA0ODw`), desktop fp `"aa"×32`, phone fp `"bb"×32`;
+`net = bitcoin-blake2b` →
+`ccc65575005c19fbb4826f49c68db719fc1c7f2bc0de4deea2c6e4d722c5263c`, `mainnet` →
+`e7f46e42e05dd6a69c1f8372353d38fbfce4ee54d1c7ddd13bee54759ef5854a`,
+`bitcoin-blake2b-testnet4` →
+`1c81ce3dea97020338d1dc09f88e9eaafdd100187f92fb7d3895d9fd8f5a6114`.
+
 ## 1. Why the desktop is involved
 
 A BTCB2 Vault is the same descriptor, xpubs and fingerprints as its Bitcoin twin
@@ -27,8 +48,8 @@ Mobile signing rails inherit the ambiguity:
 - **Rail 1 (Connect)** — `keychain_sign.rs` sends `vault_id`, `descriptor_id` and
   `SignerTarget{device_id, key_id, key_fingerprint}` (`coincube-gui/src/app/state/vault/keychain_sign.rs:1016-1073`),
   never the chain, although it has it: `Wallet.chain: ChainId` (`coincube-gui/src/app/wallet.rs:141`).
-- **Rail 2 (LAN)** — the v2 `PairingOffer` carries `key`, `dh`, `wfp`, `psk`
-  (`coincube-gui/src/phone_signer/pairing.rs:65-105`), no chain. The phone picks a
+- **Rail 2 (LAN)** — before v3, the v2 `PairingOffer` carried `key`, `dh`, `wfp`,
+  `psk` (`coincube-gui/src/phone_signer/pairing.rs` at the commit above), no chain. The phone picks a
   local record by xpub alone and echoes its backend id in `SignerBinding.key_id`,
   which `sign_tx` copies into every LAN session's target (`phone_signer/mod.rs:293-298`).
   The pairing store is datadir-global (`pairing_store.rs:183-190`), one row per
@@ -159,7 +180,7 @@ message PartialSignature {
 ```
 
 A2 rewords these two comments; field names, numbers and types are unchanged.
-`grpc/local_envelope.proto` takes the reworded comments with the v3 implementation.
+`grpc/local_envelope.proto` carries them verbatim since Desktop PR 8a.
 
 `ErrorEnvelope.code` gains `"network_mismatch"` (phone → desktop). `PresentSession`
 is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
@@ -246,7 +267,7 @@ LAN is enabled only on desktops that implement this contract and emit v3 offers
 (LANE-B3 §B3.4: BTCB2 stays Connect-rail-only, or is refused on LAN, until
 chain-bound pairing ships). A pre-identity desktop must never have BTCB2 Mobile
 signing enabled — it may load a `ChainId::BitcoinBlake2b` Vault (`coincube-core/src/chain.rs`),
-but the v2 offer (`coincube-gui/src/phone_signer/pairing.rs:65-105`) carries no
+but the v2 offer such a desktop emits carries no
 chain, so a phone holding only the Bitcoin twin cannot tell a Bitcoin session from a
 BTCB2 one and would sign on its Bitcoin-family record. A2: before the amendment this
 prerequisite was what made the admitted legacy path safe. That path no longer exists
@@ -284,8 +305,10 @@ contract; it remains a deployment gate, not a check. Canonical §4.6 says the sa
   **resolve → create against an old Connect** (empty `resp.network`): a Bitcoin-family
   Vault and a BTCB2 Vault each send nothing (A3); `network` present on every create;
   empty `network` on a created/fetched session cancels it, on every chain;
-  capability registered; a target storing only `btcb2-unified-v1` reads as outdated. Bitcoin-family sessions render and merge exactly as today (existing
-  tests unchanged).
+  capability registered; a target storing only `btcb2-unified-v1` reads as outdated.
+  Bitcoin-family sessions that state their network render and merge exactly as
+  before; existing tests that relied on an empty Bitcoin session network now state
+  it or expect the refusal (Desktop PR 4).
 
 ## 6. Not in this contract
 

@@ -46,12 +46,18 @@ use coincube_gui::phone_signer::{
     tls,
 };
 
-/// Compute the v2 proof-of-QR-scan the fake phone must return so the
+/// Compute the v3 proof-of-QR-scan the fake phone must return so the
 /// desktop will pin its cert. Mirrors what the keychain-app does after
 /// scanning the QR. See
 /// `coincube_gui::phone_signer::pairing::pairing_proof`.
 fn proof_for(offer: &PairingOffer, phone_cert_fp_hex: &str) -> String {
-    pairing::pairing_proof(&offer.psk_b64, &offer.cert_fp, phone_cert_fp_hex).expect("proof")
+    pairing::pairing_proof(
+        &offer.psk_b64,
+        &offer.cert_fp,
+        phone_cert_fp_hex,
+        &offer.network,
+    )
+    .expect("proof")
 }
 
 /// A valid compressed secp256k1 point for `PairingComplete.transport_pubkey`.
@@ -86,6 +92,7 @@ fn fresh_offer(wallet_fp: Fingerprint, cert_fp: String, ttl_secs: u64) -> Pairin
     PairingOffer {
         signer_xpub: "selected-test-xpub".into(),
         descriptor_sha256: format!("{}{}", wallet_fp, "00".repeat(28)),
+        network: "mainnet".into(),
         version: PAIRING_PROTOCOL_VERSION,
         // These tests don't exercise the cert-trust path (a separate
         // pair-then-sign integration test does), so any well-formed
@@ -104,6 +111,7 @@ fn fresh_offer(wallet_fp: Fingerprint, cert_fp: String, ttl_secs: u64) -> Pairin
             &fresh_desktop_identity(),
             "x".into(),
             pairing::OfferedKey::default(),
+            coincube_gui::chain::ChainId::Bitcoin,
         )
         .offer
         .psk_b64,
@@ -167,6 +175,7 @@ async fn fake_phone_server_with_transport_key(
             xpub: "selected-test-xpub".into(),
             fingerprint: "01020304".into(),
             descriptor_sha256: [&[1u8, 2, 3, 4][..], &[0u8; 28][..]].concat(),
+            network: "mainnet".into(),
         },
     )
     .await;
@@ -274,6 +283,7 @@ async fn run_pairing_happy_path_returns_paired_phone() {
         wallet_fp,
         vec![wallet_fp],
         wallet_fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -308,6 +318,7 @@ async fn run_pairing_returns_offer_expired_when_ttl_in_past() {
         Fingerprint::default(),
         vec![Fingerprint::default()],
         Fingerprint::default(),
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -368,6 +379,7 @@ async fn run_pairing_returns_wallet_fingerprint_mismatch() {
         actual,
         vec![actual],
         actual,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -426,6 +438,7 @@ async fn run_pairing_rejects_phone_reporting_mismatched_cert_fp() {
         wallet_fp,
         vec![wallet_fp],
         wallet_fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -494,6 +507,7 @@ async fn run_pairing_rejects_invalid_pairing_proof() {
         wallet_fp,
         vec![wallet_fp],
         wallet_fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -579,6 +593,7 @@ async fn run_pairing_returns_offer_expired_when_phone_stalls_after_tls() {
             wallet_fp,
             vec![wallet_fp],
             wallet_fp,
+            coincube_gui::chain::ChainId::Bitcoin,
             &durable_pairing_test_dir(),
             &Default::default(),
         ),
@@ -647,6 +662,7 @@ async fn run_pairing_returns_signer_fps_not_vault_id() {
             xpub: offer.signer_xpub.clone(),
             fingerprint: signer_fps[1].to_string(),
             descriptor_sha256: hex::decode(&offer.descriptor_sha256).unwrap(),
+            network: "mainnet".into(),
         },
     ));
 
@@ -663,6 +679,7 @@ async fn run_pairing_returns_signer_fps_not_vault_id() {
         vault_id,
         signer_fps.clone(),
         signer_fps[1],
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -729,6 +746,7 @@ async fn run_pairing_reports_a_legacy_offer_rather_than_blaming_the_phone() {
         wallet_fp,
         vec![wallet_fp],
         wallet_fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -802,6 +820,7 @@ async fn run_pairing_rejects_fingerprint_of_a_different_vault_key() {
             // ...but a fingerprint belonging to the vault's *other* key.
             fingerprint: other.to_string(),
             descriptor_sha256: hex::decode(&offer.descriptor_sha256).unwrap(),
+            network: "mainnet".into(),
         },
     ));
 
@@ -818,6 +837,7 @@ async fn run_pairing_rejects_fingerprint_of_a_different_vault_key() {
         vault_id,
         signer_fps,
         selected,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -881,6 +901,7 @@ async fn fake_phone_close_then_serve(
                     xpub: "selected-test-xpub".into(),
                     fingerprint: "01020304".into(),
                     descriptor_sha256: [&[1u8, 2, 3, 4][..], &[0u8; 28][..]].concat(),
+                    network: "mainnet".into(),
                 }),
                 phone_cert_fp: phone_cert_fp_hex,
                 device_name,
@@ -939,6 +960,7 @@ async fn run_pairing_returns_offer_expired_when_retries_exhaust_ttl() {
             wallet_fp,
             vec![wallet_fp],
             wallet_fp,
+            coincube_gui::chain::ChainId::Bitcoin,
             &durable_pairing_test_dir(),
             &Default::default(),
         ),
@@ -1003,6 +1025,7 @@ async fn run_pairing_redials_after_phone_closes_early() {
         wallet_fp,
         vec![wallet_fp],
         wallet_fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &dir,
         &run,
     );
@@ -1115,6 +1138,7 @@ async fn run_pairing_refuses_a_phone_with_no_transport_key() {
             wallet_fp,
             vec![wallet_fp],
             wallet_fp,
+            coincube_gui::chain::ChainId::Bitcoin,
             &durable_pairing_test_dir(),
             &Default::default(),
         )
@@ -1164,6 +1188,7 @@ async fn cancellation_at_tls_identity_acceptance_and_pre_persistence_leaves_no_r
                         xpub: offer.signer_xpub.clone(),
                         fingerprint: fp.to_string(),
                         descriptor_sha256: hex::decode(&offer.descriptor_sha256).unwrap(),
+                        network: "mainnet".into(),
                     }),
                 },
             )),
@@ -1244,6 +1269,7 @@ async fn cancellation_at_tls_identity_acceptance_and_pre_persistence_leaves_no_r
             fp,
             vec![fp],
             fp,
+            coincube_gui::chain::ChainId::Bitcoin,
             &dir,
             &run,
         )
@@ -1361,6 +1387,7 @@ async fn cancellation_stops_redial_and_late_persistence() {
         fp,
         vec![fp],
         fp,
+        coincube_gui::chain::ChainId::Bitcoin,
         &dir,
         &run
     )
@@ -1402,6 +1429,7 @@ async fn eof_timeout_and_unexpected_frames_at_each_desktop_boundary_leave_no_tru
                 fp,
                 vec![fp],
                 fp,
+                coincube_gui::chain::ChainId::Bitcoin,
                 &dir,
                 &Default::default(),
             )
@@ -1431,4 +1459,152 @@ async fn eof_timeout_and_unexpected_frames_at_each_desktop_boundary_leave_no_tru
             );
         }
     }
+}
+
+/// One pairing run against a fake phone whose selected record reports
+/// `phone_network` and whose proof covers `proof_network`, for an offer made
+/// with `offer_network` while the desktop has a Vault on `expected_chain`.
+async fn pair_v3(
+    offer_network: &str,
+    expected_chain: coincube_gui::chain::ChainId,
+    phone_network: &str,
+    proof_network: &str,
+) -> (
+    Result<coincube_gui::phone_signer::pairing_store::PairedPhone, PairingError>,
+    coincube_gui::dir::CoincubeDirectory,
+) {
+    let (phone_cert, phone_key) = mint_ed25519_cert("Coincube Phone (test)");
+    let phone_cert_fp_hex = tls::fingerprint_of(&phone_cert)
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let wallet_fp = Fingerprint::from([1, 2, 3, 4]);
+    let identity = fresh_desktop_identity();
+    let mut offer = fresh_offer(wallet_fp, identity.cert_fp(), 5);
+    offer.network = offer_network.into();
+    let proof = pairing::pairing_proof(
+        &offer.psk_b64,
+        &offer.cert_fp,
+        &phone_cert_fp_hex,
+        proof_network,
+    )
+    .expect("proof");
+    let phone_handle = tokio::spawn(fake_phone_server_with_identity(
+        listener,
+        phone_cert,
+        phone_key,
+        "Test Pixel".into(),
+        phone_cert_fp_hex.clone(),
+        proof,
+        valid_transport_pubkey(),
+        local_v1::SignerBinding {
+            key_id: "10".into(),
+            xpub: "selected-test-xpub".into(),
+            fingerprint: "01020304".into(),
+            descriptor_sha256: [&[1u8, 2, 3, 4][..], &[0u8; 28][..]].concat(),
+            network: phone_network.into(),
+        },
+    ));
+    let dir = durable_pairing_test_dir();
+    let result = pairing_listener::run_pairing(
+        identity,
+        offer,
+        DiscoveredPhone {
+            cert_fp8: phone_cert_fp_hex[..8].to_string(),
+            addr,
+            instance_name: "keychain-test".into(),
+        },
+        wallet_fp,
+        vec![wallet_fp],
+        wallet_fp,
+        expected_chain,
+        &dir,
+        &Default::default(),
+    )
+    .await;
+    phone_handle.abort();
+    (result, dir)
+}
+
+/// Contract §4.5 (R2.4, R2.5) and the chain beside the wallet-swap guard:
+/// the phone's reported network must be present and equal to the offer's,
+/// the offer must be for the chain loaded now, and the proof covers `net`.
+/// A refusal writes no pairing row.
+#[tokio::test]
+async fn v3_pairing_requires_the_offers_network_from_the_phone() {
+    use coincube_gui::chain::ChainId;
+    let btcb2 = ChainId::BitcoinBlake2bTestnet4;
+    let b = btcb2.api_str();
+    // Accepted, on a Bitcoin and on a Bitcoin Blake2b Vault.
+    for chain in [ChainId::Bitcoin, btcb2] {
+        let net = chain.api_str();
+        let (result, _dir) = pair_v3(net, chain, net, net).await;
+        let paired = result.unwrap_or_else(|e| panic!("{}: {:?}", chain, e));
+        assert_eq!(paired.name, "Test Pixel");
+        // PR 8b: the row records the chain and the phone's capabilities.
+        assert_eq!(paired.network.as_deref(), Some(net));
+        assert_eq!(paired.capabilities, vec!["sign-psbt".to_string()]);
+    }
+    let refusals: [(&str, ChainId, &str, &str, &str); 5] = [
+        // R2.5: no network from the phone.
+        (b, btcb2, "", b, "Update COINCUBE Mobile and pair again."),
+        // R2.4: the phone's record is on another chain.
+        (
+            "mainnet",
+            ChainId::Bitcoin,
+            b,
+            "mainnet",
+            "Exact pairing identity mismatch; pair again.",
+        ),
+        (
+            b,
+            btcb2,
+            "mainnet",
+            b,
+            "Exact pairing identity mismatch; pair again.",
+        ),
+        // The code was made for the other chain of the same descriptor (a
+        // switch between twins mid-run): refused as the desktop's own fault.
+        ("mainnet", btcb2, "mainnet", "mainnet", "another network"),
+        (b, ChainId::Bitcoin, b, b, "another network"),
+    ];
+    for (offer_net, chain, phone_net, proof_net, needle) in refusals {
+        let (result, dir) = pair_v3(offer_net, chain, phone_net, proof_net).await;
+        match result {
+            Err(PairingError::InternalError(message)) => {
+                assert!(
+                    message.contains(needle),
+                    "{}/{}/{}: {}",
+                    offer_net,
+                    chain,
+                    phone_net,
+                    message
+                )
+            }
+            other => panic!("{}/{}/{}: {:?}", offer_net, chain, phone_net, other),
+        }
+        assert!(
+            coincube_gui::phone_signer::pairing_store::load(&dir)
+                .unwrap()
+                .phones
+                .is_empty(),
+            "a refused pairing stores nothing"
+        );
+    }
+    // A proof computed over another chain string fails verification, even
+    // when the phone's reported network matches.
+    let (result, dir) = pair_v3(b, btcb2, b, "bitcoin-blake2b").await;
+    assert!(
+        matches!(result, Err(PairingError::PhoneVerificationFailed)),
+        "{:?}",
+        result
+    );
+    assert!(coincube_gui::phone_signer::pairing_store::load(&dir)
+        .unwrap()
+        .phones
+        .is_empty());
 }
