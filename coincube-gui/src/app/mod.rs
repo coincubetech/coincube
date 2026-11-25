@@ -7066,7 +7066,8 @@ impl App {
     }
 
     /// Drop everything this App holds for a Connect session that has ended:
-    /// the realtime stream and what the signer pipeline recorded for it. The
+    /// the realtime stream, what the signer pipeline recorded for it, and the
+    /// account's Lightning address with its receive QR. The
     /// stream's subscription is keyed on `connect_stream_config`, so clearing
     /// that stops it on the next `subscription()` tick.
     ///
@@ -12672,6 +12673,7 @@ pub(crate) mod tests {
         app.cache.connect_email = Some("alice@example.invalid".into());
         app.cache.has_connect_session = true;
         app.cache.connect_stream_status = ConnectionStatus::Connected;
+        app.cache.lightning_address = Some("alice@example.invalid".into());
     }
 
     fn assert_connect_session_state_cleared(app: &App) {
@@ -12726,7 +12728,10 @@ pub(crate) mod tests {
             .unwrap();
         let _enter = runtime.enter();
 
+        // `fork_app` leaves the cache's data directory relative; bind it to
+        // the temp root so nothing here can reach the crate directory.
         let mut app = fork_app(&root, true);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         seed_connect_session_state(&mut app);
         app.revoke_local_connect_services();
         assert_connect_session_state_cleared(&app);
@@ -12734,12 +12739,85 @@ pub(crate) mod tests {
         assert!(app.fork_connect_client.is_none());
 
         let mut app = fork_app(&root, true);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         seed_connect_session_state(&mut app);
         app.invalidate_fork_session();
         assert_connect_session_state_cleared(&app);
         assert!(app.connect_auth.is_none());
         assert!(app.fork_connect_client.is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Connect says this computer was removed: besides signing out, the App
+    /// discards the signer device id stored in every chain folder, so a Cube
+    /// on another chain does not replay a revoked id after the next sign-in.
+    #[tokio::test]
+    async fn a_removed_computer_discards_the_stored_device_ids_of_every_chain() {
+        use crate::services::connect::client::cache::{Account, CONNECT_CACHE_FILENAME};
+        use crate::services::connect::grpc::trouble::Refusal;
+        use crate::services::connect::grpc::ConnectStreamMessage as M;
+        use iced::futures::StreamExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+        let datadir = app.cache.datadir_path.clone();
+        assert!(datadir.path().is_absolute());
+        let email = "alice@example.invalid";
+        let folders = [
+            datadir.network_directory(app.cache.chain()),
+            datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b),
+        ];
+        for (dir, device_id) in folders.iter().zip(["device-here", "device-fork"]) {
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&serde_json::json!({
+                    "active_email": email,
+                    "accounts": [{
+                        "email": email,
+                        "tokens": {
+                            "access_token": "access",
+                            "refresh_token": "refresh",
+                            "expires_at": 1000
+                        },
+                        "device_id": device_id
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        // The stream is up from the saved session, and the panel has not
+        // authenticated: on a removed computer it never does.
+        seed_connect_session_state(&mut app);
+        app.connect_email = Some(email.into());
+        assert!(!app.cache.connect_authenticated);
+
+        let task = app.update(Message::ConnectStream(M::Refused(Refusal::DeviceRevoked)));
+        // The parked stream is dropped at once, whether or not the panel
+        // was signed in, so the sign-out that follows has nothing to miss.
+        assert_connect_session_state_cleared(&app);
+        let mut outputs = Vec::new();
+        let mut stream = iced_runtime::task::into_stream(task).expect("tasks to run");
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                outputs.push(message);
+            }
+        }
+
+        assert!(outputs
+            .iter()
+            .any(|m| matches!(m, Message::ConnectDeviceIdsDiscarded)));
+        assert!(outputs
+            .iter()
+            .any(|m| matches!(m, Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved))));
+        for dir in &folders {
+            let account = Account::from_cache(dir, email).unwrap().unwrap();
+            assert_eq!(account.device_id, None, "{:?}", dir.path());
+            assert_eq!(account.tokens.access_token, "access");
+        }
+        // Handling the completion changes nothing further.
+        assert_eq!(app.update(Message::ConnectDeviceIdsDiscarded).units(), 0);
     }
 
     /// The pipeline's endpoint is the Cube's own client's: the session a

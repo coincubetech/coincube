@@ -249,7 +249,20 @@ impl App {
                     // out drops the stream.
                     Refusal::DeviceRevoked => {
                         log::warn!("[CONNECT] This computer was removed from the Connect account");
+                        // Its signer devices are revoked too, in every chain
+                        // folder: discard their ids so the next sign-in
+                        // registers afresh and none is replayed. Read the
+                        // account before the teardown below clears it.
+                        let discard = self.discard_connect_device_ids();
+                        // The stream is parked for good after this refusal
+                        // and waits for the App to drop it. The sign-out below
+                        // does that only when the panel was signed in; at
+                        // start-up the stream runs from the saved session
+                        // before the panel has authenticated, and on a removed
+                        // computer it never will. So drop it here.
+                        self.clear_connect_session_state();
                         Task::batch([
+                            discard,
                             Task::done(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)),
                             Task::done(Message::View(view::Message::ConnectAccount(
                                 view::ConnectAccountMessage::LogOut,
@@ -440,6 +453,41 @@ impl App {
         )
     }
 
+    /// Discard the signer device ids stored for the signed-in account, in
+    /// every chain folder. The account is read now, before the sign-out that
+    /// follows a removal clears it.
+    fn discard_connect_device_ids(&self) -> Task<Message> {
+        use crate::services::connect::client::cache::{
+            discard_device_id_in_every_chain_folder, DeviceIdDiscard,
+        };
+        let Some(email) = self
+            .connect_email
+            .clone()
+            .or_else(|| self.cache.connect_email.clone())
+        else {
+            return Task::none();
+        };
+        let datadir = self.cache.datadir_path.clone();
+        Task::perform(
+            async move {
+                for (chain, outcome) in
+                    discard_device_id_in_every_chain_folder(&datadir, &email).await
+                {
+                    match outcome {
+                        DeviceIdDiscard::Discarded => {
+                            log::info!("[CONNECT] Discarded the revoked device id for {chain}")
+                        }
+                        DeviceIdDiscard::Kept => log::warn!(
+                            "[CONNECT] The revoked device id for {chain} is still stored; \
+                             it will be refused again when a Cube on that chain opens"
+                        ),
+                    }
+                }
+            },
+            |()| Message::ConnectDeviceIdsDiscarded,
+        )
+    }
+
     /// The Connect control, its panel and renewal; everything else routes on.
     pub(super) fn update_connect_chrome(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -460,6 +508,7 @@ impl App {
                     Task::none()
                 }
             }
+            Message::ConnectDeviceIdsDiscarded => Task::none(),
             Message::ConnectSignedOutBy(reason) => {
                 self.cache.connect_signed_out_by = Some(reason);
                 self.cache.connect_panel_open = false;
