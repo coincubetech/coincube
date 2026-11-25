@@ -204,7 +204,9 @@ fn an_uncompressed_or_malformed_reserved_key_is_refused_on_btcb2() {
     for bytes in [uncompressed, vec![0x02; 10], Vec::new()] {
         let mut rekeyed = key.clone();
         rekeyed.key = bytes.clone();
-        let mut forged = f.psbt.clone();
+        // Beside the bound key's valid record, so the refusal can only come
+        // from the bad key itself.
+        let mut forged = returned.clone();
         forged.inputs[0].proprietary.insert(rekeyed, value.clone());
         let mut target = f.psbt.clone();
         assert!(

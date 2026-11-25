@@ -1110,6 +1110,31 @@ async fn a_partial_signature_for_another_or_no_network_is_discarded_before_merge
     }
 }
 
+/// R2.13 runs before the signature is opened: a reply sealed to another
+/// request, which would fail to decrypt, is refused for its network first.
+#[tokio::test]
+async fn the_partial_network_is_checked_before_the_signature_is_decrypted() {
+    let (signer, handle) = signer_against_response(FakeResponse::Network(
+        Box::new(FakeResponse::WrongRequest),
+        "bitcoin-blake2b".into(),
+    ))
+    .await;
+    let mut psbt = empty_psbt();
+    let before = psbt.serialize();
+    let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("The signature COINCUBE Mobile returned is for a different network."),
+        "{}",
+        error
+    );
+    assert!(!error.contains("decrypt"), "{}", error);
+    assert_eq!(psbt.serialize(), before);
+    handle.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn imported_sign_tx_rechecks_pairing_after_valid_phone_review() {
     for (name, change) in [
