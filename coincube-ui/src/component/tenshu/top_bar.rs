@@ -696,7 +696,15 @@ mod tests {
         let brand = bounds(&probe, "brand");
         let preferences = bounds(&probe, "preferences");
         assert_eq!(brand.x, GUTTER);
-        assert_eq!(preferences.x + preferences.width, WIDTH - GUTTER);
+        // The right group's position is what the fill space leaves after
+        // fractional text widths, so it carries float rounding (the
+        // one-word wordmark lands it at 999.9999): a hundredth of a pixel
+        // is far below anything drawn.
+        let right_edge = preferences.x + preferences.width;
+        assert!(
+            (right_edge - (WIDTH - GUTTER)).abs() < 0.01,
+            "preferences ends at {right_edge}, not the gutter"
+        );
         for (id, control) in &probe.focus {
             // Every control is centred in the bar.
             let middle = control.y + control.height / 2.0;
