@@ -198,6 +198,17 @@ impl App {
             Some(self.cube_settings.id.clone())
         };
         let email_for_task = email.clone();
+        // A Connect-served Bitcoin Blake2b Cube is pinned to its own session,
+        // so an id registration returned without saving it (the shared file
+        // moved on) still serves it. Every other Cube reads its id from the
+        // file, as before.
+        let carry_unsaved_id = self.cache.connect_served;
+        // For the same reason such a Cube does not need to own the file's
+        // active account to start: another Cube of the same account may have
+        // saved its own session between this Cube's save and here. The
+        // token is still the Cube's own (checked above against its client),
+        // and the stream trigger pins it again.
+        let pinned_to_own_session = self.cache.connect_served;
 
         Task::perform(
             async move {
@@ -219,22 +230,30 @@ impl App {
                 };
 
                 let network_dir = datadir.network_directory(chain);
-                let owns_cached_session =
-                    crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
-                        .ok()
-                        .and_then(|cache| cache.active_account().cloned())
-                        .is_some_and(|account| {
-                            account.email == email_for_task
-                                && account.tokens.refresh_token == tokens.refresh_token
-                        });
+                // Both tokens: a Connect-served Bitcoin Blake2b Cube can save
+                // its session with an empty refresh token, and two opens of
+                // one account then differ in their access tokens only. Such a
+                // Cube is pinned to its own session and skips the check.
+                let owns_cached_session = pinned_to_own_session
+                    || crate::services::connect::client::cache::ConnectCache::from_file(
+                        &network_dir,
+                    )
+                    .ok()
+                    .and_then(|cache| cache.active_account().cloned())
+                    .is_some_and(|account| {
+                        account.email == email_for_task
+                            && account.tokens.refresh_token == tokens.refresh_token
+                            && account.tokens.access_token == tokens.access_token
+                    });
                 if !owns_cached_session {
-                    return (chain, datadir, None, email_for_task, cube_uuid);
+                    return (chain, datadir, None, email_for_task, cube_uuid, None);
                 }
 
                 // Fetch grpc_url and register the device.
                 let tokens_arc =
                     connect_registration_auth(shared_auth, tokens, &network_dir, &email_for_task)
                         .await;
+                let mut unsaved_id = None;
                 if let Some(grpc_url) =
                     crate::services::connect::client::resolve_connect_grpc_url_for(&base_url).await
                 {
@@ -245,7 +264,7 @@ impl App {
                     // every registration site derives it from
                     // `signer_device_label`.
                     let device_name = crate::utils::device::signer_device_label(chain);
-                    ensure_device_registered_best_effort(
+                    unsaved_id = ensure_device_registered_best_effort(
                         &grpc_url,
                         tokens_arc.clone(),
                         &network_dir,
@@ -254,14 +273,23 @@ impl App {
                         env!("CARGO_PKG_VERSION").to_string(),
                         std::env::consts::OS.to_string(),
                     )
-                    .await;
+                    .await
+                    .filter(|registered| carry_unsaved_id && !registered.persisted)
+                    .map(|registered| registered.device_id);
                 } else {
                     tracing::warn!("InAppConnectLoginCompleted: no Connect gRPC URL available");
                 }
 
-                (chain, datadir, Some(tokens_arc), email_for_task, cube_uuid)
+                (
+                    chain,
+                    datadir,
+                    Some(tokens_arc),
+                    email_for_task,
+                    cube_uuid,
+                    unsaved_id,
+                )
             },
-            |(chain, datadir, tokens_opt, email, cube_uuid)| {
+            |(chain, datadir, tokens_opt, email, cube_uuid, device_id)| {
                 // Chain the existing stream bootstrap so the
                 // cache fields populate without an app restart.
                 match tokens_opt {
@@ -271,6 +299,7 @@ impl App {
                         tokens,
                         email,
                         cube_uuid,
+                        device_id,
                     },
                     None => Message::ConnectStreamReady(None),
                 }

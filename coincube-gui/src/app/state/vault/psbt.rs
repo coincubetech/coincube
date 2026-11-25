@@ -587,7 +587,11 @@ impl PsbtState {
             };
             return Task::none();
         }
-        let Some(tokens) = cache.connect_tokens.clone() else {
+        // The endpoint comes with the session: a Bitcoin Blake2b Cube's bearer
+        // is never sent to the configured API by fallback.
+        let (Some(tokens), Some(base_url)) =
+            (cache.connect_tokens.clone(), cache.connect_api_base_url())
+        else {
             // No Connect session: the check cannot run. Say so; the
             // acknowledgement path stays open. `revalidated_for` is left
             // unset, so the check runs once a session arrives on this same
@@ -610,7 +614,7 @@ impl PsbtState {
         let spend = self.tx.psbt.unsigned_tx.compute_txid();
         Task::perform(
             async move {
-                let mut client = crate::services::coincube::CoincubeClient::new();
+                let mut client = crate::services::coincube::CoincubeClient::with_base_url(base_url);
                 let access_token = tokens.read().await.access_token.clone();
                 client.set_token(&access_token);
                 crate::services::entangled::lookup_all(client, chain, txids).await
@@ -937,6 +941,7 @@ impl PsbtState {
             } => self.apply_split_key_reply(cache, spend, key, generation, result),
             message => self.update_inner(daemon, cache, message),
         };
+        let pipeline = self.follow_signer_pipeline(cache);
         // Likewise the split key: re-qualified on entering the screen and
         // when its answer lapses; a picker it no longer admits comes down.
         let requalify = self.requalify_split_key(cache, false);
@@ -956,7 +961,31 @@ impl PsbtState {
             was_picker,
             was_unavailable,
         );
-        Task::batch([task, requalify, picker, recheck, dialog, focus])
+        Task::batch([task, pipeline, requalify, picker, recheck, dialog, focus])
+    }
+
+    /// An open picker follows the Cube's signer pipeline as it comes up from
+    /// the session it was opened with, and builds its Mobile signing flow
+    /// once the pipeline is ready. Only a Connect-served Bitcoin Blake2b Cube
+    /// moves the pipeline off `Idle`, so on every other Cube this does
+    /// nothing and the picker keeps the state it opened with.
+    fn follow_signer_pipeline(&mut self, cache: &Cache) -> Task<Message> {
+        use crate::app::cache::SignerPipelineStart as Start;
+        let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() else {
+            return Task::none();
+        };
+        let was = std::mem::replace(&mut sign.pipeline_start, cache.signer_pipeline_start);
+        if was == Start::Idle || cache.signer_pipeline_start != Start::Idle {
+            return Task::none();
+        }
+        if !sign.keychain_needs_init() {
+            return Task::none();
+        }
+        let (keychain, launch) = build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
+        if let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() {
+            sign.set_keychain(keychain);
+        }
+        launch
     }
 
     fn restore_signer_focus(
@@ -1147,7 +1176,8 @@ impl PsbtState {
             keychain,
             true,
         )
-        .with_connect_account(ConnectAccountStatus::from_cache(cache));
+        .with_connect_account(ConnectAccountStatus::from_cache(cache))
+        .with_connect_served(cache.connect_served);
         let cmd = modal.load(daemon);
         self.modal = Some(PsbtModal::Sign(modal));
         Task::batch([cmd, kc_launch])
@@ -1461,6 +1491,11 @@ impl PsbtState {
                 // missing-cube registration, avoiding concurrent registration
                 // RPCs from this modal and the app bootstrap.
                 self.modal = None;
+                return Task::done(Message::EnsureConnectReady);
+            }
+            Message::View(view::Message::Spend(view::SpendTxMessage::RetryConnectSigning)) => {
+                // From a signer row whose Cube could not bring Mobile signing
+                // up from its own session: try again, keeping the picker.
                 return Task::done(Message::EnsureConnectReady);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::KeychainPairPhone)) => {
@@ -1905,7 +1940,12 @@ fn build_keychain_if_ready(
     // (`Wallet::may_hold_keychain_key`): a row only decides whether to offer
     // Connect before Connect has answered, and a key Connect resolves
     // becomes signable either way.
-    if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() {
+    // The REST client goes to the endpoint the Cube's signer pipeline uses,
+    // which the stream bootstrap records beside the gRPC address. A Bitcoin
+    // Blake2b Cube without one is not ready: its bearer never goes to the
+    // configured API by fallback.
+    let base_url = cache.connect_api_base_url();
+    if wallet.is_imported() || !keychain_connect_missing(cache).is_empty() || base_url.is_none() {
         return (None, Task::none());
     }
     let grpc_url = cache.connect_grpc_url.clone().expect("checked above");
@@ -1915,14 +1955,8 @@ fn build_keychain_if_ready(
     // The REST client's bearer is set asynchronously inside
     // `KeychainSignModal::launch()` (an async context) rather than here on
     // the synchronous `update` path, which can't `blocking_read` the token.
-    // On the endpoint the Cube's signer pipeline is using, which the stream
-    // bootstrap records beside the gRPC address.
-    let coincube_client = crate::services::coincube::CoincubeClient::with_base_url(
-        cache
-            .connect_base_url
-            .clone()
-            .unwrap_or_else(crate::services::coincube_api_base_url),
-    );
+    let coincube_client =
+        crate::services::coincube::CoincubeClient::with_base_url(base_url.expect("checked above"));
     let modal = super::keychain_sign::KeychainSignModal::new(
         wallet.clone(),
         coincube_client,
@@ -2234,6 +2268,17 @@ pub struct SignModal {
     /// owner, at picker-open time. Decides what unresolved Keychain rows ask
     /// for: a sign-in, or a switch to the owning account.
     connect_account: ConnectAccountStatus,
+    /// Where the Cube's signer pipeline is in coming up from the session it
+    /// was opened with ([`Cache::signer_pipeline_start`]), followed while the
+    /// picker is open. Only a Connect-served Bitcoin Blake2b Cube moves it
+    /// off `Idle`.
+    pipeline_start: crate::app::cache::SignerPipelineStart,
+    /// The Cube is a Connect-served Bitcoin Blake2b Cube
+    /// ([`Cache::connect_served`]). It brings Mobile signing up from the
+    /// session it was opened with and refuses an in-Cube sign-in, so an
+    /// unresolved Mobile row never offers one, even while the pipeline is
+    /// still `Idle` (before the admitted panel has saved the session).
+    connect_served: bool,
     /// Spending-path identities the user has expanded, keyed the same way as
     /// `ToggleSpendPath`: `None` = primary, `Some(seq)` = a recovery path.
     /// Inactive cards default to collapsed.
@@ -2281,6 +2326,8 @@ impl SignModal {
             keychain,
             keychain_enabled,
             connect_account: ConnectAccountStatus::SignedOut,
+            pipeline_start: crate::app::cache::SignerPipelineStart::Idle,
+            connect_served: false,
             expanded_paths: HashSet::new(),
             lan_failures: HashMap::new(),
             lan_signing: HashSet::new(),
@@ -2308,6 +2355,14 @@ impl SignModal {
     /// already signed in as someone else.
     pub fn with_connect_account(mut self, status: ConnectAccountStatus) -> Self {
         self.connect_account = status;
+        self
+    }
+
+    /// Record whether the Cube is Connect-served ([`Cache::connect_served`]),
+    /// so unresolved Mobile rows wait for its own session instead of asking
+    /// for a sign-in it would refuse.
+    pub fn with_connect_served(mut self, connect_served: bool) -> Self {
+        self.connect_served = connect_served;
         self
     }
 
@@ -2757,6 +2812,24 @@ impl SignModal {
         // Vault recorded its Keychain keys and this isn't one, or the wallet
         // was imported — is never offered Connect: signing in can't reach it.
         if may_be_keychain && self.keychain_enabled && self.keychain.is_none() {
+            // A Connect-served Bitcoin Blake2b Cube is bringing its own
+            // session up: neither a sign-in prompt (it cannot sign in) nor a
+            // missing session, but a neutral wait, or a retry if it failed.
+            use crate::app::cache::SignerPipelineStart as Start;
+            match self.pipeline_start {
+                Start::Starting => return St::Disabled("Looking up Mobile signers…".to_string()),
+                Start::Failed => {
+                    return St::StartFailed("Mobile signing couldn't start.".to_string())
+                }
+                // Before the admitted panel has saved the session (or once
+                // it has ended and the Cube asks to be reopened) a
+                // Connect-served Cube is still `Idle`; it cannot sign in, so
+                // it waits rather than offering a sign-in it would refuse.
+                Start::Idle if self.connect_served => {
+                    return St::Disabled("Looking up Mobile signers…".to_string())
+                }
+                Start::Idle => {}
+            }
             match &self.connect_account {
                 // Signed out, or signed in as the owner while Keychain is
                 // still coming up: "Sign in to Connect" either routes to Home
@@ -5036,6 +5109,62 @@ mod tests {
                         if reason.contains("Connect this signing device")
                 )));
             }
+        }
+    }
+
+    /// A Connect-served Bitcoin Blake2b Cube brings Mobile signing up from
+    /// the session it was opened with. Meanwhile a possible Mobile key reads
+    /// as a neutral wait, not a sign-in prompt; if it could not start, the
+    /// row offers to try again. Before the session is saved it is still
+    /// `Idle`, and it waits too: it refuses an in-Cube sign-in. `Idle` on
+    /// every other Cube keeps the sign-in prompt.
+    #[test]
+    fn a_possible_mobile_key_follows_the_signer_pipeline_start() {
+        use crate::app::cache::SignerPipelineStart as Start;
+        use view::vault::psbt::SigningKeyState;
+
+        let phone = fingerprint("f714c228");
+        for (start, served, expected) in [
+            (Start::Starting, true, "looking"),
+            (Start::Failed, true, "retry"),
+            (Start::Idle, true, "looking"),
+            (Start::Idle, false, "sign-in"),
+        ] {
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                Arc::new(wallet().with_keychain_keys(HashMap::from([(phone, 42)]), true)),
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Signet,
+                false,
+                None,
+                None,
+                true,
+            )
+            .with_connect_account(ConnectAccountStatus::Owner)
+            .with_connect_served(served);
+            modal.pipeline_start = start;
+            let row = modal
+                .signing_paths()
+                .into_iter()
+                .find(|p| p.is_primary)
+                .unwrap()
+                .keys
+                .into_iter()
+                .find(|row| row.fingerprint == phone)
+                .unwrap();
+            let got = match &row.state {
+                SigningKeyState::Disabled(reason)
+                    if reason.contains("Looking up Mobile signers") =>
+                {
+                    "looking"
+                }
+                SigningKeyState::StartFailed(reason) if reason.contains("couldn't start") => {
+                    "retry"
+                }
+                SigningKeyState::NeedsSignIn(_) => "sign-in",
+                _ => "other",
+            };
+            assert_eq!(got, expected, "{start:?}, connect-served: {served}");
         }
     }
 

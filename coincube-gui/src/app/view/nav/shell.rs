@@ -349,10 +349,9 @@ fn rule_line<'a>() -> Element<'a, Message> {
     rule::horizontal(1).into()
 }
 
-/// The Connect panel: the account, live updates on this computer (not on a
-/// Bitcoin Blake2b Cube, which never starts them), a notice only when the
-/// user has something to do, and a Vault line only when a Vault that uses
-/// Connect has stopped updating.
+/// The Connect panel: the account, live updates on this computer, a notice
+/// only when the user has something to do, and a Vault line only when a
+/// Vault that uses Connect has stopped updating.
 fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     let signed_in = ctx.connect_authenticated;
     let account = ctx
@@ -391,13 +390,9 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     .align_y(Alignment::Center);
 
     let mut body = Column::new().spacing(6);
-    // A Bitcoin Blake2b Cube's signed-in panel has no live-updates row, so
-    // its body may stay empty.
-    let mut body_empty = true;
     let mut foot: Vec<Element<'a, Message>> = Vec::new();
     match ctx.connect.signed_out_by.filter(|_| !signed_in) {
         Some(reason) => {
-            body_empty = false;
             body = body
                 .push(text(reason.title()).size(14).font(font::SEMIBOLD))
                 .push(muted(reason.detail(), 13))
@@ -420,33 +415,27 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         }
         None => {
             let status = *ctx.connect_stream_status;
-            if crate::app::live_updates_apply(ctx.network) {
-                body_empty = false;
-                let kind = match status {
-                    ConnectionStatus::Connected => page::Status::Ok,
-                    ConnectionStatus::Inactive | ConnectionStatus::Connecting => page::Status::Busy,
-                    ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => {
-                        page::Status::Warn
-                    }
-                    ConnectionStatus::Offline | ConnectionStatus::RenewFailed => page::Status::Off,
-                };
-                body = body.push(
-                    row![
-                        text(localized_copy("Live updates on this computer"))
-                            .size(13)
-                            .font(font::MEDIUM)
-                            .width(Length::Fill),
-                        page::status(kind, localized_copy(status.word())),
-                    ]
-                    .spacing(12)
-                    .align_y(Alignment::Center),
-                );
-                if let Some(line) = status.line() {
-                    body = body.push(muted(line, 13));
-                }
+            let kind = match status {
+                ConnectionStatus::Connected => page::Status::Ok,
+                ConnectionStatus::Inactive | ConnectionStatus::Connecting => page::Status::Busy,
+                ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => page::Status::Warn,
+                ConnectionStatus::Offline | ConnectionStatus::RenewFailed => page::Status::Off,
+            };
+            body = body.push(
+                row![
+                    text(localized_copy("Live updates on this computer"))
+                        .size(13)
+                        .font(font::MEDIUM)
+                        .width(Length::Fill),
+                    page::status(kind, localized_copy(status.word())),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            );
+            if let Some(line) = status.line() {
+                body = body.push(muted(line, 13));
             }
             if status == ConnectionStatus::RenewFailed {
-                body_empty = false;
                 body = body
                     .push(Space::new().height(Length::Fixed(6.0)))
                     .push(rule_line())
@@ -480,13 +469,10 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         }
     }
     if let Some(alert) = ctx.connect.vault_alert.filter(|a| a.via_connect) {
-        if !body_empty {
-            body = body
-                .push(Space::new().height(Length::Fixed(6.0)))
-                .push(rule_line())
-                .push(Space::new().height(Length::Fixed(6.0)));
-        }
-        body_empty = false;
+        body = body
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(rule_line())
+            .push(Space::new().height(Length::Fixed(6.0)));
         body = body
             .push(
                 row![
@@ -507,12 +493,9 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .push(muted(alert.panel_line(), 13));
     }
 
-    let mut panel = column![container(head).padding([14, 16])];
-    if !body_empty {
-        panel = panel
-            .push(rule_line())
-            .push(container(body).padding([14, 16]));
-    }
+    let mut panel = column![container(head).padding([14, 16])]
+        .push(rule_line())
+        .push(container(body).padding([14, 16]));
     if !foot.is_empty() {
         panel = panel
             .push(rule_line())

@@ -1696,12 +1696,11 @@ fn connect_panel_says_what_the_state_table_says() {
     }
 }
 
-/// A signed-in Bitcoin Blake2b Cube never starts live updates, so its
-/// Connect control and panel show the account without a live-updates row
-/// that would read "Connecting…" for good. A Bitcoin Cube in the same state
-/// is still starting them and keeps the row.
+/// A signed-in Bitcoin Blake2b Cube runs live updates as a Bitcoin Cube does,
+/// so its Connect control and panel show the account and the live-updates
+/// row, as a Bitcoin Cube's do.
 #[test]
-fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
+fn a_blake2b_connect_panel_shows_the_account_and_live_updates() {
     use crate::app::view::shared::landing::capture;
     use crate::app::{VaultAlert, VaultStall};
     let offline_vault = VaultAlert {
@@ -1711,7 +1710,9 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
         last_synced: Some("14:02".into()),
         block: 974_600,
     };
-    for (name, chain, vault, says, never) in [
+    // A Bitcoin Blake2b Cube runs the signer pipeline as a Bitcoin Cube does,
+    // so its Connect panel reads the same.
+    for (name, chain, vault, says) in [
         (
             "blake2b",
             ChainId::BitcoinBlake2bTestnet4,
@@ -1721,11 +1722,7 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
                 "alex@example.test",
                 "Connect account",
                 "Connections settings",
-            ][..],
-            &[
                 "Live updates on this computer",
-                "Connecting…",
-                "Starting live updates from Connect.",
             ][..],
         ),
         (
@@ -1737,7 +1734,6 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
                 "Family savings",
                 "The balance shown is from 14:02.",
             ][..],
-            &["Live updates on this computer", "Connecting…"][..],
         ),
         (
             "bitcoin",
@@ -1748,7 +1744,6 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
                 "Live updates on this computer",
                 "Connecting…",
             ][..],
-            &[][..],
         ),
     ] {
         let mut ctx = fixture_context();
@@ -1774,9 +1769,6 @@ fn a_blake2b_connect_panel_shows_the_account_without_live_updates() {
         );
         for label in says {
             assert!(panel.contains(label), "{}: {}", name, label);
-        }
-        for label in never {
-            assert!(!panel.contains(label), "{}: {}", name, label);
         }
     }
 }
