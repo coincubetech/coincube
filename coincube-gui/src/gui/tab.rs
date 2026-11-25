@@ -338,6 +338,14 @@ fn duress_state_check_task_at(
     )
 }
 
+/// Whether an activation POST from this computer is still queued for Connect.
+fn activation_still_queued(root: &std::path::Path) -> bool {
+    crate::services::duress::queue::DuressQueue::new(root)
+        .is_empty()
+        .map(|empty| !empty)
+        .unwrap_or(false)
+}
+
 /// Builds the [`DuressOrchestrator`] for this data directory — the single
 /// production trust anchor for local duress activation (journal → enqueue →
 /// spawn POST → wipe → persist; see
@@ -3267,6 +3275,17 @@ impl Tab {
                 // Update local state and exit into the normal flow.
                 if let Some(datadir) = screen.datadir().cloned() {
                     let root = datadir.path();
+                    // This computer's own activation has not reached
+                    // Connect yet: "not active" means the server has not
+                    // heard of it, not that it was cleared. Stay locked
+                    // until the drain lands it (an unreadable queue is
+                    // not held on, as at launch: nothing could drain it).
+                    if activation_still_queued(root) {
+                        screen.checking = false;
+                        screen.queue_pending = true;
+                        screen.error = Some("Duress mode is active. Try again later.".to_string());
+                        return Break(Task::none());
+                    }
                     if !Self::clear_local_duress_state(screen, root) {
                         return Break(Task::none());
                     }
@@ -10160,7 +10179,7 @@ mod spark_nickname_flush_tests {
 #[cfg(test)]
 mod duress_clear_check_tests {
     use super::*;
-    use crate::app::view::duress::active_screen::DuressActiveScreen;
+    use crate::app::view::duress::active_screen::{DuressActiveScreen, Message as DuressMsg};
     use crate::services::duress::clear_check::tests::{
         crate_dir_entries, mock_duress, mock_status, mock_user, write_connect_json, write_lock,
         TempRoot,
@@ -10324,5 +10343,40 @@ mod duress_clear_check_tests {
                 .unwrap()
                 .active
         );
+    }
+
+    #[test]
+    fn this_computers_queued_activation_holds_the_lock_on_a_not_active_answer() {
+        let root = btcb2_only_lock("tab-clear-queued");
+        crate::services::duress::queue::DuressQueue::new(&root.0)
+            .enqueue(crate::services::duress::PendingActivation {
+                account_id: "7".into(),
+                duress_code: "sealed".into(),
+                enqueued_at: chrono::Utc::now(),
+                attempts: 0,
+            })
+            .unwrap();
+        let mut tab = locked_tab(&root, Network::Bitcoin);
+        drop(tab.update(Message::Duress(DuressMsg::StateChecked(Some(false)))));
+        let State::DuressActive(screen) = &tab.state else {
+            panic!("a queued activation must hold the lock");
+        };
+        assert!(screen.queue_pending);
+        assert_eq!(
+            screen.error.as_deref(),
+            Some("Duress mode is active. Try again later.")
+        );
+        assert!(
+            crate::services::duress::DuressLocalState::load(&root.0)
+                .unwrap()
+                .active
+        );
+
+        // Once it has landed, the same answer clears.
+        crate::services::duress::queue::DuressQueue::new(&root.0)
+            .clear()
+            .unwrap();
+        drop(tab.update(Message::Duress(DuressMsg::StateChecked(Some(false)))));
+        assert_cleared(&tab, &root);
     }
 }
