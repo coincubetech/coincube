@@ -173,13 +173,12 @@ async fn reach_dashboard(app: &mut App) -> Vec<Message> {
 /// Runs the save at open and hands its result back to the App, as the
 /// runtime does. Returns what the App answered with.
 async fn save_at_open(app: &mut App) -> Task<Message> {
-    let mut saved = outputs(app.save_served_session()).await;
-    assert!(
-        matches!(&saved[..], [Message::ConnectServedSessionSaved { .. }]),
-        "the save at open answered {} messages",
-        saved.len()
-    );
-    app.update(saved.remove(0))
+    let saved = outputs(app.save_served_session())
+        .await
+        .into_iter()
+        .find(|m| matches!(m, Message::ConnectServedSessionSaved { .. }))
+        .expect("the save at open answers");
+    app.update(saved)
 }
 
 fn stream_config(
@@ -459,8 +458,16 @@ fn a_refused_save_leaves_the_cube_open_with_a_retry() {
         std::fs::write(dir.path().join(CONNECT_CACHE_FILENAME), b"{not json").unwrap();
         let mut app = tests::fork_app(root.path(), true);
 
-        drop(save_at_open(&mut app).await);
+        let answered = outputs(save_at_open(&mut app).await).await;
         assert_eq!(app.served_session, ServedSession::Failed);
+        // The open signer list is told at once, so its retry shows without
+        // waiting for an unrelated message.
+        assert!(answered.iter().any(|m| matches!(
+            m,
+            Message::KeychainSign(
+                state::vault::keychain_sign::KeychainSignMessage::StreamHealth(_)
+            )
+        )));
         assert_eq!(
             app.cache.signer_pipeline_start,
             cache::SignerPipelineStart::Failed
@@ -474,16 +481,13 @@ fn a_refused_save_leaves_the_cube_open_with_a_retry() {
         );
 
         std::fs::remove_file(dir.path().join(CONNECT_CACHE_FILENAME)).unwrap();
-        let mut retry = outputs(app.update(Message::EnsureConnectReady)).await;
+        let retry = outputs(app.update(Message::EnsureConnectReady)).await;
         assert_eq!(app.served_session, ServedSession::Saving);
-        assert!(
-            matches!(
-                &retry[..],
-                [Message::ConnectServedSessionSaved { saved: true, .. }]
-            ),
-            "the retry did not save the session"
-        );
-        drop(app.update(retry.remove(0)));
+        let saved = retry
+            .into_iter()
+            .find(|m| matches!(m, Message::ConnectServedSessionSaved { saved: true, .. }))
+            .expect("the retry saves the session");
+        drop(app.update(saved));
         assert!(matches!(app.served_session, ServedSession::Saved { .. }));
         assert_eq!(
             fork_entry(root.path()).unwrap().tokens.access_token,
@@ -790,6 +794,8 @@ fn a_promoted_cube_keeps_its_kind_and_loses_only_connect_services_at_session_end
         ))));
         assert!(app.connect_stream_config.is_none());
         assert!(app.fork_connect_client.is_none());
+        // No in-Cube sign-in until it is reopened: the reopen notice.
+        assert!(app.panels.connect.account.requires_authenticated_reopen());
         // Its node is its own: the Vault stays on it, and the Cube stays open
         // on the local feature check, not on a Connect client.
         assert!(app.daemon.is_some());

@@ -24,6 +24,10 @@ impl App {
         if self.cache.connect_served && pinned_tokens.is_none() {
             return Task::none();
         }
+        // A retry once the session is saved keeps the retry state shown:
+        // the bootstrap's own failures answer with a notice, not a message
+        // this App could clear a "starting" state on. It reads ready once
+        // the stream is up.
         // The user is signed in to Connect but the signing stream
         // isn't ready. Run the same device-registration + stream
         // bootstrap the in-app login flow does, sourcing tokens
@@ -721,8 +725,7 @@ impl App {
                         cfg.device_id = saved;
                     }
                     if cfg.device_id.trim().is_empty() {
-                        self.cache.signer_pipeline_start = cache::SignerPipelineStart::Failed;
-                        return Task::none();
+                        return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
                     }
                     cfg.last_seen_seq = cfg.last_seen_seq.max(
                         entry
@@ -771,11 +774,11 @@ impl App {
                 self.cache.connect_device_id = Some(cfg.device_id.clone());
                 self.cache.connect_email = Some(email);
                 self.connect_stream_config = Some(cfg);
-                self.cache.signer_pipeline_start = cache::SignerPipelineStart::Idle;
                 // Subscription will mount on the next render
                 // tick — show `Connecting` until the first
                 // `ConnectStreamMessage::Connected` lands.
                 self.cache.connect_stream_status = ConnectionStatus::Connecting;
+                return self.set_signer_pipeline_start(cache::SignerPipelineStart::Idle);
             }
             None => {
                 tracing::debug!("Connect stream not started: missing grpc_url or device_id",);
@@ -785,11 +788,23 @@ impl App {
                     && matches!(self.served_session, ServedSession::Saved { .. })
                     && self.connect_stream_config.is_none()
                 {
-                    self.cache.signer_pipeline_start = cache::SignerPipelineStart::Failed;
+                    return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
                 }
             }
         }
         Task::none()
+    }
+
+    /// Moves a Connect-served Cube's signer pipeline start-up along and tells
+    /// the current panel, so an open signer list follows it at once (it reads
+    /// the state on the next message it gets). Nothing is sent when the state
+    /// does not change, so on every other Cube this stays silent.
+    fn set_signer_pipeline_start(&mut self, start: cache::SignerPipelineStart) -> Task<Message> {
+        if self.cache.signer_pipeline_start == start {
+            return Task::none();
+        }
+        self.cache.signer_pipeline_start = start;
+        stream_health_dispatch(self.cache.connect_stream_status)
     }
 
     pub(super) fn trigger_connect_stream_ready(
@@ -978,13 +993,12 @@ impl App {
             expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
         };
         let epoch = account.auth_epoch();
-        let network_dir = self
-            .cache
-            .datadir_path
-            .network_directory(self.cache.chain());
+        // The App's own data directory: the save never depends on a cache
+        // field being bound to it.
+        let network_dir = self.datadir.network_directory(self.cache.chain());
         self.served_session = ServedSession::Saving;
-        self.cache.signer_pipeline_start = cache::SignerPipelineStart::Starting;
-        Task::perform(
+        let starting = self.set_signer_pipeline_start(cache::SignerPipelineStart::Starting);
+        let save = Task::perform(
             async move {
                 use crate::services::connect::client::cache::{
                     persist_restored_tokens, ConnectCache, ConnectCacheError,
@@ -1018,7 +1032,8 @@ impl App {
                 }
             },
             |message| message,
-        )
+        );
+        Task::batch([starting, save])
     }
 
     /// The save started by [`Self::save_served_session`] settled. Saved, the
@@ -1042,8 +1057,7 @@ impl App {
         }
         if !saved {
             self.served_session = ServedSession::Failed;
-            self.cache.signer_pipeline_start = cache::SignerPipelineStart::Failed;
-            return Task::none();
+            return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
         }
         self.served_session = ServedSession::Saved {
             email: email.clone(),
@@ -1074,6 +1088,10 @@ impl App {
             self.invalidate_fork_session();
         } else {
             self.revoke_local_connect_services();
+            // It was opened Connect-served: no in-Cube sign-in until it is
+            // reopened, so its panel shows the reopen notice instead of a
+            // sign-in form its login messages would be refused for.
+            self.panels.connect.revoke_admitted_client();
         }
         cancel
     }

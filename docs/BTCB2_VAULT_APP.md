@@ -85,7 +85,10 @@ token from the Cube's own client and refuses any other, compared by
 `connect_session::same_session`; nothing adopts or overwrites a different
 token found later. The device id is the one stored for the account; if none
 is stored and the registration's write is refused, the id registration
-returned is used for this session only and dropped with it. A sign-in started
+returned is used for this session only and dropped with it. Such an id
+cannot be renewed in place (renewal claims the id stored in the file), so if
+Connect later stops recognising it the Cube shows "Couldn't reconnect this
+computer" until it is reopened. A sign-in started
 inside the Cube stays refused: `InAppConnectAuthReady`,
 `InAppConnectAuthPersisted` and `InAppConnectLoginCompleted` are refused
 whatever sends them, and a deferred commit is answered with
