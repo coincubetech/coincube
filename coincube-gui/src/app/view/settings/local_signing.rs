@@ -479,41 +479,12 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
         let fp8_for_name = fp8.clone();
         let fp8_for_fb = fp8.clone();
         let fp8_for_save = fp8.clone();
-        // Must be the same predicate signing and the hw refresh loop apply.
-        let has_full_binding = p
-            .signer_binding
-            .as_ref()
-            .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
         let removable = p.signer_binding.as_ref().is_some_and(|binding| {
             binding.descriptor_sha256.len() == 32
                 && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
         });
-        let exact = p
-            .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
-            .is_ok();
-        let (kind, word, detail) = if exact {
-            (page::Status::Ok, "Paired", "Exact vault key paired.")
-        } else if p.network.is_none() {
-            // A pairing made before v3: kept visible and removable, never
-            // used to sign (contract R2.6, legacy variant).
-            (
-                page::Status::Warn,
-                "Pair again",
-                crate::phone_signer::pairing_store::PRE_V3_PAIRING,
-            )
-        } else if has_full_binding && !removable {
-            (
-                page::Status::Warn,
-                "Other Vault",
-                "This pairing belongs to a different Vault descriptor. Open that Vault to remove it.",
-            )
-        } else {
-            (
-                page::Status::Warn,
-                "Pair again",
-                "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed.",
-            )
-        };
+        let (kind, word, detail) =
+            pairing_row_status(p, &state.descriptor_sha256, &state.vault_key_fingerprints);
         rows.push(
             page::row(if p.name.is_empty() {
                 localized_copy("Phone")
@@ -622,6 +593,54 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
     )
 }
 
+/// The settings row's status for one pairing, in order: exact, another
+/// Vault's (only that Vault can remove it), made before v3, anything else.
+fn pairing_row_status(
+    p: &crate::phone_signer::pairing_store::PairedPhone,
+    descriptor_sha256: &str,
+    vault_key_fingerprints: &[(
+        String,
+        coincube_core::miniscript::bitcoin::bip32::Fingerprint,
+    )],
+) -> (page::Status, &'static str, &'static str) {
+    // Must be the same predicate signing and the hw refresh loop apply.
+    let has_full_binding = p
+        .signer_binding
+        .as_ref()
+        .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
+    let removable = p.signer_binding.as_ref().is_some_and(|binding| {
+        binding.descriptor_sha256.len() == 32
+            && hex::encode(&binding.descriptor_sha256) == descriptor_sha256
+    });
+    let exact = p
+        .exact_signer_against(descriptor_sha256, vault_key_fingerprints)
+        .is_ok();
+    if exact {
+        (page::Status::Ok, "Paired", "Exact vault key paired.")
+    } else if has_full_binding && !removable {
+        (
+            page::Status::Warn,
+            "Other Vault",
+            "This pairing belongs to a different Vault descriptor. Open that Vault to remove it.",
+        )
+    } else if p.network.is_none() {
+        // A pairing made before v3: kept visible and never used to sign
+        // (contract R2.6, legacy variant). A row of another Vault keeps
+        // the advice above, since only that Vault can remove it.
+        (
+            page::Status::Warn,
+            "Pair again",
+            crate::phone_signer::pairing_store::PRE_V3_PAIRING,
+        )
+    } else {
+        (
+            page::Status::Warn,
+            "Pair again",
+            "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed.",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +734,38 @@ mod tests {
         let _ = picker_body(&state, std::slice::from_ref(&phone));
         let _ = error_body(&PairingError::ReplayRefused);
         let _ = error_body(&PairingError::OfferExpired);
+    }
+
+    #[test]
+    fn a_pre_v3_row_of_another_vault_keeps_the_open_that_vault_advice() {
+        use crate::phone_signer::pairing_store::{PairedPhone, SignerBinding, PRE_V3_PAIRING};
+        let this_vault = hex::encode([1u8; 32]);
+        let row = |descriptor: [u8; 32], network: Option<&str>| PairedPhone {
+            signer_binding: Some(SignerBinding {
+                key_id: "1".into(),
+                xpub: "tpubD6NzVbkrYhZ4X".into(),
+                fingerprint: Fingerprint::from_str("f108451f").unwrap(),
+                descriptor_sha256: descriptor.to_vec(),
+                imported_scope: None,
+            }),
+            cert_pin: [7; 32],
+            name: "Phone".into(),
+            paired_at_unix: 1,
+            wallet_fingerprints: Vec::new(),
+            vault_fingerprint: Fingerprint::from_str("00000000").unwrap(),
+            transport_pubkey: vec![2; 33],
+            fallback_addr: None,
+            network: network.map(str::to_owned),
+            capabilities: Vec::new(),
+        };
+        // Another Vault's row cannot be removed here, made before v3 or not.
+        for network in [None, Some("mainnet")] {
+            let (_, word, detail) = pairing_row_status(&row([2; 32], network), &this_vault, &[]);
+            assert_eq!(word, "Other Vault");
+            assert!(detail.contains("Open that Vault to remove it"));
+        }
+        // This Vault's row made before v3 says to pair again.
+        let (_, word, detail) = pairing_row_status(&row([1; 32], None), &this_vault, &[]);
+        assert_eq!((word, detail), ("Pair again", PRE_V3_PAIRING));
     }
 }
