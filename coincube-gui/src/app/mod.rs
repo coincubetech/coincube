@@ -7809,10 +7809,7 @@ impl App {
             &self.twin_checks,
             std::time::Instant::now(),
         );
-        let proved = crate::services::split_coins::merge_proofs(
-            &mut self.cache.chain_proofs,
-            derived.proofs,
-        );
+        let proved = self.cache.merge_derived_proofs(derived.proofs);
         if derived.changed {
             self.save_split_records();
         }
@@ -12257,6 +12254,78 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Every message `task` produces, run to completion on its own runtime.
+    fn fork_task_outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    /// A local fork Cube's account panel never defers a sign-in commit to the
+    /// App, in either of its modes, so the App's refusal of that commit has
+    /// no pending sign-in to abort. While the Cube holds the session it was
+    /// opened with, the panel is admitted and refuses a sign-in completion
+    /// outright. Once that session has ended the panel is local and finishes
+    /// a sign-in itself. (`AuthCommitRejected` aborts a sign-in only while a
+    /// deferred commit is pending.)
+    #[test]
+    fn a_local_fork_cube_never_defers_a_sign_in_commit() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-no-deferral-{}", uuid::Uuid::new_v4()));
+        let mut app = signed_in_fork_cube_without_a_vault(&root);
+        let login = crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: "synthetic-restored".into(),
+            refresh_token: "synthetic-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 77,
+                email: "fixture@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        };
+        let defers = |messages: &[Message]| {
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::InAppConnectAuthReady { .. }))
+        };
+        let refreshed = |app: &App| {
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::RefreshedSession(
+                    login.clone(),
+                    app.connect_auth_epoch(),
+                    "old".into(),
+                ),
+            ))
+        };
+
+        // Holding its opening session.
+        assert!(app.fork_connect_client.is_some());
+        let message = refreshed(&app);
+        assert!(!defers(&fork_task_outputs(app.update(message))));
+
+        // After that session has ended.
+        app.on_local_auth_change(false);
+        assert!(app.fork_connect_client.is_none());
+        let message = refreshed(&app);
+        assert!(!defers(&fork_task_outputs(app.update(message))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Once its opening session ends, a Vault-less Bitcoin Blake2b Cube's
     /// account panel signs in by itself, as Home's does: a restored session is
     /// accepted without the App commit the fork refuses. A deferred commit
@@ -12265,26 +12334,7 @@ pub(crate) mod tests {
     /// the "Connect signer bootstrap" error.
     #[test]
     fn a_local_fork_cube_signs_in_without_the_bitcoin_commit() {
-        fn outputs(task: Task<Message>) -> Vec<Message> {
-            use iced_runtime::futures::futures::StreamExt;
-            let Some(stream) = iced_runtime::task::into_stream(task) else {
-                return Vec::new();
-            };
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(
-                    stream
-                        .filter_map(|action| async move {
-                            match action {
-                                iced_runtime::Action::Output(message) => Some(message),
-                                _ => None,
-                            }
-                        })
-                        .collect(),
-                )
-        }
+        let outputs = fork_task_outputs;
         let is_bootstrap_error = |message: &Message| {
             matches!(message, Message::View(view::Message::ShowError(error))
                 if error.contains("Connect signer bootstrap"))
@@ -12586,8 +12636,13 @@ pub(crate) mod tests {
             uuid::Uuid::new_v4()
         ));
         let mut app = fork_app(&root, false);
+        // `fork_app` leaves the cache's data directory at its default, which
+        // is a relative path: without this the fixture files below land in
+        // the crate directory.
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         let chain = app.cache.chain();
         let datadir = app.cache.datadir_path.clone();
+        assert!(datadir.path().is_absolute());
         for (dir, email) in [
             (datadir.network_directory(chain), "fork@example.invalid"),
             (

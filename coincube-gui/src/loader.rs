@@ -1241,6 +1241,7 @@ pub async fn load_application(
         entangled: std::collections::HashMap::new(),
         chain_proofs: std::collections::HashMap::new(),
         superseded_proof_checks: std::collections::HashSet::new(),
+        rejected_split_keys: std::collections::HashSet::new(),
         split_records: Vec::new(),
         splitting: std::collections::HashMap::new(),
         split_unconfirmed: std::collections::HashSet::new(),
