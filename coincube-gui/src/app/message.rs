@@ -499,7 +499,10 @@ pub enum Message {
     /// payload carries everything `connect_stream_ready_task` needs
     /// so we can fire it from a non-init context.
     TriggerConnectStreamReady {
-        network: coincube_core::miniscript::bitcoin::Network,
+        /// The Cube's chain. It picks the Connect folder and the network name
+        /// sent to Connect; a `bitcoin::Network` cannot tell Bitcoin Blake2b
+        /// from Bitcoin.
+        chain: crate::chain::ChainId,
         datadir: crate::dir::CoincubeDirectory,
         tokens: std::sync::Arc<
             tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>,

@@ -43,7 +43,7 @@ impl App {
                 .flatten()
         });
         let datadir = self.cache.datadir_path.clone();
-        let network = self.cache.network;
+        let chain = self.cache.chain();
         if previous_refresh_token.is_some() {
             self.in_app_refresh_commit = Some((epoch, self.connect_auth.clone()));
         }
@@ -54,7 +54,7 @@ impl App {
                     refresh_token: login.refresh_token.clone(),
                     expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
                 };
-                let network_dir = datadir.network_directory(network);
+                let network_dir = datadir.network_directory(chain);
                 let persisted =
                     if let Err(error) = tokio::fs::create_dir_all(network_dir.path()).await {
                         Err(cache::ConnectCacheError::WritingFile(error.to_string()))
@@ -187,7 +187,7 @@ impl App {
         self.cache.connect_email = Some(email.clone());
         self.cache.has_connect_session = true;
 
-        let network = self.cache.network;
+        let chain = self.cache.chain();
         let datadir = self.cache.datadir_path.clone();
         // Use the authoritative Cube settings id. The cache mirror can
         // still be empty during local-vault startup.
@@ -217,7 +217,7 @@ impl App {
                     expires_at: now + 30 * 24 * 60 * 60,
                 };
 
-                let network_dir = datadir.network_directory(network);
+                let network_dir = datadir.network_directory(chain);
                 let owns_cached_session =
                     crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                         .ok()
@@ -227,7 +227,7 @@ impl App {
                                 && account.tokens.refresh_token == tokens.refresh_token
                         });
                 if !owns_cached_session {
-                    return (network, datadir, None, email_for_task, cube_uuid);
+                    return (chain, datadir, None, email_for_task, cube_uuid);
                 }
 
                 // Fetch grpc_url and register the device.
@@ -241,8 +241,9 @@ impl App {
                     // `ensure_device_registered` short-circuits on a
                     // cached device_id, so whichever path registers
                     // first owns this machine's name permanently —
-                    // all four call sites must derive it identically.
-                    let device_name = crate::utils::device::device_label();
+                    // every registration site derives it from
+                    // `signer_device_label`.
+                    let device_name = crate::utils::device::signer_device_label(chain);
                     ensure_device_registered_best_effort(
                         &grpc_url,
                         tokens_arc.clone(),
@@ -257,20 +258,14 @@ impl App {
                     tracing::warn!("InAppConnectLoginCompleted: no Connect gRPC URL available");
                 }
 
-                (
-                    network,
-                    datadir,
-                    Some(tokens_arc),
-                    email_for_task,
-                    cube_uuid,
-                )
+                (chain, datadir, Some(tokens_arc), email_for_task, cube_uuid)
             },
-            |(network, datadir, tokens_opt, email, cube_uuid)| {
+            |(chain, datadir, tokens_opt, email, cube_uuid)| {
                 // Chain the existing stream bootstrap so the
                 // cache fields populate without an app restart.
                 match tokens_opt {
                     Some(tokens) => Message::TriggerConnectStreamReady {
-                        network,
+                        chain,
                         datadir,
                         tokens,
                         email,

@@ -81,7 +81,7 @@ pub fn renewal_task(cache: &Cache) -> Option<Task<Message>> {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let os_version = std::env::consts::OS.to_string();
     // The label used at first launch, so a renewal keeps the same name.
-    let device_name = crate::utils::device::device_label();
+    let device_name = crate::utils::device::signer_device_label(cache.chain());
     Some(Task::perform(
         async move {
             let claim = match crate::services::connect::client::cache::begin_device_reregistration(
