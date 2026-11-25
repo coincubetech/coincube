@@ -15353,6 +15353,75 @@ pub(crate) mod shell_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A finished split belongs to the App that built it. One that lands
+    /// after that Cube was locked or switched must not be journaled on the
+    /// Vault now open, or clear the review that Vault is still building.
+    #[test]
+    fn a_finished_split_from_another_app_is_not_recorded() {
+        let root = std::env::temp_dir().join(format!("split-other-app-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        coin_on_both_chains(&mut app);
+        app.panels
+            .split_hub
+            .as_mut()
+            .unwrap()
+            .start_building_split_for_test();
+        let journal = app.vault_data_dir().unwrap().join("splits.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let txid: bitcoin::Txid = "cd".repeat(32).parse().unwrap();
+        let record = || {
+            Ok(Box::new(crate::services::split_coins::SplitRecord {
+                txid,
+                chain: crate::chain::ChainId::Bitcoin,
+                method: crate::services::split_coins::Method::Signature,
+                inputs: Vec::new(),
+                key: None,
+                key_path: None,
+                created_at: 1,
+                confirmations: 0,
+            }))
+        };
+        let progress = |app: &App| {
+            app.panels
+                .split_hub
+                .as_ref()
+                .unwrap()
+                .split_progress_for_test()
+        };
+
+        drop(app.update(Message::SplitBuilt {
+            app: crate::app::cache::AppGeneration::next(),
+            result: record(),
+        }));
+        assert!(
+            app.cache.split_records.is_empty(),
+            "another App's split is not this Vault's"
+        );
+        assert!(!journal.exists(), "the journal is not written");
+        assert_eq!(progress(&app), (true, None), "this review is still building");
+
+        drop(app.update(Message::SplitBuilt {
+            app: app.cache.app_generation,
+            result: record(),
+        }));
+        assert_eq!(
+            app.cache
+                .split_records
+                .iter()
+                .map(|saved| saved.txid)
+                .collect::<Vec<_>>(),
+            vec![txid]
+        );
+        assert!(
+            std::fs::read_to_string(&journal)
+                .unwrap()
+                .contains(&txid.to_string()),
+            "this App's split is journaled"
+        );
+        assert_eq!(progress(&app), (false, None), "the review hears its own result");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A build error that goes stale while another panel is showing is
     /// dropped then, so it isn't back when the flow looks the same again.
     #[test]
