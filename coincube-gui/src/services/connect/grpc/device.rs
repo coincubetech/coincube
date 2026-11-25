@@ -47,7 +47,7 @@ impl GrpcDeviceClient {
             capabilities: vec![
                 "create_session".to_string(),
                 "cancel_session".to_string(),
-                "chain-identity-v1".to_string(),
+                crate::app::state::vault::signers::CHAIN_IDENTITY_CAPABILITY.to_string(),
             ],
             transport_pubkey,
         };
