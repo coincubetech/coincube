@@ -1835,9 +1835,15 @@ impl Btcb2Signing {
     }
 }
 
+/// Lenient: a value that is not a string becomes [`Btcb2Signing::Unrecognised`]
+/// rather than failing the whole key list, which Mobile signing and Vault
+/// reconcile read too. That one key then fails closed.
 impl<'de> Deserialize<'de> for Btcb2Signing {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(|value| Self::from_wire(&value))
+        Ok(match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(value) => Self::from_wire(&value),
+            other => Self::Unrecognised(other.to_string()),
+        })
     }
 }
 
@@ -5767,6 +5773,31 @@ mod btcb2_signing_tests {
             let key = key_json("bitcoin-blake2b", Some(serde_json::json!(wire)));
             assert_eq!(key.btcb2_signing, Some(parsed), "{wire}");
         }
+        // A value that is not a string fails that key closed, not the list.
+        for odd in [
+            serde_json::json!(5),
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let key = key_json("bitcoin-blake2b", Some(odd.clone()));
+            assert!(
+                matches!(key.btcb2_signing, Some(Btcb2Signing::Unrecognised(_))),
+                "{}",
+                odd
+            );
+            assert_eq!(
+                key.btcb2_signing_refusal(ChainId::BitcoinBlake2b),
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed)
+            );
+        }
+        let list: Vec<CubeKeyRaw> = serde_json::from_value(serde_json::json!([
+            {"id": 1, "name": "a", "fingerprint": "8a550171", "derivationPath": "m/0",
+             "network": "bitcoin-blake2b", "status": "active", "btcb2Signing": 5},
+            {"id": 2, "name": "b", "fingerprint": "8a550172", "derivationPath": "m/0",
+             "network": "bitcoin-blake2b", "status": "active", "btcb2Signing": "can_sign"},
+        ]))
+        .expect("one odd value does not fail the list");
+        assert_eq!(list[1].btcb2_signing, Some(Btcb2Signing::CanSign));
         // Absent (Connect omits it off Bitcoin Blake2b) and null both read as
         // no value.
         assert_eq!(key_json("mainnet", None).btcb2_signing, None);

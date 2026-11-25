@@ -77,7 +77,7 @@ impl KeySource {
     /// key attached to the Cube. A device signs the standard Bitcoin way, so
     /// its signatures stay replayable ([`Self::replay_capable`] is false and
     /// the path advice says so); a Border Wallet key signs in-process with
-    /// the unified signer. A Keychain key is allowed only when Connect said
+    /// the unified signer. A Mobile key is allowed only when Connect said
     /// its phone can sign Bitcoin Blake2b (`btcb2Signing` = `can_sign`); any
     /// other answer, or none, refuses it (master decision 12). A source
     /// missing from this list stays refused on Bitcoin Blake2b.
@@ -92,7 +92,7 @@ impl KeySource {
             }
     }
 
-    /// Whether this is a Keychain key whose phone Connect resolved as able to
+    /// Whether this is a Mobile key whose phone Connect resolved as able to
     /// sign Bitcoin Blake2b when it was picked. The one place both
     /// [`Self::available_for_creation`] and [`Self::replay_capable`] read it.
     fn btcb2_phone_can_sign(&self) -> bool {
@@ -108,16 +108,16 @@ impl KeySource {
     /// Whether a key from this source counts, for the editor's path advice,
     /// as able to produce a Bitcoin Blake2b unified signature: what signs
     /// in-process from a seed (the Cube key, a Border Wallet key), and a
-    /// Keychain key whose phone Connect resolved as `can_sign`. Devices are
+    /// Mobile key whose phone Connect resolved as `can_sign`. Devices are
     /// unmarked until the user says otherwise after enrolment, and a pasted
     /// xpub cannot sign here at all.
     ///
     /// Path selection only. This is never replay evidence (master I5): a
     /// spend's replay status comes from the verified signatures in its final
     /// witness, and a phone that could sign at creation may not be the one
-    /// that signs.
-    /// Mirrors `app::state::vault::signers::ReplayProtection` for the
-    /// signer index a loaded Vault builds.
+    /// that signs. A loaded Vault's signer index
+    /// (`app::state::vault::signers::ReplayProtection`) does not use this: it
+    /// classifies a Mobile key from its phone's capabilities at sign time.
     pub fn replay_capable(&self) -> bool {
         matches!(
             self,

@@ -51,12 +51,25 @@ coincube #568, so this lift needs the same owner sign-off before merge.
   sealed to the Cube's encryption key, so it can be opened only once the
   Cube has published that key (`BTCB2_CUBE_OPEN.md`). Signed out, the card
   asks for Connect, as on Bitcoin.
+- **Only the Cube's chain.** On BTCB2 the list keeps only keys whose network
+  is the Cube's chain (`CubeKeyRaw::listed_on_chain`, one filter on the
+  shared list); on a Bitcoin Cube it drops only keys on a BTCB2 chain.
+- **Whether the phone can sign.** Connect's key list says, per key on a
+  BTCB2 Cube, whether its phone can sign BTCB2 (`btcb2Signing`,
+  coincube-api#526, master decisions 12 and 28). Only `can_sign` is
+  selectable. The other rows are shown disabled with why: `cannot_sign`
+  needs a COINCUBE Mobile update, `unavailable` means the phone is no longer
+  registered, and `unknown` means the phone could not be confirmed and asks
+  the user to open COINCUBE Mobile on it. An unrecognised value, or no value
+  (an API older than that field), fails closed the same way as `unknown`.
+  The card itself has no tip when signed in, as on Bitcoin.
 - **Creation.** A chosen key becomes a Connect Vault member, as on Bitcoin,
-  so COINCUBE Mobile can find the Vault it signs for.
-  `KeySource::replay_capable` stays false for a Mobile key: the phone's capabilities are known only at
-  sign time, where a phone advertising both literals may be classified
-  replay-capable. The card's tip says the phone needs a COINCUBE Mobile
-  version with BTCB2 signing.
+  so COINCUBE Mobile can find the Vault it signs for. `KeySource::KeychainKey`
+  records the value seen when the key was picked; `available_for_creation`
+  admits it on BTCB2 only when it is `can_sign`, and
+  `KeySource::replay_capable` counts it for the path advice only then. That
+  is a snapshot for path selection: a loaded Vault classifies the phone at
+  sign time, and Connect re-resolves it there.
 - **Still separate.** Mobile LAN signing on BTCB2 stays refused
   (`BTCB2_CONNECT_SIGNING_CLIENT.md`).
 
@@ -81,7 +94,8 @@ separate launch gates.
 Synthetic tests cover the per-chain creation rule, the picker's Mobile key,
 hardware and Border Wallet messages, listing and selecting a key attached to
 the Cube, device discovery and key fetch with a fake device, the grid's cards
-signed in and out, descriptor apply with a Mobile key (including its
-Connect Vault member), the path advice and the spend-time device copy.
+signed in and out, descriptor apply with a `can_sign` Mobile key (including its
+Connect Vault member) and its refusal of every other value, the key list's
+chain filter, each `btcb2Signing` value per BTCB2 chain, the path advice and the spend-time device copy.
 Bitcoin picker behavior stays unchanged. No live devices, phones, funds or
 existing-wallet changes are used.
