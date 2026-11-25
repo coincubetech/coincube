@@ -591,9 +591,13 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         "echo-back PSBT bytes should be byte-identical"
     );
 
-    // Drain the server task. It returns once the single envelope
-    // round-trip is done.
-    let _ = phone_handle.await;
+    // The server task returns once the single envelope round-trip is done:
+    // the phone must have received and answered the session, and a refusal
+    // before the send fails here instead of hanging.
+    tokio::time::timeout(std::time::Duration::from_secs(10), phone_handle)
+        .await
+        .expect("the phone answered in time")
+        .expect("join");
 
     // Sanity: the test also exercises the fingerprint helper.
     let _hex = pin_hex8(&phone_pin);
