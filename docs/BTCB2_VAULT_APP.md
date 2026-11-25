@@ -19,9 +19,10 @@ so fork heartbeats are withheld. This is an explicit unsupported feature, not
 a mainnet projection.
 
 App session replacement/logout revokes the current authority, drops its retained
-client and encryption key, and clears fiat data. Global Home authentication
-changes must invoke the same invalidation through every open tab and pending
-unlock/Loader. Reopening uses a new authenticated context. Generic backend
+client and encryption key, and clears fiat data. On a Connect-served Cube,
+global Home authentication changes must invoke the same invalidation through
+every open tab and pending unlock/Loader. A local Cube's tab follows the
+account as a Bitcoin tab does (below). Reopening uses a new authenticated context. Generic backend
 switches cannot reuse fork authority and instruct the user to reopen instead.
 Persisted daemon configuration is sanitized: no bearer token belongs in it.
 The Connect session itself is saved as a Bitcoin Cube saves its own, in the
@@ -97,11 +98,27 @@ torn down with the reopen notice instead of retrying; one promoted to its
 managed node loses its Connect services only. A Cube opened Connect-served
 keeps that kind for as long as it is open.
 
-**Local** (no Vault, or a managed local node). It signs in through its own
-panel (`BTCB2_CUBE_OPEN.md`). Until it runs the Bitcoin path too, all seven
-bootstrap and login messages stay refused for it: the gate refuses that
-sign-in's bootstrap tail without an error, and answers a deferred commit with
-`AuthCommitRejected` so the panel never waits on it.
+**Local** (no Vault, or a managed local node). It runs the Bitcoin path,
+unchanged: its panel's sign-in commits through the App into the chain
+folder's `connect.json` (deferred commit, `InAppConnectAuthReady`), the
+commit check finds it there, and `connect_login_completed` registers the
+signer device and starts the stream. Nothing is refused for it. With a Vault
+it restores the saved session at open as a Bitcoin Cube does
+(`gui::tab::saved_connect_session`, shared with `finish_loader_wallets`);
+without one it restores nothing from the file and becomes ready through the
+session check, the keyring refresh and the login commit, as a Vault-less
+Bitcoin Cube does. One opened signed in keeps that session in its panel and
+brings the pipeline up from it at open, as a Connect-served Cube does but
+without the pin; once that session ends, its panel signs in through the
+Bitcoin path. As on Bitcoin, signing out does not erase `connect.json`, and a
+sign-in or sign-out in another tab does not sign it out or close it
+(`App::on_global_auth_change`, as on a Bitcoin tab); a revoked feature still
+closes it. Home's session is not adopted (`can_adopt_shared_connect_session`
+still excludes Bitcoin Blake2b); the Cube runs its own keyring refresh.
+
+A Cube opened Connect-served keeps that kind when promoted to its managed
+node: it keeps its admitted panel, and loses its Connect services with the
+reopen notice when its session ends or the account changes.
 
 ## Lost authorization
 

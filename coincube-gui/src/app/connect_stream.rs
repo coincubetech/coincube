@@ -4,16 +4,23 @@ use super::*;
 impl App {
     /// Register the current Connect device and bring its signing stream online.
     pub(super) fn ensure_connect_ready(&mut self) -> Task<Message> {
-        // A Connect-served Bitcoin Blake2b Cube brings its pipeline up from
-        // the session it was opened with. Until that session is saved, this
-        // is the retry: save it again (`save_served_session`).
-        if self.cache.connect_served {
+        // A Bitcoin Blake2b Cube still on the session it was opened with
+        // brings its pipeline up from that session. Until that session is
+        // saved, this is the retry: save it again (`save_served_session`).
+        if self.runs_on_opening_session() {
             match &self.served_session {
                 ServedSession::Saved { .. } => {}
                 ServedSession::Saving => return Task::none(),
                 ServedSession::NotSaved | ServedSession::Failed => {
                     self.served_session = ServedSession::NotSaved;
-                    return self.save_served_session();
+                    let save = self.save_served_session();
+                    // A local Cube that cannot save a whole session (no
+                    // matching saved sign-in) takes the Bitcoin path below,
+                    // which uses the session in `connect.json` or says none
+                    // was found, instead of doing nothing.
+                    if self.cache.connect_served || self.served_session == ServedSession::Saving {
+                        return save;
+                    }
                 }
             }
         }
@@ -884,7 +891,7 @@ impl App {
                 tracing::debug!("Connect stream not started: missing grpc_url or device_id",);
                 // A Connect-served Cube whose session is saved says so,
                 // with a retry, rather than leaving the signer list waiting.
-                if self.cache.connect_served
+                if self.runs_on_opening_session()
                     && matches!(self.served_session, ServedSession::Saved { .. })
                     && self.connect_stream_config.is_none()
                 {
@@ -987,6 +994,17 @@ impl App {
         )
     }
 
+    /// Whether this Bitcoin Blake2b Cube brings its signer pipeline up from
+    /// the session it was opened with, saving it at open: always when it is
+    /// Connect-served, and for a local Cube while it still holds that
+    /// session (`fork_connect_client`, PR 5). Only a Connect-served Cube is
+    /// also pinned to it; a local one then runs the Bitcoin path, and once
+    /// that session ends its panel signs in as a Bitcoin Cube's does.
+    fn runs_on_opening_session(&self) -> bool {
+        self.cache.chain().is_blake2b()
+            && (self.cache.connect_served || self.fork_connect_client.is_some())
+    }
+
     /// The session a Connect-served Bitcoin Blake2b Cube's signer pipeline
     /// is pinned to (I3): the Cube's own client, for the account its session
     /// was saved for at open. `None` on every other Cube, and before the
@@ -1057,7 +1075,7 @@ impl App {
     /// and then runs the login completion itself. Does nothing on any other
     /// Cube, or once the session is saving or saved.
     pub(super) fn save_served_session(&mut self) -> Task<Message> {
-        if !self.cache.connect_served || self.served_session != ServedSession::NotSaved {
+        if !self.runs_on_opening_session() || self.served_session != ServedSession::NotSaved {
             return Task::none();
         }
         let Some(client) = self.fork_connect_client.as_ref() else {
@@ -1083,13 +1101,22 @@ impl App {
         {
             return Task::none();
         }
+        let saved_refresh = account.saved_refresh_token_for(token);
+        // A local Cube is not pinned and later Cubes of the account restore
+        // this file, so it writes only a whole session, as a Bitcoin sign-in
+        // commit does. Without the saved sign-in's refresh token it writes
+        // nothing and signs in through the Bitcoin path once its opening
+        // session ends.
+        if !self.cache.connect_served && saved_refresh.is_none() {
+            return Task::none();
+        }
         let tokens = crate::services::connect::client::auth::AccessTokenResponse {
             access_token: token.to_string(),
             // The saved sign-in's refresh token only when it is this same
-            // session. This Cube never refreshes, and the gRPC interceptor
-            // and the stream send the access token only, so an empty one is
-            // never sent anywhere.
-            refresh_token: account.saved_refresh_token_for(token).unwrap_or_default(),
+            // session. A Connect-served Cube never refreshes, and the gRPC
+            // interceptor and the stream send the access token only, so an
+            // empty one is never sent anywhere.
+            refresh_token: saved_refresh.unwrap_or_default(),
             expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
         };
         let epoch = account.auth_epoch();

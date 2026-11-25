@@ -1176,7 +1176,8 @@ impl PsbtState {
             keychain,
             true,
         )
-        .with_connect_account(ConnectAccountStatus::from_cache(cache));
+        .with_connect_account(ConnectAccountStatus::from_cache(cache))
+        .with_connect_served(cache.connect_served);
         let cmd = modal.load(daemon);
         self.modal = Some(PsbtModal::Sign(modal));
         Task::batch([cmd, kc_launch])
@@ -2272,6 +2273,12 @@ pub struct SignModal {
     /// picker is open. Only a Connect-served Bitcoin Blake2b Cube moves it
     /// off `Idle`.
     pipeline_start: crate::app::cache::SignerPipelineStart,
+    /// The Cube is a Connect-served Bitcoin Blake2b Cube
+    /// ([`Cache::connect_served`]). It brings Mobile signing up from the
+    /// session it was opened with and refuses an in-Cube sign-in, so an
+    /// unresolved Mobile row never offers one, even while the pipeline is
+    /// still `Idle` (before the admitted panel has saved the session).
+    connect_served: bool,
     /// Spending-path identities the user has expanded, keyed the same way as
     /// `ToggleSpendPath`: `None` = primary, `Some(seq)` = a recovery path.
     /// Inactive cards default to collapsed.
@@ -2316,6 +2323,7 @@ impl SignModal {
             keychain_enabled,
             connect_account: ConnectAccountStatus::SignedOut,
             pipeline_start: crate::app::cache::SignerPipelineStart::Idle,
+            connect_served: false,
             expanded_paths: HashSet::new(),
             lan_failures: HashMap::new(),
             lan_signing: HashSet::new(),
@@ -2327,6 +2335,14 @@ impl SignModal {
     /// already signed in as someone else.
     pub fn with_connect_account(mut self, status: ConnectAccountStatus) -> Self {
         self.connect_account = status;
+        self
+    }
+
+    /// Record whether the Cube is Connect-served ([`Cache::connect_served`]),
+    /// so unresolved Mobile rows wait for its own session instead of asking
+    /// for a sign-in it would refuse.
+    pub fn with_connect_served(mut self, connect_served: bool) -> Self {
+        self.connect_served = connect_served;
         self
     }
 
@@ -2784,6 +2800,13 @@ impl SignModal {
                 Start::Starting => return St::Disabled("Looking up Mobile signers…".to_string()),
                 Start::Failed => {
                     return St::StartFailed("Mobile signing couldn't start.".to_string())
+                }
+                // Before the admitted panel has saved the session (or once
+                // it has ended and the Cube asks to be reopened) a
+                // Connect-served Cube is still `Idle`; it cannot sign in, so
+                // it waits rather than offering a sign-in it would refuse.
+                Start::Idle if self.connect_served => {
+                    return St::Disabled("Looking up Mobile signers…".to_string())
                 }
                 Start::Idle => {}
             }
@@ -4906,18 +4929,20 @@ mod tests {
     /// A Connect-served Bitcoin Blake2b Cube brings Mobile signing up from
     /// the session it was opened with. Meanwhile a possible Mobile key reads
     /// as a neutral wait, not a sign-in prompt; if it could not start, the
-    /// row offers to try again. `Idle`, as on every other Cube, keeps the
-    /// sign-in prompt.
+    /// row offers to try again. Before the session is saved it is still
+    /// `Idle`, and it waits too: it refuses an in-Cube sign-in. `Idle` on
+    /// every other Cube keeps the sign-in prompt.
     #[test]
     fn a_possible_mobile_key_follows_the_signer_pipeline_start() {
         use crate::app::cache::SignerPipelineStart as Start;
         use view::vault::psbt::SigningKeyState;
 
         let phone = fingerprint("f714c228");
-        for (start, expected) in [
-            (Start::Starting, "looking"),
-            (Start::Failed, "retry"),
-            (Start::Idle, "sign-in"),
+        for (start, served, expected) in [
+            (Start::Starting, true, "looking"),
+            (Start::Failed, true, "retry"),
+            (Start::Idle, true, "looking"),
+            (Start::Idle, false, "sign-in"),
         ] {
             let mut modal = SignModal::new(
                 HashSet::new(),
@@ -4929,7 +4954,8 @@ mod tests {
                 None,
                 true,
             )
-            .with_connect_account(ConnectAccountStatus::Owner);
+            .with_connect_account(ConnectAccountStatus::Owner)
+            .with_connect_served(served);
             modal.pipeline_start = start;
             let row = modal
                 .signing_paths()
@@ -4952,7 +4978,7 @@ mod tests {
                 SigningKeyState::NeedsSignIn(_) => "sign-in",
                 _ => "other",
             };
-            assert_eq!(got, expected, "{start:?}");
+            assert_eq!(got, expected, "{start:?}, connect-served: {served}");
         }
     }
 

@@ -1029,15 +1029,6 @@ impl ConnectionStatus {
     }
 }
 
-/// Whether this Cube runs Connect's live updates. A Bitcoin Cube does, and so
-/// does a Connect-served Bitcoin Blake2b Cube, which runs the signer
-/// pipeline from the session it was opened with. A local Bitcoin Blake2b
-/// Cube does not start them yet (`docs/BTCB2_VAULT_APP.md`); its status would
-/// read "Connecting…" for good, so the views leave it out.
-pub fn live_updates_apply(chain: crate::chain::ChainId, connect_served: bool) -> bool {
-    !chain.is_blake2b() || connect_served
-}
-
 /// The notice shown when automatic renewal didn't work.
 pub const RENEW_FAILED_TITLE: &str = "Couldn’t reconnect this computer";
 
@@ -3388,9 +3379,13 @@ impl App {
             data_dir,
             cube_settings,
             internal_bitcoind,
+            None,
         )
     }
 
+    /// A Bitcoin Blake2b Cube on its own node. `connect_auth` is the session
+    /// its chain folder's `connect.json` holds, restored at open as a Bitcoin
+    /// Cube's is (`gui::tab::saved_connect_session`).
     #[allow(clippy::too_many_arguments)]
     pub fn new_local_fork(
         cache: Cache,
@@ -3401,6 +3396,10 @@ impl App {
         data_dir: CoincubeDirectory,
         cube_settings: settings::CubeSettings,
         internal_bitcoind: Option<Bitcoind>,
+        connect_auth: Option<(
+            Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+            String,
+        )>,
     ) -> Result<(App, Task<Message>), Error> {
         Self::build_fork(
             cache,
@@ -3412,6 +3411,7 @@ impl App {
             data_dir,
             cube_settings,
             internal_bitcoind,
+            connect_auth,
         )
     }
 
@@ -3426,6 +3426,10 @@ impl App {
         data_dir: CoincubeDirectory,
         cube_settings: settings::CubeSettings,
         internal_bitcoind: Option<Bitcoind>,
+        connect_auth: Option<(
+            Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+            String,
+        )>,
     ) -> Result<(App, Task<Message>), Error> {
         let chain = cube_settings.network;
         let refuse = |error: Error| -> Result<(App, Task<Message>), Error> { Err(error) };
@@ -3508,6 +3512,9 @@ impl App {
             )));
         }
         cache.cube_encryption_key = cube_encryption_key;
+        // Only a Cube on its own node restores a saved session; a
+        // Connect-served one runs on the session it was opened with.
+        let connect_auth = connect_auth.filter(|_| local_backend);
         let (mut app, task) = Self::new_inner(
             cache,
             wallet,
@@ -3518,7 +3525,7 @@ impl App {
             data_dir,
             internal_bitcoind,
             cube_settings,
-            None,
+            connect_auth,
         );
         // The kind of Cube is recorded once, here (Desktop plan PR 3): a Cube
         // opened Connect-served keeps its admitted session and panel even if
@@ -6564,32 +6571,19 @@ impl App {
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
-        // The signer bootstrap uses gRPC registration that is not bound to the
-        // Cube's admitted client. A fork Cube must retain its admitted client;
-        // neither direct requests nor late completions may enter that pipeline.
-        //
         // A Connect-served Cube runs the device and stream bootstrap from the
         // session it was opened with, pinned to that session (Desktop plan
-        // PR 3); only the three login messages stay refused, since a sign-in
-        // started inside it would replace that session (I3). Messages carry
-        // no source, so they are refused whatever sends them. A local Cube
-        // keeps all seven refused until it runs the Bitcoin path (PR 5).
+        // PR 3); the three login messages stay refused for it, since a
+        // sign-in started inside it would replace that session (I3).
+        // Messages carry no source, so they are refused whatever sends them.
+        // A local Cube runs the Bitcoin path (PR 5): nothing is refused.
         let login_message = matches!(
             &message,
             Message::InAppConnectLoginCompleted { .. }
                 | Message::InAppConnectAuthReady { .. }
                 | Message::InAppConnectAuthPersisted { .. }
         );
-        let pipeline_message = matches!(
-            &message,
-            Message::EnsureConnectReady
-                | Message::TriggerConnectStreamReady { .. }
-                | Message::ConnectStreamReady(_)
-                | Message::ConnectStream(_)
-        );
-        if self.cache.chain().is_blake2b()
-            && (login_message || (pipeline_message && !self.cache.connect_served))
-        {
+        if self.cache.chain().is_blake2b() && self.cache.connect_served && login_message {
             // A refused deferred commit must still answer the account panel:
             // otherwise it waits on that commit forever and ignores every
             // later sign-in in this Cube.
@@ -6601,20 +6595,6 @@ impl App {
                 }
                 _ => Task::none(),
             };
-            // A local fork Cube signs in directly (`use_local_backend`). Its
-            // login still asks for the legacy device and stream bootstrap
-            // afterwards, and a commit deferred before the panel went local
-            // may still arrive. Neither is something the user asked for, so
-            // both are refused without the error.
-            if !self.requires_connect()
-                && matches!(
-                    &message,
-                    Message::InAppConnectLoginCompleted { .. }
-                        | Message::InAppConnectAuthReady { .. }
-                )
-            {
-                return answer;
-            }
             return Task::batch([
                 answer,
                 Task::done(Message::View(view::Message::ShowError(
@@ -7027,8 +7007,18 @@ impl App {
             if explicit_logout || changed || current.is_none() {
                 if self.requires_connect() {
                     self.invalidate_fork_session();
-                } else {
+                } else if self.cache.connect_served {
+                    // Opened Connect-served, since promoted: Connect services
+                    // go and the reopen notice stays.
                     self.revoke_local_connect_services();
+                } else {
+                    // A local Cube follows its account as a Bitcoin Cube does
+                    // (Desktop plan PR 5): the session it was opened with has
+                    // ended, so its panel becomes an ordinary one and signs in
+                    // through the Bitcoin path. Its stream and claim are
+                    // handled by the sign-out scrub as on Bitcoin; nothing
+                    // else is revoked.
+                    self.release_opening_session();
                 }
             }
         }
@@ -7115,23 +7105,6 @@ impl App {
             // Logout occurred - clear the avatar
             self.cache.avatar_handle = None;
         }
-    }
-
-    /// The header shows the account email from `cache.connect_email`. A
-    /// Bitcoin Cube fills it from its login commit or live-updates startup.
-    /// A local Bitcoin Blake2b Cube runs neither yet, so it mirrors the
-    /// account its panel is signed in as, and clears it once the panel has
-    /// none. A Connect-served one runs the pipeline, which fills it.
-    fn sync_fork_connect_email(&mut self) {
-        if !self.cache.chain().is_blake2b() || self.cache.connect_served {
-            return;
-        }
-        let account = &self.panels.connect.account;
-        self.cache.connect_email = account
-            .authenticated_client()
-            .and(account.user.as_ref())
-            .map(|user| user.email.clone())
-            .filter(|email| !email.is_empty());
     }
 
     /// Drop everything this App holds for a Connect session that has ended:
@@ -7378,7 +7351,6 @@ impl App {
         self.sync_connect_claim_session(session_epoch, explicit_logout);
         self.sync_connect_sidebar(was_authenticated);
         self.sync_connect_stream_after_auth(was_authenticated);
-        self.sync_fork_connect_email();
         let save_session = self.save_served_session();
         // Auto-return for the "Switch to Connect" flow. When the user
         // clicked it without an active session, we routed them to the
@@ -9711,6 +9683,27 @@ impl App {
         }
     }
 
+    /// A local Bitcoin Blake2b Cube no longer holds the session it was
+    /// opened with: its panel becomes an ordinary one, and what the signer
+    /// pipeline set up from that session goes with it, as a Bitcoin Cube's
+    /// sign-out scrub does. Unlike `revoke_local_connect_services` it leaves
+    /// the claim to `on_global_auth_change`, as on Bitcoin, and keeps the fiat
+    /// data and the account grant.
+    pub(crate) fn release_opening_session(&mut self) {
+        self.fork_connect_client = None;
+        self.panels.global_home.set_fork_connect_client(None);
+        self.panels.connect.account.use_local_backend();
+        self.clear_connect_session_state();
+        self.connect_auth = None;
+    }
+
+    /// A local Bitcoin Blake2b Cube: on its own node, or with no Vault yet,
+    /// and not opened Connect-served. It follows the account as a Bitcoin
+    /// Cube does (Desktop plan PR 5).
+    pub(crate) fn is_local_fork(&self) -> bool {
+        self.cache.chain().is_blake2b() && !self.cache.connect_served && !self.requires_connect()
+    }
+
     pub(crate) fn revoke_local_connect_services(&mut self) {
         self.revoke_claim();
         self.fork_connect_client = None;
@@ -11392,6 +11385,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn local_app(root: &std::path::Path) -> App {
+        local_app_with(root, None)
+    }
+
+    /// `local_app` opened with the session its chain folder restores.
+    pub(crate) fn local_app_with(
+        root: &std::path::Path,
+        connect_auth: Option<(
+            Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+            String,
+        )>,
+    ) -> App {
         let directory = CoincubeDirectory::new(root.to_path_buf());
         let (cfg, wallet_settings) =
             crate::chain::managed_local_fixture(&directory, crate::chain::ChainId::BitcoinBlake2b);
@@ -11415,6 +11419,9 @@ pub(crate) mod tests {
         let (app, task) = App::new_local_fork(
             Cache {
                 fiat_chain: crate::chain::ChainId::BitcoinBlake2b,
+                // Bound to the fixture's root, so nothing the App writes for
+                // its chain folder lands in the working directory.
+                datadir_path: directory.clone(),
                 ..Cache::default()
             },
             wallet,
@@ -11424,6 +11431,7 @@ pub(crate) mod tests {
             directory,
             settings::CubeSettings::new("Local".into(), crate::chain::ChainId::BitcoinBlake2b),
             None,
+            connect_auth,
         )
         .unwrap();
         drop(task);
@@ -11590,7 +11598,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn local_gui_logout_signin_and_stale_account_results_preserve_wallet() {
+    fn local_gui_logout_and_signin_preserve_wallet_and_sibling_sessions() {
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -11667,6 +11675,17 @@ pub(crate) mod tests {
                     serde_json::json!({"plans":[],"bitcoin_blake2b_enabled":true}),
                 )
                 .unwrap();
+                // The sibling's sign-in neither signed this local Cube out nor
+                // detached its panel, as on a Bitcoin tab (Desktop plan PR 5):
+                // a result of its own current session still applies.
+                assert_eq!(
+                    gui.reviewer_app_mut(1)
+                        .panels
+                        .connect
+                        .account
+                        .session_generation(),
+                    generation
+                );
                 drop(gui.reviewer_account(
                     2,
                     view::ConnectAccountMessage::FeaturesLoaded(Some(granted), generation),
@@ -11677,8 +11696,7 @@ pub(crate) mod tests {
                     .connect
                     .account
                     .features
-                    .is_none());
-                assert!(!gui.reviewer_app_mut(1).cache.btcb2_server_enabled);
+                    .is_some());
                 assert!(gui.reviewer_app_mut(0).cache.cube_encryption_key.is_some());
                 std::fs::remove_dir_all(root).unwrap();
             })
@@ -12341,19 +12359,38 @@ pub(crate) mod tests {
 
     /// The header reads the account email from `cache.connect_email`, which a
     /// Bitcoin Cube fills from its login commit or live-updates startup. A
-    /// signed-in Bitcoin Blake2b Cube runs neither, so it shows the account
-    /// its panel loaded, and drops it when that account signs out.
+    /// Vault-less Bitcoin Blake2b Cube opened signed in fills it the same way:
+    /// once its panel reaches its dashboard it saves the opening session and
+    /// runs the login completion, which sets the email. Sign-out clears it.
     #[test]
     fn a_signed_in_fork_cube_shows_its_account_email() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("fork-open-email-{}", uuid::Uuid::new_v4()));
+        // The saved sign-in is the session the Cube was opened with, so the
+        // Cube saves it whole at open.
+        state::connect::write_connect_secret(
+            state::connect::CONNECT_KEYRING_USER,
+            &serde_json::to_vec(&crate::services::coincube::LoginResponse {
+                requires_2fa: false,
+                token: "synthetic-opening".into(),
+                refresh_token: "synthetic-opening-refresh".into(),
+                user: crate::services::coincube::User {
+                    id: 77,
+                    email: "fixture@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let mut app = signed_in_fork_cube_without_a_vault(&root);
         drop(app.update(Message::View(view::Message::ConnectAccount(
             view::ConnectAccountMessage::Init,
         ))));
         assert_eq!(app.cache.connect_email, None, "no account loaded yet");
 
-        // The opening session's account, as the admitted user load returns it.
+        // The opening session's account, as the admitted user load returns it,
+        // then the duress gate clears and the panel reaches its dashboard.
         let account = &app.panels.connect.account;
         let (generation, epoch) = (account.session_generation(), account.auth_epoch());
         drop(app.update(Message::View(view::Message::ConnectAccount(
@@ -12367,6 +12404,23 @@ pub(crate) mod tests {
                 epoch,
             },
         ))));
+        let clear: crate::services::coincube::DuressState = serde_json::from_value(
+            serde_json::json!({"active": false, "enrolled": false, "this_device_registered": false}),
+        )
+        .unwrap();
+        let generation = app.panels.connect.account.session_generation();
+        let routed = fork_task_outputs(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::DuressStateChecked(
+                crate::services::coincube::DuressCheckOutcome::Ok(clear),
+                generation,
+                0,
+            ),
+        ))));
+        let saved = routed
+            .into_iter()
+            .find(|m| matches!(m, Message::ConnectServedSessionSaved { saved: true, .. }))
+            .expect("the opening session is saved at open");
+        drop(app.update(saved));
         assert!(
             app.fork_connect_client.is_some(),
             "still the opening session"
@@ -12380,6 +12434,13 @@ pub(crate) mod tests {
             view::ConnectAccountMessage::LogOut,
         ))));
         assert_eq!(app.cache.connect_email, None, "cleared with the session");
+        assert!(app.connect_auth.is_none());
+        // Saved in its own chain folder only.
+        assert!(!root.join("bitcoin").exists());
+        assert!(root
+            .join("bitcoin-blake2b-testnet4")
+            .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME)
+            .exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -12405,17 +12466,16 @@ pub(crate) mod tests {
             )
     }
 
-    /// A local fork Cube's account panel never defers a sign-in commit to the
-    /// App, in either of its modes, so the App's refusal of that commit has
-    /// no pending sign-in to abort. While the Cube holds the session it was
-    /// opened with, the panel is admitted and refuses a sign-in completion
-    /// outright. Once that session has ended the panel is local and finishes
-    /// a sign-in itself. (`AuthCommitRejected` aborts a sign-in only while a
-    /// deferred commit is pending.)
+    /// A Vault-less Bitcoin Blake2b Cube's account panel commits a sign-in
+    /// through the App as a Bitcoin Cube's does (Desktop plan PR 5). While it
+    /// holds the session it was opened with, the panel is admitted and refuses
+    /// a sign-in completion outright. Once that session has ended, a restored
+    /// session is deferred to the App's commit, which writes the Cube's own
+    /// chain folder.
     #[test]
-    fn a_local_fork_cube_never_defers_a_sign_in_commit() {
+    fn a_local_fork_cube_defers_its_sign_in_commit_as_on_bitcoin() {
         let _guard = crate::app::session::test_guard();
-        let root = std::env::temp_dir().join(format!("fork-no-deferral-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("fork-deferral-{}", uuid::Uuid::new_v4()));
         let mut app = signed_in_fork_cube_without_a_vault(&root);
         let login = crate::services::coincube::LoginResponse {
             requires_2fa: false,
@@ -12442,90 +12502,18 @@ pub(crate) mod tests {
             ))
         };
 
-        // Holding its opening session.
+        // Holding its opening session: refused outright.
         assert!(app.fork_connect_client.is_some());
         let message = refreshed(&app);
         assert!(!defers(&fork_task_outputs(app.update(message))));
 
-        // After that session has ended.
-        app.on_local_auth_change(false);
+        // After that session has ended: deferred to the App's commit.
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
         assert!(app.fork_connect_client.is_none());
         let message = refreshed(&app);
-        assert!(!defers(&fork_task_outputs(app.update(message))));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Once its opening session ends, a Vault-less Bitcoin Blake2b Cube's
-    /// account panel signs in by itself, as Home's does: a restored session is
-    /// accepted without the App commit the fork refuses. A deferred commit
-    /// that still arrives is answered so the panel never waits on it, and the
-    /// legacy bootstrap a sign-in asks for afterwards is refused, both without
-    /// the "Connect signer bootstrap" error.
-    #[test]
-    fn a_local_fork_cube_signs_in_without_the_bitcoin_commit() {
-        let outputs = fork_task_outputs;
-        let is_bootstrap_error = |message: &Message| {
-            matches!(message, Message::View(view::Message::ShowError(error))
-                if error.contains("Connect signer bootstrap"))
-        };
-
-        let _guard = crate::app::session::test_guard();
-        let root = std::env::temp_dir().join(format!("fork-local-signin-{}", uuid::Uuid::new_v4()));
-        let mut app = signed_in_fork_cube_without_a_vault(&root);
-        // Another tab's sign-in ends the opening session.
-        app.on_local_auth_change(false);
-        assert!(app.fork_connect_client.is_none());
-
-        let login = crate::services::coincube::LoginResponse {
-            requires_2fa: false,
-            token: "synthetic-restored".into(),
-            refresh_token: "synthetic-refresh".into(),
-            user: crate::services::coincube::User {
-                id: 77,
-                email: "fixture@example.invalid".into(),
-                email_verified: Some(true),
-            },
-        };
-        let revision = app.panels.connect.account.accepted_auth_revision();
-        let epoch = app.connect_auth_epoch();
-        drop(app.update(Message::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::RefreshedSession(login.clone(), epoch, "old".into()),
-        ))));
-        assert_ne!(
-            app.panels.connect.account.accepted_auth_revision(),
-            revision,
-            "the restored session is accepted in the panel"
-        );
-        let saved = state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER)
-            .expect("the restored session is saved");
-        assert!(String::from_utf8(saved)
-            .unwrap()
-            .contains("synthetic-restored"));
-
-        let epoch = app.connect_auth_epoch();
-        let answered = outputs(app.update(Message::InAppConnectAuthReady {
-            login: login.clone(),
-            epoch,
-            previous_refresh_token: None,
-        }));
-        assert!(answered.iter().any(|message| matches!(
-            message,
-            Message::View(view::Message::ConnectAccount(
-                view::ConnectAccountMessage::AuthCommitRejected { epoch: answered_epoch }
-            )) if *answered_epoch == epoch
-        )));
-        assert!(!answered.iter().any(is_bootstrap_error));
-
-        let bootstrap = outputs(app.update(Message::InAppConnectLoginCompleted {
-            token: login.token.clone(),
-            refresh_token: login.refresh_token.clone(),
-            email: login.user.email.clone(),
-            epoch,
-        }));
-        assert!(!bootstrap.iter().any(is_bootstrap_error));
-        assert!(!bootstrap
-            .iter()
-            .any(|message| matches!(message, Message::TriggerConnectStreamReady { .. })));
+        assert!(defers(&fork_task_outputs(app.update(message))));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -21061,3 +21049,6 @@ mod stream_startup_routing_tests {
 
 #[cfg(test)]
 mod connect_served_tests;
+
+#[cfg(test)]
+mod local_fork_pipeline_tests;
