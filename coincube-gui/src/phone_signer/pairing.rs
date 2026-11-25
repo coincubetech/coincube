@@ -81,7 +81,8 @@ pub struct PairingOffer {
     /// not generate, which the listener refuses.
     #[serde(default, rename = "net")]
     pub network: String,
-    /// Protocol version. Pin to [`PAIRING_PROTOCOL_VERSION`] for v1.
+    /// Protocol version: [`PAIRING_PROTOCOL_VERSION`] (3) on every offer
+    /// this desktop generates.
     #[serde(rename = "v")]
     pub version: u32,
 
