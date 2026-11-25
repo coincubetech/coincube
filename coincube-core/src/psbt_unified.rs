@@ -603,7 +603,10 @@ fn raw_reserved_signature(
 
 /// A record in this crate's own `coincube`/0 proprietary namespace: the only
 /// proprietary records a unified signature request may add to a PSBT.
-pub(crate) fn is_reserved_key(key: &ProprietaryKey) -> bool {
+/// Whether `key` is the proprietary key under which a unified signature is
+/// stored (prefix `coincube`, subtype 0). Says nothing about the value: use
+/// the validating readers above before trusting what it holds.
+pub fn is_reserved_key(key: &ProprietaryKey) -> bool {
     key.prefix == PROPRIETARY_PREFIX && key.subtype == PROPRIETARY_SUBTYPE
 }
 
