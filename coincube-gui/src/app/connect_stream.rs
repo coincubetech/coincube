@@ -249,11 +249,20 @@ impl App {
                     // out drops the stream.
                     Refusal::DeviceRevoked => {
                         log::warn!("[CONNECT] This computer was removed from the Connect account");
+                        // Its signer devices are revoked too, in every chain
+                        // folder: discard their ids so the next sign-in
+                        // registers afresh and none is replayed. Read the
+                        // account before the teardown below clears it.
+                        let discard = self.discard_connect_device_ids();
+                        // The stream is parked for good after this refusal
+                        // and waits for the App to drop it. The sign-out below
+                        // does that only when the panel was signed in; at
+                        // start-up the stream runs from the saved session
+                        // before the panel has authenticated, and on a removed
+                        // computer it never will. So drop it here.
+                        self.clear_connect_session_state();
                         Task::batch([
-                            // Its signer devices are revoked too, in every
-                            // chain folder: discard their ids so the next
-                            // sign-in registers afresh and none is replayed.
-                            self.discard_connect_device_ids(),
+                            discard,
                             Task::done(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)),
                             Task::done(Message::View(view::Message::ConnectAccount(
                                 view::ConnectAccountMessage::LogOut,

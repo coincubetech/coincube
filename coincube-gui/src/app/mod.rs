@@ -12787,9 +12787,16 @@ pub(crate) mod tests {
             )
             .unwrap();
         }
+        // The stream is up from the saved session, and the panel has not
+        // authenticated: on a removed computer it never does.
+        seed_connect_session_state(&mut app);
         app.connect_email = Some(email.into());
+        assert!(!app.cache.connect_authenticated);
 
         let task = app.update(Message::ConnectStream(M::Refused(Refusal::DeviceRevoked)));
+        // The parked stream is dropped at once, whether or not the panel
+        // was signed in, so the sign-out that follows has nothing to miss.
+        assert_connect_session_state_cleared(&app);
         let mut outputs = Vec::new();
         let mut stream = iced_runtime::task::into_stream(task).expect("tasks to run");
         while let Some(action) = stream.next().await {

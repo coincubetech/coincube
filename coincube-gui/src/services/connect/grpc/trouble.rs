@@ -56,9 +56,10 @@ fn reason(status: &tonic::Status) -> Option<String> {
         .message()
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .next()?;
-    let first = first.to_ascii_uppercase();
+    // Matched as the server writes them, in upper case. A trailer may be in
+    // any case; the first word of a message is not loosened the same way.
     (first.starts_with("DEVICE_") || first == COMPUTER_REMOVED || first == SESSION_ENDED)
-        .then_some(first)
+        .then(|| first.to_ascii_uppercase())
 }
 
 const COMPUTER_REMOVED: &str = "COMPUTER_REMOVED";
@@ -200,6 +201,17 @@ mod tests {
             .metadata_mut()
             .insert(REASON_METADATA, "session_ended".parse().unwrap());
         assert_eq!(refusal(&status), None);
+        // The first word of a message is matched as the server writes it.
+        assert_eq!(
+            refusal(&tonic::Status::unauthenticated(
+                "computer_removed: this computer was removed"
+            )),
+            None
+        );
+        assert_eq!(
+            refusal(&tonic::Status::permission_denied("device_revoked: gone")),
+            Some(Refusal::Unexplained)
+        );
         // And the reason alone, on a code that is not a refusal, is nothing.
         assert_eq!(
             refusal(&tonic::Status::unavailable("COMPUTER_REMOVED: later")),

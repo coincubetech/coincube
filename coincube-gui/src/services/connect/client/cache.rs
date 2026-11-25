@@ -520,9 +520,10 @@ pub enum DeviceIdDiscard {
 /// account.
 ///
 /// Removing a computer retires every signer device it registered, and each
-/// chain folder keeps its own. The folder the next sign-in is written to gets
-/// a fresh registration anyway, but the others would replay a revoked id the
-/// next time one of their Cubes opens, and be signed out again for it.
+/// chain folder keeps its own. Nothing else clears them: a new sign-in keeps
+/// a stored id unless a re-registration was in progress, and registration
+/// short-circuits on a stored id. Left in place, a revoked id is replayed by
+/// the next Cube that opens on that chain, which is signed out again for it.
 ///
 /// Returns what happened in each folder that held an id for the account;
 /// folders with no `connect.json`, no such account or no id are not listed.
@@ -2012,6 +2013,23 @@ mod tests {
         assert!(Account::from_cache(&bitcoin, alice).unwrap().is_some());
         assert!(!signet.path().join(CONNECT_CACHE_FILENAME).exists());
         assert!(!datadir.network_directory(ChainId::Regtest).path().exists());
+    }
+
+    /// Why the discard is needed even in the folder the next sign-in is
+    /// written to: a new sign-in keeps the stored id, so a revoked one would
+    /// be replayed.
+    #[tokio::test]
+    async fn a_new_sign_in_keeps_a_stored_device_id() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        write_cache(&dir, &[(email, Some("revoked-id"))]);
+
+        update_connect_cache(&dir, &tokens("new"), email, CacheAccountAction::NewLogin)
+            .await
+            .unwrap();
+
+        assert_eq!(device_id(&dir, email).as_deref(), Some("revoked-id"));
+        std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
     /// A folder whose id is held by a live re-registration is reported as
