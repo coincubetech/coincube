@@ -2,6 +2,8 @@ Pairing completion protocol 1 (within QR v3)
 
 The pairing QR is v3 only, on every chain (signing identity contract §4.1, `docs/BTCB2_SIGNING_IDENTITY.md` §4). It carries `net`, the Vault's chain as its Connect network id, and the phone's proof is `HMAC-SHA256(psk, "coincube-pair-v3" || desktop_cert_fp || phone_cert_fp || net)`, which the desktop verifies with its own `net`. A phone that predates v3 refuses the code at scan; no v1 or v2 code is emitted or read. Before the proof the desktop requires the offer to be its own v3 offer for the chain of the Vault loaded now (a Bitcoin Vault and its Bitcoin Blake2b twin share a vault id, so the vault-id guard alone cannot tell them apart). After it, `SignerBinding.network` must be non-empty ("Update COINCUBE Mobile and pair again.") and equal to the offer's `net` ("Exact pairing identity mismatch; pair again.").
 
+The stored row (`paired-phones.json`, one row per phone certificate) records the offer's `net` as `network` and `PairingComplete.capabilities` as `capabilities`, once, at pairing; they are not refreshed afterwards. A row without `network` was made before v3: it stays listed and removable, and is never used to sign on any chain ("This pairing predates network-aware signing. Pair this phone again."). Pairing a phone for another chain replaces its row and keeps the user's name for it; the pairing screen says so before the user scans.
+
 The QR PSK, TLS identity, chain, exact selected xpub/origin and descriptor commitment checks precede staging. PairingComplete.completion_protocol must equal 1. Pong is exclusively liveness. Old peers must update both applications and create a fresh offer.
 
 Desktop has three durable journal states:
