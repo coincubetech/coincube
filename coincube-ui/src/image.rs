@@ -21,19 +21,14 @@ pub fn coincube_window_icon() -> icon::Icon {
 }
 
 /// COINCUBE wordmark using Space Grotesk Bold at a given size.
-/// "COIN" is always orange; "CUBE" uses the theme's primary text color.
+/// One ink throughout: the whole word takes the theme's primary text color
+/// (white on the dark theme), with no orange "COIN".
 pub fn coincube_wordmark<'a, M: 'a>(size: f32) -> Row<'a, M> {
     use crate::theme;
-    iced::widget::row![
-        iced::widget::text("COIN")
-            .font(font::SPACE_GROTESK_BOLD)
-            .size(size)
-            .color(color::ORANGE),
-        iced::widget::text("CUBE")
-            .font(font::SPACE_GROTESK_BOLD)
-            .size(size)
-            .style(theme::text::primary),
-    ]
+    iced::widget::row![iced::widget::text("COINCUBE")
+        .font(font::SPACE_GROTESK_BOLD)
+        .size(size)
+        .style(theme::text::primary),]
 }
 
 /// The app-chrome brand mark: the sumi-e castle keep inside an orange
@@ -48,8 +43,8 @@ static TENSHU_MARK: LazyLock<iced::widget::image::Handle> =
 /// App-chrome logo — the brand mark stacked above the [`coincube_wordmark`].
 /// Used in app chrome (the nav-rail header and the home sidebar). `size` is
 /// the wordmark font size; the mark scales to 2× that so the two read as one
-/// lockup. "COIN" carries the orange accent and "CUBE" follows the theme's
-/// primary text color, so it stays legible in light and dark modes. The
+/// lockup. The wordmark follows the theme's primary text color, so it stays
+/// legible in light and dark modes. The
 /// castle mark is retained artwork; the function keeps its historical name.
 pub fn tenshu_wordmark<'a, M: 'a>(size: f32) -> Column<'a, M> {
     let mark = size * 2.0;

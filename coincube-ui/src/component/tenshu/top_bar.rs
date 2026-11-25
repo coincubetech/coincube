@@ -167,21 +167,16 @@ fn brand_row<'a, M: 'a>(mark: Element<'a, M>, word: Element<'a, M>) -> Row<'a, M
         .push(word)
 }
 
-/// The brand word: the two-tone COINCUBE wordmark, or the same letters in
-/// one muted ink under a Cube's unlock face. Both set "COINCUBE" in Space
-/// Grotesk Bold at [`BRAND_WORD`], so the brand keeps one width either way.
-fn brand_word<'a, M: 'a>(muted: bool) -> Element<'a, M> {
-    if muted {
-        text("COINCUBE")
-            .size(BRAND_WORD)
-            .font(font::SPACE_GROTESK_BOLD)
-            .style(move |theme: &Theme| text::Style {
-                color: Some(ink(theme, true)),
-            })
-            .into()
-    } else {
-        crate::image::coincube_wordmark(BRAND_WORD).into()
-    }
+/// The brand word: "COINCUBE" in Space Grotesk Bold at [`BRAND_WORD`], in
+/// one ink that `color` picks per theme — the same ink as the cube beside it.
+fn brand_word<'a, M: 'a>(color: impl Fn(&Theme) -> Color + 'a) -> Element<'a, M> {
+    text("COINCUBE")
+        .size(BRAND_WORD)
+        .font(font::SPACE_GROTESK_BOLD)
+        .style(move |theme: &Theme| text::Style {
+            color: Some(color(theme)),
+        })
+        .into()
 }
 
 /// `.brand` where it is not a control: the cube and the COINCUBE wordmark,
@@ -189,7 +184,7 @@ fn brand_word<'a, M: 'a>(muted: bool) -> Element<'a, M> {
 pub fn brand_mark<'a, M: 'a>(muted: bool) -> Element<'a, M> {
     brand_row(
         mark(CUBE, BRAND_MARK, move |theme| ink(theme, muted)),
-        brand_word(muted),
+        brand_word(move |theme| ink(theme, muted)),
     )
     .into()
 }
@@ -203,17 +198,20 @@ pub fn brand_action<'a, M: Clone + 'static>(
 ) -> Element<'a, M> {
     // An SVG cannot inherit the button's text colour, and its own hover
     // status covers only the cube. The button's style runs just before its
-    // content draws, so it records the hover for the cube to read.
+    // content draws, so it records the hover for the cube and the word to read.
     let hovered = Rc::new(Cell::new(false));
-    let cube_hovered = hovered.clone();
-    let cube = mark(CUBE, BRAND_MARK, move |theme| {
-        if cube_hovered.get() {
-            theme.colors.shell.accent_ink
-        } else {
-            theme.colors.shell.ink
+    let brand_ink = |hovered: Rc<Cell<bool>>| {
+        move |theme: &Theme| {
+            if hovered.get() {
+                theme.colors.shell.accent_ink
+            } else {
+                theme.colors.shell.ink
+            }
         }
-    });
-    Action::new(id, brand_row(cube, brand_word(false)), focus_intent)
+    };
+    let cube = mark(CUBE, BRAND_MARK, brand_ink(hovered.clone()));
+    let word = brand_word(brand_ink(hovered.clone()));
+    Action::new(id, brand_row(cube, word), focus_intent)
         .padding(0.0)
         .style(move |theme: &Theme, status| {
             let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
