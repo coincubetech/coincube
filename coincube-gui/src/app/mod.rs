@@ -2874,8 +2874,10 @@ fn connect_stream_ready_task(
                 );
                 return None;
             };
+            // This Cube's own cursor, never one another Cube of the account
+            // moved past an event this one has not received.
             let last_seen_seq = cache_account
-                .and_then(|a| a.last_seen_event_seq)
+                .map(|a| a.event_seq_for(cube_uuid.as_deref()))
                 .unwrap_or(0);
 
             // Look up the cube's vault id so the server can scope this

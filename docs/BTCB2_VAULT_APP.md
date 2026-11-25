@@ -91,7 +91,13 @@ the event cursor it is used only while the entry is this Cube's host's: a
 token, device id or cursor is only ever used with the host that issued it,
 so an entry another host wrote, or one the Cube's save took over from another
 host, gives neither (`Account::issued_by`; the registration shortcut checks
-the same). If none is stored and the registration's write is refused, the id registration
+the same). The event cursor is also each Cube's own
+(`Account::cube_event_seqs`, by Cube id): a Cube resumes from its own
+position, so another Cube of the account that received later events never
+moves it past an event this one has not received. A Cube with none starts
+from 0 once any Cube has its own, and until then resumes from the account's
+single cursor that older builds wrote, which is still written for them
+(`Account::event_seq_for`). If none is stored and the registration's write is refused, the id registration
 returned is used for this session only and dropped with it. Such an id
 cannot be renewed in place (renewal claims the id stored in the file), so if
 Connect later stops recognising it the Cube shows "Couldn't reconnect this

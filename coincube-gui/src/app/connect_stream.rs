@@ -405,6 +405,9 @@ impl App {
                 &self.connect_base_url(),
                 &crate::services::coincube_api_base_url(),
             );
+            // This Cube's own cursor: another Cube of the account resumes
+            // from its own.
+            let cube_id = self.cube_settings.id.clone();
             Task::perform(
                 async move {
                     if let Err(e) =
@@ -413,6 +416,7 @@ impl App {
                             &email,
                             seq,
                             issuer.as_deref(),
+                            Some(cube_id.as_str()),
                         )
                         .await
                     {
@@ -865,7 +869,7 @@ impl App {
                     }
                     cfg.last_seen_seq = cfg.last_seen_seq.max(
                         entry
-                            .and_then(|entry| entry.last_seen_event_seq)
+                            .map(|entry| entry.event_seq_for(Some(&self.cube_settings.id)))
                             .unwrap_or(0),
                     );
                 } else {
@@ -884,7 +888,8 @@ impl App {
                     let Some(account) = cached_account else {
                         return Task::none();
                     };
-                    let Some(device_id) = account.device_id.filter(|id| !id.trim().is_empty())
+                    let Some(device_id) =
+                        account.device_id.clone().filter(|id| !id.trim().is_empty())
                     else {
                         return Task::none();
                     };
@@ -894,7 +899,7 @@ impl App {
                     cfg.device_id = device_id;
                     cfg.last_seen_seq = cfg
                         .last_seen_seq
-                        .max(account.last_seen_event_seq.unwrap_or(0));
+                        .max(account.event_seq_for(Some(&self.cube_settings.id)));
                 }
                 tracing::info!(
                     "Connect stream ready (device_id={}, last_seen_seq={})",
