@@ -439,26 +439,38 @@ pub struct KeychainSignModal {
     dismissed: bool,
 }
 
+/// The session's stated chain must be exactly the Vault's, on every chain
+/// (signing identity contract §3.5, R1.10 and R1.11; master decision 30). An
+/// empty network means Connect predates chain identity: nothing is sealed or
+/// sent before a session exists, and a session that already exists is
+/// cancelled.
 fn check_session_network(
     chain: crate::chain::ChainId,
     network: &str,
     session_exists: bool,
-) -> Result<(), &'static str> {
-    if network == chain.api_str() || (network.is_empty() && !chain.is_blake2b()) {
+) -> Result<(), String> {
+    use crate::chain::ChainIdExt;
+    if network == chain.api_str() {
         return Ok(());
     }
     if network.is_empty() {
+        let label = chain.label();
         return Err(if session_exists {
-            "Connect needs updating before COINCUBE Mobile can sign on Bitcoin Blake2b. The request was cancelled."
+            format!(
+                "Connect needs updating before COINCUBE Mobile can sign on {label}. The request was cancelled."
+            )
         } else {
-            "Connect needs updating before COINCUBE Mobile can sign on Bitcoin Blake2b. Nothing was sent to the signer."
+            format!(
+                "Connect needs updating before COINCUBE Mobile can sign on {label}. Nothing was sent to the signer."
+            )
         });
     }
     Err(if session_exists {
         "Connect reports this request on a different network than this Cube. The request was cancelled. Reopen the Cube; if this repeats, contact https://coincube.io/support."
     } else {
         "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact https://coincube.io/support."
-    })
+    }
+    .to_string())
 }
 
 impl KeychainSignModal {
@@ -885,7 +897,7 @@ impl KeychainSignModal {
         self.phase = Phase::Sessions;
         if let Err(message) = check_session_network(self.wallet.chain, &resp.network, false) {
             self.pending.clear();
-            self.error = Some(message.to_string());
+            self.error = Some(message);
             self.phase = Phase::AllDone;
             return Task::none();
         }
@@ -1337,7 +1349,7 @@ impl KeychainSignModal {
                         check_session_network(self.wallet.chain, &session.network, true)
                     {
                         entry.status = PendingSessionStatus::Failed;
-                        entry.error = Some(message.to_string());
+                        entry.error = Some(message);
                         entry.cancel_requested = true;
                         Some((session_id, "network_mismatch"))
                     } else if mismatched {
@@ -1606,7 +1618,7 @@ impl KeychainSignModal {
                 entry.signed_psbt_fetching = false;
                 entry.cancel_requested = true;
                 entry.status = PendingSessionStatus::Failed;
-                entry.error = Some(message.to_string());
+                entry.error = Some(message);
             }
             return self.cancel_session_task(session_id, "network_mismatch");
         }
@@ -2599,7 +2611,7 @@ pub(crate) mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn chain_identity_is_exact_with_only_the_bitcoin_legacy_window() {
+    fn chain_identity_is_exact_on_every_chain_with_no_legacy_window() {
         use crate::chain::ChainId;
         for chain in [
             ChainId::Bitcoin,
@@ -2612,9 +2624,24 @@ pub(crate) mod tests {
         ] {
             for exists in [false, true] {
                 assert!(check_session_network(chain, chain.api_str(), exists).is_ok());
+                // Master decision 30: a session with no chain is refused on
+                // every chain, Bitcoin-family included (R1.11).
+                let empty = check_session_network(chain, "", exists).unwrap_err();
+                assert!(
+                    empty.contains(&format!(
+                        "before COINCUBE Mobile can sign on {}.",
+                        crate::chain::ChainIdExt::label(chain)
+                    )),
+                    "{}: {}",
+                    chain,
+                    empty
+                );
                 assert_eq!(
-                    check_session_network(chain, "", exists).is_ok(),
-                    !chain.is_blake2b()
+                    empty.contains("The request was cancelled."),
+                    exists,
+                    "{}: {}",
+                    chain,
+                    empty
                 );
                 for wrong in ["bitcoin", "future-chain", " mainnet"] {
                     assert!(check_session_network(chain, wrong, exists).is_err());
@@ -2647,14 +2674,31 @@ pub(crate) mod tests {
                 assert!(m.error.unwrap().contains("Nothing was sent"));
             }
         }
-        let mut m = modal();
-        m.wallet = Arc::new(
-            Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
-                .with_chain(ChainId::BitcoinBlake2b),
-        );
-        let task = m.on_signers_resolved(ResolveSignersResponse::default());
-        assert!(iced_runtime::task::into_stream(task).is_none());
-        assert!(m.error.unwrap().contains("Nothing was sent"));
+        // An empty resolve network is refused before sealing on every chain
+        // (master decision 30), with the Vault's chain named in the copy.
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet4,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut m = modal();
+            m.wallet = Arc::new(
+                Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap()).with_chain(chain),
+            );
+            m.pending.push(pending(PendingSessionStatus::Idle));
+            let task = m.on_signers_resolved(ResolveSignersResponse::default());
+            assert!(iced_runtime::task::into_stream(task).is_none());
+            assert!(m.pending.is_empty());
+            let error = m.error.unwrap();
+            assert!(error.contains("Nothing was sent"), "{}: {}", chain, error);
+            assert!(
+                error.contains(crate::chain::ChainIdExt::label(chain)),
+                "{}: {}",
+                chain,
+                error
+            );
+        }
     }
 
     #[test]
@@ -2865,12 +2909,11 @@ pub(crate) mod tests {
                 let mut session = created_session();
                 session.network = network.into();
                 let task = m.on_session_created(m.pending[0].fingerprint, Ok(session));
-                let refused = !network.is_empty() || chain.is_blake2b();
-                assert_eq!(m.pending[0].cancel_requested, refused);
-                assert_eq!(iced_runtime::task::into_stream(task).is_some(), refused);
-                if refused {
-                    assert_eq!(m.pending[0].status, PendingSessionStatus::Failed);
-                }
+                // Master decision 30: an empty network is refused on every
+                // chain, as a wrong one is.
+                assert!(m.pending[0].cancel_requested, "{}/{:?}", chain, network);
+                assert!(iced_runtime::task::into_stream(task).is_some());
+                assert_eq!(m.pending[0].status, PendingSessionStatus::Failed);
             }
         }
     }
@@ -3173,7 +3216,7 @@ pub(crate) mod tests {
             reason: reason.to_string(),
         };
         let _ = modal.on_signers_resolved(ResolveSignersResponse {
-            network: String::new(),
+            network: crate::chain::ChainId::Bitcoin.api_str().to_string(),
             targets: vec![],
             unresolved: vec![
                 unresolved("f5acc2fd", "transport_key_stale"),
@@ -3308,7 +3351,8 @@ pub(crate) mod tests {
     /// test fills in only the field it is about.
     fn created_session() -> SigningSession {
         SigningSession {
-            network: String::new(),
+            // `modal()`'s wallet chain: a session always states its chain.
+            network: crate::chain::ChainId::Bitcoin.api_str().to_string(),
             session_id: "session-created".to_string(),
             request_id: "req-1".to_string(),
             user_id: String::new(),
