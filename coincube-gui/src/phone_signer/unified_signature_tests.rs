@@ -155,3 +155,63 @@ fn a_returned_transaction_or_final_field_is_never_imported_on_btcb2() {
     let mut target = f.psbt.clone();
     assert!(!merge(true, &f, &mut target, &other, 0));
 }
+
+#[test]
+fn non_reserved_proprietary_data_and_request_field_edits_are_ignored_on_btcb2() {
+    use coincube_core::miniscript::bitcoin::psbt::{raw::ProprietaryKey, PsbtSighashType};
+    let f = unified::fixture();
+    let mut returned = unified::unified(&f.psbt, &f.signers[0]);
+    // Proprietary data outside the reserved unified records.
+    let other = ProprietaryKey {
+        prefix: b"another-app".to_vec(),
+        subtype: 7,
+        key: vec![1, 2, 3],
+    };
+    returned.inputs[0]
+        .proprietary
+        .insert(other.clone(), vec![9; 4]);
+    // Edits to fields only the request decides.
+    returned.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(0x01));
+    returned.inputs[0].bip32_derivation.clear();
+    let mut target = f.psbt.clone();
+    assert!(merge(true, &f, &mut target, &returned, 0));
+    // Only the reserved record crossed over; the request's fields stayed.
+    assert!(!target.inputs[0].proprietary.contains_key(&other));
+    assert_eq!(target.inputs[0].proprietary.len(), 1);
+    assert_eq!(target.inputs[0].sighash_type, f.psbt.inputs[0].sighash_type);
+    assert_eq!(
+        target.inputs[0].bip32_derivation,
+        f.psbt.inputs[0].bip32_derivation
+    );
+}
+
+#[test]
+fn an_uncompressed_or_malformed_reserved_key_is_refused_on_btcb2() {
+    use coincube_core::miniscript::bitcoin::PublicKey;
+    let f = unified::fixture();
+    let returned = unified::unified(&f.psbt, &f.signers[0]);
+    let (key, value) = returned.inputs[0]
+        .proprietary
+        .iter()
+        .next()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .unwrap();
+    let uncompressed = PublicKey::from_slice(&key.key)
+        .unwrap()
+        .inner
+        .serialize_uncompressed()
+        .to_vec();
+    for bytes in [uncompressed, vec![0x02; 10], Vec::new()] {
+        let mut rekeyed = key.clone();
+        rekeyed.key = bytes.clone();
+        let mut forged = f.psbt.clone();
+        forged.inputs[0].proprietary.insert(rekeyed, value.clone());
+        let mut target = f.psbt.clone();
+        assert!(
+            !merge(true, &f, &mut target, &forged, 0),
+            "{} key bytes accepted",
+            bytes.len()
+        );
+        assert_eq!(target, f.psbt, "nothing merged");
+    }
+}
