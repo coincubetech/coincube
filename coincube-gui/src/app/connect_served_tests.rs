@@ -808,15 +808,18 @@ fn a_promoted_cube_never_offers_an_in_cube_sign_in() {
                     let mut tab = Tab::new(1, State::App(app));
                     drop(tab.invalidate_fork_session(change, false));
                     let State::App(app) = tab.state else {
-                        panic!("{way}: a promoted Cube stays open");
+                        panic!("{}: a promoted Cube stays open", way);
                     };
                     app
                 }
             };
             let account = &app.panels.connect.account;
-            assert!(account.requires_authenticated_reopen(), "{way}");
-            assert!(account.authenticated_client().is_none(), "{way}");
-            assert!(app.fork_connect_client.is_none(), "{way}");
+            assert!(account.requires_authenticated_reopen(), "{}", way);
+            assert!(account.authenticated_client().is_none(), "{}", way);
+            // The ended session leaves the panel's memory too.
+            assert!(account.client.token().is_none(), "{}", way);
+            assert!(account.user.is_none(), "{}", way);
+            assert!(app.fork_connect_client.is_none(), "{}", way);
             assert_bitcoin_untouched(root.path(), &before);
         }
     });
