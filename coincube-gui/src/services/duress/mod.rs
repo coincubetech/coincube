@@ -219,6 +219,17 @@ impl DuressLocalState {
         write_bytes_atomic(&Self::path(coincube_dir), &bytes)
     }
 
+    /// Records the account whose Connect stream delivered a remote duress
+    /// activation, so the locked screen trusts only that account's sessions
+    /// to confirm a clear (decision 26). An account already recorded is kept:
+    /// it is the enrolling account, and the code-authenticated activation and
+    /// the remote-disable reconcile both address it.
+    pub fn record_remote_lock_account(&mut self, activating_account: Option<String>) {
+        if self.account_id.is_none() {
+            self.account_id = activating_account;
+        }
+    }
+
     /// Resets this state to the un-enrolled baseline for a duress *disable*
     /// (disarm, not wipe): zeroizes the encrypted device code (and any queued
     /// copy of it) in place before dropping it, then clears every duress field —
