@@ -1,5 +1,11 @@
 //! Test driver for the real Rust desktop -> Dart TLS host -> native BDK flow.
 //! Public test fixtures only. No fake phone and no echoed signature.
+//!
+//! The Vault's chain is `COINCUBE_EXAMPLE_CHAIN`, a Connect network id
+//! (`regtest` when unset; `bitcoin-blake2b-testnet4` for the Bitcoin Blake2b
+//! run). It drives the offer's `net`, the pairing check, the session's network
+//! and, on Bitcoin Blake2b, unified signatures; the fixture must be a Vault on
+//! that chain.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt};
 use coincube_gui::{
@@ -16,6 +22,13 @@ use std::{path::PathBuf, sync::Arc};
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let chain = std::env::var("COINCUBE_EXAMPLE_CHAIN")
+        .ok()
+        .map(|id| {
+            coincube_core::chain::ChainId::from_api_str(&id)
+                .unwrap_or_else(|| panic!("unknown COINCUBE_EXAMPLE_CHAIN {}", id))
+        })
+        .unwrap_or(coincube_core::chain::ChainId::Regtest);
     let dir = PathBuf::from(&args[2]);
     std::fs::create_dir_all(&dir).unwrap();
     let fixture: serde_json::Value =
@@ -35,7 +48,7 @@ async fn main() {
                 signer_xpub: fixture["keys"][index]["xpub"].as_str().unwrap().into(),
                 descriptor_sha256: hex::encode(hash),
             },
-            coincube_gui::chain::ChainId::Regtest,
+            chain,
         )
         .offer;
         let encoded = pairing::encode_offer(&offer).unwrap();
@@ -70,7 +83,7 @@ async fn main() {
         vault,
         vec![fingerprint],
         fingerprint,
-        coincube_gui::chain::ChainId::Regtest,
+        chain,
         &CoincubeDirectory::new(dir.clone()),
         &Default::default(),
     )
@@ -93,9 +106,7 @@ async fn main() {
         serde_json::to_value(&stored.phones[0]).unwrap(),
         serde_json::to_value(&paired).unwrap()
     );
-    let binding = paired
-        .exact_signer(descriptor, coincube_core::chain::ChainId::Regtest)
-        .unwrap();
+    let binding = paired.exact_signer(descriptor, chain).unwrap();
     assert_eq!(binding.key_id, format!("{}", 10 + index));
     assert_eq!(
         binding.xpub,
@@ -111,11 +122,8 @@ async fn main() {
         fingerprint,
         None,
         paired,
-        coincube_gui::phone_signer::policy::PhonePolicy::vault(
-            descriptor,
-            coincube_core::chain::ChainId::Regtest,
-        )
-        .expect("vault policy"),
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(descriptor, chain)
+            .expect("vault policy"),
         desktop_dir,
         Some(Arc::new(key)),
     );
@@ -141,7 +149,15 @@ async fn main() {
         );
     }
     async_hwi::HWI::sign_tx(&signer, &mut psbt).await.unwrap();
-    if index == 0 && kind == "taproot" {
+    if chain.is_blake2b() {
+        // A unified signature, stored as the reserved proprietary record; no
+        // ordinary signature crosses over.
+        assert!(psbt.inputs[0]
+            .proprietary
+            .keys()
+            .any(coincube_core::psbt_unified::is_reserved_key));
+        assert!(psbt.inputs[0].partial_sigs.is_empty());
+    } else if index == 0 && kind == "taproot" {
         assert!(psbt.inputs[0].tap_key_sig.is_some());
         assert!(psbt.inputs[0].tap_script_sigs.is_empty());
     } else {
