@@ -47,6 +47,11 @@ impl StoredSession {
     pub(crate) fn access_token(&self) -> &str {
         &self.login.token
     }
+
+    /// The email of the account the session was issued to.
+    pub(crate) fn email(&self) -> &str {
+        &self.login.user.email
+    }
 }
 
 /// The saved sign-in in the OS keyring, if one is there and parses. The one

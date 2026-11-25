@@ -416,10 +416,19 @@ impl App {
     }
 
     /// The Connect user id of the account this App's stream runs on: the
-    /// panel's signed-in user when it is the stream's account, else none.
+    /// panel's signed-in user when it is the stream's account, else the saved
+    /// keyring sign-in when that is the stream's account (the panel's user is
+    /// not loaded yet while a restored session's stream already runs), else
+    /// none.
     pub(crate) fn duress_activating_account(&self) -> Option<String> {
-        let user = self.panels.connect.account.user.as_ref()?;
-        (self.connect_email.as_deref() == Some(user.email.as_str())).then(|| user.id.to_string())
+        let email = self.connect_email.as_deref()?;
+        if let Some(user) = self.panels.connect.account.user.as_ref() {
+            if user.email == email {
+                return Some(user.id.to_string());
+            }
+        }
+        let saved = crate::app::state::connect::account::load_session_from_keyring()?;
+        (saved.email() == email).then(|| saved.user_id().to_string())
     }
 
     fn handle_connect_duress_cleared(&self) -> Task<Message> {
@@ -967,6 +976,35 @@ mod remote_duress_tests {
         assert!(state.active);
         assert_eq!(state.locked_by_account_id, None);
         assert_eq!(state.lock_account(), None);
+    }
+
+    #[test]
+    fn before_the_panel_loads_its_user_the_keyring_names_the_streams_account() {
+        let save = |id: u32, email: &str| {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "requires_2fa": false, "token": "synthetic", "refresh_token": "synthetic-refresh",
+                "user": {"id": id, "email": email},
+            }))
+            .unwrap();
+            crate::app::state::connect::write_connect_secret(
+                crate::app::state::connect::CONNECT_KEYRING_USER,
+                &bytes,
+            )
+            .unwrap();
+        };
+        let root = TempRoot::new("remote-lock-keyring");
+        let mut app = signed_in_app(&root);
+        app.panels.connect.account.user = None;
+        save(5, "someone-else@example.com");
+        assert_eq!(app.duress_activating_account(), None);
+        save(7, "b@example.com");
+        assert_eq!(app.duress_activating_account().as_deref(), Some("7"));
+        persist_remote_lock(&app);
+        crate::app::state::connect::delete_connect_secret(
+            crate::app::state::connect::CONNECT_KEYRING_USER,
+        );
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
     }
 
     #[test]
