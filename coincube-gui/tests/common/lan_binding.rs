@@ -35,5 +35,7 @@ pub fn proto(descriptor: &str) -> local_v1::SignerBinding {
         xpub: b.xpub,
         fingerprint: b.fingerprint.to_string(),
         descriptor_sha256: b.descriptor_sha256,
+        // The fixtures pair a Bitcoin mainnet offer.
+        network: "mainnet".into(),
     }
 }

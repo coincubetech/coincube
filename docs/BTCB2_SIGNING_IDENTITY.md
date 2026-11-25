@@ -18,6 +18,21 @@ window on the LAN rail: v3 only, a pre-v3 pairing is never used on any chain;
 every chain. Where this mirror and the canonical copy differ, the canonical copy
 wins.
 
+**Implementation status (Rail 2).** Desktop PR 8a implements §4.1 to §4.3 and the
+listener's network check in §4.4: the desktop emits v3 only with `net`, computes and
+verifies the `coincube-pair-v3` proof over `net`, and refuses a missing or different
+`SignerBinding.network`; `grpc/local_envelope.proto` carries the two `network` fields
+with the comments quoted in §4.3 and the `network_mismatch` code. The stored row's
+`network` and `capabilities` (§4.4), the dial predicate (§4.5) and the network on
+`PresentSession`/`PartialSignature` follow in PRs 8b to 8d. The v3 known-answer vector
+is `phone_signer/pairing.rs::pairing_proof_known_answer_vector`: psk = the 16 bytes
+`0x00..0x0f` (`AAECAwQFBgcICQoLDA0ODw`), desktop fp `"aa"×32`, phone fp `"bb"×32`;
+`net = bitcoin-blake2b` →
+`ccc65575005c19fbb4826f49c68db719fc1c7f2bc0de4deea2c6e4d722c5263c`, `mainnet` →
+`e7f46e42e05dd6a69c1f8372353d38fbfce4ee54d1c7ddd13bee54759ef5854a`,
+`bitcoin-blake2b-testnet4` →
+`1c81ce3dea97020338d1dc09f88e9eaafdd100187f92fb7d3895d9fd8f5a6114`.
+
 ## 1. Why the desktop is involved
 
 A BTCB2 Vault is the same descriptor, xpubs and fingerprints as its Bitcoin twin
@@ -159,7 +174,7 @@ message PartialSignature {
 ```
 
 A2 rewords these two comments; field names, numbers and types are unchanged.
-`grpc/local_envelope.proto` takes the reworded comments with the v3 implementation.
+`grpc/local_envelope.proto` carries them verbatim since Desktop PR 8a.
 
 `ErrorEnvelope.code` gains `"network_mismatch"` (phone → desktop). `PresentSession`
 is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
@@ -284,8 +299,10 @@ contract; it remains a deployment gate, not a check. Canonical §4.6 says the sa
   **resolve → create against an old Connect** (empty `resp.network`): a Bitcoin-family
   Vault and a BTCB2 Vault each send nothing (A3); `network` present on every create;
   empty `network` on a created/fetched session cancels it, on every chain;
-  capability registered; a target storing only `btcb2-unified-v1` reads as outdated. Bitcoin-family sessions render and merge exactly as today (existing
-  tests unchanged).
+  capability registered; a target storing only `btcb2-unified-v1` reads as outdated.
+  Bitcoin-family sessions that state their network render and merge exactly as
+  before; existing tests that relied on an empty Bitcoin session network now state
+  it or expect the refusal (Desktop PR 4).
 
 ## 6. Not in this contract
 
