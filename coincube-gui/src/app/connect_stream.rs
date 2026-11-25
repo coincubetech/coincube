@@ -514,18 +514,26 @@ impl App {
         (saved.email() == email).then(|| saved.user_id().to_string())
     }
 
-    /// Where this App's stream account lives, for a remote lock it raises:
-    /// on a Connect-served Cube, the Cube's Connect API and chain folder
-    /// (see [`crate::services::duress::DuressLocalState::locked_by_origin`]);
-    /// elsewhere none, and the locked screen keeps using the configured API
-    /// and the launch network's folder.
+    /// Where this App's stream account lives, for a remote lock it raises
+    /// (see [`crate::services::duress::DuressLocalState::locked_by_origin`]):
+    /// on a Bitcoin Blake2b Cube, its chain folder, which alone holds its
+    /// session, and the Connect API its session came from (a Connect-served
+    /// Cube's endpoint, a local Cube's panel client). On a Bitcoin Cube none,
+    /// and the locked screen keeps using the configured API and the launch
+    /// network's folder.
     pub(crate) fn duress_lock_origin(&self) -> Option<crate::services::duress::LockOrigin> {
-        if !self.cache.connect_served {
+        let chain = self.cache.chain();
+        if !chain.is_blake2b() {
             return None;
         }
+        let api_base_url = if self.cache.connect_served {
+            self.cache.connect_api_base_url()?
+        } else {
+            self.connect_base_url()
+        };
         Some(crate::services::duress::LockOrigin {
-            api_base_url: self.cache.connect_api_base_url()?,
-            chain: self.cache.chain(),
+            api_base_url,
+            chain,
         })
     }
 

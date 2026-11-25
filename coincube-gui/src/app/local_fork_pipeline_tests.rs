@@ -584,3 +584,21 @@ fn a_local_cube_saves_its_opening_session_only_with_its_refresh_token() {
         assert_eq!(now.transport_key, before.transport_key);
     });
 }
+
+/// A remote duress lock raised on a local Bitcoin Blake2b Cube records its
+/// own chain folder and its panel's Connect API, so the locked screen reads
+/// the folder that holds the Cube's session rather than `bitcoin/`.
+#[test]
+fn a_remote_lock_on_a_local_cube_records_its_own_folder() {
+    use crate::services::duress::LockOrigin;
+    let root = tempfile::tempdir().unwrap();
+    let app = vault_less(root.path());
+    assert!(!app.cache.connect_served);
+    assert_eq!(
+        app.duress_lock_origin(),
+        Some(LockOrigin {
+            api_base_url: app.panels.connect.account.client.base_url.clone(),
+            chain: crate::chain::ChainId::BitcoinBlake2b,
+        })
+    );
+}
