@@ -3738,6 +3738,17 @@ async fn sign_psbt(
             psbt_in
                 .tap_script_sigs
                 .append(&mut pruned_psbt_in.tap_script_sigs);
+            // Unified signatures are proprietary records
+            // (`coincube_core::psbt_unified`), returned by a phone signing a
+            // Bitcoin Blake2b Vault over Wi-Fi. This wrapper has no pairing
+            // binding: the phone signer has already verified and merged them
+            // (`phone_signer::signatures::merge_verified_for`), and the panel's
+            // chain-aware merge verifies the result again.
+            for (key, value) in std::mem::take(&mut pruned_psbt_in.proprietary) {
+                if coincube_core::psbt_unified::is_reserved_key(&key) {
+                    psbt_in.proprietary.insert(key, value);
+                }
+            }
         } else {
             log::error!(
                 "Not all PSBT inputs are present in the pruned psbt. Pruned psbt: '{}'.",
@@ -5925,6 +5936,90 @@ mod tests {
         };
         use std::path::PathBuf;
         use std::str::FromStr;
+
+        /// A device that answers `sign_tx` with a fixed signed PSBT's
+        /// signature fields, as the Wi-Fi phone signer does after
+        /// `merge_verified_for` has accepted a unified signature.
+        #[derive(Debug)]
+        struct ReturningDevice(Psbt);
+
+        #[async_trait::async_trait]
+        impl async_hwi::HWI for ReturningDevice {
+            fn device_kind(&self) -> async_hwi::DeviceKind {
+                async_hwi::DeviceKind::Specter
+            }
+            async fn get_version(&self) -> Result<async_hwi::Version, async_hwi::Error> {
+                Err(async_hwi::Error::UnimplementedMethod)
+            }
+            async fn get_master_fingerprint(&self) -> Result<Fingerprint, async_hwi::Error> {
+                Err(async_hwi::Error::UnimplementedMethod)
+            }
+            async fn get_extended_pubkey(
+                &self,
+                _path: &coincube_core::miniscript::bitcoin::bip32::DerivationPath,
+            ) -> Result<coincube_core::miniscript::bitcoin::bip32::Xpub, async_hwi::Error>
+            {
+                Err(async_hwi::Error::UnimplementedMethod)
+            }
+            async fn register_wallet(
+                &self,
+                _name: &str,
+                _policy: &str,
+            ) -> Result<Option<[u8; 32]>, async_hwi::Error> {
+                Ok(None)
+            }
+            async fn is_wallet_registered(
+                &self,
+                _name: &str,
+                _policy: &str,
+            ) -> Result<bool, async_hwi::Error> {
+                Ok(true)
+            }
+            async fn display_address(
+                &self,
+                _script: &async_hwi::AddressScript,
+            ) -> Result<(), async_hwi::Error> {
+                Err(async_hwi::Error::UnimplementedMethod)
+            }
+            async fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), async_hwi::Error> {
+                for (input, signed) in psbt.inputs.iter_mut().zip(&self.0.inputs) {
+                    input.partial_sigs = signed.partial_sigs.clone();
+                    input.proprietary = signed.proprietary.clone();
+                }
+                Ok(())
+            }
+        }
+
+        /// The device-signing wrapper copies a unified signature back to the
+        /// stored PSBT, beside the three fields it always copied; before, a
+        /// unified signature returned over Wi-Fi was silently dropped. The
+        /// result then merges through the panel's chain-aware merge.
+        #[tokio::test]
+        async fn a_unified_signature_returned_through_sign_psbt_survives() {
+            let f = fixture();
+            let returned = unified(&f.psbt, &f.signers[0]);
+            let wallet = Arc::new(
+                Wallet::new(f.descriptor.clone()).with_chain(ChainId::BitcoinBlake2bTestnet4),
+            );
+            let signed = sign_psbt(
+                wallet.clone(),
+                Arc::new(ReturningDevice(returned.clone())),
+                f.psbt.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(signed.inputs[0].proprietary, returned.inputs[0].proprietary);
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(signed.clone()).unwrap())
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let mut stored = f.psbt.clone();
+            merge_signatures_for_chain(uses_unified_signatures(&wallet), &mut stored, &signed)
+                .unwrap();
+            assert_eq!(stored.inputs[0].proprietary, returned.inputs[0].proprietary);
+        }
 
         /// The generation of the re-check currently in flight, or a panic.
         fn in_flight_generation(state: &PsbtState) -> u64 {
