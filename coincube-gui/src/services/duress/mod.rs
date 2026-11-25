@@ -145,6 +145,12 @@ pub struct DuressLocalState {
     /// its remote-disable reconcile.
     #[serde(default)]
     pub locked_by_account_id: Option<String>,
+    /// The current lock was raised remotely, over a Connect stream. Such a
+    /// lock is never judged by the enrolling account: when the raising
+    /// account could not be told, it takes the check for a lock with no
+    /// recorded account. Cleared with the lock.
+    #[serde(default)]
+    pub remote_lock: bool,
     /// Set immediately **before** enrollment starts arming Cubes, cleared once
     /// the enrollment is fully recorded. `arming && !enrolled` is an orphan: a
     /// crash left live duress markers behind with no enrollment to explain
@@ -221,6 +227,7 @@ impl DuressLocalState {
             || self.duress_code.is_some()
             || self.account_id.is_some()
             || self.locked_by_account_id.is_some()
+            || self.remote_lock
             || self.pending_activation.is_some()
             || self.unlock_at.is_some()
             || self.last_activation_attempt.is_some();
@@ -228,27 +235,43 @@ impl DuressLocalState {
         write_bytes_atomic(&Self::path(coincube_dir), &bytes)
     }
 
-    /// Records the account whose Connect stream delivered a remote duress
-    /// activation, so the locked screen trusts only that account's sessions
-    /// to confirm a clear (decision 26). [`Self::account_id`] is left alone.
+    /// Marks the lock as raised remotely and records the account whose
+    /// Connect stream delivered the activation, so the locked screen trusts
+    /// only that account's sessions to confirm a clear (decision 26). An
+    /// unknown account (`None`) does not replace one already recorded for
+    /// this lock. [`Self::account_id`] is left alone.
     pub fn record_remote_lock_account(&mut self, activating_account: Option<String>) {
-        self.locked_by_account_id = activating_account;
+        self.remote_lock = true;
+        if activating_account.is_some() {
+            self.locked_by_account_id = activating_account;
+        }
+    }
+
+    /// Marks the lock as raised on this computer (a duress PIN or code):
+    /// judged by the enrolling account, whatever an earlier remote lock left.
+    pub fn record_local_lock(&mut self) {
+        self.remote_lock = false;
+        self.locked_by_account_id = None;
     }
 
     /// The account whose sessions alone may confirm that this lock was
-    /// cleared: the account that raised a remote lock, else the enrolling
-    /// account. `None` for a lock that records neither.
+    /// cleared: for a remote lock, the account that raised it; for a local
+    /// one, the enrolling account. `None` when that account is unknown.
     pub fn lock_account(&self) -> Option<&str> {
-        self.locked_by_account_id
-            .as_deref()
-            .or(self.account_id.as_deref())
+        if self.remote_lock {
+            self.locked_by_account_id.as_deref()
+        } else {
+            self.account_id.as_deref()
+        }
     }
 
-    /// Lifts the lock: not active, no unlock time, no account that raised it.
+    /// Lifts the lock: not active, no unlock time, nothing recorded about
+    /// who raised it.
     pub fn clear_lock(&mut self) {
         self.active = false;
         self.unlock_at = None;
         self.locked_by_account_id = None;
+        self.remote_lock = false;
     }
 
     /// Resets this state to the un-enrolled baseline for a duress *disable*
@@ -311,6 +334,7 @@ mod tests {
             duress_code: Some("enc:cafebabe".to_string()),
             account_id: Some("acct_123".to_string()),
             locked_by_account_id: Some("acct_456".to_string()),
+            remote_lock: true,
             arming: false,
             migration_disarm_notice: false,
         }

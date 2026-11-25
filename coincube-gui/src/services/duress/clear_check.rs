@@ -776,6 +776,46 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_remote_lock_whose_account_is_unknown_is_not_judged_by_the_enrolment() {
+        let root = TempRoot::new("clear-remote-unknown");
+        write_lock(&root.0, Some("7"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.record_remote_lock_account(None);
+        state.save(&root.0).unwrap();
+        assert_eq!(state.lock_account(), None);
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            Some("b@example.com"),
+            &[("b@example.com", "launch"), ("a@example.com", "enrolling")],
+        );
+        let server = MockServer::start();
+        let launch = mock_duress(&server, "launch", true);
+        let enrolling = mock_duress(&server, "enrolling", false);
+        let keyring_enrolling = mock_duress(&server, "kr", false);
+        // The check for a lock with no recorded account: the launch folder's
+        // active account only.
+        assert_eq!(
+            check(&root, Some(Network::Bitcoin), keyring(7, "kr"), &server).await,
+            Some(true)
+        );
+        launch.assert();
+        enrolling.assert_hits(0);
+        keyring_enrolling.assert_hits(0);
+    }
+
+    #[test]
+    fn an_unknown_account_does_not_replace_the_one_recorded_for_the_lock() {
+        let mut state = DuressLocalState::default();
+        state.record_remote_lock_account(Some("9".into()));
+        state.record_remote_lock_account(None);
+        assert_eq!(state.lock_account(), Some("9"));
+        state.clear_lock();
+        assert!(!state.remote_lock);
+        assert_eq!(state.locked_by_account_id, None);
+    }
+
     #[test]
     fn a_state_file_from_before_the_locked_by_field_loads() {
         let root = TempRoot::new("clear-old-state");
@@ -786,6 +826,7 @@ pub(crate) mod tests {
         .unwrap();
         let state = DuressLocalState::load(&root.0).unwrap();
         assert_eq!(state.locked_by_account_id, None);
+        assert!(!state.remote_lock);
         assert_eq!(state.lock_account(), Some("7"));
     }
 
