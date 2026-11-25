@@ -4796,10 +4796,27 @@ mod tests {
         ] {
             let wallet = Arc::new(wallet().with_chain(chain));
             let policy = crate::phone_signer::policy::PhonePolicy::from_wallet(&wallet).unwrap();
+            // The phone key's xpub, so a row for this chain is one it dials.
+            let xpub =
+                <coincube_core::descriptors::CoincubeDescriptor as std::str::FromStr>::from_str(
+                    policy.descriptor(),
+                )
+                .unwrap()
+                .spendable_keys()
+                .into_iter()
+                .find_map(|key| match key {
+                    coincube_core::miniscript::DescriptorPublicKey::XPub(k)
+                        if k.origin.as_ref().map(|(fp, _)| *fp) == Some(phone) =>
+                    {
+                        Some(k.xkey.to_string())
+                    }
+                    _ => None,
+                })
+                .expect("the phone key is a spendable xpub");
             let row = |network: ChainId, capabilities: Vec<String>| PairedPhone {
                 signer_binding: Some(SignerBinding {
                     key_id: "1".into(),
-                    xpub: String::new(),
+                    xpub: xpub.clone(),
                     fingerprint: phone,
                     descriptor_sha256: Sha256::digest(policy.descriptor().as_bytes()).to_vec(),
                     imported_scope: None,
@@ -4814,7 +4831,7 @@ mod tests {
                 network: Some(network.api_str().into()),
                 capabilities,
             };
-            let state_with = |stored: Option<PairedPhone>| {
+            let state_with = |stored: Vec<PairedPhone>| {
                 let mut path = std::env::temp_dir();
                 path.push(format!(
                     "coincube-signer-list-test-{}",
@@ -4825,7 +4842,7 @@ mod tests {
                 pairing_store::save(
                     &dir,
                     &PairingStoreFile {
-                        phones: stored.into_iter().collect(),
+                        phones: stored,
                         pending_unpairs: Vec::new(),
                     },
                 )
@@ -4859,17 +4876,17 @@ mod tests {
 
             // Paired for the other chain: the list offers to pair again.
             assert_eq!(
-                disabled(state_with(Some(row(other, both.clone())))),
+                disabled(state_with(vec![row(other, both.clone())])),
                 format!("Paired for {}. Pair again to use it here.", other.label()),
                 "{}",
                 chain
             );
             // Paired for this chain by a phone without both capabilities:
             // refused on Bitcoin Blake2b only.
-            let outdated = disabled(state_with(Some(row(
+            let outdated = disabled(state_with(vec![row(
                 chain,
                 vec![CHAIN_IDENTITY_CAPABILITY.to_string()],
-            ))));
+            )]));
             if chain.is_blake2b() {
                 assert_eq!(outdated, BTCB2_PHONE_OUTDATED);
             } else {
@@ -4877,13 +4894,23 @@ mod tests {
             }
             // No pairing, or a pairing this chain dials: the usual advice.
             assert_eq!(
-                disabled(state_with(None)),
+                disabled(state_with(Vec::new())),
                 "Connect this signing device to sign.",
                 "{}",
                 chain
             );
             assert_eq!(
-                disabled(state_with(Some(row(chain, both.clone())))),
+                disabled(state_with(vec![row(chain, both.clone())])),
+                "Connect this signing device to sign.",
+                "{}",
+                chain
+            );
+            // A refused row beside another phone that may sign the same key:
+            // that phone may only be offline, so the usual advice stays.
+            let mut second = row(chain, both.clone());
+            second.cert_pin = [8; 32];
+            assert_eq!(
+                disabled(state_with(vec![row(other, both.clone()), second])),
                 "Connect this signing device to sign.",
                 "{}",
                 chain

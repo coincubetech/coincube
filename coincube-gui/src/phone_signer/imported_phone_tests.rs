@@ -857,3 +857,75 @@ fn imported_signature_delta_rejects_tampering_and_preserves_original() {
         before.inputs[0].non_witness_utxo
     );
 }
+
+/// The chain rule a Vault's pairing follows holds for an imported wallet too:
+/// a row paired for another chain is refused (contract R2.7), and an imported
+/// Bitcoin Blake2b wallet needs a phone that reported both capabilities
+/// (R2.6). The signer list's reasons agree with what is dialled.
+#[test]
+fn imported_pairings_follow_the_chain_and_capability_rule() {
+    use crate::chain::ChainId;
+    use crate::mobile_signing::{BTCB2_UNIFIED_CAPABILITY, CHAIN_IDENTITY_CAPABILITY};
+    let (input, _) = fixture();
+    let vector = case(&input, "sortedmulti_nonfirst");
+    let text = vector["descriptor"].as_str().unwrap();
+    let both = vec![
+        CHAIN_IDENTITY_CAPABILITY.to_string(),
+        BTCB2_UNIFIED_CAPABILITY.to_string(),
+    ];
+    for chain in [ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4] {
+        let imported = ImportedWalletDescriptor::parse(text, None, ChainId::Testnet4).unwrap();
+        let imported = if chain.is_blake2b() {
+            imported.paired_blake2b().unwrap()
+        } else {
+            imported
+        };
+        let wallet_id = crate::app::settings::WalletId::for_imported(&imported, chain).unwrap();
+        let policy = PhonePolicy::imported(imported, chain, wallet_id).unwrap();
+        let mut row = phone(&input, &policy);
+        row.capabilities = both.clone();
+        assert!(row.exact_signer_for(&policy).is_ok(), "{}", chain);
+
+        let other = if chain.is_blake2b() {
+            ChainId::Testnet4
+        } else {
+            ChainId::BitcoinBlake2bTestnet4
+        };
+        let mut wrong_chain = row.clone();
+        wrong_chain.network = Some(other.api_str().into());
+        let expected = format!(
+            "Paired for {}. Pair again to use it here.",
+            crate::chain::ChainIdExt::label(other)
+        );
+        assert_eq!(
+            wrong_chain.exact_signer_for(&policy).unwrap_err(),
+            expected,
+            "{}",
+            chain
+        );
+
+        let mut outdated = row.clone();
+        outdated.capabilities = vec![CHAIN_IDENTITY_CAPABILITY.to_string()];
+        let store = pairing_store::PairingStoreFile {
+            phones: vec![outdated.clone()],
+            pending_unpairs: Vec::new(),
+        };
+        if chain.is_blake2b() {
+            assert_eq!(
+                outdated.exact_signer_for(&policy).unwrap_err(),
+                pairing_store::BTCB2_PHONE_OUTDATED
+            );
+            let fingerprint = outdated.signer_binding.as_ref().unwrap().fingerprint;
+            assert_eq!(
+                store
+                    .chain_refusals_for(&policy)
+                    .get(&fingerprint)
+                    .map(String::as_str),
+                Some(pairing_store::BTCB2_PHONE_OUTDATED)
+            );
+        } else {
+            assert!(outdated.exact_signer_for(&policy).is_ok());
+            assert!(store.chain_refusals_for(&policy).is_empty());
+        }
+    }
+}
