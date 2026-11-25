@@ -7,6 +7,7 @@
 //! Skeleton status: types and load/save signatures are in place;
 //! the file I/O paths are stubbed and marked TODO.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -421,6 +422,28 @@ pub struct PairingStoreFile {
 }
 
 impl PairingStoreFile {
+    /// Why this policy's own paired phones are not dialled on its chain,
+    /// by the bound key's fingerprint: paired for another chain (contract
+    /// R2.7), before v3 or, on Bitcoin Blake2b, by a phone without the
+    /// capabilities (R2.6). The signer list shows these where it would
+    /// otherwise only ask for the device. Rows of another descriptor are
+    /// not this Vault's and are left out.
+    pub fn chain_refusals_for(&self, policy: &PhonePolicy) -> HashMap<Fingerprint, String> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(policy.descriptor().as_bytes());
+        self.phones
+            .iter()
+            .filter_map(|row| {
+                let binding = row.signer_binding.as_ref()?;
+                if binding.descriptor_sha256 != digest.as_slice() {
+                    return None;
+                }
+                let refusal = row.chain_refusal(policy.chain())?;
+                Some((binding.fingerprint, refusal))
+            })
+            .collect()
+    }
+
     /// Decides whether a live hardware-list handle may be reused for the
     /// current imported wallet. A valid newly paired row is not sufficient:
     /// the handle captured the old row and old policy when it was dialled.
