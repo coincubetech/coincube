@@ -329,7 +329,8 @@ impl HWI for PhoneSigner {
         let session = cv1::SigningSession {
             // Empty until desktop PR 8d, which states the paired record's
             // chain here and checks `PartialSignature.network` against it
-            // (see grpc/local_envelope.proto). LAN stays BTCB2-gated.
+            // (see grpc/local_envelope.proto). The chain is already enforced
+            // before this point by `PhoneSigner::current_binding` (PR 8c).
             network: String::new(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),
