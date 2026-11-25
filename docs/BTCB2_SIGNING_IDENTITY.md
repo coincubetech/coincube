@@ -22,9 +22,12 @@ wins.
 listener's network check in §4.4: the desktop emits v3 only with `net`, computes and
 verifies the `coincube-pair-v3` proof over `net`, and refuses a missing or different
 `SignerBinding.network`; `grpc/local_envelope.proto` carries the two `network` fields
-with the comments quoted in §4.3 and the `network_mismatch` code. The stored row's
-`network` and `capabilities` (§4.4), the dial predicate (§4.5) and the network on
-`PresentSession`/`PartialSignature` follow in PRs 8b to 8d. The v3 known-answer vector
+with the comments quoted in §4.3 and the `network_mismatch` code. Desktop PR 8b stores
+the row's `network` and `capabilities` (§4.4): a row without a network is a pre-v3
+pairing, kept listed and removable and refused for every Vault with the R2.6 legacy
+copy, and pairing the same phone for another chain replaces its row, which the pairing
+screen says before the user scans. The dial predicate (§4.5) and the network on
+`PresentSession`/`PartialSignature` follow in PRs 8c and 8d. The v3 known-answer vector
 is `phone_signer/pairing.rs::pairing_proof_known_answer_vector`: psk = the 16 bytes
 `0x00..0x0f` (`AAECAwQFBgcICQoLDA0ODw`), desktop fp `"aa"×32`, phone fp `"bb"×32`;
 `net = bitcoin-blake2b` →
@@ -42,8 +45,8 @@ Mobile signing rails inherit the ambiguity:
 - **Rail 1 (Connect)** — `keychain_sign.rs` sends `vault_id`, `descriptor_id` and
   `SignerTarget{device_id, key_id, key_fingerprint}` (`coincube-gui/src/app/state/vault/keychain_sign.rs:1016-1073`),
   never the chain, although it has it: `Wallet.chain: ChainId` (`coincube-gui/src/app/wallet.rs:141`).
-- **Rail 2 (LAN)** — the v2 `PairingOffer` carries `key`, `dh`, `wfp`, `psk`
-  (`coincube-gui/src/phone_signer/pairing.rs:65-105`), no chain. The phone picks a
+- **Rail 2 (LAN)** — before v3, the v2 `PairingOffer` carried `key`, `dh`, `wfp`,
+  `psk` (`coincube-gui/src/phone_signer/pairing.rs` at the commit above), no chain. The phone picks a
   local record by xpub alone and echoes its backend id in `SignerBinding.key_id`,
   which `sign_tx` copies into every LAN session's target (`phone_signer/mod.rs:293-298`).
   The pairing store is datadir-global (`pairing_store.rs:183-190`), one row per
@@ -261,7 +264,7 @@ LAN is enabled only on desktops that implement this contract and emit v3 offers
 (LANE-B3 §B3.4: BTCB2 stays Connect-rail-only, or is refused on LAN, until
 chain-bound pairing ships). A pre-identity desktop must never have BTCB2 Mobile
 signing enabled — it may load a `ChainId::BitcoinBlake2b` Vault (`coincube-core/src/chain.rs`),
-but the v2 offer (`coincube-gui/src/phone_signer/pairing.rs:65-105`) carries no
+but the v2 offer such a desktop emits carries no
 chain, so a phone holding only the Bitcoin twin cannot tell a Bitcoin session from a
 BTCB2 one and would sign on its Bitcoin-family record. A2: before the amendment this
 prerequisite was what made the admitted legacy path safe. That path no longer exists

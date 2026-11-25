@@ -403,6 +403,8 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         vault_fingerprint: paired.vault_fingerprint,
         transport_pubkey: paired.transport_pubkey.clone(),
         fallback_addr: paired.fallback_addr.clone(),
+        network: paired.network.clone(),
+        capabilities: paired.capabilities.clone(),
     };
     // A real descriptor, so the fake phone's fingerprint check is meaningful.
 

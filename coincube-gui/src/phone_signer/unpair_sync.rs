@@ -365,6 +365,8 @@ mod tests {
             vault_fingerprint: vault,
             transport_pubkey: Vec::new(),
             fallback_addr: None,
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 

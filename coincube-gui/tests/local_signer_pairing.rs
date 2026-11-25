@@ -1545,6 +1545,9 @@ async fn v3_pairing_requires_the_offers_network_from_the_phone() {
         let (result, _dir) = pair_v3(net, chain, net, net).await;
         let paired = result.unwrap_or_else(|e| panic!("{}: {:?}", chain, e));
         assert_eq!(paired.name, "Test Pixel");
+        // PR 8b: the row records the chain and the phone's capabilities.
+        assert_eq!(paired.network.as_deref(), Some(net));
+        assert_eq!(paired.capabilities, vec!["sign-psbt".to_string()]);
     }
     let refusals: [(&str, ChainId, &str, &str, &str); 5] = [
         // R2.5: no network from the phone.

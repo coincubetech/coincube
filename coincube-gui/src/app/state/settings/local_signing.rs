@@ -199,6 +199,23 @@ impl Default for LocalSigningState {
 }
 
 impl LocalSigningState {
+    /// The loaded Vault's chain, which a new pairing is made for.
+    pub fn wallet_chain(&self) -> Option<crate::chain::ChainId> {
+        self.wallet_chain
+    }
+
+    /// What pairing the phone `fp8` here would replace, said before the
+    /// user scans: its stored pairing is for another chain or predates v3
+    /// (one pairing per phone and desktop, master decision 19).
+    pub fn replaced_pairing_notice(&self, fp8: &str) -> Option<String> {
+        let chain = self.wallet_chain?;
+        self.phones
+            .phones
+            .iter()
+            .find(|p| crate::phone_signer::identity::pin_hex8(&p.cert_pin) == fp8)
+            .and_then(|p| p.replaced_by_pairing_for(chain))
+    }
+
     fn refresh_phones(&mut self, cache: &Cache) {
         self.refresh_phones_from(&cache.datadir_path);
     }
@@ -762,7 +779,8 @@ impl LocalSigningState {
         };
         let Some(chain) = self.wallet_chain else {
             self.flow = PairingFlow::Error(PairingError::InternalError(
-                "Couldn't identify the selected vault key; reload the wallet and try again.".into(),
+                "Couldn't tell which network this Vault is on; reload the wallet and try again."
+                    .into(),
             ));
             return Task::none();
         };
@@ -1139,6 +1157,8 @@ mod tests {
             vault_fingerprint: Fingerprint::default(),
             transport_pubkey: Vec::new(),
             fallback_addr: fallback.map(|s| s.to_string()),
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 

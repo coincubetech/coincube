@@ -3812,11 +3812,14 @@ async fn sign_psbt(
                 .tap_script_sigs
                 .append(&mut pruned_psbt_in.tap_script_sigs);
             // Unified signatures are proprietary records
-            // (`coincube_core::psbt_unified`), returned by a phone signing a
-            // Bitcoin Blake2b Vault over Wi-Fi. This wrapper has no pairing
-            // binding: the phone signer has already verified and merged them
-            // (`phone_signer::signatures::merge_verified_for`), and the panel's
-            // chain-aware merge verifies the result again.
+            // (`coincube_core::psbt_unified`). They are copied from any
+            // device's result; in practice a phone signing a Bitcoin Blake2b
+            // Vault over Wi-Fi returns them, already verified against the
+            // paired key by `phone_signer::signatures::merge_verified_for`.
+            // This wrapper has no pairing binding of its own. The panel's
+            // merge then decides: on a Bitcoin Blake2b Vault the unified
+            // adapter merges and verifies them; on Bitcoin they are dropped,
+            // since that merge copies only the three fields above.
             for (key, value) in std::mem::take(&mut pruned_psbt_in.proprietary) {
                 if coincube_core::psbt_unified::is_reserved_key(&key) {
                     psbt_in.proprietary.insert(key, value);

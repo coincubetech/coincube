@@ -302,7 +302,9 @@ async fn try_pair_once(
         &offer.psk_b64,
         &offer.cert_fp,
         &expected_pin_hex,
-        &offer.network,
+        // The desktop's own chain, never a string from the offer or the
+        // phone (equal to `offer.network` after the check above).
+        expected_chain.api_str(),
         complete.pairing_proof.trim(),
     ) {
         tracing::warn!(
@@ -464,6 +466,10 @@ async fn try_pair_once(
         // Validated just above; `sign_tx` seals every LAN session to this.
         transport_pubkey,
         fallback_addr: None,
+        // Checked above: the offer's chain, which the phone's record matched.
+        network: Some(offer.network.clone()),
+        // Recorded once, here; never refreshed (contract §4.5).
+        capabilities: complete.capabilities.clone(),
     };
 
     run.check()?;
