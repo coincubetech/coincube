@@ -325,25 +325,48 @@ fn duress_state_check_task_at(
     api_base_url: String,
 ) -> Task<Message> {
     use crate::app::view::duress::active_screen::Message as DuressMsg;
-    use crate::services::duress::clear_check::{duress_still_active, KeyringSession};
-    // Read on the update thread, through the Connect panel's own reader.
-    let keyring =
-        crate::app::state::connect::account::load_session_from_keyring().map(|s| KeyringSession {
-            user_id: s.user_id(),
-            access_token: s.access_token().to_string(),
-        });
+    use crate::services::duress::clear_check::duress_still_active;
+    let keyring = keyring_session_for_duress_check(datadir.path());
     Task::perform(
         async move { duress_still_active(&datadir, network, keyring, &api_base_url).await },
         |active: Option<bool>| Message::Duress(DuressMsg::StateChecked(active)),
     )
 }
 
-/// Whether an activation POST from this computer is still queued for Connect.
+/// The saved keyring sign-in for the locked screen's check, read on the
+/// update thread through the Connect panel's own reader, and only for a lock
+/// that records its account: the check for one that does not never consults
+/// the keyring, so it must not touch it (on macOS a keychain read can raise a
+/// prompt over the locked screen).
+fn keyring_session_for_duress_check(
+    root: &std::path::Path,
+) -> Option<crate::services::duress::clear_check::KeyringSession> {
+    let records_account = crate::services::duress::DuressLocalState::load(root)
+        .is_ok_and(|st| st.lock_account().is_some());
+    if !records_account {
+        return None;
+    }
+    let saved = crate::app::state::connect::account::load_session_from_keyring()?;
+    Some(crate::services::duress::clear_check::KeyringSession {
+        user_id: saved.user_id(),
+        access_token: saved.access_token().to_string(),
+    })
+}
+
+/// Whether an activation POST from this computer is still queued for Connect
+/// and can still be sent. Without a readable device key the drainer never
+/// runs (`build_duress_drainer`), so the entry would never leave the queue and
+/// holding the lock on it would hold it for ever.
 fn activation_still_queued(root: &std::path::Path) -> bool {
-    crate::services::duress::queue::DuressQueue::new(root)
+    let queued = crate::services::duress::queue::DuressQueue::new(root)
         .is_empty()
         .map(|empty| !empty)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    queued
+        && matches!(
+            crate::services::duress::cipher::DeviceKey::load(root),
+            Ok(Some(_))
+        )
 }
 
 /// Builds the [`DuressOrchestrator`] for this data directory — the single
@@ -10318,6 +10341,19 @@ mod duress_clear_check_tests {
     }
 
     #[test]
+    fn the_keyring_is_read_only_for_a_lock_that_records_its_account() {
+        save_keyring_session(7, "kr");
+        let unrecorded = TempRoot::new("tab-keyring-unrecorded");
+        write_lock(&unrecorded.0, None);
+        assert!(keyring_session_for_duress_check(&unrecorded.0).is_none());
+        let recorded = btcb2_only_lock("tab-keyring-recorded");
+        let session = keyring_session_for_duress_check(&recorded.0).unwrap();
+        assert_eq!(session.user_id, 7);
+        assert_eq!(session.access_token, "kr");
+        clear_keyring();
+    }
+
+    #[test]
     fn a_network_failure_shows_try_again_later_and_tries_nothing_further() {
         let root = btcb2_only_lock("tab-clear-network");
         write_connect_json(
@@ -10375,6 +10411,17 @@ mod duress_clear_check_tests {
                 .unwrap()
                 .active
         );
+
+        // A queue that can never drain does not hold it: without the device
+        // key the drainer is never built.
+        let key = root
+            .0
+            .join(crate::services::duress::cipher::DEVICE_KEY_FILE);
+        let saved_key = std::fs::read(&key).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        assert!(!activation_still_queued(&root.0));
+        std::fs::write(&key, saved_key).unwrap();
+        assert!(activation_still_queued(&root.0));
 
         // Once it has landed, the same answer clears.
         crate::services::duress::queue::DuressQueue::new(&root.0)
