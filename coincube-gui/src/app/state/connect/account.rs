@@ -1850,12 +1850,8 @@ impl ConnectAccountPanel {
         self.admitted_client = false;
         self.shared_client = false;
         self.admitted_reopen_required = false;
-        // A local fork Cube keeps no Bitcoin-family `connect.json` for the App
-        // to commit a login into first, and the App refuses that commit for
-        // the fork. Its sign-in, OTP and session restore therefore finish here,
-        // as on Home, instead of waiting on an `InAppConnectAuthReady` that
-        // never answers.
-        self.defer_auth_cache_commit = false;
+        // Its sign-in commits through the App as on Bitcoin, into the Cube's
+        // own chain folder: the commit stays deferred.
     }
 
     /// Discard this tab's account memory without touching the shared keyring.
@@ -1985,6 +1981,14 @@ impl ConnectAccountPanel {
     /// denial only under the same test, so the two never disagree.
     pub fn is_current_features_load(&self, generation: u64) -> bool {
         generation == self.session_generation && !self.awaiting_session_load
+    }
+
+    /// Marks a deferred sign-in commit as this panel's own, as an OTP
+    /// verification or keyring refresh does before it emits
+    /// `InAppConnectAuthReady`, for App tests that drive the commit directly.
+    #[cfg(test)]
+    pub(crate) fn begin_auth_commit_for_test(&mut self) {
+        self.auth_commit_pending = true;
     }
 
     /// Opens the adoption window without a real sign-in, for App tests that

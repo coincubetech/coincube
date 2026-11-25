@@ -98,19 +98,16 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
     }
 
     let status = cache.connect_stream_status;
-    // A Bitcoin Blake2b Cube never starts live updates.
-    if crate::app::live_updates_apply(cache.chain(), cache.connect_served) {
-        let (kind, word) = live_updates_status(status);
-        let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
-        if let Some(line) = status.line() {
-            live = live.description(line);
-        }
-        content = content.push(page::group(
-            localized_copy("This computer"),
-            None,
-            page::rows([live.into()]),
-        ));
+    let (kind, word) = live_updates_status(status);
+    let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
+    if let Some(line) = status.line() {
+        live = live.description(line);
     }
+    content = content.push(page::group(
+        localized_copy("This computer"),
+        None,
+        page::rows([live.into()]),
+    ));
 
     // Only when automatic renewal didn't work.
     if status == ConnectionStatus::RenewFailed {
@@ -235,10 +232,10 @@ mod tests {
         }
     }
 
-    /// A Bitcoin Blake2b Cube never starts live updates: its connections
-    /// show the signed-in account, not a "Connecting…" that never ends.
+    /// A Bitcoin Blake2b Cube runs the signer pipeline as a Bitcoin Cube
+    /// does: its connections show the account and its live updates.
     #[test]
-    fn a_blake2b_cube_shows_the_account_without_live_updates() {
+    fn a_blake2b_cube_shows_the_account_and_its_live_updates() {
         let cache = Cache {
             fiat_chain: crate::chain::ChainId::BitcoinBlake2bTestnet4,
             connect_device_id: None,
@@ -246,16 +243,14 @@ mod tests {
             ..signed_in()
         };
         let probe = inspect(connections_content(&cache, false));
-        for label in ["Connect account", "alex@example.test", "Signed in"] {
-            assert!(probe.contains(label), "{}", label);
-        }
-        for gone in [
+        for label in [
+            "Connect account",
+            "alex@example.test",
+            "Signed in",
             "This computer",
             "Live updates",
-            "Connecting…",
-            "Starting live updates from Connect.",
         ] {
-            assert!(!probe.contains(gone), "{}", gone);
+            assert!(probe.contains(label), "{}", label);
         }
     }
 

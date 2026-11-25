@@ -296,12 +296,9 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
         page::rows([data.into(), sync.into()]),
     ));
 
-    // Mobile signing reaches a Bitcoin Vault through Connect's live updates.
-    // A Bitcoin Blake2b Vault never starts them; its signing window checks
-    // Connect itself, so there is no status to show.
-    if cache.connect_authenticated
-        && crate::app::live_updates_apply(cache.chain(), cache.connect_served)
-    {
+    // Mobile signing reaches a Vault through Connect's live updates, on
+    // either chain.
+    if cache.connect_authenticated {
         let status = cache.connect_stream_status;
         let (kind, word) = live_updates_status(status);
         let line = match status {
@@ -4002,11 +3999,11 @@ mod tests {
         )));
     }
 
-    /// A Bitcoin Blake2b Vault never starts live updates (its signing window
-    /// checks Connect itself), so it has no "Signing updates" status stuck at
-    /// "Connecting…".
+    /// A Bitcoin Blake2b Vault reaches Mobile signing through Connect's live
+    /// updates as a Bitcoin Vault does, so it shows the same "Signing
+    /// updates" status.
     #[test]
-    fn a_blake2b_vault_has_no_signing_updates_status() {
+    fn a_blake2b_vault_shows_its_signing_updates_status() {
         use crate::app::view::shared::landing::capture;
         let mut cache = Cache {
             fiat_chain: crate::chain::ChainId::BitcoinBlake2bTestnet4,
@@ -4024,13 +4021,7 @@ mod tests {
             coincube_ui::theme::Theme::dark(),
         );
         assert!(probe.contains("Blockchain data"));
-        for gone in [
-            "Signing updates",
-            "Connecting…",
-            "Starting live updates from Connect.",
-        ] {
-            assert!(!probe.contains(gone), "{}", gone);
-        }
+        assert!(probe.contains("Signing updates"));
     }
 
     fn value(text: &str, valid: bool) -> form::Value<String> {

@@ -24,8 +24,10 @@ Ordinary Bitcoin, absent or different schedules, pre-fork headers, inactive fork
 and inconsistent tips are refused. This is local-node trust, not an independent
 header proof or Connect anchor. RDTS expiry is not an admission requirement.
 
-Connect authentication remains runtime-only, including tokens on a saved local
-node's fallback configuration. The loader can restart an already admitted local
+No Connect token is kept in a saved local node's fallback configuration. The
+Cube's Connect session itself is saved as a Bitcoin Cube's is, in the chain
+folder's `connect.json`, and restored at reopen (`BTCB2_VAULT_APP.md`,
+"Connect signer bootstrap"). The loader can restart an already admitted local
 backend without a Connect feature-status request. Account unlock/session setup
 continues to use the existing authenticated Cube flow.
 
