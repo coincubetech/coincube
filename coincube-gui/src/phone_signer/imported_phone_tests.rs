@@ -89,7 +89,7 @@ fn phone_for_key(input: &Value, policy: &PhonePolicy, index: usize) -> pairing_s
         vault_fingerprint: policy.transport_id(),
         transport_pubkey: vec![2; 33],
         fallback_addr: None,
-        network: Some("mainnet".into()),
+        network: Some(policy.chain().api_str().into()),
         capabilities: Vec::new(),
     }
 }
@@ -493,6 +493,24 @@ fn imported_pairing_requires_exact_account_origin_chain_wallet_and_full_hash() {
         .descriptor_checksum
         .push('0');
     assert!(wrong_wallet.exact_signer_for(&policy).is_err());
+    // A pairing made before v3 carries no network: refused on this path too,
+    // with the pair-again copy, through both the row and the store lookups.
+    let mut pre_v3 = phone.clone();
+    pre_v3.network = None;
+    assert_eq!(
+        pre_v3.exact_signer_for(&policy).unwrap_err(),
+        pairing_store::PRE_V3_PAIRING
+    );
+    let pre_v3_store = pairing_store::PairingStoreFile {
+        phones: vec![pre_v3.clone()],
+        pending_unpairs: Vec::new(),
+    };
+    assert_eq!(
+        pre_v3_store
+            .unique_signer_for(&pre_v3, &policy)
+            .unwrap_err(),
+        pairing_store::PRE_V3_PAIRING
+    );
     let mut legacy = phone.clone();
     legacy.signer_binding.as_mut().unwrap().imported_scope = None;
     let encoded = serde_json::to_string(&legacy).unwrap();
