@@ -305,7 +305,10 @@ fn duress_drain_task(root: &std::path::Path) -> Task<Message> {
 /// The Connect session a Cube with a Vault restores at open: the active
 /// account of its chain folder's `connect.json`, saved by an earlier sign-in.
 /// A Bitcoin Cube and a Bitcoin Blake2b Cube on its own node share it; each
-/// reads only its own chain's folder.
+/// reads only its own chain's folder. Both sign in on the configured Connect
+/// API, so a session another host issued (a Connect-served Cube's, saved in
+/// the same folder) is never restored: its token would go to the configured
+/// API.
 pub(crate) fn saved_connect_session(
     datadir: &CoincubeDirectory,
     chain: crate::chain::ChainId,
@@ -318,6 +321,7 @@ pub(crate) fn saved_connect_session(
     )
     .ok()
     .and_then(|c| c.active_account().cloned())
+    .filter(|account| account.issued_by(None))
     .map(|account| {
         (
             Arc::new(tokio::sync::RwLock::new(account.tokens)),

@@ -62,8 +62,11 @@ when its temporary provider is dropped.
 Home or App logout/token replacement invalidates every open Connect-served fork
 tab before the account change propagates. A local fork tab (no Vault, or a
 managed local node) stays open and keeps its own session, as a Bitcoin tab
-does; a revoked feature still closes it. The fork App is dropped into a fresh Home, removing
-its wallet, signing/export panels and matching Cube PIN session. App tasks are
+does; a revoked feature still closes it. A Connect-served Cube that still
+requires Connect is dropped into a fresh Home, removing its wallet,
+signing/export panels and matching Cube PIN session. One opened
+Connect-served and since promoted to its managed node stays in its App: it
+loses its Connect client and services only, and keeps the reopen notice. App tasks are
 owned and cancelled; task, subscription and view callbacks carry the session
 generation so stale signing results cannot affect a later reopened App. A CPU
 operation already running may finish, but its revoked completion is discarded.

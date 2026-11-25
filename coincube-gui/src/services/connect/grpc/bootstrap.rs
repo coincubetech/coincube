@@ -80,6 +80,11 @@ impl From<tonic::Status> for BootstrapError {
 /// `env!("CARGO_PKG_VERSION")`) and `os_version` should describe the host
 /// OS (e.g. `std::env::consts::OS`). `device_name` is the user-visible
 /// label the API stores — defaults to a hostname-style string if empty.
+///
+/// `issuer` is the Connect API the session belongs to, as
+/// [`cache::issuing_api`] records it (`None`: the configured API). A cached
+/// id is reused only when the account entry was issued by that same host.
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_device_registered(
     grpc_url: &str,
     tokens: Arc<RwLock<AccessTokenResponse>>,
@@ -88,6 +93,7 @@ pub async fn ensure_device_registered(
     device_name: String,
     app_version: String,
     os_version: String,
+    issuer: Option<&str>,
 ) -> Result<String, BootstrapError> {
     register_device(
         DeviceRegistration {
@@ -98,6 +104,7 @@ pub async fn ensure_device_registered(
             device_name,
             app_version,
             os_version,
+            issuer,
         },
         None,
     )
@@ -112,6 +119,8 @@ pub struct DeviceRegistration<'a> {
     pub device_name: String,
     pub app_version: String,
     pub os_version: String,
+    /// The Connect API the session belongs to ([`cache::issuing_api`]).
+    pub issuer: Option<&'a str>,
 }
 
 pub async fn register_device_for_claim(
@@ -133,6 +142,7 @@ async fn register_device(
         device_name,
         app_version,
         os_version,
+        issuer,
     } = registration;
     if let Some(claim) = claim {
         let owns_claim = Account::from_cache(network_dir, email)?
@@ -151,7 +161,9 @@ async fn register_device(
             // superseded without touching a live request.
             return Err(BootstrapError::Superseded);
         }
+        // An id issued by another host is not this host's device.
         if let Some(existing) = cached
+            .filter(|account| account.issued_by(issuer))
             .and_then(|account| account.device_id)
             .filter(|id| !id.trim().is_empty())
         {
@@ -254,6 +266,7 @@ pub struct RegisteredDevice {
 /// errors after logging. Use this from post-login orchestration points
 /// where a registration failure shouldn't block the user from opening
 /// the app.
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_device_registered_best_effort(
     grpc_url: &str,
     tokens: Arc<RwLock<AccessTokenResponse>>,
@@ -262,6 +275,7 @@ pub async fn ensure_device_registered_best_effort(
     device_name: String,
     app_version: String,
     os_version: String,
+    issuer: Option<&str>,
 ) -> Option<RegisteredDevice> {
     match ensure_device_registered(
         grpc_url,
@@ -271,6 +285,7 @@ pub async fn ensure_device_registered_best_effort(
         device_name,
         app_version,
         os_version,
+        issuer,
     )
     .await
     {
