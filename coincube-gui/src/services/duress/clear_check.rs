@@ -13,8 +13,9 @@
 //!   account are trusted. The keyring session carries its user id; a file
 //!   entry stores an email and tokens, so its account is looked up with that
 //!   session (`GET /api/v1/user`) before it is asked anything. A session the
-//!   server refuses is skipped and the next one tried. A network failure stops
-//!   the check. The first trusted answer decides: every trusted session belongs
+//!   server refuses is skipped and the next one tried: 401/403, and at the
+//!   lookup any other definitive 4xx (a deleted account's 404). A network
+//!   failure, a rate limit, a 5xx or an unusable answer stops the check. The first trusted answer decides: every trusted session belongs
 //!   to the same account, so the check never goes on looking for a "cleared"
 //!   answer once one has said "active".
 //! * **No account is recorded.** The check stays exactly as it was before
@@ -98,10 +99,28 @@ enum Answer {
 }
 
 impl Answer {
+    /// A failed duress query: 401/403 refuse the session, anything else stops.
     fn from_err(e: &crate::services::coincube::CoincubeError) -> Self {
         match DuressCheckOutcome::from_err(e) {
             DuressCheckOutcome::Unauthorized => Self::Refused,
             _ => Self::Unavailable,
+        }
+    }
+
+    /// A failed account lookup: any definitive client error (a 4xx that is
+    /// not 408 or 429, such as the 404 of a deleted account) refuses the
+    /// session; network failures, rate limits, 5xx and unusable answers stop.
+    fn from_lookup_err(e: &crate::services::coincube::CoincubeError) -> Self {
+        use crate::services::coincube::CoincubeError;
+        let client_error = match e {
+            CoincubeError::Unsuccessful(info) => (400..500).contains(&info.status_code),
+            CoincubeError::NotFound => true,
+            _ => false,
+        };
+        if e.is_auth_error() || (client_error && !e.is_transient()) {
+            Self::Refused
+        } else {
+            Self::Unavailable
         }
     }
 }
@@ -143,7 +162,7 @@ async fn recorded_account_check(
             match client.get_user().await {
                 Ok(user) if user.id.to_string() == account_id => {}
                 Ok(_) => continue,
-                Err(e) => match Answer::from_err(&e) {
+                Err(e) => match Answer::from_lookup_err(&e) {
                     Answer::Refused => continue,
                     _ => return None,
                 },
@@ -469,6 +488,57 @@ pub(crate) mod tests {
         mock_user(&server, "new", 7);
         mock_duress(&server, "new", false);
         assert_eq!(check(&root, None, None, &server).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_accounts_entry_is_skipped_but_a_rate_limit_stops() {
+        let root = TempRoot::new("clear-lookup-404");
+        write_lock(&root.0, Some("7"));
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            None,
+            &[("gone@example.com", "gone"), ("a@example.com", "mine")],
+        );
+        let server = MockServer::start();
+        let gone = mock_status(&server, "/api/v1/user", "gone", 404);
+        mock_user(&server, "mine", 7);
+        mock_duress(&server, "mine", false);
+        assert_eq!(check(&root, None, None, &server).await, Some(false));
+        gone.assert();
+
+        let server = MockServer::start();
+        mock_status(&server, "/api/v1/user", "gone", 429);
+        let mine = mock_user(&server, "mine", 7);
+        assert_eq!(check(&root, None, None, &server).await, None);
+        mine.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn a_token_saved_in_the_keyring_and_a_folder_is_asked_once() {
+        let root = TempRoot::new("clear-dedupe");
+        write_lock(&root.0, Some("7"));
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            Some("a@example.com"),
+            &[("a@example.com", "shared")],
+        );
+        write_connect_json(
+            &root.0,
+            ChainId::BitcoinBlake2b,
+            Some("a@example.com"),
+            &[("a@example.com", "shared")],
+        );
+        let server = MockServer::start();
+        let refused = mock_status(&server, "/api/v1/connect/duress", "shared", 401);
+        let lookups = mock_user(&server, "shared", 7);
+        assert_eq!(
+            check(&root, None, keyring(7, "shared"), &server).await,
+            None
+        );
+        refused.assert_hits(1);
+        lookups.assert_hits(0);
     }
 
     #[tokio::test]
