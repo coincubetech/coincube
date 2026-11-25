@@ -64,8 +64,8 @@ missing device secret, restore that Cube from its Recovery Kit or mnemonic.
 Local MCP: the adapter binary is now `coincube-mcp` (it was `tenshu-mcp`), and its environment
 variables are now `COINCUBE_MCP_*` instead of `TENSHU_MCP_*`. AI clients paired with an earlier
 build point at the old path and variable names, so remove that entry and pair them again from
-**Settings → AI access** in a build with AI access enabled (it is off by default; see
-`docs/mcp/README.md`).
+**Settings → AI access** once AI access is enabled for your account (it is off by default;
+see `docs/mcp/README.md`).
 On Windows the install folder also moved, from `Program Files\Tenshu` to
 `Program Files\COINCUBE`, so pair local MCP clients again after upgrading there too.
 

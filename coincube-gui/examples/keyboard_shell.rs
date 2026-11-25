@@ -147,6 +147,7 @@ impl Fixture {
             network: ChainId::Bitcoin,
             p2p_test_coordinator: false,
             marketplace_flags: MarketplaceServerFlags::OFF,
+            ai_access: false,
             cube_name: "Synthetic QA Cube",
             spark_alias: Some("Daily spending"),
             vault_alias: Some("Family savings"),

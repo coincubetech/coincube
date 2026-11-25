@@ -277,6 +277,34 @@ impl Settings {
         }
     }
 
+    /// True when this session holds no AI access state: no pairing registry
+    /// open, no client runtime, no legacy endpoint and no proposal store.
+    pub(crate) fn is_dormant(&self) -> bool {
+        #[cfg(any(unix, windows))]
+        if self.server.is_some() {
+            return false;
+        }
+        #[cfg(feature = "mcp-proposals")]
+        if self.proposals.is_some() {
+            return false;
+        }
+        self.pairing_location.is_none() && self.pairing_store.is_none() && self.paired.is_empty()
+    }
+
+    /// Suspend AI access while it is switched off for this account: stop
+    /// every runtime ([`Self::revoke`]) and release the pairing registry so
+    /// it is reopened from disk when AI access returns. Stored pairings are
+    /// untouched. A registry poisoned by a storage failure stays poisoned
+    /// (with its error), so a revocation that could not be saved is never
+    /// served again by reopening it.
+    pub(crate) fn suspend(&mut self) {
+        self.revoke();
+        self.pairing_store = None;
+        self.pairing_location = None;
+        self.pairing_generation = None;
+        self.enabled = false;
+    }
+
     /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
         // Runtime suspension only. Explicit durable revocation is RevokePair.
@@ -3413,6 +3441,216 @@ mod feature_flag_tests {
         app.stop();
         drop(app);
         drop(daemon);
+        crate::app::session::close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    /// The signed-in account's `aiAccessEnabled` turns AI access on without
+    /// the build override; withdrawing it mid-session stops running clients
+    /// and leaves the AI access page.
+    fn account_flag_turns_ai_access_on_and_off_mid_session() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use crate::app::{message::Message as AppMessage, App};
+        let _session_guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = tests::fixture();
+        let _no_build_override = crate::feature_flags::test_override::ai_access(false);
+        let (mut app, startup) = App::new_inner(
+            crate::app::Cache::default(),
+            wallet,
+            None,
+            None,
+            crate::app::Config::new(false),
+            daemon.clone(),
+            crate::app::CoincubeDirectory::new(root.clone()),
+            None,
+            crate::app::settings::CubeSettings::new(
+                "MCP fixture".into(),
+                crate::chain::ChainId::Bitcoin,
+            ),
+            None,
+        );
+        drop(startup);
+        crate::app::session::open_without_pin(app.cube_settings.id.clone());
+        let features = |enabled: bool| -> crate::services::coincube::FeaturesResponse {
+            serde_json::from_value(serde_json::json!({"plans": [], "aiAccessEnabled": enabled}))
+                .unwrap()
+        };
+        let load = |app: &mut App, enabled: Option<bool>| {
+            let generation = app.panels.connect.account.session_generation();
+            drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::FeaturesLoaded(enabled.map(features), generation),
+            ))));
+        };
+        let ai_access = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+
+        let serve = |app: &mut App| {
+            for message in [
+                Message::Enable(true),
+                Message::Wallet(true),
+                Message::ClientName("client".into()),
+                Message::Capability(0, true),
+                Message::Approve,
+            ] {
+                drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
+            }
+            let grant = app.local_mcp.server.as_ref().unwrap().grant.clone();
+            assert!(grant.active(), "a client is being served");
+            grant
+        };
+
+        assert!(!app.mcp_supported(), "no grant and no override: off");
+        assert!(app.local_mcp.pairing_location.is_none());
+        load(&mut app, Some(true));
+        assert!(
+            app.cache.ai_access_server_enabled,
+            "the grant reaches the cache"
+        );
+        assert!(app.mcp_supported(), "the account grant turns AI access on");
+        assert!(
+            app.local_mcp.pairing_location.is_some(),
+            "the update that grants AI access opens the pairing registry"
+        );
+        drop(app.update(AppMessage::View(view::Message::Menu(ai_access.clone()))));
+        assert_eq!(app.panels.current, ai_access);
+        let grant = serve(&mut app);
+
+        load(&mut app, Some(false));
+        assert!(!app.cache.ai_access_server_enabled);
+        assert!(
+            !grant.active(),
+            "withdrawing the grant stops the running client"
+        );
+        assert!(app.local_mcp.is_dormant(), "no AI access state is held");
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            "the open AI access page is left"
+        );
+
+        load(&mut app, Some(true));
+        assert!(app.mcp_supported(), "a renewed grant turns it back on");
+        load(&mut app, None);
+        assert!(!app.mcp_supported(), "a failed features fetch reads as off");
+
+        // A log-out in another tab holds this tab's session without
+        // clearing its features: the grant ends before the broadcast returns.
+        load(&mut app, Some(true));
+        drop(app.update(AppMessage::View(view::Message::Menu(ai_access.clone()))));
+        assert_eq!(app.panels.current, ai_access);
+        let grant = serve(&mut app);
+        drop(app.on_global_auth_change(crate::gui::tab::AuthChange::LogOut, false));
+        assert!(!app.cache.ai_access_server_enabled);
+        assert!(!grant.active(), "a log-out elsewhere stops the client");
+        assert!(app.local_mcp.is_dormant());
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
+            "a log-out elsewhere leaves the AI access page"
+        );
+        load(&mut app, Some(true));
+        assert!(!app.mcp_supported(), "a held session grants nothing");
+
+        // Signing in here lifts the hold in the same update that adopts the
+        // new session. The grant retained from the held session must not
+        // resume stored pairings, before this session's `SessionLoaded` and
+        // even if the held session's features fetch lands in between.
+        let held_generation = app.panels.connect.account.session_generation();
+        let epoch = app.connect_auth_epoch();
+        let next_user = crate::services::coincube::User {
+            id: 2,
+            email: "next@example.invalid".into(),
+            email_verified: Some(true),
+        };
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SetSession(
+                crate::services::coincube::LoginResponse {
+                    requires_2fa: false,
+                    token: "next-bearer".into(),
+                    refresh_token: "next-refresh".into(),
+                    user: next_user.clone(),
+                },
+                epoch,
+            ),
+        ))));
+        assert!(
+            !app.cache.ai_access_server_enabled,
+            "the held session's grant does not carry into the adopted one"
+        );
+        assert!(app.local_mcp.is_dormant(), "stored pairings stay suspended");
+        assert!(app.local_mcp.pairing_location.is_none());
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(features(true)), held_generation),
+        ))));
+        assert!(
+            !app.cache.ai_access_server_enabled,
+            "a features fetch from the held session restores nothing"
+        );
+        assert!(app.local_mcp.is_dormant());
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SessionLoaded {
+                user: next_user,
+                plan: None,
+                epoch,
+            },
+        ))));
+        assert_ne!(
+            app.panels.connect.account.session_generation(),
+            held_generation,
+            "the adopted session loads under a new generation"
+        );
+        assert!(
+            !app.mcp_supported(),
+            "off until this session's features load"
+        );
+        load(&mut app, Some(true));
+        assert!(app.mcp_supported(), "this session's own grant turns it on");
+        assert!(app.local_mcp.pairing_location.is_some());
+        app.stop();
+        drop(app);
+        drop(daemon);
+        crate::app::session::close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    /// Suspending AI access (the account flag turned off) keeps a registry
+    /// poisoned by a storage failure locked, so a revocation that could not
+    /// be saved is not served again when AI access returns.
+    fn suspend_keeps_a_storage_failure_lock() {
+        let _session_guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("mcp-suspend-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("regtest")).unwrap();
+        let cube = "mcp-suspend-fixture";
+        crate::app::session::open_without_pin(cube);
+        let location =
+            pairings::Location::new(&root, crate::chain::ChainId::Regtest, cube).unwrap();
+        let error = "Durable revocation could not be confirmed.";
+        let mut settings = Settings {
+            enabled: true,
+            pairing_poisoned: true,
+            pairing_error: Some(error),
+            pairing_location: Some(location),
+            ..Settings::default()
+        };
+        assert!(!settings.is_dormant());
+        settings.suspend();
+        assert!(settings.is_dormant(), "suspend releases the registry");
+        assert!(!settings.enabled);
+        assert!(
+            settings.pairing_poisoned,
+            "the storage-failure lock survives"
+        );
+        assert_eq!(settings.pairing_error, Some(error));
+        assert!(
+            settings
+                .restore_pairing_context(&root, crate::chain::ChainId::Regtest, cube)
+                .is_none()
+                && settings.pairing_location.is_none(),
+            "a poisoned registry is not reopened when AI access returns"
+        );
         crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
     }

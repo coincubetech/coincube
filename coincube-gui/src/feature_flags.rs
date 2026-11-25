@@ -122,27 +122,23 @@ pub const CUBE_MEMBERS_UI_ENABLED: bool = is_truthy(option_env!("COINCUBE_CUBE_M
 /// is hidden; the panel code still compiles but is unreachable via UI.
 pub const RECOVER_VAULT_ENABLED: bool = is_truthy(option_env!("COINCUBE_ENABLE_RECOVER_VAULT"));
 
-/// Whether Cube → Settings → AI access (local MCP) is available.
+/// Developer override for Cube → Settings → AI access (local MCP).
 ///
-/// Controlled by the `COINCUBE_ENABLE_AI_ACCESS` env var at build time.
-/// Defaults to `false`: the feature has not passed signed-release, real-client
-/// or security acceptance (#1535), so it stays dark for launch. When `false`:
+/// AI access is normally switched **per account** by the Connect `ai_access`
+/// flag (`aiAccessEnabled` on `GET /connect/features`, default off, granted
+/// per user through the admin feature-flag API). See
+/// [`crate::app::features::ai_access_enabled`] for the full gate.
 ///
-/// - the AI access tab is hidden from both Cube Settings navigations, and a
-///   restored or deep-linked route to it opens General instead;
-/// - the app never opens the pairing registry, starts an IPC endpoint or
-///   answers an MCP client, so pairings already stored on disk stay inert
-///   (not revoked or deleted) until a build with the flag on is run;
-/// - AI access messages are ignored.
-///
-/// The `coincube-mcp` companion is still built and packaged; without an
-/// endpoint published by the desktop it can only report `wallet_unavailable`.
+/// Setting `COINCUBE_ENABLE_AI_ACCESS` at build time forces AI access on in
+/// that build for every Cube, signed in or not. It exists for local
+/// development and test builds (regtest without a Connect account). Release
+/// builds must leave it unset; it defaults to `false`.
 pub const AI_ACCESS_ENABLED: bool = is_truthy(option_env!("COINCUBE_ENABLE_AI_ACCESS"));
 
 /// Runtime view of [`AI_ACCESS_ENABLED`]. Production code reads this, so
 /// tests can exercise both states regardless of how the test binary was
-/// built (CI builds without the variable, i.e. with the flag off).
-pub fn ai_access_enabled() -> bool {
+/// built (CI builds without the variable, i.e. with the override off).
+pub fn ai_access_build_override() -> bool {
     #[cfg(test)]
     if let Some(value) = test_override::AI_ACCESS.with(std::cell::Cell::get) {
         return value;
@@ -159,7 +155,8 @@ pub mod test_override {
         pub(super) static AI_ACCESS: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
-    /// Force [`super::ai_access_enabled`] on this thread until the guard drops.
+    /// Force [`super::ai_access_build_override`] on this thread until the
+    /// guard drops.
     #[must_use = "the override ends when the guard is dropped"]
     pub fn ai_access(value: bool) -> Guard {
         let previous = AI_ACCESS.with(|cell| cell.replace(Some(value)));

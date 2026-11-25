@@ -114,14 +114,14 @@ fn scope_route(menu: &Menu, target: RouteScope, cache: &Cache) -> Menu {
 
 fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
     match route_scope(menu) {
-        Some(RouteScope::Cube) => cube_section_routes(menu),
+        Some(RouteScope::Cube) => cube_section_routes(menu, cache),
         Some(RouteScope::Vault) => vault_section_routes(menu, cache),
         Some(RouteScope::Spark) => spark_section_routes(menu),
         None => Vec::new(),
     }
 }
 
-fn cube_section_routes(menu: &Menu) -> Vec<RouteChoice> {
+fn cube_section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
     let mut sections = vec![
         (
             CubeSettingsOption::General,
@@ -145,7 +145,7 @@ fn cube_section_routes(menu: &Menu) -> Vec<RouteChoice> {
         ),
         (CubeSettingsOption::DataExports, "Data & exports", "data"),
     ];
-    if crate::feature_flags::ai_access_enabled() {
+    if cache.ai_access_enabled() {
         // Keep its place after Payment checks.
         sections.insert(3, (CubeSettingsOption::AiAccess, "AI access", "ai-access"));
     }
@@ -520,6 +520,17 @@ mod tests {
         {
             let _on = crate::feature_flags::test_override::ai_access(true);
             assert_eq!(labels(RouteScope::Cube.landing()), cube);
+        }
+        {
+            // The signed-in account's grant shows it without the override.
+            let _off = crate::feature_flags::test_override::ai_access(false);
+            let mut granted = spark_cache();
+            granted.ai_access_server_enabled = true;
+            let granted_labels: Vec<String> = section_routes(&RouteScope::Cube.landing(), &granted)
+                .into_iter()
+                .map(|tab| tab.label)
+                .collect();
+            assert_eq!(granted_labels, cube);
         }
         {
             let _off = crate::feature_flags::test_override::ai_access(false);

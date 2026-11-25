@@ -319,6 +319,12 @@ pub struct Cache {
     /// [`crate::app::features::claim_blake2b`]. Fails closed until
     /// `/connect/features` answers, like every other server-controlled gate.
     pub btcb2_server_enabled: bool,
+    /// The signed-in account's AI access flag (`aiAccessEnabled` from
+    /// `/connect/features`), mirrored from the Connect account after every
+    /// update. Fails closed until features load and after logout. Read it
+    /// through [`Self::ai_access_enabled`], which also applies the developer
+    /// build override.
+    pub ai_access_server_enabled: bool,
     /// Whether a Bitcoin Blake2b Cube on this device already reuses this
     /// Cube's Vault descriptor — i.e. this Cube has already been claimed.
     ///
@@ -352,6 +358,15 @@ pub struct Cache {
     /// them, started before that answer: its result is dropped when the
     /// batch lands. See [`Self::split_key_rejected`].
     pub superseded_proof_checks:
+        std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+    /// Coins the split builder rejected as a split key in this session. A
+    /// path derived from an earlier split must not bring one back: after the
+    /// no-path answer is due again, a re-check that cannot finish leaves no
+    /// answer, and the derived path it would let in is the one the builder
+    /// just refused. Only a check that verifies a path clears a coin from
+    /// here. See [`Self::split_key_rejected`] and
+    /// [`Self::merge_derived_proofs`].
+    pub rejected_split_keys:
         std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
     /// This Vault's split records ([`crate::services::split_coins::journal`]).
     pub split_records: Vec<crate::services::split_coins::SplitRecord>,
@@ -559,10 +574,12 @@ impl std::default::Default for Cache {
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
+            ai_access_server_enabled: false,
             btcb2_already_claimed: false,
             entangled: std::collections::HashMap::new(),
             chain_proofs: std::collections::HashMap::new(),
             superseded_proof_checks: std::collections::HashSet::new(),
+            rejected_split_keys: std::collections::HashSet::new(),
             split_records: Vec::new(),
             splitting: std::collections::HashMap::new(),
             split_unconfirmed: std::collections::HashSet::new(),
@@ -601,6 +618,13 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// Whether AI access (local MCP) is available in this Cube right now:
+    /// the signed-in account's `aiAccessEnabled`, or the developer build
+    /// override. See [`crate::app::features::ai_access_enabled`].
+    pub fn ai_access_enabled(&self) -> bool {
+        crate::app::features::ai_access_enabled(self.ai_access_server_enabled)
+    }
+
     /// A Vault with recovery paths (inheritance, recovery alerts), not an
     /// imported Vault.
     pub fn has_inheritance_vault(&self) -> bool {
@@ -842,6 +866,28 @@ impl Cache {
             key,
             crate::services::chain_status::ProofEntry::NoQualifyingAncestry { checked_at: now },
         );
+        self.rejected_split_keys.insert(key);
+    }
+
+    /// Add paths derived from earlier splits to the ancestry results
+    /// ([`crate::services::split_coins::merge_proofs`]), leaving out any
+    /// coin the split builder rejected in this session. Without that, a
+    /// rejected coin whose later re-check could not finish would be offered
+    /// as a split key again on the very path the builder refused. Returns
+    /// whether anything was added.
+    pub fn merge_derived_proofs(
+        &mut self,
+        derived: Vec<(
+            coincube_core::miniscript::bitcoin::OutPoint,
+            crate::services::chain_status::ProofEntry,
+        )>,
+    ) -> bool {
+        let rejected = &self.rejected_split_keys;
+        let derived = derived
+            .into_iter()
+            .filter(|(outpoint, _)| !rejected.contains(outpoint))
+            .collect();
+        crate::services::split_coins::merge_proofs(&mut self.chain_proofs, derived)
     }
 
     /// The ancestry check of `outpoint` now in flight started before a newer
@@ -944,6 +990,11 @@ impl Cache {
             }
             // A check that couldn't finish never drops a saved path.
             let entry = ProofEntry::after_check(previous, entry);
+            // A path a check verified is the coin's answer again, whatever
+            // the split builder said about an earlier path.
+            if matches!(entry, ProofEntry::Verified(_)) {
+                self.rejected_split_keys.remove(&outpoint);
+            }
             self.chain_proofs.insert(outpoint, entry);
             changed = true;
         }
@@ -1449,13 +1500,40 @@ mod entangled_cache_tests {
         // A key the build's check rejected is no longer offered, and a
         // derived path can't bring it back.
         cache.split_key_rejected(small, now);
-        assert!(!crate::services::split_coins::merge_proofs(
-            &mut cache.chain_proofs,
-            vec![(small, ProofEntry::Saved(small_path))]
-        ));
+        assert!(!cache.merge_derived_proofs(vec![(small, ProofEntry::Saved(small_path.clone()))]));
         let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
         assert_eq!(keys, vec![key]);
         assert_eq!(cache.chain_status(&small), ChainStatus::CouldntVerify);
+
+        // Once that answer is due again, a re-check that cannot finish
+        // replaces it with a failure, which is no answer. The derived path
+        // still does not fill in: it is the one the build refused.
+        let recheck_failed =
+            ProofEntry::after_check(cache.chain_proofs.get(&small), ProofEntry::failed(now));
+        assert!(matches!(recheck_failed, ProofEntry::Failed { .. }));
+        cache.chain_proofs.insert(small, recheck_failed);
+        assert!(!cache.merge_derived_proofs(vec![(small, ProofEntry::Saved(small_path.clone()))]));
+        assert!(matches!(
+            cache.chain_proofs.get(&small),
+            Some(ProofEntry::Failed { .. })
+        ));
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key], "the rejected coin is not offered again");
+        // A coin the build never rejected is still filled in beside a
+        // failed check.
+        let never_rejected = OutPoint::new(small.txid, 7);
+        cache
+            .chain_proofs
+            .insert(never_rejected, ProofEntry::failed(now));
+        assert!(cache.merge_derived_proofs(vec![(
+            never_rejected,
+            ProofEntry::Saved(small_path.clone())
+        )]));
+        assert!(matches!(
+            cache.chain_proofs.get(&never_rejected),
+            Some(ProofEntry::SavedRetry { .. })
+        ));
+        cache.chain_proofs.remove(&never_rejected);
 
         cache.record_entanglement(
             key.txid,

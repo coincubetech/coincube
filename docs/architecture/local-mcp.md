@@ -37,8 +37,10 @@ new adapter executable.
   authenticated local IPC connection, no wallet engine, database or AI SDK.
 - Cube Settings → AI access: opt-in, wallet scope and capability selection,
   persistent client pairing, private configuration and immediate revocation.
-  The whole surface is behind the build-time flag `COINCUBE_ENABLE_AI_ACCESS`,
-  off by default; see "Feature flag and release status" in `docs/mcp/README.md`.
+  The whole surface follows the signed-in account's Connect `ai_access` flag
+  (`aiAccessEnabled`), off by default, with `COINCUBE_ENABLE_AI_ACCESS` as a
+  developer build override; see "Feature flag and release status" in
+  `docs/mcp/README.md`.
 
 The service supports macOS/Linux/Windows and embedded Vault daemons on Bitcoin,
 Testnet4, Regtest, Bitcoin Blake2b and Bitcoin Blake2b Testnet4. External daemon

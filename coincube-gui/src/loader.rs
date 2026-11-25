@@ -1234,11 +1234,14 @@ pub async fn load_application(
         marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
         // Same fail-closed stance for the fork account grant.
         btcb2_server_enabled: false,
+        // And for the account's AI access flag.
+        ai_access_server_enabled: false,
         // Resolved from disk in `App::new_inner`.
         btcb2_already_claimed: false,
         entangled: std::collections::HashMap::new(),
         chain_proofs: std::collections::HashMap::new(),
         superseded_proof_checks: std::collections::HashSet::new(),
+        rejected_split_keys: std::collections::HashSet::new(),
         split_records: Vec::new(),
         splitting: std::collections::HashMap::new(),
         split_unconfirmed: std::collections::HashSet::new(),
