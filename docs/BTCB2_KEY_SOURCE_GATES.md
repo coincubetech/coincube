@@ -57,8 +57,9 @@ coincube #568, so this lift needs the same owner sign-off before merge.
   sign time, where a phone advertising both literals may be classified
   replay-capable. The card's tip says the phone needs a COINCUBE Mobile
   version with BTCB2 signing.
-- **Still separate.** Mobile LAN signing on BTCB2 stays refused
-  (`BTCB2_CONNECT_SIGNING_CLIENT.md`).
+- **Wi-Fi signing** on BTCB2 follows the chain-bound v3 pairing: a phone paired for
+  the Vault's chain with both capabilities is dialled as on Bitcoin
+  (`BTCB2_CONNECT_SIGNING_CLIENT.md`, `BTCB2_SIGNING_IDENTITY.md`).
 
 **Being allowed at creation is not replay evidence.** Only verified unified
 witnesses make the replay pill say "protected"; neither the key source nor

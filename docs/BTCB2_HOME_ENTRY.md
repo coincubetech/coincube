@@ -17,7 +17,8 @@ Cube, by the Vault installer (Robert, 2026-11-03). The journey never starts
 Liquid or Spark. Import, seed recovery, Recovery Kit restore and phone restore
 still refuse BTCB2.
 
-This change does not activate Claim/Split, Mobile LAN signing, testnet4 infrastructure,
+This change does not activate Claim/Split, Mobile LAN signing (since Desktop PR 8c
+governed by the v3 pairing rules), testnet4 infrastructure,
 or any server service. Launch still requires a canonical post-fork trust anchor
 with provenance, chain-bound provider admission, and live endpoint acceptance.
 A shared genesis or server-reported status height cannot substitute for that

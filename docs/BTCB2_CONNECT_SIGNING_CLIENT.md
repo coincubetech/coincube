@@ -28,13 +28,14 @@ cryptographic verification under Wallet.chain remains authoritative for the
 transaction's post-signing replay status; capability metadata alone never marks
 a spend replay protected.
 
-LAN now has explicit BTCB2 refusal independent of the global dormant flag:
-pairing Start/Pick refuses, hardware discovery skips phone browsing/dialing,
-and PhoneSigner::sign_tx refuses before inspecting or sealing a PSBT. Switching
-between same-descriptor Bitcoin/BTCB2 twins revokes an active pairing run.
-These guards remain until chain-bound pairing v3 and signer prerequisites ship. The additive protobuf fields on the pre-identity LAN constructor
-remain empty; this PR does not pretend it implements the LAN identity contract.
-No COINCUBE Mobile repository changes or live service changes are included.
+The LAN (Wi-Fi) rail's blanket BTCB2 refusals (pairing Start/Pick, hardware
+discovery, `PhoneSigner::sign_tx`) were removed by Desktop PR 8c, once v3
+chain-bound pairing shipped (PRs 8a, 8b). A pairing row is now dialled only for
+its own chain, and on Bitcoin Blake2b only with `chain-identity-v1` and
+`btcb2-unified-v2` recorded at pairing; anything else is refused before a session
+is sent, with the contract's R2.6 or R2.7 copy shown in the settings and signer
+lists. Switching between same-descriptor Bitcoin/BTCB2 twins still revokes an
+active pairing run. No COINCUBE Mobile repository changes or live service changes are included.
 
 Verification uses synthetic Vaults and encrypted fixtures: exact/missing/unknown
 network matrix, pre-seal refusals, create/fetch defensive cancellation,
