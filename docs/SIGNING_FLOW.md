@@ -81,7 +81,8 @@ A Bitcoin Cube's file is written by its in-Cube sign-in. A Connect-served
 Bitcoin Blake2b Cube writes its own session there at open and its pipeline
 stays pinned to that session while it is open
 ([`BTCB2_VAULT_APP.md`](BTCB2_VAULT_APP.md)). A local Bitcoin Blake2b Cube
-does not run the pipeline yet.
+(on its own node, or with no Vault yet) writes it from its in-Cube sign-in,
+exactly as a Bitcoin Cube does.
 
 ## Happy-path sequence
 

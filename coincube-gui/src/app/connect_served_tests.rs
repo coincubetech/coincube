@@ -384,11 +384,6 @@ fn a_connect_served_cube_fills_the_same_stream_fields_as_a_bitcoin_cube() {
                 cache::SignerPipelineStart::Idle
             );
         }
-        // Its live updates are shown, as on Bitcoin.
-        assert!(live_updates_apply(
-            app.cache.chain(),
-            app.cache.connect_served
-        ));
         assert_bitcoin_untouched(root.path(), &before);
     });
 }

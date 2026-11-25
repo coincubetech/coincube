@@ -45,7 +45,6 @@ mod tests {
             has_imported_bitcoin: false,
             has_p2p: false,
             network: crate::chain::ChainId::Bitcoin,
-            live_updates: true,
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             ai_access: false,

@@ -4,10 +4,10 @@ use super::*;
 impl App {
     /// Register the current Connect device and bring its signing stream online.
     pub(super) fn ensure_connect_ready(&mut self) -> Task<Message> {
-        // A Connect-served Bitcoin Blake2b Cube brings its pipeline up from
-        // the session it was opened with. Until that session is saved, this
-        // is the retry: save it again (`save_served_session`).
-        if self.cache.connect_served {
+        // A Bitcoin Blake2b Cube still on the session it was opened with
+        // brings its pipeline up from that session. Until that session is
+        // saved, this is the retry: save it again (`save_served_session`).
+        if self.runs_on_opening_session() {
             match &self.served_session {
                 ServedSession::Saved { .. } => {}
                 ServedSession::Saving => return Task::none(),
@@ -784,7 +784,7 @@ impl App {
                 tracing::debug!("Connect stream not started: missing grpc_url or device_id",);
                 // A Connect-served Cube whose session is saved says so,
                 // with a retry, rather than leaving the signer list waiting.
-                if self.cache.connect_served
+                if self.runs_on_opening_session()
                     && matches!(self.served_session, ServedSession::Saved { .. })
                     && self.connect_stream_config.is_none()
                 {
@@ -887,6 +887,17 @@ impl App {
         )
     }
 
+    /// Whether this Bitcoin Blake2b Cube brings its signer pipeline up from
+    /// the session it was opened with, saving it at open: always when it is
+    /// Connect-served, and for a local Cube while it still holds that
+    /// session (`fork_connect_client`, PR 5). Only a Connect-served Cube is
+    /// also pinned to it; a local one then runs the Bitcoin path, and once
+    /// that session ends its panel signs in as a Bitcoin Cube's does.
+    fn runs_on_opening_session(&self) -> bool {
+        self.cache.chain().is_blake2b()
+            && (self.cache.connect_served || self.fork_connect_client.is_some())
+    }
+
     /// The session a Connect-served Bitcoin Blake2b Cube's signer pipeline
     /// is pinned to (I3): the Cube's own client, for the account its session
     /// was saved for at open. `None` on every other Cube, and before the
@@ -957,7 +968,7 @@ impl App {
     /// and then runs the login completion itself. Does nothing on any other
     /// Cube, or once the session is saving or saved.
     pub(super) fn save_served_session(&mut self) -> Task<Message> {
-        if !self.cache.connect_served || self.served_session != ServedSession::NotSaved {
+        if !self.runs_on_opening_session() || self.served_session != ServedSession::NotSaved {
             return Task::none();
         }
         let Some(client) = self.fork_connect_client.as_ref() else {
