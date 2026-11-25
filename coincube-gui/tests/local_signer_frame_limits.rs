@@ -144,7 +144,7 @@ fn measure(
         descriptor_envelopes: vec![desc_env.clone()],
     };
     let session = cv1::SigningSession {
-        network: String::new(),
+        network: "regtest".into(),
         session_id: "11111111-2222-3333-4444-555555555555".into(),
         request_id: request_id.into(),
         user_id: String::new(),
@@ -257,8 +257,8 @@ async fn echo_phone(
     let reply = LocalEnvelope {
         payload: Some(local_v1::local_envelope::Payload::Partial(
             local_v1::PartialSignature {
-                // Checked by the desktop from PR 8d.
-                network: String::new(),
+                // The network this phone signed for: the session's.
+                network: s.network.clone(),
                 session_id: s.session_id,
                 signed_psbt: Vec::new(),
                 signed_key_ids: vec!["10".into()],

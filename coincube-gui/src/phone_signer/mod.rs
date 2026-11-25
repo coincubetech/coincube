@@ -326,9 +326,12 @@ impl HWI for PhoneSigner {
             }
         };
 
+        // The Vault's chain, the only thing that chooses the session's
+        // network (contract §3.8, §4.5); the phone checks it against its
+        // binding and states it again on the partial signature.
+        let network = self.policy.chain().api_str().to_string();
         let session = cv1::SigningSession {
-            // LAN remains pre-identity and BTCB2-gated until pairing v3 lands.
-            network: String::new(),
+            network: network.clone(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),
             user_id: String::new(),
@@ -404,6 +407,10 @@ impl HWI for PhoneSigner {
             }
         };
 
+        // The phone's statement of the network it signed for, checked before
+        // anything is decrypted, verified or merged (contract R2.13).
+        check_partial_network(&network, &partial.network).map_err(HwiError::Device)?;
+
         // The session went out as ECIES_V1, so the signature must come back
         // sealed. A phone that answers with a plaintext `signed_psbt` is either
         // too old to have decrypted the descriptor it was sent, or is trying to
@@ -462,6 +469,26 @@ impl HWI for PhoneSigner {
 
 /// Error code a peer sends when its stored pairing no longer matches: the
 /// phone's key, account or transport key changed since the QR was scanned.
+/// Contract R2.13: a returned `PartialSignature.network` is required and must
+/// equal the session's, on every chain and every response. Anything else is
+/// discarded before verification and merge.
+fn check_partial_network(session: &str, partial: &str) -> Result<(), String> {
+    const NOT_ACCEPTED: &str = "Your signature wasn't accepted and nothing was broadcast from it.";
+    if partial.is_empty() {
+        return Err(format!(
+            "{} Update COINCUBE Mobile and pair again.",
+            NOT_ACCEPTED
+        ));
+    }
+    if partial != session {
+        return Err(format!(
+            "{} The signature COINCUBE Mobile returned is for a different network. Pair again.",
+            NOT_ACCEPTED
+        ));
+    }
+    Ok(())
+}
+
 /// Retrying over the local network cannot succeed until the user pairs again.
 pub(crate) const PAIR_AGAIN_CODE: &str = "pair_again";
 
