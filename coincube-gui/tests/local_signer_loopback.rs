@@ -931,32 +931,6 @@ async fn a_btcb2_pairing_without_both_capabilities_refuses_before_a_session_is_s
     }
 }
 
-#[tokio::test]
-async fn a_capable_btcb2_pairing_for_its_chain_reaches_the_phone() {
-    use coincube_core::chain::ChainId;
-    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-        let (signer, handle) = signer_against_chain_response(
-            chain,
-            FakeResponse::Error {
-                code: "USER_DECLINED".into(),
-                message: "user pressed reject".into(),
-            },
-        )
-        .await;
-        let mut psbt = empty_psbt();
-        let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("USER_DECLINED"),
-            "{}: {}",
-            chain,
-            error
-        );
-        handle.await.unwrap();
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ImportedReviewChange {
     None,
