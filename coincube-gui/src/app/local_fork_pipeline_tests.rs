@@ -183,7 +183,9 @@ fn assert_no_refusal(answers: &[Message]) {
 }
 
 /// On a local-node Cube and on a Vault-less Cube, an OTP sign-in and a keyring
-/// restore each commit through the App with no refusal: the session lands in
+/// restore each commit through the App with no refusal (driven from the
+/// panel's deferred commit, `InAppConnectAuthReady`; the panel's own OTP and
+/// refresh requests need the network and are not run): the session lands in
 /// `bitcoin-blake2b/connect.json`, the App installs it, and the login
 /// completion that registers the signer device is asked for. Nothing under
 /// `bitcoin/` changes.
@@ -207,6 +209,17 @@ fn a_local_cube_signs_in_through_the_bitcoin_path_into_its_own_folder() {
             assert!(app.is_local_fork(), "{}", kind);
             let answers = commit_sign_in(&mut app, refreshed).await;
             assert_no_refusal(&answers);
+            // The login completion that registers the signer device and
+            // starts the stream is asked for, as on Bitcoin. (An OTP sign-in
+            // asks for it from the panel; a refresh from the App's commit.)
+            assert!(
+                answers
+                    .iter()
+                    .any(|m| matches!(m, Message::InAppConnectLoginCompleted { email, .. } if email == EMAIL)),
+                "{} {}",
+                kind,
+                refreshed
+            );
             let file = ConnectCache::from_file(&chain_dir(&app)).unwrap();
             let active = file.active_account().unwrap();
             assert_eq!(active.email, EMAIL, "{} {}", kind, refreshed);
@@ -328,9 +341,9 @@ fn bitcoin_and_a_local_blake2b_cube_follow_the_same_sign_in_sequence() {
 }
 
 /// A sign-in or sign-out in another tab neither closes an open local Cube
-/// nor signs it out, and does not cancel its in-flight work, as on a Bitcoin
-/// tab. A Connect-served tab still closes (covered in
-/// `connect_served_tests`).
+/// nor signs it out, as on a Bitcoin tab, and its fork task generation is not
+/// bumped (that bump is what aborts a fork tab's in-flight work). A
+/// Connect-served tab still closes (covered in `connect_served_tests`).
 #[test]
 fn a_global_auth_change_leaves_a_local_tab_open_and_signed_in() {
     use crate::gui::tab::{AuthChange, State, Tab};
@@ -419,12 +432,134 @@ fn a_superseded_stream_is_not_restarted_on_either_chain() {
                     .zip(Some(app.connect_stream_restart))
             };
             let before = identity(&app);
-            // The superseded stream says nothing; the status still reads
-            // live. A later bootstrap lands on the same identity.
+            // The superseded stream says nothing to the App. A later
+            // bootstrap lands on the same identity, so nothing restarts
+            // the stream; the status it leaves reads "Connecting…" on both
+            // chains.
             drop(app.update(ready(auth)));
             assert_eq!(identity(&app), before, "{}", kind);
             identities.push((before.is_some(), app.cache.connect_stream_status));
         }
         assert_eq!(identities[0], identities[1]);
+    });
+}
+
+/// A Vault-less Cube still on the session it was opened with keeps it when
+/// another tab signs in or out, as an open Bitcoin Cube keeps its session
+/// (the plan's per-event list: the tab's local arm no longer runs for it). Its
+/// own sign-out ends it, and the panel then signs in through the Bitcoin
+/// path. A promoted Connect-served Cube in the same call still loses its
+/// Connect services and keeps the reopen notice.
+#[test]
+fn another_tabs_auth_change_leaves_an_opening_session_and_revokes_a_promoted_one() {
+    use crate::gui::tab::{AuthChange, State, Tab};
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path());
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:9");
+        client.set_token("opening-token");
+        let (app, startup) = App::new_fork_without_wallet(
+            cek,
+            Some(client),
+            Config::new(false),
+            CoincubeDirectory::new(root.path().to_path_buf()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .unwrap();
+        drop(startup);
+        assert!(app.is_local_fork());
+        let mut tab = Tab::new(1, State::App(app));
+        drop(tab.invalidate_fork_session(
+            AuthChange::SignIn {
+                user_id: 99,
+                token: zeroize::Zeroizing::new("home-sign-in".into()),
+            },
+            false,
+        ));
+        let State::App(app) = &mut tab.state else {
+            panic!("a local tab stays open");
+        };
+        assert_eq!(
+            app.fork_connect_client.as_ref().and_then(|c| c.token()),
+            Some("opening-token")
+        );
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::LogOut,
+        ))));
+        assert!(app.fork_connect_client.is_none());
+        assert!(!app.panels.connect.account.requires_authenticated_reopen());
+        assert_bitcoin_untouched(root.path(), &before);
+
+        // A promoted Connect-served Cube, through the same tab call.
+        let promoted_root = tempfile::tempdir().unwrap();
+        let mut promoted = tests::local_app(promoted_root.path());
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:9");
+        client.set_token("served-token");
+        promoted
+            .panels
+            .connect
+            .install_admitted_client(client.clone());
+        promoted.fork_connect_client = Some(client);
+        promoted.cache.connect_served = true;
+        let mut tab = Tab::new(2, State::App(promoted));
+        drop(tab.invalidate_fork_session(AuthChange::LogOut, false));
+        let State::App(promoted) = &tab.state else {
+            panic!("a promoted tab stays open on its node");
+        };
+        assert!(promoted.fork_connect_client.is_none());
+        assert!(promoted
+            .panels
+            .connect
+            .account
+            .requires_authenticated_reopen());
+    });
+}
+
+/// A local Cube on its opening session saves it only as a whole session:
+/// when the saved sign-in is another session, it writes nothing rather than
+/// an access token with no refresh token that later Cubes would restore.
+#[test]
+fn a_local_cube_saves_its_opening_session_only_with_its_refresh_token() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path());
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:9");
+        client.set_token("opening-token");
+        let (mut app, startup) = App::new_fork_without_wallet(
+            cek,
+            Some(client),
+            Config::new(false),
+            CoincubeDirectory::new(root.path().to_path_buf()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .unwrap();
+        drop(startup);
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 11,
+            email: EMAIL.into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        // The keyring holds another session (seed_bitcoin's), not this one.
+        assert!(iced_runtime::task::into_stream(app.save_served_session()).is_none());
+        assert_eq!(app.served_session, ServedSession::NotSaved);
+        assert!(!chain_dir(&app).path().join(CONNECT_CACHE_FILENAME).exists());
+        assert_bitcoin_untouched(root.path(), &before);
     });
 }

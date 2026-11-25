@@ -11674,6 +11674,17 @@ pub(crate) mod tests {
                     serde_json::json!({"plans":[],"bitcoin_blake2b_enabled":true}),
                 )
                 .unwrap();
+                // The sibling's sign-in neither signed this local Cube out nor
+                // detached its panel, as on a Bitcoin tab (Desktop plan PR 5):
+                // a result of its own current session still applies.
+                assert_eq!(
+                    gui.reviewer_app_mut(1)
+                        .panels
+                        .connect
+                        .account
+                        .session_generation(),
+                    generation
+                );
                 drop(gui.reviewer_account(
                     2,
                     view::ConnectAccountMessage::FeaturesLoaded(Some(granted), generation),
@@ -11684,8 +11695,7 @@ pub(crate) mod tests {
                     .connect
                     .account
                     .features
-                    .is_none());
-                assert!(!gui.reviewer_app_mut(1).cache.btcb2_server_enabled);
+                    .is_some());
                 assert!(gui.reviewer_app_mut(0).cache.cube_encryption_key.is_some());
                 std::fs::remove_dir_all(root).unwrap();
             })
@@ -12355,6 +12365,23 @@ pub(crate) mod tests {
     fn a_signed_in_fork_cube_shows_its_account_email() {
         let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("fork-open-email-{}", uuid::Uuid::new_v4()));
+        // The saved sign-in is the session the Cube was opened with, so the
+        // Cube saves it whole at open.
+        state::connect::write_connect_secret(
+            state::connect::CONNECT_KEYRING_USER,
+            &serde_json::to_vec(&crate::services::coincube::LoginResponse {
+                requires_2fa: false,
+                token: "synthetic-opening".into(),
+                refresh_token: "synthetic-opening-refresh".into(),
+                user: crate::services::coincube::User {
+                    id: 77,
+                    email: "fixture@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let mut app = signed_in_fork_cube_without_a_vault(&root);
         drop(app.update(Message::View(view::Message::ConnectAccount(
             view::ConnectAccountMessage::Init,
@@ -12407,6 +12434,12 @@ pub(crate) mod tests {
         ))));
         assert_eq!(app.cache.connect_email, None, "cleared with the session");
         assert!(app.connect_auth.is_none());
+        // Saved in its own chain folder only.
+        assert!(!root.join("bitcoin").exists());
+        assert!(root
+            .join("bitcoin-blake2b-testnet4")
+            .join(crate::services::connect::client::cache::CONNECT_CACHE_FILENAME)
+            .exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

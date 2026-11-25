@@ -1696,10 +1696,9 @@ fn connect_panel_says_what_the_state_table_says() {
     }
 }
 
-/// A signed-in Bitcoin Blake2b Cube never starts live updates, so its
-/// Connect control and panel show the account without a live-updates row
-/// that would read "Connecting…" for good. A Bitcoin Cube in the same state
-/// is still starting them and keeps the row.
+/// A signed-in Bitcoin Blake2b Cube runs live updates as a Bitcoin Cube does,
+/// so its Connect control and panel show the account and the live-updates
+/// row, as a Bitcoin Cube's do.
 #[test]
 fn a_blake2b_connect_panel_shows_the_account_and_live_updates() {
     use crate::app::view::shared::landing::capture;

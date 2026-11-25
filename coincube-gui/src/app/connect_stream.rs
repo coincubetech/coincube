@@ -994,13 +994,22 @@ impl App {
         {
             return Task::none();
         }
+        let saved_refresh = account.saved_refresh_token_for(token);
+        // A local Cube is not pinned and later Cubes of the account restore
+        // this file, so it writes only a whole session, as a Bitcoin sign-in
+        // commit does. Without the saved sign-in's refresh token it writes
+        // nothing and signs in through the Bitcoin path once its opening
+        // session ends.
+        if !self.cache.connect_served && saved_refresh.is_none() {
+            return Task::none();
+        }
         let tokens = crate::services::connect::client::auth::AccessTokenResponse {
             access_token: token.to_string(),
             // The saved sign-in's refresh token only when it is this same
-            // session. This Cube never refreshes, and the gRPC interceptor
-            // and the stream send the access token only, so an empty one is
-            // never sent anywhere.
-            refresh_token: account.saved_refresh_token_for(token).unwrap_or_default(),
+            // session. A Connect-served Cube never refreshes, and the gRPC
+            // interceptor and the stream send the access token only, so an
+            // empty one is never sent anywhere.
+            refresh_token: saved_refresh.unwrap_or_default(),
             expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
         };
         let epoch = account.auth_epoch();

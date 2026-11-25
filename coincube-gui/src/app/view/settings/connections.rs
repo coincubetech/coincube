@@ -98,18 +98,16 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
     }
 
     let status = cache.connect_stream_status;
-    {
-        let (kind, word) = live_updates_status(status);
-        let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
-        if let Some(line) = status.line() {
-            live = live.description(line);
-        }
-        content = content.push(page::group(
-            localized_copy("This computer"),
-            None,
-            page::rows([live.into()]),
-        ));
+    let (kind, word) = live_updates_status(status);
+    let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
+    if let Some(line) = status.line() {
+        live = live.description(line);
     }
+    content = content.push(page::group(
+        localized_copy("This computer"),
+        None,
+        page::rows([live.into()]),
+    ));
 
     // Only when automatic renewal didn't work.
     if status == ConnectionStatus::RenewFailed {
