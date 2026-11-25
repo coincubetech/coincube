@@ -302,24 +302,38 @@ fn duress_drain_task(root: &std::path::Path) -> Task<Message> {
     }
 }
 
-/// Builds an authenticated `get_duress_state` check from the Connect auth
-/// cached at `<network>/connect.json` (preserved through the wipe). Returns a
-/// task whose message is `Some(active)` on a successful check, or `None` when
-/// the cache/token/network is unavailable or the request fails — `None` is
-/// treated as "still locked" so a failed check never opens a sign-in form.
-fn duress_state_check_task(datadir: CoincubeDirectory, network: bitcoin::Network) -> Task<Message> {
+/// Asks Connect whether duress has been cleared, with a session already saved
+/// on this computer (the locked screen offers no sign-in). Which saved
+/// sessions are tried, and which are trusted, is
+/// [`crate::services::duress::clear_check::duress_still_active`]: the OS
+/// keyring's session and every chain folder's `connect.json` for a lock that
+/// records its account, the launch network's folder only for one that does
+/// not. The message is `Some(active)` from a trusted answer, or `None` when
+/// none could be had; `None` is treated as "still locked" so a failed check
+/// never opens a sign-in form.
+fn duress_state_check_task(
+    datadir: CoincubeDirectory,
+    network: Option<bitcoin::Network>,
+) -> Task<Message> {
+    duress_state_check_task_at(datadir, network, crate::services::coincube_api_base_url())
+}
+
+/// [`duress_state_check_task`] against the Connect API at `api_base_url`.
+fn duress_state_check_task_at(
+    datadir: CoincubeDirectory,
+    network: Option<bitcoin::Network>,
+    api_base_url: String,
+) -> Task<Message> {
     use crate::app::view::duress::active_screen::Message as DuressMsg;
+    use crate::services::duress::clear_check::{duress_still_active, KeyringSession};
+    // Read on the update thread, through the Connect panel's own reader.
+    let keyring =
+        crate::app::state::connect::account::load_session_from_keyring().map(|s| KeyringSession {
+            user_id: s.user_id(),
+            access_token: s.access_token().to_string(),
+        });
     Task::perform(
-        async move {
-            let network_dir = datadir.network_directory(network);
-            let cache =
-                crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
-                    .ok()?;
-            let account = cache.active_account()?;
-            let mut client = crate::services::coincube::CoincubeClient::new();
-            client.set_token(&account.tokens.access_token);
-            client.get_duress_state().await.ok().map(|s| s.active)
-        },
+        async move { duress_still_active(&datadir, network, keyring, &api_base_url).await },
         |active: Option<bool>| Message::Duress(DuressMsg::StateChecked(active)),
     )
 }
@@ -3224,14 +3238,14 @@ impl Tab {
         // Connect auth (preserved through the wipe) and check
         // get_duress_state BEFORE rendering any sign-in surface. No
         // credential prompt ever appears here.
-        match (screen.datadir().cloned(), screen.network()) {
-            (Some(datadir), Some(network)) => {
+        match screen.datadir().cloned() {
+            Some(datadir) => {
                 screen.checking = true;
                 screen.error = None;
-                duress_state_check_task(datadir, network)
+                duress_state_check_task(datadir, screen.network())
             }
-            _ => {
-                // No way to reach the server (no network resolved) —
+            None => {
+                // No data directory to read a saved session from —
                 // safe default is to stay locked.
                 screen.error = Some("Duress mode is active. Try again later.".to_string());
                 Task::none()
@@ -10138,5 +10152,175 @@ mod spark_nickname_flush_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod duress_clear_check_tests {
+    use super::*;
+    use crate::app::view::duress::active_screen::DuressActiveScreen;
+    use crate::services::duress::clear_check::tests::{
+        crate_dir_entries, mock_duress, mock_status, mock_user, write_connect_json, write_lock,
+        TempRoot,
+    };
+    use coincube_core::miniscript::bitcoin::Network;
+    use httpmock::MockServer;
+
+    fn save_keyring_session(user_id: u32, token: &str) {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "requires_2fa": false, "token": token, "refresh_token": "synthetic-refresh",
+            "user": {"id": user_id, "email": "fixture@example.invalid"},
+        }))
+        .unwrap();
+        crate::app::state::connect::write_connect_secret(
+            crate::app::state::connect::CONNECT_KEYRING_USER,
+            &bytes,
+        )
+        .unwrap();
+    }
+
+    fn clear_keyring() {
+        crate::app::state::connect::delete_connect_secret(
+            crate::app::state::connect::CONNECT_KEYRING_USER,
+        );
+    }
+
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .filter_map(|action| match action {
+                iced_runtime::Action::Output(message) => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What Sign in does on the locked screen, against `server`.
+    fn press_sign_in(tab: &mut Tab, server: &MockServer) {
+        let State::DuressActive(screen) = &tab.state else {
+            panic!("not on the locked screen");
+        };
+        let task = duress_state_check_task_at(
+            screen.datadir().unwrap().clone(),
+            screen.network(),
+            server.base_url(),
+        );
+        for message in outputs(task) {
+            drop(tab.update(message));
+        }
+    }
+
+    /// The screen a remote lock leaves on screen in a running session.
+    fn locked_tab(root: &TempRoot, network: Network) -> Tab {
+        Tab::new(
+            1,
+            State::DuressActive(DuressActiveScreen::with_context(root.dir(), Some(network))),
+        )
+    }
+
+    /// The screen a relaunch builds from the launch network.
+    fn relaunched_tab(root: &TempRoot) -> Tab {
+        let (state, drain) = State::new(root.dir(), Some(Network::Bitcoin));
+        drop(drain);
+        assert!(matches!(state, State::DuressActive(_)));
+        Tab::new(1, state)
+    }
+
+    /// A remote lock of account 7 on a data directory with only BTCB2 Cubes.
+    fn btcb2_only_lock(label: &str) -> TempRoot {
+        let root = TempRoot::new(label);
+        write_lock(&root.0, Some("7"));
+        std::fs::create_dir_all(root.0.join("bitcoin-blake2b")).unwrap();
+        root
+    }
+
+    fn assert_cleared(tab: &Tab, root: &TempRoot) {
+        assert!(matches!(tab.state, State::Home(_)));
+        let state = crate::services::duress::DuressLocalState::load(&root.0).unwrap();
+        assert!(!state.active);
+    }
+
+    #[test]
+    fn a_server_clear_exits_the_locked_screen_from_the_keyring_session() {
+        let before = crate_dir_entries();
+        let server = MockServer::start();
+        mock_duress(&server, "kr", false);
+        save_keyring_session(7, "kr");
+        for relaunch in [false, true] {
+            let root = btcb2_only_lock("tab-clear-keyring");
+            let mut tab = if relaunch {
+                relaunched_tab(&root)
+            } else {
+                locked_tab(&root, Network::Bitcoin)
+            };
+            press_sign_in(&mut tab, &server);
+            assert_cleared(&tab, &root);
+        }
+        clear_keyring();
+        assert_eq!(crate_dir_entries(), before);
+    }
+
+    #[test]
+    fn with_the_keyring_empty_the_btcb2_folder_session_exits_the_locked_screen() {
+        let before = crate_dir_entries();
+        clear_keyring();
+        let server = MockServer::start();
+        mock_user(&server, "b2", 7);
+        mock_duress(&server, "b2", false);
+        for relaunch in [false, true] {
+            let root = btcb2_only_lock("tab-clear-file");
+            write_connect_json(
+                &root.0,
+                crate::chain::ChainId::BitcoinBlake2b,
+                Some("a@example.com"),
+                &[("a@example.com", "b2")],
+            );
+            let mut tab = if relaunch {
+                relaunched_tab(&root)
+            } else {
+                locked_tab(&root, Network::Bitcoin)
+            };
+            press_sign_in(&mut tab, &server);
+            assert_cleared(&tab, &root);
+        }
+        assert_eq!(crate_dir_entries(), before);
+    }
+
+    #[test]
+    fn a_network_failure_shows_try_again_later_and_tries_nothing_further() {
+        let root = btcb2_only_lock("tab-clear-network");
+        write_connect_json(
+            &root.0,
+            crate::chain::ChainId::BitcoinBlake2b,
+            Some("a@example.com"),
+            &[("a@example.com", "b2")],
+        );
+        save_keyring_session(7, "kr");
+        let server = MockServer::start();
+        mock_status(&server, "/api/v1/connect/duress", "kr", 503);
+        let next = mock_user(&server, "b2", 7);
+        let mut tab = locked_tab(&root, Network::Bitcoin);
+        press_sign_in(&mut tab, &server);
+        clear_keyring();
+        let State::DuressActive(screen) = &tab.state else {
+            panic!("left the locked screen");
+        };
+        assert_eq!(
+            screen.error.as_deref(),
+            Some("Duress mode is active. Try again later.")
+        );
+        assert!(!screen.checking);
+        next.assert_hits(0);
+        assert!(
+            crate::services::duress::DuressLocalState::load(&root.0)
+                .unwrap()
+                .active
+        );
     }
 }

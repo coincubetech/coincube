@@ -37,6 +37,18 @@ pub(crate) struct StoredSession {
     login: LoginResponse,
 }
 
+impl StoredSession {
+    /// The Connect user id the session was issued to.
+    pub(crate) fn user_id(&self) -> u32 {
+        self.login.user.id
+    }
+
+    /// The session's access token.
+    pub(crate) fn access_token(&self) -> &str {
+        &self.login.token
+    }
+}
+
 /// The saved sign-in in the OS keyring, if one is there and parses. The one
 /// reader of that entry: the Connect panel restores from it, and the duress
 /// locked screen, which has no panel, checks with it.

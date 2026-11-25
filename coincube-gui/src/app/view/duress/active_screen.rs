@@ -43,10 +43,12 @@ pub struct DuressActiveScreen {
     /// Whether the retry queue still has pending work — drives the subtle
     /// corner dot (Phase 4 Task 4.2). No text, no explanation.
     pub queue_pending: bool,
-    /// Data directory + network, used to locate cached Connect auth
-    /// (`<network>/connect.json`, preserved through the wipe) for the Sign-in
-    /// check and to rebuild the Home flow on exit. `network` is `None` only on
-    /// a launch reconcile where the network wasn't resolved.
+    /// Data directory + network, used to find the saved Connect sessions
+    /// (the keyring's and the chain folders' `connect.json`, preserved
+    /// through the wipe) for the Sign-in check, and to rebuild the Home flow
+    /// on exit. A lock that records no account is checked from
+    /// `<network>/connect.json` alone. `network` is `None` only on a launch
+    /// reconcile where the network wasn't resolved.
     datadir: Option<CoincubeDirectory>,
     network: Option<Network>,
 }
