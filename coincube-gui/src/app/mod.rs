@@ -15976,7 +15976,7 @@ pub(crate) mod shell_tests {
                 &network_dir,
                 "alice@example.com",
                 "registered-device",
-                &current.refresh_token
+                &current
             )
             .await
             .unwrap()

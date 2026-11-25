@@ -162,7 +162,9 @@ impl App {
                 // Same helper as every other registration path — see
                 // the note on the in-app login path above.
                 let device_name = crate::utils::device::signer_device_label(chain);
-                let Some(_device_id) = ensure_device_registered_best_effort(
+                // An id registration could not save (the account's session
+                // moved on) is refused here, as before.
+                let Some(_registered) = ensure_device_registered_best_effort(
                     &grpc_url,
                     tokens_arc.clone(),
                     &network_dir,
@@ -172,7 +174,7 @@ impl App {
                     std::env::consts::OS.to_string(),
                 )
                 .await
-                else {
+                .filter(|registered| registered.persisted) else {
                     return info_toast(
                         "Couldn't register this device with Connect. Try again, or pair a \
                          phone over Wi-Fi to sign locally.",

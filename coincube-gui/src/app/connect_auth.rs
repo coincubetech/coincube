@@ -219,6 +219,9 @@ impl App {
                 };
 
                 let network_dir = datadir.network_directory(chain);
+                // Both tokens: a Connect-served Bitcoin Blake2b Cube can save
+                // its session with an empty refresh token, and two opens of
+                // one account then differ in their access tokens only.
                 let owns_cached_session =
                     crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                         .ok()
@@ -226,6 +229,7 @@ impl App {
                         .is_some_and(|account| {
                             account.email == email_for_task
                                 && account.tokens.refresh_token == tokens.refresh_token
+                                && account.tokens.access_token == tokens.access_token
                         });
                 if !owns_cached_session {
                     return (chain, datadir, None, email_for_task, cube_uuid);
