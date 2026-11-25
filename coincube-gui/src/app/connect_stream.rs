@@ -1087,11 +1087,8 @@ impl App {
         if self.requires_connect() {
             self.invalidate_fork_session();
         } else {
+            // It keeps the reopen notice (`revoke_local_connect_services`).
             self.revoke_local_connect_services();
-            // It was opened Connect-served: no in-Cube sign-in until it is
-            // reopened, so its panel shows the reopen notice instead of a
-            // sign-in form its login messages would be refused for.
-            self.panels.connect.revoke_admitted_client();
         }
         cancel
     }

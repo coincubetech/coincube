@@ -9703,7 +9703,9 @@ impl App {
 
     pub(crate) fn on_local_auth_change(&mut self, originated: bool) {
         self.revoke_local_connect_services();
-        if !originated {
+        // A Cube opened Connect-served keeps its reopen notice; detaching
+        // would hand it a sign-in form.
+        if !originated && !self.cache.connect_served {
             self.panels.connect.detach_local_session();
         }
     }
@@ -9712,7 +9714,15 @@ impl App {
         self.revoke_claim();
         self.fork_connect_client = None;
         self.panels.global_home.set_fork_connect_client(None);
-        self.panels.connect.account.use_local_backend();
+        if self.cache.connect_served {
+            // Opened Connect-served and since promoted to its managed node:
+            // no in-Cube sign-in until it is reopened (I3). The admitted
+            // panel drops its session from memory (the saved sign-in is not
+            // its own, so the keyring is left) and shows the reopen notice.
+            self.panels.connect.revoke_admitted_client();
+        } else {
+            self.panels.connect.account.use_local_backend();
+        }
         self.clear_connect_session_state();
         self.cache.restorable_connect_session = false;
         self.cache.connect_authenticated = false;

@@ -739,6 +739,89 @@ fn a_running_stream_survives_the_file_moving_on() {
     });
 }
 
+/// A managed-node Cube that was opened Connect-served (promoted while open),
+/// its admitted panel on its dashboard.
+fn promoted_cube(root: &std::path::Path) -> App {
+    let mut app = tests::local_app(root);
+    app.cache.datadir_path = CoincubeDirectory::new(root.to_path_buf());
+    let mut client = crate::services::coincube::CoincubeClient::for_test(CUBE_BASE);
+    client.set_token(CUBE_TOKEN);
+    app.panels.connect.install_admitted_client(client.clone());
+    app.panels.connect.account.user = Some(crate::services::coincube::User {
+        id: 7,
+        email: EMAIL.into(),
+        email_verified: Some(true),
+    });
+    app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+    app.fork_connect_client = Some(client);
+    app.cache.connect_served = true;
+    assert!(!app.requires_connect());
+    app
+}
+
+/// However a promoted Cube loses its session (its own sign-out, Connect
+/// refusing the device, or a sign-in or sign-out in another tab), it shows
+/// the reopen notice, never a sign-in form: a sign-in inside a Cube opened
+/// Connect-served stays refused (I3). The saved sign-in is not touched.
+#[test]
+fn a_promoted_cube_never_offers_an_in_cube_sign_in() {
+    use crate::gui::tab::{AuthChange, State, Tab};
+    use crate::services::connect::grpc::trouble::Refusal;
+    use crate::services::connect::grpc::ConnectStreamMessage as M;
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        for way in [
+            "log-out",
+            "device-revoked",
+            "sibling-sign-in",
+            "sibling-log-out",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+            let mut app = promoted_cube(root.path());
+            let app = match way {
+                "log-out" => {
+                    drop(app.update(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::LogOut,
+                    ))));
+                    app
+                }
+                "device-revoked" => {
+                    for message in outputs(
+                        app.update(Message::ConnectStream(M::Refused(Refusal::DeviceRevoked))),
+                    )
+                    .await
+                    {
+                        drop(app.update(message));
+                    }
+                    app
+                }
+                sibling => {
+                    let change = if sibling == "sibling-sign-in" {
+                        AuthChange::SignIn {
+                            user_id: 8,
+                            token: zeroize::Zeroizing::new("sibling-token".into()),
+                        }
+                    } else {
+                        AuthChange::LogOut
+                    };
+                    let mut tab = Tab::new(1, State::App(app));
+                    drop(tab.invalidate_fork_session(change, false));
+                    let State::App(app) = tab.state else {
+                        panic!("{way}: a promoted Cube stays open");
+                    };
+                    app
+                }
+            };
+            let account = &app.panels.connect.account;
+            assert!(account.requires_authenticated_reopen(), "{way}");
+            assert!(account.authenticated_client().is_none(), "{way}");
+            assert!(app.fork_connect_client.is_none(), "{way}");
+            assert_bitcoin_untouched(root.path(), &before);
+        }
+    });
+}
+
 /// A Cube opened Connect-served keeps that kind when promoted to its managed
 /// node: its admitted panel is not handed to local mode, and an ended session
 /// costs it its Connect services only.
@@ -749,21 +832,7 @@ fn a_promoted_cube_keeps_its_kind_and_loses_only_connect_services_at_session_end
     runtime().block_on(async {
         let root = tempfile::tempdir().unwrap();
         let before = seed_bitcoin(root.path(), CUBE_TOKEN);
-        // A managed-node Cube that was opened Connect-served.
-        let mut app = tests::local_app(root.path());
-        app.cache.datadir_path = CoincubeDirectory::new(root.path().to_path_buf());
-        let mut client = crate::services::coincube::CoincubeClient::for_test(CUBE_BASE);
-        client.set_token(CUBE_TOKEN);
-        app.panels.connect.install_admitted_client(client.clone());
-        app.panels.connect.account.user = Some(crate::services::coincube::User {
-            id: 7,
-            email: EMAIL.into(),
-            email_verified: Some(true),
-        });
-        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
-        app.fork_connect_client = Some(client);
-        app.cache.connect_served = true;
-        assert!(!app.requires_connect());
+        let mut app = promoted_cube(root.path());
 
         // A panel message does not hand the admitted panel to local mode;
         // the panel reaching its dashboard saves the session, as when the
