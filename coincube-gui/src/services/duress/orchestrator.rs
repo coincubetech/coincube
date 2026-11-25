@@ -269,6 +269,7 @@ impl DuressOrchestrator {
         //    route straight to the cryptic screen). Logged-not-fatal: the journal
         //    already guards an interrupted wipe.
         self.local_state.active = true;
+        self.local_state.record_local_lock();
         self.local_state.last_activation_attempt = Some(Utc::now());
         if let Err(e) = self.local_state.save(&self.data_dir) {
             log::error!("duress: failed to persist active state: {e}");
@@ -519,6 +520,10 @@ mod tests {
             h.calls.lock().unwrap().as_slice(),
             &["acct_enrolled".to_string()]
         );
+        // A local lock is judged by the enrolment, whatever a remote one left.
+        let state = DuressLocalState::load(&h.dir).unwrap();
+        assert!(state.active);
+        assert_eq!(state.lock_account(), Some("acct_enrolled"));
         let _ = std::fs::remove_dir_all(&h.dir);
     }
 
