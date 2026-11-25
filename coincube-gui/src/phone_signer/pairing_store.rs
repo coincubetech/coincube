@@ -294,6 +294,11 @@ impl PairedPhone {
         if matches != 1 {
             return Err(error.into());
         }
+        // The same chain rule as a Vault's pairing, capabilities included: an
+        // imported Bitcoin Blake2b wallet needs a phone that can sign it.
+        if let Some(outdated) = self.chain_refusal(wallet.chain()) {
+            return Err(outdated);
+        }
         Ok(binding)
     }
 
@@ -431,17 +436,30 @@ impl PairingStoreFile {
     pub fn chain_refusals_for(&self, policy: &PhonePolicy) -> HashMap<Fingerprint, String> {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(policy.descriptor().as_bytes());
-        self.phones
+        // A key another of its rows may sign with keeps the usual advice:
+        // that phone may only be offline.
+        let signable: std::collections::HashSet<Fingerprint> = self
+            .phones
             .iter()
-            .filter_map(|row| {
-                let binding = row.signer_binding.as_ref()?;
-                if binding.descriptor_sha256 != digest.as_slice() {
-                    return None;
-                }
-                let refusal = row.chain_refusal(policy.chain())?;
-                Some((binding.fingerprint, refusal))
-            })
-            .collect()
+            .filter_map(|row| row.exact_signer_for(policy).ok())
+            .map(|binding| binding.fingerprint)
+            .collect();
+        let mut refusals = HashMap::new();
+        for row in &self.phones {
+            let Some(binding) = row.signer_binding.as_ref() else {
+                continue;
+            };
+            if binding.descriptor_sha256 != digest.as_slice()
+                || signable.contains(&binding.fingerprint)
+            {
+                continue;
+            }
+            if let Some(refusal) = row.chain_refusal(policy.chain()) {
+                // Rows in file order: the first refusal for a key is shown.
+                refusals.entry(binding.fingerprint).or_insert(refusal);
+            }
+        }
+        refusals
     }
 
     /// Decides whether a live hardware-list handle may be reused for the
