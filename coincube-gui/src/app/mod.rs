@@ -7752,10 +7752,7 @@ impl App {
             &self.twin_checks,
             std::time::Instant::now(),
         );
-        let proved = crate::services::split_coins::merge_proofs(
-            &mut self.cache.chain_proofs,
-            derived.proofs,
-        );
+        let proved = self.cache.merge_derived_proofs(derived.proofs);
         if derived.changed {
             self.save_split_records();
         }
