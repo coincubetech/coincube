@@ -700,6 +700,48 @@ fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
     });
 }
 
+/// Another Cube of the account received later events: this Cube's stream
+/// resumes from its own cursor, not past events it has not received.
+#[test]
+fn the_stream_resumes_from_this_cubes_own_cursor() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let before = seed_bitcoin(root.path(), CUBE_TOKEN);
+        let mut app = tests::fork_app(root.path(), true);
+        let cube_id = app.cube_settings.id.clone();
+        assert!(!cube_id.is_empty());
+        let completion = outputs(save_at_open(&mut app).await).await;
+        let trigger = completion
+            .into_iter()
+            .find(|m| matches!(m, Message::TriggerConnectStreamReady { .. }))
+            .unwrap();
+        write_fork_cache(
+            root.path(),
+            serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": tokens(CUBE_TOKEN, ""),
+                    "device_id": "stored-device", "last_seen_event_seq": 50,
+                    "cube_event_seqs": {"a-sibling-cube": 50, cube_id: 12},
+                    "api_base_url": cube_issuer()}]
+            }),
+        );
+        drop(app.update(trigger));
+        let auth = app.connect_auth.clone().unwrap();
+        drop(app.update(Message::ConnectStreamReady(Some((
+            stream_config(auth, CUBE_BASE, ""),
+            EMAIL.into(),
+        )))));
+        let cfg = app
+            .connect_stream_config
+            .as_ref()
+            .expect("the stream mounts");
+        assert_eq!(cfg.device_id, "stored-device");
+        assert_eq!(cfg.last_seen_seq, 12);
+        assert_bitcoin_untouched(root.path(), &before);
+    });
+}
+
 /// The shared file moved on between the save at open and the login
 /// completion's check (another Cube of the account saved its own session).
 /// The first start still triggers the stream on the Cube's own token; it is

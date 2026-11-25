@@ -3,7 +3,7 @@ use async_fd_lock::LockWrite;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::SeekFrom;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
@@ -183,6 +183,7 @@ impl ConnectCache {
                 if c.api_base_url.as_deref() != api {
                     c.device_id = None;
                     c.last_seen_event_seq = None;
+                    c.cube_event_seqs.clear();
                     // A re-registration started for the previous host's
                     // session is superseded, as by a new sign-in: its
                     // completion must not install that host's id here.
@@ -197,6 +198,7 @@ impl ConnectCache {
                 device_id: None,
                 last_seen_event_seq: None,
                 reregister_claim: None,
+                cube_event_seqs: BTreeMap::new(),
                 api_base_url: match issuer {
                     Issuer::Set(api) => api.map(str::to_string),
                     Issuer::Keep => None,
@@ -291,6 +293,13 @@ pub struct Account {
     /// the event cursor belong to this host too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
+    /// Each Cube's own event cursor, by Cube id. Several Cubes of one
+    /// account share this entry, and one must not resume past an event
+    /// another received and it did not: each resumes from its own cursor
+    /// ([`Self::event_seq_for`]). `last_seen_event_seq` is still written,
+    /// for an older build reading the file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cube_event_seqs: BTreeMap<String, i64>,
 }
 
 impl Account {
@@ -299,6 +308,24 @@ impl Account {
     /// cursor is only ever used with the host that issued it.
     pub fn issued_by(&self, api: Option<&str>) -> bool {
         self.api_base_url.as_deref() == api
+    }
+
+    /// Where the Cube `cube_id` resumes its event stream: its own cursor,
+    /// never another Cube's. A Cube with none yet starts from 0 (a full
+    /// replay of its events, as on a first launch), except while no Cube has
+    /// a cursor of its own here: the entry was last written by a build with
+    /// one cursor per account, and the Cube resumes from it, as it did then.
+    /// A Cube without an id reads the account's cursor, as before.
+    pub fn event_seq_for(&self, cube_id: Option<&str>) -> i64 {
+        let account = self.last_seen_event_seq.unwrap_or(0);
+        match cube_id.filter(|id| !id.is_empty()) {
+            Some(id) => match self.cube_event_seqs.get(id) {
+                Some(own) => *own,
+                None if self.cube_event_seqs.is_empty() => account,
+                None => 0,
+            },
+            None => account,
+        }
     }
 
     /// A fresh account record for the opt-in Testnet4 provisioning runner.
@@ -311,6 +338,7 @@ impl Account {
             last_seen_event_seq: None,
             reregister_claim: None,
             api_base_url: None,
+            cube_event_seqs: BTreeMap::new(),
         }
     }
 
@@ -919,11 +947,14 @@ fn apply_unclaimed_device_registration(
 ///
 /// `issuer` is the host of the stream the event came from
 /// ([`issuing_api`]): an entry another host issued keeps its own cursor.
+/// `cube_id` is the Cube whose stream received it: its own cursor moves
+/// ([`Account::cube_event_seqs`]), never another Cube's.
 pub async fn set_last_seen_event_seq_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
     event_seq: i64,
     issuer: Option<&str>,
+    cube_id: Option<&str>,
 ) -> Result<(), ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -964,10 +995,22 @@ pub async fn set_last_seen_event_seq_for_email(
     else {
         return Ok(());
     };
-    if account.last_seen_event_seq.unwrap_or(0) >= event_seq {
+    let mut moved = false;
+    if let Some(id) = cube_id.filter(|id| !id.is_empty()) {
+        let cursor = account.cube_event_seqs.entry(id.to_string()).or_insert(0);
+        if *cursor < event_seq {
+            *cursor = event_seq;
+            moved = true;
+        }
+    }
+    // The account's cursor, for an older build reading the file.
+    if account.last_seen_event_seq.unwrap_or(0) < event_seq {
+        account.last_seen_event_seq = Some(event_seq);
+        moved = true;
+    }
+    if !moved {
         return Ok(());
     }
-    account.last_seen_event_seq = Some(event_seq);
 
     let content = serde_json::to_vec_pretty(&cache)
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to serialize cache: {}", e)))?;
@@ -1181,11 +1224,17 @@ mod tests {
         let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
 
         // Another host's stream leaves the configured API's cursor alone.
-        super::set_last_seen_event_seq_for_email(&dir, email, 50, Some("https://cube.example"))
-            .await
-            .unwrap();
+        super::set_last_seen_event_seq_for_email(
+            &dir,
+            email,
+            50,
+            Some("https://cube.example"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(entry().last_seen_event_seq, Some(3));
-        super::set_last_seen_event_seq_for_email(&dir, email, 4, None)
+        super::set_last_seen_event_seq_for_email(&dir, email, 4, None, None)
             .await
             .unwrap();
         assert_eq!(entry().last_seen_event_seq, Some(4));
@@ -1205,6 +1254,65 @@ mod tests {
         let taken = entry();
         assert_eq!(taken.reregister_claim, None);
         assert_eq!(taken.last_seen_event_seq, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// Each Cube resumes from its own cursor: a sibling Cube of the account
+    /// that received later events does not move it, and a Cube with none
+    /// starts from 0 once any Cube has its own. Before that, the account's
+    /// cursor (all an older build wrote) is where every Cube resumes.
+    #[tokio::test]
+    async fn each_cube_resumes_from_its_own_cursor() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(7);
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Written by a build with one cursor per account: every Cube
+        // resumes from it, and a Cube without an id always does.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 7);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 7);
+        assert_eq!(entry().event_seq_for(None), 7);
+
+        // Cube A receives events up to 20.
+        super::set_last_seen_event_seq_for_email(&dir, email, 20, None, Some("cube-a"))
+            .await
+            .unwrap();
+        // B has not received them: it does not resume past them.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 20);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 0);
+        // B's own events move only B's cursor; an older event moves nothing.
+        super::set_last_seen_event_seq_for_email(&dir, email, 9, None, Some("cube-b"))
+            .await
+            .unwrap();
+        super::set_last_seen_event_seq_for_email(&dir, email, 5, None, Some("cube-a"))
+            .await
+            .unwrap();
+        let both = entry();
+        assert_eq!(both.event_seq_for(Some("cube-a")), 20);
+        assert_eq!(both.event_seq_for(Some("cube-b")), 9);
+        // The account's cursor is still written, for an older build.
+        assert_eq!(both.last_seen_event_seq, Some(20));
+
+        // A host change clears every Cube's cursor with the entry's.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        assert!(entry().cube_event_seqs.is_empty());
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
