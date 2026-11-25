@@ -8,6 +8,7 @@ use iced::widget::{
     Column, Container, Row, Space,
 };
 use iced::{Alignment, Length};
+use std::borrow::Cow;
 
 use coincube_ui::component::tenshu::{self, radio_list, segment, FieldSize, Tone};
 use coincube_ui::component::text::*;
@@ -483,8 +484,12 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
             binding.descriptor_sha256.len() == 32
                 && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
         });
-        let (kind, word, detail) =
-            pairing_row_status(p, &state.descriptor_sha256, &state.vault_key_fingerprints);
+        let (kind, word, detail) = pairing_row_status(
+            p,
+            &state.descriptor_sha256,
+            &state.vault_key_fingerprints,
+            state.wallet_chain(),
+        );
         rows.push(
             page::row(if p.name.is_empty() {
                 localized_copy("Phone")
@@ -594,7 +599,8 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
 }
 
 /// The settings row's status for one pairing, in order: exact, another
-/// Vault's (only that Vault can remove it), made before v3, anything else.
+/// Vault's (only that Vault can remove it), made before v3, refused by this
+/// Vault's chain (contract R2.6 and R2.7), anything else.
 fn pairing_row_status(
     p: &crate::phone_signer::pairing_store::PairedPhone,
     descriptor_sha256: &str,
@@ -602,7 +608,8 @@ fn pairing_row_status(
         String,
         coincube_core::miniscript::bitcoin::bip32::Fingerprint,
     )],
-) -> (page::Status, &'static str, &'static str) {
+    chain: Option<crate::chain::ChainId>,
+) -> (page::Status, &'static str, Cow<'static, str>) {
     // Must be the same predicate signing and the hw refresh loop apply.
     let has_full_binding = p
         .signer_binding
@@ -612,16 +619,18 @@ fn pairing_row_status(
         binding.descriptor_sha256.len() == 32
             && hex::encode(&binding.descriptor_sha256) == descriptor_sha256
     });
-    let exact = p
-        .exact_signer_against(descriptor_sha256, vault_key_fingerprints)
-        .is_ok();
+    let exact = chain.is_some_and(|chain| {
+        p.exact_signer_against(descriptor_sha256, vault_key_fingerprints, chain)
+            .is_ok()
+    });
     if exact {
-        (page::Status::Ok, "Paired", "Exact vault key paired.")
+        (page::Status::Ok, "Paired", "Exact vault key paired.".into())
     } else if has_full_binding && !removable {
         (
             page::Status::Warn,
             "Other Vault",
-            "This pairing belongs to a different Vault descriptor. Open that Vault to remove it.",
+            "This pairing belongs to a different Vault descriptor. Open that Vault to remove it."
+                .into(),
         )
     } else if p.network.is_none() {
         // A pairing made before v3: kept visible and never used to sign
@@ -630,13 +639,17 @@ fn pairing_row_status(
         (
             page::Status::Warn,
             "Pair again",
-            crate::phone_signer::pairing_store::PRE_V3_PAIRING,
+            crate::phone_signer::pairing_store::PRE_V3_PAIRING.into(),
         )
+    } else if let Some(refusal) = chain.and_then(|chain| p.chain_refusal(chain)) {
+        // Paired for another chain, or a phone that cannot sign this chain.
+        (page::Status::Warn, "Pair again", refusal.into())
     } else {
         (
             page::Status::Warn,
             "Pair again",
-            "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed.",
+            "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed."
+                .into(),
         )
     }
 }
@@ -760,12 +773,36 @@ mod tests {
         };
         // Another Vault's row cannot be removed here, made before v3 or not.
         for network in [None, Some("mainnet")] {
-            let (_, word, detail) = pairing_row_status(&row([2; 32], network), &this_vault, &[]);
+            let (_, word, detail) = pairing_row_status(
+                &row([2; 32], network),
+                &this_vault,
+                &[],
+                Some(crate::chain::ChainId::Bitcoin),
+            );
             assert_eq!(word, "Other Vault");
             assert!(detail.contains("Open that Vault to remove it"));
         }
         // This Vault's row made before v3 says to pair again.
-        let (_, word, detail) = pairing_row_status(&row([1; 32], None), &this_vault, &[]);
-        assert_eq!((word, detail), ("Pair again", PRE_V3_PAIRING));
+        let (_, word, detail) = pairing_row_status(
+            &row([1; 32], None),
+            &this_vault,
+            &[],
+            Some(crate::chain::ChainId::Bitcoin),
+        );
+        assert_eq!((word, detail.as_ref()), ("Pair again", PRE_V3_PAIRING));
+        // This Vault's row paired for another chain says which (R2.7).
+        let (_, word, detail) = pairing_row_status(
+            &row([1; 32], Some("bitcoin-blake2b")),
+            &this_vault,
+            &[],
+            Some(crate::chain::ChainId::Bitcoin),
+        );
+        assert_eq!(
+            (word, detail.as_ref()),
+            (
+                "Pair again",
+                "Paired for Bitcoin Blake2b. Pair again to use it here."
+            )
+        );
     }
 }

@@ -41,8 +41,9 @@ remains authoritative; rate limits do not trigger unbounded retries.
 
 This boundary alone does not activate the runtime gate. Authenticated unlock,
 create/reopen workflow evidence, exact-head review and dedicated live indexer
-acceptance are separate launch gates. Claim/Split, LAN pairing and unsupported
-external signers remain gated.
+acceptance are separate launch gates. Claim/Split and unsupported external
+signers remain gated. Wi-Fi (LAN) pairing and signing follow the chain-bound v3
+pairing rules (`docs/BTCB2_SIGNING_IDENTITY.md`), as on Bitcoin.
 
 The admitted client is installed into both Connect account and Cube consumers
 before the initialization task runs. Its bootstrap loads user information from

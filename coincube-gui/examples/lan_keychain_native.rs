@@ -93,7 +93,9 @@ async fn main() {
         serde_json::to_value(&stored.phones[0]).unwrap(),
         serde_json::to_value(&paired).unwrap()
     );
-    let binding = paired.exact_signer(descriptor).unwrap();
+    let binding = paired
+        .exact_signer(descriptor, coincube_core::chain::ChainId::Regtest)
+        .unwrap();
     assert_eq!(binding.key_id, format!("{}", 10 + index));
     assert_eq!(
         binding.xpub,

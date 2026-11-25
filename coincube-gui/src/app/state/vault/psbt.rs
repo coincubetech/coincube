@@ -2290,6 +2290,10 @@ pub struct SignModal {
     /// Keys with a signing request out to a Keychain phone over the local
     /// network, so its result is handled as a Wi-Fi one.
     lan_signing: HashSet<Fingerprint>,
+    /// Keys whose Wi-Fi pairing this Vault will not dial on its chain, with
+    /// the reason (contract R2.6, R2.7). Read from the pairing store when
+    /// the picker opens.
+    lan_refusals: HashMap<Fingerprint, String>,
 }
 
 impl SignModal {
@@ -2327,7 +2331,23 @@ impl SignModal {
             expanded_paths: HashSet::new(),
             lan_failures: HashMap::new(),
             lan_signing: HashSet::new(),
+            lan_refusals: HashMap::new(),
         }
+        .with_lan_refusals()
+    }
+
+    /// Read why this Vault's paired phones are not dialled on its chain.
+    /// A missing or unreadable store, or a wallet with no phone policy,
+    /// leaves the list as it was.
+    fn with_lan_refusals(mut self) -> Self {
+        let policy = crate::phone_signer::policy::PhonePolicy::from_wallet(&self.wallet).ok();
+        if let (Some(policy), Ok(store)) = (
+            policy,
+            crate::phone_signer::pairing_store::load(&self.datadir),
+        ) {
+            self.lan_refusals = store.chain_refusals_for(&policy);
+        }
+        self
     }
 
     /// Record the Connect account state, so unresolved Keychain rows ask
@@ -2836,6 +2856,11 @@ impl SignModal {
                     );
                 }
             }
+        }
+        // A phone paired over Wi-Fi that this Vault will not dial on its
+        // chain says why, instead of asking for a device.
+        if let Some(refusal) = self.lan_refusals.get(&fp) {
+            return St::Disabled(refusal.clone());
         }
         St::Disabled("Connect this signing device to sign.".to_string())
     }
@@ -4816,6 +4841,153 @@ mod tests {
                     chain
                 );
             }
+        }
+    }
+
+    /// A phone paired over Wi-Fi for this Vault that its chain will not dial
+    /// says why in the signer list (contract R2.6, R2.7), where the row
+    /// would otherwise ask for a device. One body for a Bitcoin and a
+    /// Bitcoin Blake2b Vault.
+    #[test]
+    fn a_wifi_pairing_this_chain_will_not_dial_says_why_in_the_signer_list() {
+        use crate::chain::{ChainId, ChainIdExt};
+        use crate::mobile_signing::{BTCB2_UNIFIED_CAPABILITY, CHAIN_IDENTITY_CAPABILITY};
+        use crate::phone_signer::pairing_store::{
+            self, PairedPhone, PairingStoreFile, SignerBinding, BTCB2_PHONE_OUTDATED,
+        };
+        use sha2::{Digest, Sha256};
+        use view::vault::psbt::SigningKeyState;
+
+        let phone = fingerprint("f714c228");
+        let both = vec![
+            CHAIN_IDENTITY_CAPABILITY.to_string(),
+            BTCB2_UNIFIED_CAPABILITY.to_string(),
+        ];
+        for (chain, other) in [
+            (ChainId::Signet, ChainId::BitcoinBlake2bTestnet4),
+            (ChainId::BitcoinBlake2bTestnet4, ChainId::Signet),
+        ] {
+            let wallet = Arc::new(wallet().with_chain(chain));
+            let policy = crate::phone_signer::policy::PhonePolicy::from_wallet(&wallet).unwrap();
+            // The phone key's xpub, so a row for this chain is one it dials.
+            let xpub =
+                <coincube_core::descriptors::CoincubeDescriptor as std::str::FromStr>::from_str(
+                    policy.descriptor(),
+                )
+                .unwrap()
+                .spendable_keys()
+                .into_iter()
+                .find_map(|key| match key {
+                    coincube_core::miniscript::DescriptorPublicKey::XPub(k)
+                        if k.origin.as_ref().map(|(fp, _)| *fp) == Some(phone) =>
+                    {
+                        Some(k.xkey.to_string())
+                    }
+                    _ => None,
+                })
+                .expect("the phone key is a spendable xpub");
+            let row = |network: ChainId, capabilities: Vec<String>| PairedPhone {
+                signer_binding: Some(SignerBinding {
+                    key_id: "1".into(),
+                    xpub: xpub.clone(),
+                    fingerprint: phone,
+                    descriptor_sha256: Sha256::digest(policy.descriptor().as_bytes()).to_vec(),
+                    imported_scope: None,
+                }),
+                cert_pin: [7; 32],
+                name: "Phone".into(),
+                paired_at_unix: 1,
+                wallet_fingerprints: Vec::new(),
+                vault_fingerprint: policy.transport_id(),
+                transport_pubkey: vec![2; 33],
+                fallback_addr: None,
+                network: Some(network.api_str().into()),
+                capabilities,
+            };
+            let state_with = |stored: Vec<PairedPhone>| {
+                let mut path = std::env::temp_dir();
+                path.push(format!(
+                    "coincube-signer-list-test-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::create_dir_all(&path).unwrap();
+                let dir = CoincubeDirectory::new(path.clone());
+                pairing_store::save(
+                    &dir,
+                    &PairingStoreFile {
+                        phones: stored,
+                        pending_unpairs: Vec::new(),
+                    },
+                )
+                .unwrap();
+                let state = SignModal::new(
+                    HashSet::new(),
+                    wallet.clone(),
+                    dir,
+                    chain.bitcoin_network(),
+                    false,
+                    None,
+                    None,
+                    false,
+                )
+                .signing_paths()
+                .into_iter()
+                .find(|p| p.is_primary)
+                .unwrap()
+                .keys
+                .into_iter()
+                .find(|row| row.fingerprint == phone)
+                .unwrap()
+                .state;
+                let _ = std::fs::remove_dir_all(path);
+                state
+            };
+            let disabled = |state: SigningKeyState| match state {
+                SigningKeyState::Disabled(reason) => reason,
+                _ => panic!("{}: the row should be disabled", chain),
+            };
+
+            // Paired for the other chain: the list offers to pair again.
+            assert_eq!(
+                disabled(state_with(vec![row(other, both.clone())])),
+                format!("Paired for {}. Pair again to use it here.", other.label()),
+                "{}",
+                chain
+            );
+            // Paired for this chain by a phone without both capabilities:
+            // refused on Bitcoin Blake2b only.
+            let outdated = disabled(state_with(vec![row(
+                chain,
+                vec![CHAIN_IDENTITY_CAPABILITY.to_string()],
+            )]));
+            if chain.is_blake2b() {
+                assert_eq!(outdated, BTCB2_PHONE_OUTDATED);
+            } else {
+                assert_eq!(outdated, "Connect this signing device to sign.");
+            }
+            // No pairing, or a pairing this chain dials: the usual advice.
+            assert_eq!(
+                disabled(state_with(Vec::new())),
+                "Connect this signing device to sign.",
+                "{}",
+                chain
+            );
+            assert_eq!(
+                disabled(state_with(vec![row(chain, both.clone())])),
+                "Connect this signing device to sign.",
+                "{}",
+                chain
+            );
+            // A refused row beside another phone that may sign the same key:
+            // that phone may only be offline, so the usual advice stays.
+            let mut second = row(chain, both.clone());
+            second.cert_pin = [8; 32];
+            assert_eq!(
+                disabled(state_with(vec![row(other, both.clone()), second])),
+                "Connect this signing device to sign.",
+                "{}",
+                chain
+            );
         }
     }
 

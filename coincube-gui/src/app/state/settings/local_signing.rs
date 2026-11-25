@@ -688,11 +688,7 @@ impl LocalSigningState {
             return Task::none();
         }
         self.refresh_phones_from(dir);
-        if self.sync_in_flight
-            || self
-                .wallet_chain
-                .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
-        {
+        if self.sync_in_flight {
             return Task::none();
         }
         self.sync_in_flight = true;
@@ -921,20 +917,6 @@ impl State for LocalSigningState {
             Message::View(view::Message::Settings(view::SettingsMessage::LocalSigning(m))) => m,
             _ => return Task::none(),
         };
-        if self
-            .wallet_chain
-            .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
-            && matches!(
-                msg,
-                LocalSigningMessage::StartPairing | LocalSigningMessage::PickPhone(_)
-            )
-        {
-            self.start_pairing_run();
-            self.flow = PairingFlow::Error(PairingError::InternalError(
-                crate::phone_signer::BTCB2_LAN_UNAVAILABLE.to_string(),
-            ));
-            return Task::none();
-        }
         match msg {
             LocalSigningMessage::SelectKey(key) => {
                 if matches!(self.flow, PairingFlow::Idle)
@@ -2277,7 +2259,7 @@ mod tests {
     /// offer generated afterwards then carried the wrong vault id.
     /// `apply_wallet` is the helper both paths now go through.
     #[test]
-    fn bitcoin_twin_switch_revokes_pairing_and_btcb2_cannot_start_or_pick() {
+    fn bitcoin_twin_switch_revokes_pairing_and_btcb2_pairs_as_bitcoin() {
         use crate::chain::ChainId;
         let bitcoin =
             Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap()).with_chain(ChainId::Bitcoin);
@@ -2291,24 +2273,42 @@ mod tests {
         assert!(state.apply_wallet_update(&btcb2));
         assert_ne!(state.pairing_id, old_id);
         assert!(matches!(state.flow, PairingFlow::Idle));
-        state.initialised = true; // no fixture needs a real pairing-store read
-        for message in [
-            LocalSigningMessage::StartPairing,
-            LocalSigningMessage::PickPhone("fixture".into()),
-        ] {
-            let task = state.update(
+        assert_eq!(state.wallet_chain(), Some(ChainId::BitcoinBlake2b));
+
+        // Picking a phone offers a code for the Vault's own chain, on
+        // Bitcoin and on its Bitcoin Blake2b twin alike.
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let dir = fresh_dir();
+            let cache = Cache {
+                datadir_path: dir.clone(),
+                ..Cache::default()
+            };
+            let mut state = LocalSigningState::default();
+            state.initialised = true;
+            state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true).with_chain(chain));
+            let phone = crate::phone_signer::mdns::DiscoveredPhone {
+                cert_fp8: "01010101".into(),
+                addr: "127.0.0.1:0".parse().unwrap(),
+                instance_name: "fixture".into(),
+            };
+            state.flow = PairingFlow::PhonePicker {
+                discovered: vec![phone],
+            };
+            let _ = state.update(
                 None,
-                &Cache::default(),
+                &cache,
                 Message::View(view::Message::Settings(
-                    view::SettingsMessage::LocalSigning(message),
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::PickPhone(
+                        "01010101".into(),
+                    )),
                 )),
             );
-            assert!(iced_runtime::task::into_stream(task).is_none());
             match &state.flow {
-                PairingFlow::Error(PairingError::InternalError(error)) => {
-                    assert!(error.contains("chain-bound pairing"))
+                PairingFlow::Waiting { offer, .. } => {
+                    assert_eq!(offer.network, chain.api_str(), "{}", chain);
                 }
-                _ => panic!("BTCB2 pairing should be unavailable"),
+                PairingFlow::Error(error) => panic!("{}: {}", chain, error),
+                _ => panic!("{}: picking a phone should show the code", chain),
             }
         }
     }

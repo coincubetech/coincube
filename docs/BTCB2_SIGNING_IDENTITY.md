@@ -26,8 +26,11 @@ with the comments quoted in §4.3 and the `network_mismatch` code. Desktop PR 8b
 the row's `network` and `capabilities` (§4.4): a row without a network is a pre-v3
 pairing, kept listed and removable and refused for every Vault with the R2.6 legacy
 copy, and pairing the same phone for another chain replaces its row, which the pairing
-screen says before the user scans. The dial predicate (§4.5) and the network on
-`PresentSession`/`PartialSignature` follow in PRs 8c and 8d. The v3 known-answer vector
+screen says before the user scans. Desktop PR 8c puts the dial predicate (§4.5) in `exact_signer_against` with the
+Vault's chain: another chain's row gives R2.7, a Bitcoin Blake2b row without both
+capabilities gives the R2.6 capability copy, the settings and signer lists show them,
+and the blanket Bitcoin Blake2b Wi-Fi refusals are gone. The network on
+`PresentSession`/`PartialSignature` follows in PR 8d. The v3 known-answer vector
 is `phone_signer/pairing.rs::pairing_proof_known_answer_vector`: psk = the 16 bytes
 `0x00..0x0f` (`AAECAwQFBgcICQoLDA0ODw`), desktop fp `"aa"×32`, phone fp `"bb"×32`;
 `net = bitcoin-blake2b` →

@@ -110,14 +110,6 @@ pub struct PhoneSigner {
     pub(crate) transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
 }
 
-/// The current LAN protocol cannot authenticate a BTCB2 pairing identity.
-/// Keep this gate independent of Cube/runtime exposure until pairing v3 ships.
-pub(crate) fn lan_signing_allowed(chain: crate::chain::ChainId) -> bool {
-    !chain.is_blake2b()
-}
-
-pub(crate) const BTCB2_LAN_UNAVAILABLE: &str = "Mobile signing over the local network is unavailable for Bitcoin Blake2b until chain-bound pairing is supported. Use a supported Connect signer.";
-
 impl std::fmt::Debug for PhoneSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhoneSigner")
@@ -251,9 +243,9 @@ impl HWI for PhoneSigner {
 
     async fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), HwiError> {
         use crate::services::connect::grpc::connect_v1 as cv1;
-        if !lan_signing_allowed(self.chain) {
-            return Err(HwiError::Device(BTCB2_LAN_UNAVAILABLE.to_string()));
-        }
+        // Chain-bound pairing (v3) decides which chain this phone may sign
+        // for: `current_binding` applies the chain rule in
+        // `PairedPhone::exact_signer_against` (contract §4.5).
         if self.peer_unpaired() {
             return Err(HwiError::Device(protocol::phone_unpaired_text()));
         }
@@ -337,7 +329,8 @@ impl HWI for PhoneSigner {
         let session = cv1::SigningSession {
             // Empty until desktop PR 8d, which states the paired record's
             // chain here and checks `PartialSignature.network` against it
-            // (see grpc/local_envelope.proto). LAN stays BTCB2-gated.
+            // (see grpc/local_envelope.proto). The chain is already enforced
+            // before this point by `PhoneSigner::current_binding` (PR 8c).
             network: String::new(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),

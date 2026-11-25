@@ -308,7 +308,7 @@ async fn signer_against_echo_phone() -> (PhoneSigner, tokio::task::JoinHandle<Op
         vault_fingerprint: lan_binding::vault(large_psbt::TR_DESC),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
-        network: Some("mainnet".into()),
+        network: Some(coincube_core::chain::ChainId::Regtest.api_str().into()),
         capabilities: Vec::new(),
     };
     let signer = PhoneSigner::new(

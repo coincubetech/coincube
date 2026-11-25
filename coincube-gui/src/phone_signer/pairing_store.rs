@@ -7,6 +7,7 @@
 //! Skeleton status: types and load/save signatures are in place;
 //! the file I/O paths are stubbed and marked TODO.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -116,6 +117,13 @@ pub struct PairedPhone {
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
+
+/// Signer-list copy for a Bitcoin Blake2b Vault when the phone did not report
+/// both capabilities at pairing (contract R2.6, capability variant), word for
+/// word. The capabilities are recorded at pairing only, so an updated phone
+/// must also pair again before it is dialled.
+pub const BTCB2_PHONE_OUTDATED: &str =
+    "This phone's COINCUBE Mobile needs updating before it can sign on Bitcoin Blake2b.";
 
 /// Signer-list copy for a pairing made before v3 (contract R2.6, legacy
 /// variant), shown for every Vault on every chain.
@@ -237,7 +245,7 @@ impl PairedPhone {
 
     pub fn exact_signer_for(&self, policy: &PhonePolicy) -> Result<&SignerBinding, String> {
         match policy.kind() {
-            PhonePolicyKind::Vault(_) => self.exact_signer(policy.descriptor()),
+            PhonePolicyKind::Vault(_) => self.exact_signer(policy.descriptor(), policy.chain()),
             PhonePolicyKind::Imported { wallet, wallet_id } => {
                 self.exact_imported_signer(policy.descriptor(), wallet, wallet_id)
             }
@@ -253,9 +261,7 @@ impl PairedPhone {
         use coincube_core::miniscript::{DescriptorPublicKey, ForEachKey};
         use sha2::{Digest, Sha256};
         let error = "Pair this phone again and select its exact imported account key.";
-        if self.network.is_none() {
-            return Err(PRE_V3_PAIRING.into());
-        }
+        self.check_paired_chain(wallet.chain())?;
         let binding = self.signer_binding.as_ref().ok_or(error)?;
         let scope = binding.imported_scope.as_ref().ok_or(error)?;
         let digest = Sha256::digest(descriptor.as_bytes());
@@ -288,12 +294,17 @@ impl PairedPhone {
         if matches != 1 {
             return Err(error.into());
         }
+        // The same chain rule as a Vault's pairing, capabilities included: an
+        // imported Bitcoin Blake2b wallet needs a phone that can sign it.
+        if let Some(outdated) = self.chain_refusal(wallet.chain()) {
+            return Err(outdated);
+        }
         Ok(binding)
     }
 
     /// Full descriptor commitment and exact parsed key membership are authority;
     /// a master fingerprint or the four-byte vault display ID alone is not.
-    pub fn exact_signer(&self, descriptor: &str) -> Result<&SignerBinding, String> {
+    pub fn exact_signer(&self, descriptor: &str, chain: ChainId) -> Result<&SignerBinding, String> {
         use coincube_core::{descriptors::CoincubeDescriptor, miniscript::DescriptorPublicKey};
         use sha2::{Digest, Sha256};
         use std::str::FromStr;
@@ -312,6 +323,7 @@ impl PairedPhone {
         self.exact_signer_against(
             &hex::encode(Sha256::digest(descriptor.as_bytes())),
             &vault_keys,
+            chain,
         )
     }
 
@@ -324,17 +336,22 @@ impl PairedPhone {
     /// descriptor. Checking a subset here is what makes a row read "Exact
     /// vault key paired" while signing and the hw refresh loop reject the
     /// phone, so this is the only predicate either path should use.
+    ///
+    /// `chain` is the Vault's chain. A Bitcoin Vault and its Bitcoin Blake2b
+    /// twin share a descriptor, so the chain rule lives here (contract
+    /// §4.5): the row must have been paired for this chain (R2.7; a pre-v3
+    /// row is R2.6, legacy variant), and on Bitcoin Blake2b the phone must
+    /// have reported both capabilities at pairing (R2.6, capability variant;
+    /// `mobile_signing::btcb2_signing_capable`, the rule the Connect rail
+    /// uses). Bitcoin-family Vaults require no capability.
     pub fn exact_signer_against(
         &self,
         descriptor_sha256_hex: &str,
         vault_keys: &[(String, Fingerprint)],
+        chain: ChainId,
     ) -> Result<&SignerBinding, String> {
         let error = "Pair this phone again and select its exact vault key.";
-        // A pairing made before v3 is never used, on any chain (contract
-        // R2.6, legacy variant; master decision 21).
-        if self.network.is_none() {
-            return Err(PRE_V3_PAIRING.into());
-        }
+        self.check_paired_chain(chain)?;
         let binding = self.signer_binding.as_ref().ok_or(error)?;
         let member = vault_keys
             .iter()
@@ -352,7 +369,44 @@ impl PairedPhone {
         {
             return Err(error.into());
         }
+        if let Some(outdated) = self.chain_refusal(chain) {
+            return Err(outdated);
+        }
         Ok(binding)
+    }
+
+    /// Why this row is not used for a Vault on `chain`, as far as the chain
+    /// rule goes (contract R2.6 and R2.7), or `None`. The settings list shows
+    /// it for a row of the loaded Vault; [`Self::exact_signer_against`]
+    /// applies the same rule.
+    pub fn chain_refusal(&self, chain: ChainId) -> Option<String> {
+        if let Err(message) = self.check_paired_chain(chain) {
+            return Some(message);
+        }
+        (chain.is_blake2b() && !crate::mobile_signing::btcb2_signing_capable(&self.capabilities))
+            .then(|| BTCB2_PHONE_OUTDATED.to_string())
+    }
+
+    /// The pairing's chain against the Vault's: a pre-v3 row is never used
+    /// (R2.6, legacy variant), and a row for another chain is not either
+    /// (R2.7). Shared by the Vault and imported predicates.
+    fn check_paired_chain(&self, chain: ChainId) -> Result<(), String> {
+        use crate::chain::ChainIdExt;
+        match self.network.as_deref() {
+            None => Err(PRE_V3_PAIRING.into()),
+            Some(net) if net == chain.api_str() => Ok(()),
+            Some(net) => Err(match ChainId::from_api_str(net) {
+                Some(other) => coincube_ui::localized_format!(
+                    "Paired for {}. Pair again to use it here.",
+                    "Emparejado para {}. Empareja de nuevo para usarlo aquí.",
+                    other.label()
+                ),
+                None => coincube_ui::localized_format!(
+                    "Paired for another network. Pair again to use it here.",
+                    "Emparejado para otra red. Empareja de nuevo para usarlo aquí."
+                ),
+            }),
+        }
     }
 }
 
@@ -373,6 +427,41 @@ pub struct PairingStoreFile {
 }
 
 impl PairingStoreFile {
+    /// Why this policy's own paired phones are not dialled on its chain,
+    /// by the bound key's fingerprint: paired for another chain (contract
+    /// R2.7), before v3 or, on Bitcoin Blake2b, by a phone without the
+    /// capabilities (R2.6). The signer list shows these where it would
+    /// otherwise only ask for the device. Rows of another descriptor are
+    /// not this Vault's and are left out.
+    pub fn chain_refusals_for(&self, policy: &PhonePolicy) -> HashMap<Fingerprint, String> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(policy.descriptor().as_bytes());
+        // A key another of its rows may sign with keeps the usual advice:
+        // that phone may only be offline.
+        let signable: std::collections::HashSet<Fingerprint> = self
+            .phones
+            .iter()
+            .filter_map(|row| row.exact_signer_for(policy).ok())
+            .map(|binding| binding.fingerprint)
+            .collect();
+        let mut refusals = HashMap::new();
+        for row in &self.phones {
+            let Some(binding) = row.signer_binding.as_ref() else {
+                continue;
+            };
+            if binding.descriptor_sha256 != digest.as_slice()
+                || signable.contains(&binding.fingerprint)
+            {
+                continue;
+            }
+            if let Some(refusal) = row.chain_refusal(policy.chain()) {
+                // Rows in file order: the first refusal for a key is shown.
+                refusals.entry(binding.fingerprint).or_insert(refusal);
+            }
+        }
+        refusals
+    }
+
     /// Decides whether a live hardware-list handle may be reused for the
     /// current imported wallet. A valid newly paired row is not sufficient:
     /// the handle captured the old row and old policy when it was dialled.
@@ -826,7 +915,7 @@ mod tests {
 
         assert!(
             phone(good.clone())
-                .exact_signer_against(&hash_hex, &vault_keys)
+                .exact_signer_against(&hash_hex, &vault_keys, ChainId::Bitcoin)
                 .is_ok(),
             "a fully consistent binding is an exact signer",
         );
@@ -858,7 +947,7 @@ mod tests {
         ] {
             assert!(
                 phone(binding)
-                    .exact_signer_against(&hash_hex, &vault_keys)
+                    .exact_signer_against(&hash_hex, &vault_keys, ChainId::Bitcoin)
                     .is_err(),
                 "{} must not read as an exact signer",
                 label,
@@ -872,7 +961,7 @@ mod tests {
                 vault_fingerprint: Fingerprint::from([0, 0, 0, 1]),
                 ..sample_phone(1)
             }
-            .exact_signer_against(&hash_hex, &vault_keys)
+            .exact_signer_against(&hash_hex, &vault_keys, ChainId::Bitcoin)
             .is_err(),
             "a vault id that doesn't match the descriptor commitment must not read as exact",
         );
@@ -963,10 +1052,15 @@ mod tests {
         for phone in &file.phones {
             assert_eq!(phone.network, None);
             assert!(phone.capabilities.is_empty());
-            assert_eq!(phone.exact_signer(descriptor).unwrap_err(), PRE_V3_PAIRING);
             assert_eq!(
                 phone
-                    .exact_signer_against(&hex::encode(digest), &vault_keys)
+                    .exact_signer(descriptor, ChainId::Bitcoin)
+                    .unwrap_err(),
+                PRE_V3_PAIRING
+            );
+            assert_eq!(
+                phone
+                    .exact_signer_against(&hex::encode(digest), &vault_keys, ChainId::Bitcoin)
                     .unwrap_err(),
                 PRE_V3_PAIRING
             );

@@ -417,9 +417,12 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         None,
         paired_clone,
+        // The chain it was paired for: a pairing for another chain is never
+        // dialled (contract R2.7), so a mismatch here would refuse before the
+        // phone saw the session.
         coincube_gui::phone_signer::policy::PhonePolicy::vault(
             DESC,
-            coincube_core::chain::ChainId::Regtest,
+            coincube_gui::chain::ChainId::Bitcoin,
         )
         .expect("vault policy"),
         durable_pairing_test_dir(),
@@ -438,7 +441,11 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     );
 
     drop(signer);
-    let _ = phone_handle.await;
+    // The phone read the session and answered: the pairing was dialled.
+    phone_handle
+        .await
+        .expect("join")
+        .expect("the phone received and answered the session");
 }
 
 #[tokio::test]
