@@ -239,6 +239,42 @@ fn a_local_cube_signs_in_through_the_bitcoin_path_into_its_own_folder() {
     });
 }
 
+/// The folder's active session was saved by a Connect-served Cube on another
+/// host: a local-node Cube does not restore it, since it signs in on the
+/// configured API and the token would go there.
+#[test]
+fn a_local_node_cube_never_restores_another_hosts_session() {
+    let root = tempfile::tempdir().unwrap();
+    let datadir = CoincubeDirectory::new(root.path().to_path_buf());
+    let dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+    std::fs::create_dir_all(dir.path()).unwrap();
+    let write = |api_base_url: Option<&str>| {
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": EMAIL,
+                "accounts": [{"email": EMAIL, "tokens": {
+                    "access_token": TOKEN, "refresh_token": "r", "expires_at": 2000
+                }, "api_base_url": api_base_url}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write(Some("https://cube.example"));
+    assert!(crate::gui::tab::saved_connect_session(
+        &datadir,
+        crate::chain::ChainId::BitcoinBlake2b
+    )
+    .is_none());
+    write(None);
+    assert!(crate::gui::tab::saved_connect_session(
+        &datadir,
+        crate::chain::ChainId::BitcoinBlake2b
+    )
+    .is_some());
+}
+
 /// A local-node Cube with a saved session opens signed in, as a Bitcoin Cube
 /// with a Vault does, and reaches `ConnectStreamReady` on it.
 #[test]

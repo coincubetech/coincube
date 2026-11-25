@@ -399,6 +399,12 @@ impl App {
         let seq = session_event.event_seq;
         let persist_task = if let Some(email) = self.connect_email.clone() {
             let network_dir = self.datadir.network_directory(self.cache.chain());
+            // The cursor is this stream's host's: an entry another host
+            // issued keeps its own.
+            let issuer = crate::services::connect::client::cache::issuing_api(
+                &self.connect_base_url(),
+                &crate::services::coincube_api_base_url(),
+            );
             Task::perform(
                 async move {
                     if let Err(e) =
@@ -406,6 +412,7 @@ impl App {
                             &network_dir,
                             &email,
                             seq,
+                            issuer.as_deref(),
                         )
                         .await
                     {

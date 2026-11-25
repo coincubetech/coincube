@@ -183,6 +183,10 @@ impl ConnectCache {
                 if c.api_base_url.as_deref() != api {
                     c.device_id = None;
                     c.last_seen_event_seq = None;
+                    // A re-registration started for the previous host's
+                    // session is superseded, as by a new sign-in: its
+                    // completion must not install that host's id here.
+                    c.reregister_claim = None;
                     c.api_base_url = api.map(str::to_string);
                 }
             }
@@ -912,10 +916,14 @@ fn apply_unclaimed_device_registration(
 /// account matching `email`. Idempotent — only writes when the new value is
 /// strictly greater, so concurrent stream writers can't move the cursor
 /// backwards.
+///
+/// `issuer` is the host of the stream the event came from
+/// ([`issuing_api`]): an entry another host issued keeps its own cursor.
 pub async fn set_last_seen_event_seq_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
     event_seq: i64,
+    issuer: Option<&str>,
 ) -> Result<(), ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -949,7 +957,11 @@ pub async fn set_last_seen_event_seq_for_email(
         }
     };
 
-    let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
+    let Some(account) = cache
+        .accounts
+        .iter_mut()
+        .find(|a| a.email == email && a.issued_by(issuer))
+    else {
         return Ok(());
     };
     if account.last_seen_event_seq.unwrap_or(0) >= event_seq {
@@ -1147,6 +1159,52 @@ mod tests {
         let saved = entry();
         assert_eq!(saved.api_base_url, None);
         assert_eq!((saved.device_id, saved.last_seen_event_seq), (None, None));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A stream's event cursor is written only to an entry its host issued,
+    /// and a host change supersedes a re-registration started for the
+    /// previous host's session.
+    #[tokio::test]
+    async fn the_cursor_and_a_reregistration_stay_with_their_host() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("seed"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(3);
+        cache.accounts[0].reregister_claim = Some("about-claim".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Another host's stream leaves the configured API's cursor alone.
+        super::set_last_seen_event_seq_for_email(&dir, email, 50, Some("https://cube.example"))
+            .await
+            .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(3));
+        super::set_last_seen_event_seq_for_email(&dir, email, 4, None)
+            .await
+            .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(4));
+
+        // The Cube's host takes the entry over: the claim goes with the
+        // previous host's device id and cursor.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        let taken = entry();
+        assert_eq!(taken.reregister_claim, None);
+        assert_eq!(taken.last_seen_event_seq, None);
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
