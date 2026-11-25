@@ -364,8 +364,7 @@ impl DuressOrchestrator {
     /// Duress cleared server-side (gRPC `DuressCleared` or a launch/sign-in
     /// reconcile). Exits the cryptic screen.
     pub fn handle_remote_clear(&mut self) -> Result<(), DuressError> {
-        self.local_state.active = false;
-        self.local_state.unlock_at = None;
+        self.local_state.clear_lock();
         self.local_state
             .save(&self.data_dir)
             .map_err(DuressError::Io)?;
@@ -504,6 +503,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(h.calls.lock().unwrap().as_slice(), &["acct_1".to_string()]);
+        let _ = std::fs::remove_dir_all(&h.dir);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_remote_lock_account_does_not_redirect_the_activation_post() {
+        let mut h = build(Behavior::Ok);
+        h.orch.local_state.account_id = Some("acct_enrolled".to_string());
+        h.orch
+            .local_state
+            .record_remote_lock_account(Some("acct_other".to_string()));
+        h.orch.activate(None).await.unwrap();
+        h.notify.notified().await;
+        assert_eq!(
+            h.calls.lock().unwrap().as_slice(),
+            &["acct_enrolled".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&h.dir);
     }
 

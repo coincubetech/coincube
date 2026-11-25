@@ -441,8 +441,7 @@ impl App {
                         return;
                     }
                 };
-                st.active = false;
-                st.unlock_at = None;
+                st.clear_lock();
                 if let Err(e) = st.save(&root) {
                     log::warn!("[CONNECT GRPC] Failed to clear remote duress state: {e}");
                 }
@@ -877,23 +876,35 @@ mod remote_duress_tests {
 
     fn signed_in_app(root: &TempRoot) -> super::App {
         let mut app = crate::app::shell_tests::bitcoin_app_with_id(&root.0, "remote-duress");
-        app.connect_email = Some("a@example.com".into());
+        app.connect_email = Some("b@example.com".into());
         app.panels.connect.account.user = Some(User {
             id: 7,
-            email: "a@example.com".into(),
+            email: "b@example.com".into(),
             email_verified: Some(true),
         });
         app
     }
 
-    fn persist_remote_lock(app: &super::App) {
+    fn run(task: iced::Task<super::Message>) {
         use iced::futures::StreamExt;
-        let task = app.handle_connect_duress_activated(None, "remote".into());
         if let Some(stream) = iced_runtime::task::into_stream(task) {
             drop(iced::futures::executor::block_on(
                 stream.collect::<Vec<_>>(),
             ));
         }
+    }
+
+    fn persist_remote_lock(app: &super::App) {
+        run(app.handle_connect_duress_activated(None, "remote".into()));
+    }
+
+    /// Account 3 enrolled duress on this computer and is not locked.
+    fn enrolled_as_3(root: &TempRoot) {
+        write_lock(&root.0, Some("3"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.active = false;
+        state.enrolled = true;
+        state.save(&root.0).unwrap();
     }
 
     #[test]
@@ -904,33 +915,70 @@ mod remote_duress_tests {
         persist_remote_lock(&app);
         let state = DuressLocalState::load(&root.0).unwrap();
         assert!(state.active);
-        assert_eq!(state.account_id.as_deref(), Some("7"));
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(
+            state.account_id, None,
+            "the enrolment's identity is untouched"
+        );
+        assert_eq!(state.lock_account(), Some("7"));
         drop(app);
         assert_eq!(crate_dir_entries(), before);
     }
 
     #[test]
-    fn a_remote_lock_keeps_the_enrolling_account() {
+    fn a_remote_lock_by_another_account_leaves_the_enrolment_on_its_own_account() {
         let root = TempRoot::new("remote-lock-enrolled");
-        write_lock(&root.0, Some("3"));
-        let mut state = DuressLocalState::load(&root.0).unwrap();
-        state.active = false;
-        state.save(&root.0).unwrap();
+        enrolled_as_3(&root);
         let app = signed_in_app(&root);
         persist_remote_lock(&app);
         let state = DuressLocalState::load(&root.0).unwrap();
         assert!(state.active);
         assert_eq!(state.account_id.as_deref(), Some("3"));
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(state.lock_account(), Some("7"));
+
+        // The remote-disable reconcile still acts on the enrolling account,
+        // and not on the account that raised the lock.
+        let disarm = |account: &str| {
+            iced::futures::executor::block_on(crate::app::reconcile_duress_disarm(
+                root.dir(),
+                account.to_string(),
+            ))
+            .unwrap()
+        };
+        assert!(!disarm("7"));
+        assert_eq!(
+            DuressLocalState::load(&root.0)
+                .unwrap()
+                .account_id
+                .as_deref(),
+            Some("3")
+        );
+        assert!(disarm("3"));
     }
 
     #[test]
     fn a_panel_user_that_is_not_the_streams_account_is_not_recorded() {
         let root = TempRoot::new("remote-lock-mismatch");
         let mut app = signed_in_app(&root);
-        app.connect_email = Some("b@example.com".into());
+        app.connect_email = Some("someone-else@example.com".into());
         persist_remote_lock(&app);
         let state = DuressLocalState::load(&root.0).unwrap();
         assert!(state.active);
-        assert_eq!(state.account_id, None);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.lock_account(), None);
+    }
+
+    #[test]
+    fn a_remote_clear_forgets_the_account_that_raised_the_lock() {
+        let root = TempRoot::new("remote-lock-cleared");
+        enrolled_as_3(&root);
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        run(app.handle_connect_duress_cleared());
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(!state.active);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
     }
 }

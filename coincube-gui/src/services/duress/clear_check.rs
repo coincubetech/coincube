@@ -4,7 +4,8 @@
 //! The locked screen offers no sign-in, so it can only ask with a session
 //! already saved on this computer. Which sessions it may trust depends on
 //! whether the lock records the account it belongs to
-//! ([`DuressLocalState::account_id`], the Connect user id):
+//! ([`DuressLocalState::lock_account`], a Connect user id: the account whose
+//! stream delivered a remote lock, else the enrolling account):
 //!
 //! * **An account is recorded.** Saved sessions are tried in this order: the
 //!   one in the OS keyring, then every account entry (not only the active one)
@@ -65,9 +66,9 @@ pub async fn duress_still_active(
             return None;
         }
     };
-    match state.account_id {
+    match state.lock_account() {
         Some(account_id) => {
-            recorded_account_check(datadir, &account_id, keyring, api_base_url).await
+            recorded_account_check(datadir, account_id, keyring, api_base_url).await
         }
         None => launch_folder_check(datadir, launch_network?, api_base_url).await,
     }
@@ -643,6 +644,79 @@ pub(crate) mod tests {
         );
         btcb2.assert_hits(0);
         assert_eq!(check(&root, None, keyring(7, "kr"), &server).await, None);
+    }
+
+    /// A remote lock raised by account 9 on a computer enrolled as account 7.
+    fn remote_lock_by_9_enrolled_as_7(root: &TempRoot) {
+        write_lock(&root.0, Some("7"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.record_remote_lock_account(Some("9".into()));
+        state.save(&root.0).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_remote_lock_by_another_account_is_not_cleared_by_the_enrolling_accounts_session() {
+        let root = TempRoot::new("clear-locked-by-other");
+        remote_lock_by_9_enrolled_as_7(&root);
+        write_connect_json(
+            &root.0,
+            ChainId::Bitcoin,
+            Some("a@example.com"),
+            &[("a@example.com", "enrolling")],
+        );
+        let server = MockServer::start();
+        mock_user(&server, "enrolling", 7);
+        let enrolling = mock_duress(&server, "enrolling", false);
+        let keyring_enrolling = mock_duress(&server, "kr-enrolling", false);
+        assert_eq!(
+            check(
+                &root,
+                Some(Network::Bitcoin),
+                keyring(7, "kr-enrolling"),
+                &server
+            )
+            .await,
+            None
+        );
+        enrolling.assert_hits(0);
+        keyring_enrolling.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn a_remote_lock_is_confirmed_by_the_account_that_raised_it() {
+        for (active, expected) in [(false, Some(false)), (true, Some(true))] {
+            let root = TempRoot::new("clear-locked-by-raiser");
+            remote_lock_by_9_enrolled_as_7(&root);
+            write_connect_json(
+                &root.0,
+                ChainId::BitcoinBlake2b,
+                Some("a@example.com"),
+                &[("a@example.com", "enrolling"), ("b@example.com", "raiser")],
+            );
+            let server = MockServer::start();
+            mock_user(&server, "enrolling", 7);
+            let enrolling = mock_duress(&server, "enrolling", false);
+            mock_user(&server, "raiser", 9);
+            mock_duress(&server, "raiser", active);
+            assert_eq!(
+                check(&root, Some(Network::Bitcoin), keyring(7, "kr"), &server).await,
+                expected
+            );
+            enrolling.assert_hits(0);
+        }
+    }
+
+    #[test]
+    fn a_state_file_from_before_the_locked_by_field_loads() {
+        let root = TempRoot::new("clear-old-state");
+        std::fs::write(
+            DuressLocalState::path(&root.0),
+            br#"{"enrolled": true, "active": true, "accountId": "7"}"#,
+        )
+        .unwrap();
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.lock_account(), Some("7"));
     }
 
     #[tokio::test]
