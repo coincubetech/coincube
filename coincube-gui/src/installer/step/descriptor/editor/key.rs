@@ -43,7 +43,9 @@ use crate::{
         message::{self, Message},
         Error, PathKind,
     },
-    services::coincube::{classify_cube_key_ownership, Contact, CubeKeyOwnership, CubeKeyRaw},
+    services::coincube::{
+        classify_cube_key_ownership, Btcb2SigningRefusal, Contact, CubeKeyOwnership, CubeKeyRaw,
+    },
     signer::Signer,
 };
 
@@ -68,7 +70,9 @@ pub struct ResolvedCubeKeys {
     pub server_cube_id: Option<u64>,
 }
 
-/// Splits a Cube's key list into the viewer's own keys and its contacts' keys.
+/// Splits a Cube's key list into the viewer's own keys and its contacts' keys,
+/// keeping only the keys listed on the Cube's `chain`
+/// ([`CubeKeyRaw::listed_on_chain`]).
 ///
 /// Pure so the classification is unit-testable independently of the API calls
 /// in [`SelectKeySource::on_fetch_cube_keys`], which is its only caller.
@@ -76,11 +80,17 @@ fn resolve_cube_keys(
     raw_keys: Vec<CubeKeyRaw>,
     contacts: &[Contact],
     current_user_id: u64,
+    chain: crate::chain::ChainId,
 ) -> ResolvedCubeKeys {
     let mut my_keys = Vec::new();
     let mut contact_keys = Vec::new();
 
     for key in raw_keys {
+        // One list on every chain; on Bitcoin Blake2b it holds only the
+        // phone's key for this chain, never its Bitcoin key.
+        if !key.listed_on_chain(chain) {
+            continue;
+        }
         // Shared classification (identity-only contact match, never on
         // `ContactRole`) lives in `services::coincube` so this picker and the
         // sign-flow reconcile can't drift apart. See
@@ -233,12 +243,40 @@ pub enum SelectKeySourceMessage {
 const HARDWARE_DEVICE_TIP: &str = "Use a plugged-in hardware signer. \
      Supported: Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.";
 
-/// The Keychain Keys card's tip on the Bitcoin Blake2b picker. The card lists
-/// the COINCUBE Mobile keys attached to this Cube; a phone signs a Bitcoin
-/// Blake2b spend only once its app has Bitcoin Blake2b signing.
-const BLAKE2B_KEYCHAIN_TIP: &str = "COINCUBE Mobile keys attached to this Cube. To sign a \
-     Bitcoin Blake2b spend, the phone needs a COINCUBE Mobile version with Bitcoin Blake2b \
-     signing.";
+/// The caption on a Mobile key row that cannot be added on Bitcoin Blake2b.
+fn btcb2_signing_row_caption(refusal: Btcb2SigningRefusal) -> &'static str {
+    match refusal {
+        Btcb2SigningRefusal::AppOutdated => "Needs a COINCUBE Mobile update",
+        Btcb2SigningRefusal::PhoneUnregistered => "Phone no longer registered",
+        Btcb2SigningRefusal::PhoneUnconfirmed => "Phone not confirmed. Open COINCUBE Mobile on it.",
+    }
+}
+
+/// The error when a Mobile key that cannot be added on Bitcoin Blake2b is
+/// chosen anyway (the row is disabled; this is the backstop).
+fn btcb2_signing_error(refusal: Btcb2SigningRefusal, key_name: &str) -> String {
+    match refusal {
+        Btcb2SigningRefusal::AppOutdated => localized_format!(
+            "“{}” can't sign Bitcoin Blake2b yet. Update COINCUBE Mobile on its phone, then \
+             try again.",
+            "“{}” todavía no puede firmar en Bitcoin Blake2b. Actualiza COINCUBE Mobile en su \
+             teléfono y vuelve a intentarlo.",
+            key_name
+        ),
+        Btcb2SigningRefusal::PhoneUnregistered => localized_format!(
+            "The phone for “{}” is no longer registered, so it can't sign for this Vault.",
+            "El teléfono de “{}” ya no está registrado, así que no puede firmar para este Vault.",
+            key_name
+        ),
+        Btcb2SigningRefusal::PhoneUnconfirmed => localized_format!(
+            "The phone for “{}” could not be confirmed. Open COINCUBE Mobile on it, then try \
+             again.",
+            "No se pudo confirmar el teléfono de “{}”. Abre COINCUBE Mobile en él y vuelve a \
+             intentarlo.",
+            key_name
+        ),
+    }
+}
 
 /// The Hardware Device card's tip on the Bitcoin Blake2b picker. A device
 /// signs the legacy way, so a spend that only devices sign is replayable
@@ -1019,6 +1057,7 @@ impl SelectKeySource {
         else {
             return Task::none();
         };
+        let chain = self.chain;
         self.keychain_keys_loading = true;
         self.keychain_keys_error = None;
         self.keychain_keys_fetched = true;
@@ -1046,7 +1085,7 @@ impl SelectKeySource {
                     }
                 };
 
-                let mut resolved = resolve_cube_keys(raw_keys, &contacts, current_user_id);
+                let mut resolved = resolve_cube_keys(raw_keys, &contacts, current_user_id, chain);
                 resolved.server_cube_id = server_cube_id;
                 Ok(resolved)
             },
@@ -1119,6 +1158,13 @@ impl SelectKeySource {
                 "This is a recovery key — it restores this Cube but can never be a Vault signer."
                     .to_string(),
             );
+            return Task::none();
+        }
+        // Master decision 12: on Bitcoin Blake2b only a key whose phone Connect
+        // resolved as able to sign may be added. The row is disabled; this is
+        // the backstop for view state that lags a re-fetch.
+        if let Some(refusal) = resolved.raw.btcb2_signing_refusal(self.chain) {
+            self.error = Some(btcb2_signing_error(refusal, &resolved.raw.name));
             return Task::none();
         }
         // Already reported unopenable (api PR A4): the server dropped the stale
@@ -1241,6 +1287,13 @@ impl SelectKeySource {
                     owner: resolved.owner,
                     key_id: resolved.raw.id,
                     name: resolved.raw.name.clone(),
+                    // Recorded only on Bitcoin Blake2b, where it was checked
+                    // above; it is not served on a Bitcoin Cube.
+                    btcb2_signing: if self.chain.is_blake2b() {
+                        resolved.raw.btcb2_signing.clone()
+                    } else {
+                        None
+                    },
                 },
                 name: resolved.raw.name.clone(),
                 fingerprint,
@@ -1406,11 +1459,14 @@ impl SelectKeySource {
         col.into()
     }
 
-    fn view_keychain_key_entry(
+    /// Why a Mobile key row is disabled, as its caption, or `None` when it
+    /// can be chosen. Single source of truth for the row's disabled state and
+    /// its caption.
+    fn keychain_key_row_block(
         &self,
         rk: &ResolvedCubeKey,
         show_owner_self_recovery: bool,
-    ) -> Element<Message> {
+    ) -> Option<String> {
         let owner_id = rk.raw.effective_owner_user_id();
         // Match the submit-side `on_select_keychain_key` backstop:
         // a row is "owner-blocked" only when a DIFFERENT key from
@@ -1432,23 +1488,18 @@ impl SelectKeySource {
         // signer. Show it — it teaches the model — but disabled, and let
         // its caption win over the reuse/selection reasons below.
         let is_recovery = show_owner_self_recovery && rk.raw.is_owner_self_recovery();
-        let disabled = is_recovery || owner_blocked || key_reused || used_elsewhere;
-        // A rejected fingerprint still appears on its disabled row.
-        // Truncate by characters so malformed UTF-8 boundaries cannot panic.
-        let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
-        let fingerprint = Some(format!("#{}", fp_short));
-        let msg = if disabled {
-            None
-        } else {
-            let rk_clone = rk.clone();
-            Some(move || Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone())))
-        };
+        // Master decision 12: on Bitcoin Blake2b a key whose phone Connect did
+        // not resolve as able to sign is shown with why, but cannot be added.
+        let signing_refusal = rk.raw.btcb2_signing_refusal(self.chain);
         // Surface the most specific reason when several apply: the recovery
-        // caption first (it's the whole point of the row), then a key
-        // claimed by another Vault, then an exact reuse in this quorum,
-        // then the owner being placed elsewhere.
-        let warning = if is_recovery {
+        // caption first (it's the whole point of the row), then what the
+        // key's phone can do on Bitcoin Blake2b, then a key claimed by
+        // another Vault, then an exact reuse in this quorum, then the owner
+        // being placed elsewhere.
+        if is_recovery {
             Some(localized_copy("Recovery key — restores this Cube, never signs").to_string())
+        } else if let Some(refusal) = signing_refusal {
+            Some(localized_copy(btcb2_signing_row_caption(refusal)).to_string())
         } else if used_elsewhere {
             Some(localized_copy("Used by another Vault").to_string())
         } else if key_reused {
@@ -1457,6 +1508,24 @@ impl SelectKeySource {
             Some(localized_copy("Already selected").to_string())
         } else {
             None
+        }
+    }
+
+    fn view_keychain_key_entry(
+        &self,
+        rk: &ResolvedCubeKey,
+        show_owner_self_recovery: bool,
+    ) -> Element<Message> {
+        let warning = self.keychain_key_row_block(rk, show_owner_self_recovery);
+        // A rejected fingerprint still appears on its disabled row.
+        // Truncate by characters so malformed UTF-8 boundaries cannot panic.
+        let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
+        let fingerprint = Some(format!("#{}", fp_short));
+        let msg = if warning.is_some() {
+            None
+        } else {
+            let rk_clone = rk.clone();
+            Some(move || Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone())))
         };
         modal::key_entry(
             Some(icon::round_key_icon()),
@@ -1480,19 +1549,14 @@ impl SelectKeySource {
     /// The key-source cards, in display order, three per row:
     ///   Row 1: Hardware Device · Keychain Keys · Cube Key
     ///   Row 2: Border Wallet · Import xpub File · Paste xpub
-    /// Bitcoin Blake2b shows the same grid; only the Hardware Device and
-    /// Keychain Keys tips differ. On every chain the Keychain Keys card lists
-    /// the keys attached to this Cube and needs a Connect session.
+    /// Bitcoin Blake2b shows the same grid; only the Hardware Device tip
+    /// differs. On every chain the Keychain Keys card lists the keys attached
+    /// to this Cube and needs a Connect session; on Bitcoin Blake2b each key
+    /// row says whether its phone can sign.
     fn grid_cards(&self) -> Vec<GridCard> {
         let blake2b = self.chain.is_blake2b();
         let keychain_enabled = self.keychain_available();
-        let keychain_tip = if !keychain_enabled {
-            Some("Sign in to Connect to use Mobile keys.")
-        } else if blake2b {
-            Some(BLAKE2B_KEYCHAIN_TIP)
-        } else {
-            None
-        };
+        let keychain_tip = (!keychain_enabled).then_some("Sign in to Connect to use Mobile keys.");
         // "Cube Key" replaces the old Developer-mode "Generate hot key"
         // button. Disabled when the master signer is already placed in
         // the vault (matches the old gate).
@@ -2601,7 +2665,11 @@ mod tests {
                 &mut hws,
                 SelectKeySource::route(SelectKeySourceMessage::CubeKeysLoaded(Ok(
                     ResolvedCubeKeys {
-                        my_keys: vec![resolved_key(7, "0a0b0c0d", 1)],
+                        my_keys: vec![fork_resolved_key(
+                            chain,
+                            7,
+                            Some(crate::services::coincube::Btcb2Signing::CanSign),
+                        )],
                         contact_keys: Vec::new(),
                         server_cube_id: Some(42),
                     },
@@ -2619,11 +2687,21 @@ mod tests {
             );
             assert_eq!(picker.cube_server_id, Some(42), "{chain:?}");
 
-            picker
-                .keys
-                .insert(keychain_fg, (vec![], keychain_key(keychain_fg, 1, 7)));
+            let can_sign = Some(crate::services::coincube::Btcb2Signing::CanSign);
+            picker.keys.insert(
+                keychain_fg,
+                (
+                    vec![],
+                    keychain_key_signing(keychain_fg, 1, 7, can_sign.clone()),
+                ),
+            );
             for event in [
-                SelectKeySourceMessage::LoadKey(Ok(keychain_key(keychain_fg, 1, 7))),
+                SelectKeySourceMessage::LoadKey(Ok(keychain_key_signing(
+                    keychain_fg,
+                    1,
+                    7,
+                    can_sign.clone(),
+                ))),
                 SelectKeySourceMessage::SelectKey(keychain_fg),
             ] {
                 picker.error = None;
@@ -2631,6 +2709,31 @@ mod tests {
                 let _ = picker.update(&mut hws, SelectKeySource::route(event));
                 assert_ne!(picker.error.as_deref(), Some(REFUSED), "{}", label);
             }
+            // The same key recorded without `can_sign` is refused by the
+            // creation gate (master decision 12).
+            let cannot_sign = Some(crate::services::coincube::Btcb2Signing::CannotSign);
+            picker.keys.insert(
+                keychain_fg,
+                (
+                    vec![],
+                    keychain_key_signing(keychain_fg, 1, 7, cannot_sign.clone()),
+                ),
+            );
+            for event in [
+                SelectKeySourceMessage::LoadKey(Ok(keychain_key_signing(
+                    keychain_fg,
+                    1,
+                    7,
+                    cannot_sign.clone(),
+                ))),
+                SelectKeySourceMessage::SelectKey(keychain_fg),
+            ] {
+                picker.error = None;
+                let label = format!("{chain:?} {event:?}");
+                let _ = picker.update(&mut hws, SelectKeySource::route(event));
+                assert_eq!(picker.error.as_deref(), Some(REFUSED), "{}", label);
+            }
+            picker.error = None;
             picker.step = Step::Grid;
             let _ = picker.update(
                 &mut hws,
@@ -2647,11 +2750,12 @@ mod tests {
     fn fork_picker_selects_an_attached_keychain_key() {
         let mut picker = fork_picker(crate::chain::ChainId::BitcoinBlake2bTestnet4);
         let mut hws = HardwareWallets::new(CoincubeDirectory::new(PathBuf::new()), picker.network);
+        let mut key = resolved_key(1, "8a550171", 7);
+        key.raw.network = "bitcoin-blake2b-testnet4".to_string();
+        key.raw.btcb2_signing = Some(crate::services::coincube::Btcb2Signing::CanSign);
         let _ = picker.update(
             &mut hws,
-            SelectKeySource::route(SelectKeySourceMessage::SelectKeychainKey(resolved_key(
-                1, "8a550171", 7,
-            ))),
+            SelectKeySource::route(SelectKeySourceMessage::SelectKeychainKey(key)),
         );
         assert!(picker.error.is_none(), "{:?}", picker.error);
         assert_eq!(picker.step, Step::Details);
@@ -2889,8 +2993,8 @@ mod tests {
 
     /// HW-1: the Bitcoin Blake2b grid matches the Bitcoin one — same cards,
     /// same order. Signed in, Keychain Keys opens the keys attached to this
-    /// Cube and its tip says the phone needs Bitcoin Blake2b signing; signed
-    /// out, it asks for Connect as on Bitcoin. The Hardware Device card says
+    /// Cube with no tip, as on Bitcoin; signed out, it asks for Connect as on
+    /// Bitcoin. The Hardware Device card says
     /// its spends can be replayed and points to the Cube Key; the Border
     /// Wallet card keeps its Bitcoin tip.
     #[test]
@@ -2920,8 +3024,9 @@ mod tests {
                 cards[1].on_press,
                 Some(SelectKeySourceMessage::ShowKeychainKeys)
             ));
-            assert_eq!(cards[1].tip, Some(BLAKE2B_KEYCHAIN_TIP));
-            assert!(BLAKE2B_KEYCHAIN_TIP.contains("attached to this Cube"));
+            // No card-wide caveat: each key row says whether its phone can
+            // sign (master decision 12), as the Bitcoin card has no tip.
+            assert_eq!(cards[1].tip, None);
             assert!(matches!(
                 cards[2].on_press,
                 Some(SelectKeySourceMessage::SelectGenerateMasterKey)
@@ -3282,6 +3387,7 @@ mod tests {
                 vec![raw],
                 &[contact_with_role(7, 42, ContactRole::Keyholder)],
                 1,
+                crate::chain::ChainId::Signet,
             );
             assert_eq!(resolved.contact_keys.len(), 1);
             let mut picker = empty_picker();
@@ -3317,6 +3423,15 @@ mod tests {
     }
 
     fn keychain_key(fingerprint: Fingerprint, owner_id: u64, key_id: u64) -> Key {
+        keychain_key_signing(fingerprint, owner_id, key_id, None)
+    }
+
+    fn keychain_key_signing(
+        fingerprint: Fingerprint,
+        owner_id: u64,
+        key_id: u64,
+        btcb2_signing: Option<crate::services::coincube::Btcb2Signing>,
+    ) -> Key {
         let mut key = manual_key(fingerprint);
         key.source = KeySource::KeychainKey {
             owner: KeychainKeyOwner::SelfUser {
@@ -3324,6 +3439,7 @@ mod tests {
             },
             key_id,
             name: format!("Key {key_id}"),
+            btcb2_signing,
         };
         key
     }
@@ -3789,7 +3905,12 @@ mod tests {
             ContactRole::Unknown,
         ] {
             let contacts = vec![contact_with_role(11, 42, role)];
-            let resolved = resolve_cube_keys(vec![contact_owned_raw_key(5, 42)], &contacts, 7);
+            let resolved = resolve_cube_keys(
+                vec![contact_owned_raw_key(5, 42)],
+                &contacts,
+                7,
+                crate::chain::ChainId::Signet,
+            );
 
             assert!(
                 resolved.my_keys.is_empty(),
@@ -3823,7 +3944,7 @@ mod tests {
         key.owner_email = String::new();
         let contacts = vec![contact_with_role(11, 42, ContactRole::Owner)];
 
-        let resolved = resolve_cube_keys(vec![key], &contacts, 7);
+        let resolved = resolve_cube_keys(vec![key], &contacts, 7, crate::chain::ChainId::Signet);
 
         let KeychainKeyOwner::Contact { contact_email, .. } = &resolved.contact_keys[0].owner
         else {
@@ -3836,7 +3957,12 @@ mod tests {
     fn own_keys_are_classified_by_id_when_the_server_flag_is_unset() {
         // Pre-W3 backend: `isOwnKey` always false, so the id comparison
         // against the authenticated user has to carry the classification.
-        let resolved = resolve_cube_keys(vec![contact_owned_raw_key(5, 7)], &[], 7);
+        let resolved = resolve_cube_keys(
+            vec![contact_owned_raw_key(5, 7)],
+            &[],
+            7,
+            crate::chain::ChainId::Signet,
+        );
 
         assert_eq!(resolved.my_keys.len(), 1);
         assert!(resolved.contact_keys.is_empty());
@@ -3853,9 +3979,306 @@ mod tests {
         // No contact row means no `contact_id` to send to `AddVaultMember`,
         // so the key is unusable and must not be offered.
         let contacts = vec![contact_with_role(11, 99, ContactRole::Keyholder)];
-        let resolved = resolve_cube_keys(vec![contact_owned_raw_key(5, 42)], &contacts, 7);
+        let resolved = resolve_cube_keys(
+            vec![contact_owned_raw_key(5, 42)],
+            &contacts,
+            7,
+            crate::chain::ChainId::Signet,
+        );
 
         assert!(resolved.my_keys.is_empty());
         assert!(resolved.contact_keys.is_empty());
+    }
+
+    // ── Bitcoin Blake2b: the key's phone (master decisions 12 and 28) ──
+
+    use crate::services::coincube::{Btcb2Signing, Btcb2SigningRefusal};
+
+    /// Every `btcb2Signing` the picker can meet: the four values, one this
+    /// build does not know, and none at all (an API older than
+    /// coincube-api#526).
+    fn every_btcb2_signing() -> Vec<Option<Btcb2Signing>> {
+        vec![
+            Some(Btcb2Signing::CanSign),
+            Some(Btcb2Signing::CannotSign),
+            Some(Btcb2Signing::Unavailable),
+            Some(Btcb2Signing::Unknown),
+            Some(Btcb2Signing::Unrecognised("can-sign-v2".to_string())),
+            None,
+        ]
+    }
+
+    /// The refusal each value gets on Bitcoin Blake2b; `None` is addable.
+    fn expected_refusal(value: &Option<Btcb2Signing>) -> Option<Btcb2SigningRefusal> {
+        match value {
+            Some(Btcb2Signing::CanSign) => None,
+            Some(Btcb2Signing::CannotSign) => Some(Btcb2SigningRefusal::AppOutdated),
+            Some(Btcb2Signing::Unavailable) => Some(Btcb2SigningRefusal::PhoneUnregistered),
+            _ => Some(Btcb2SigningRefusal::PhoneUnconfirmed),
+        }
+    }
+
+    /// A Mobile key on `chain` as Connect lists it: a real key on the
+    /// chain's Bitcoin network, the chain's network string, and
+    /// `btcb2Signing` as given.
+    fn fork_resolved_key(
+        chain: crate::chain::ChainId,
+        id: u64,
+        btcb2_signing: Option<Btcb2Signing>,
+    ) -> ResolvedCubeKey {
+        let network = chain.bitcoin_network();
+        let signer = Signer::generate(network).unwrap();
+        let coin = if network == Network::Bitcoin { 0 } else { 1 };
+        let path = DerivationPath::from_str(&format!("m/48'/{coin}'/0'/2'")).unwrap();
+        let mut key = resolved_key(id, &signer.fingerprint().to_string(), 7);
+        key.raw.xpub = signer.get_extended_pubkey(&path).to_string();
+        key.raw.derivation_path = path.to_string();
+        key.raw.network = chain.api_str().to_string();
+        key.raw.btcb2_signing = btcb2_signing;
+        key
+    }
+
+    /// On both Bitcoin Blake2b chains, per value: only `can_sign` gives an
+    /// enabled row and, chosen, a Mobile key ready to place that records
+    /// `can_sign`. Every other value disables the row with its own caption
+    /// and, chosen anyway, is refused with its own message and nothing is
+    /// selected. An unknown string and an absent field fail closed.
+    #[test]
+    fn fork_picker_admits_a_mobile_key_only_when_its_phone_can_sign() {
+        for chain in FORK_CHAINS {
+            for value in every_btcb2_signing() {
+                let label = format!("{chain:?} {value:?}");
+                let mut picker = fork_picker(chain);
+                let mut hws =
+                    HardwareWallets::new(CoincubeDirectory::new(PathBuf::new()), picker.network);
+                let key = fork_resolved_key(chain, 3, value.clone());
+                assert_eq!(
+                    key.raw.btcb2_signing_refusal(chain),
+                    expected_refusal(&value),
+                    "{label}"
+                );
+
+                let row = picker.keychain_key_row_block(&key, true);
+                let _ = picker.update(
+                    &mut hws,
+                    SelectKeySource::route(SelectKeySourceMessage::SelectKeychainKey(key.clone())),
+                );
+                match expected_refusal(&value) {
+                    None => {
+                        assert_eq!(row, None, "{label}");
+                        assert!(picker.error.is_none(), "{label}: {:?}", picker.error);
+                        assert_eq!(picker.step, Step::Details, "{label}");
+                        assert!(
+                            matches!(
+                                &picker.selected_key,
+                                SelectedKey::New(k) if matches!(
+                                    &k.source,
+                                    KeySource::KeychainKey {
+                                        key_id: 3,
+                                        btcb2_signing: Some(Btcb2Signing::CanSign),
+                                        ..
+                                    }
+                                )
+                            ),
+                            "{}",
+                            label
+                        );
+                        let SelectedKey::New(k) = &picker.selected_key else {
+                            unreachable!()
+                        };
+                        assert!(k.source.available_for_creation(chain), "{}", label);
+                        assert!(k.source.replay_capable(), "{}", label);
+                    }
+                    Some(refusal) => {
+                        assert_eq!(
+                            row.as_deref(),
+                            Some(btcb2_signing_row_caption(refusal)),
+                            "{label}"
+                        );
+                        assert_eq!(
+                            picker.error,
+                            Some(btcb2_signing_error(refusal, &key.raw.name)),
+                            "{label}"
+                        );
+                        assert!(
+                            matches!(picker.selected_key, SelectedKey::None),
+                            "{}",
+                            label
+                        );
+                        assert_ne!(picker.step, Step::Details, "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The three refusals read differently, and each says what to do: update
+    /// the app, the phone is gone, or open COINCUBE Mobile on it.
+    #[test]
+    fn btcb2_signing_refusals_have_their_own_copy() {
+        let outdated = btcb2_signing_error(Btcb2SigningRefusal::AppOutdated, "Pixel");
+        let gone = btcb2_signing_error(Btcb2SigningRefusal::PhoneUnregistered, "Pixel");
+        let unconfirmed = btcb2_signing_error(Btcb2SigningRefusal::PhoneUnconfirmed, "Pixel");
+        assert!(outdated.contains("Update COINCUBE Mobile"), "{}", outdated);
+        assert!(gone.contains("no longer registered"), "{}", gone);
+        assert!(
+            unconfirmed.contains("could not be confirmed"),
+            "{}",
+            unconfirmed
+        );
+        assert!(
+            unconfirmed.contains("Open COINCUBE Mobile"),
+            "{}",
+            unconfirmed
+        );
+        for text in [&outdated, &gone, &unconfirmed] {
+            assert!(text.contains("Pixel"), "{}", text);
+            assert!(!text.contains("Keychain"), "{}", text);
+        }
+        assert_eq!(
+            btcb2_signing_row_caption(Btcb2SigningRefusal::AppOutdated),
+            "Needs a COINCUBE Mobile update"
+        );
+        assert_eq!(
+            btcb2_signing_row_caption(Btcb2SigningRefusal::PhoneUnregistered),
+            "Phone no longer registered"
+        );
+        assert_eq!(
+            btcb2_signing_row_caption(Btcb2SigningRefusal::PhoneUnconfirmed),
+            "Phone not confirmed. Open COINCUBE Mobile on it."
+        );
+        // Every row caption has Spanish copy.
+        for refusal in [
+            Btcb2SigningRefusal::AppOutdated,
+            Btcb2SigningRefusal::PhoneUnregistered,
+            Btcb2SigningRefusal::PhoneUnconfirmed,
+        ] {
+            let caption = btcb2_signing_row_caption(refusal);
+            let spanish =
+                coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                    localized_copy(caption).to_string()
+                });
+            assert_ne!(spanish, caption, "{caption}");
+        }
+    }
+
+    /// Bitcoin is unchanged: the field is not consulted off Bitcoin Blake2b,
+    /// so a key is addable whether the field is absent (what Connect sends) or
+    /// present with any value, and the placed key records nothing.
+    #[test]
+    fn bitcoin_picker_ignores_btcb2_signing() {
+        for value in every_btcb2_signing() {
+            let mut picker = empty_picker();
+            assert!(!picker.chain.is_blake2b());
+            let mut hws =
+                HardwareWallets::new(CoincubeDirectory::new(PathBuf::new()), picker.network);
+            let mut key = resolved_key(4, "8a550171", 7);
+            key.raw.btcb2_signing = value.clone();
+            for chain in crate::chain::ChainId::ALL {
+                if !chain.is_blake2b() {
+                    assert_eq!(key.raw.btcb2_signing_refusal(chain), None, "{value:?}");
+                }
+            }
+            assert_eq!(picker.keychain_key_row_block(&key, true), None, "{value:?}");
+            let _ = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::SelectKeychainKey(key)),
+            );
+            assert!(picker.error.is_none(), "{value:?}: {:?}", picker.error);
+            assert_eq!(picker.step, Step::Details, "{value:?}");
+            assert!(
+                matches!(
+                    &picker.selected_key,
+                    SelectedKey::New(k) if matches!(
+                        &k.source,
+                        KeySource::KeychainKey { key_id: 4, btcb2_signing: None, .. }
+                    )
+                ),
+                "{:?}",
+                value
+            );
+        }
+    }
+
+    /// The shared key list's chain filter: on a Bitcoin Blake2b Cube only
+    /// keys on exactly that chain are listed (a Bitcoin-network key, or the
+    /// other Bitcoin Blake2b chain's, is left out); on a Bitcoin-family Cube
+    /// keys on either Bitcoin Blake2b chain are left out and every other key
+    /// is listed as before, an unrecognised network string included.
+    #[test]
+    fn cube_key_list_keeps_only_keys_on_the_cubes_chain() {
+        use crate::chain::ChainId;
+        const NETWORKS: [&str; 8] = [
+            "mainnet",
+            "testnet",
+            "testnet4",
+            "signet",
+            "regtest",
+            "bitcoin-blake2b",
+            "bitcoin-blake2b-testnet4",
+            "some-future-network",
+        ];
+        let raw_keys: Vec<CubeKeyRaw> = NETWORKS
+            .iter()
+            .enumerate()
+            .map(|(i, network)| {
+                let mut key = raw_key(i as u64, "8a550171", 7);
+                key.network = network.to_string();
+                key
+            })
+            .collect();
+        let listed = |chain: ChainId| -> Vec<String> {
+            resolve_cube_keys(raw_keys.clone(), &[], 7, chain)
+                .my_keys
+                .into_iter()
+                .map(|k| k.raw.network)
+                .collect()
+        };
+        assert_eq!(listed(ChainId::BitcoinBlake2b), vec!["bitcoin-blake2b"]);
+        assert_eq!(
+            listed(ChainId::BitcoinBlake2bTestnet4),
+            vec!["bitcoin-blake2b-testnet4"]
+        );
+        let bitcoin_family = vec![
+            "mainnet",
+            "testnet",
+            "testnet4",
+            "signet",
+            "regtest",
+            "some-future-network",
+        ];
+        for chain in ChainId::ALL.iter().copied().filter(|c| !c.is_blake2b()) {
+            assert_eq!(listed(chain), bitcoin_family, "{chain:?}");
+        }
+        // Contacts' keys go through the same filter.
+        let contacts = [contact_with_role(9, 42, ContactRole::Keyholder)];
+        let mut bitcoin_key = contact_owned_raw_key(20, 42);
+        bitcoin_key.network = "mainnet".to_string();
+        let mut fork_key = contact_owned_raw_key(21, 42);
+        fork_key.network = "bitcoin-blake2b".to_string();
+        let resolved = resolve_cube_keys(
+            vec![bitcoin_key.clone(), fork_key.clone()],
+            &contacts,
+            7,
+            ChainId::BitcoinBlake2b,
+        );
+        assert_eq!(
+            resolved
+                .contact_keys
+                .iter()
+                .map(|k| k.raw.id)
+                .collect::<Vec<_>>(),
+            vec![21]
+        );
+        let resolved =
+            resolve_cube_keys(vec![bitcoin_key, fork_key], &contacts, 7, ChainId::Bitcoin);
+        assert_eq!(
+            resolved
+                .contact_keys
+                .iter()
+                .map(|k| k.raw.id)
+                .collect::<Vec<_>>(),
+            vec![20]
+        );
     }
 }

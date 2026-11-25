@@ -1191,6 +1191,7 @@ mod tests {
                 },
                 key_id: 1,
                 name: "phone".to_string(),
+                btcb2_signing: Some(crate::services::coincube::Btcb2Signing::CanSign),
             },
             KeySource::BorderWallet {
                 grid_seed_source: GridSeedSource::Independent,
@@ -1200,7 +1201,9 @@ mod tests {
 
     /// HW-1 and its Amendment A (Robert, 2026-10-06) opened hardware devices
     /// and Border Wallet keys on both Bitcoin Blake2b chains; Keychain keys
-    /// attached to the Cube follow. Every source is available on every chain.
+    /// attached to the Cube follow when their phone can sign (see
+    /// `creation_gate_admits_a_mobile_key_on_bitcoin_blake2b_only_when_it_can_sign`).
+    /// Every source is available on every chain.
     #[test]
     fn creation_gate_on_bitcoin_blake2b_allows_every_key_source() {
         use crate::chain::ChainId;
@@ -1296,6 +1299,7 @@ mod tests {
                 },
                 key_id: 1,
                 name: "phone".to_string(),
+                btcb2_signing: Some(crate::services::coincube::Btcb2Signing::CanSign),
             };
             step.keys.insert(phone.fingerprint, phone.clone());
             step.paths[0].keys = vec![Some(phone)];
@@ -1314,6 +1318,46 @@ mod tests {
                 vec![(device_signer.fingerprint(), 1, None)]
             );
             assert!(!ctx.hw_is_used);
+
+            // Master decision 12: a Mobile key whose phone Connect did not
+            // resolve as `can_sign` is refused at apply too, whatever got it
+            // into the editor's state.
+            use crate::services::coincube::Btcb2Signing;
+            for refused in [
+                Some(Btcb2Signing::CannotSign),
+                Some(Btcb2Signing::Unavailable),
+                Some(Btcb2Signing::Unknown),
+                Some(Btcb2Signing::Unrecognised("future".to_string())),
+                None,
+            ] {
+                let mut ctx = Context::new_for_chain(
+                    chain,
+                    CoincubeDirectory::new(PathBuf::new()),
+                    None,
+                    None,
+                );
+                let mut phone = device.clone();
+                phone.source = KeySource::KeychainKey {
+                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                        primary_owner_id: 1,
+                    },
+                    key_id: 1,
+                    name: "phone".to_string(),
+                    btcb2_signing: refused.clone(),
+                };
+                step.error = None;
+                step.keys.insert(phone.fingerprint, phone.clone());
+                step.paths[0].keys = vec![Some(phone)];
+                assert!(!step.apply(&mut ctx), "{:?} {:?}", chain, refused);
+                assert_eq!(
+                    step.error.as_deref(),
+                    Some("This key source is not available for Bitcoin Blake2b yet"),
+                    "{chain:?} {refused:?}"
+                );
+                assert!(ctx.descriptor.is_none(), "{:?} {:?}", chain, refused);
+                assert!(ctx.connect_vault_members.is_empty());
+            }
+            step.error = None;
 
             // Amendment A: a Border Wallet key in the device's place applies.
             let mut ctx =
@@ -1363,6 +1407,7 @@ mod tests {
                 },
                 key_id: 42,
                 name: "My iPhone".to_string(),
+                btcb2_signing: None,
             },
             "My iPhone",
         );
@@ -1811,6 +1856,40 @@ mod tests {
             step.paths[0].keys = vec![Some(border)];
             step.check_for_warning();
             assert_eq!(step.paths[0].warning, None);
+
+            // A Mobile key counts for the advice only when Connect resolved
+            // its phone as `can_sign` (master I5: never replay evidence, only
+            // path selection). Any other answer, or none, keeps the notice.
+            use crate::services::coincube::Btcb2Signing;
+            let phone = |btcb2_signing: Option<Btcb2Signing>| Key {
+                source: KeySource::KeychainKey {
+                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                        primary_owner_id: 1,
+                    },
+                    key_id: 1,
+                    name: "phone".to_string(),
+                    btcb2_signing,
+                },
+                ..device.clone()
+            };
+            step.paths[0].keys = vec![Some(phone(Some(Btcb2Signing::CanSign)))];
+            step.check_for_warning();
+            assert_eq!(step.paths[0].warning, None);
+            for not_resolved in [
+                Some(Btcb2Signing::CannotSign),
+                Some(Btcb2Signing::Unavailable),
+                Some(Btcb2Signing::Unknown),
+                Some(Btcb2Signing::Unrecognised("future".to_string())),
+                None,
+            ] {
+                step.paths[0].keys = vec![Some(phone(not_resolved.clone()))];
+                step.check_for_warning();
+                assert_eq!(
+                    step.paths[0].warning,
+                    Some(PathWarning::NoReplayCapableSigner),
+                    "{not_resolved:?}"
+                );
+            }
             step.paths[0].keys = vec![Some(hot.clone()), Some(device.clone())];
             step.check_for_warning();
 
@@ -1845,13 +1924,58 @@ mod tests {
         .replay_capable());
         assert!(!KeySource::Device(async_hwi::DeviceKind::Specter, None).replay_capable());
         assert!(!KeySource::Manual.replay_capable());
-        assert!(!KeySource::KeychainKey {
+        use crate::services::coincube::Btcb2Signing;
+        let phone = |btcb2_signing: Option<Btcb2Signing>| KeySource::KeychainKey {
             owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
                 primary_owner_id: 1,
             },
             key_id: 1,
             name: "phone".to_string(),
+            btcb2_signing,
+        };
+        // A Mobile key counts only through Connect's resolved answer.
+        assert!(phone(Some(Btcb2Signing::CanSign)).replay_capable());
+        for other in [
+            Some(Btcb2Signing::CannotSign),
+            Some(Btcb2Signing::Unavailable),
+            Some(Btcb2Signing::Unknown),
+            Some(Btcb2Signing::Unrecognised("can-sign".to_string())),
+            None,
+        ] {
+            assert!(!phone(other.clone()).replay_capable(), "{:?}", other);
         }
-        .replay_capable());
+    }
+
+    /// Master decision 12: on Bitcoin Blake2b the creation gate admits a
+    /// Mobile key only when Connect resolved its phone as `can_sign`; on the
+    /// Bitcoin family it admits every Mobile key, as before, whatever the
+    /// recorded value.
+    #[test]
+    fn creation_gate_admits_a_mobile_key_on_bitcoin_blake2b_only_when_it_can_sign() {
+        use crate::chain::ChainId;
+        use crate::services::coincube::Btcb2Signing;
+        let phone = |btcb2_signing: Option<Btcb2Signing>| KeySource::KeychainKey {
+            owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                primary_owner_id: 1,
+            },
+            key_id: 1,
+            name: "phone".to_string(),
+            btcb2_signing,
+        };
+        let values = [
+            Some(Btcb2Signing::CanSign),
+            Some(Btcb2Signing::CannotSign),
+            Some(Btcb2Signing::Unavailable),
+            Some(Btcb2Signing::Unknown),
+            Some(Btcb2Signing::Unrecognised("future".to_string())),
+            None,
+        ];
+        for chain in ChainId::ALL {
+            for value in &values {
+                let admitted = phone(value.clone()).available_for_creation(chain);
+                let expected = !chain.is_blake2b() || *value == Some(Btcb2Signing::CanSign);
+                assert_eq!(admitted, expected, "{chain:?} {value:?}");
+            }
+        }
     }
 }
