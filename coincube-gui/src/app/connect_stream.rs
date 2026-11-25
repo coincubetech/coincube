@@ -218,6 +218,12 @@ impl App {
                 // An id that could not be saved (the shared file moved on)
                 // still serves a Connect-served Cube pinned to its session;
                 // every other Cube needs it saved, as before.
+                // A cached device id is reused only from an entry the same host
+                // issued (`Account::api_base_url`).
+                let issuer = crate::services::connect::client::cache::issuing_api(
+                    &base_url,
+                    &crate::services::coincube_api_base_url(),
+                );
                 let Some(registered) = ensure_device_registered_best_effort(
                     &grpc_url,
                     tokens_arc.clone(),
@@ -226,6 +232,7 @@ impl App {
                     device_name,
                     env!("CARGO_PKG_VERSION").to_string(),
                     std::env::consts::OS.to_string(),
+                    issuer.as_deref(),
                 )
                 .await
                 .filter(|registered| registered.persisted || pinned) else {
@@ -816,19 +823,26 @@ impl App {
                     // Pinned to the Cube's own session (I3). The shared file
                     // may hold a newer token for this account; its entry still
                     // gives the device id and the event cursor, which belong
-                    // to the account and this computer, not to a token.
+                    // to the account and this computer, not to a token, but
+                    // only while the entry is this Cube's host's: another
+                    // host issued neither.
                     let pinned =
                         self.is_pinned_session(&cfg.base_url, &current.access_token, &email);
                     drop(current);
                     if !pinned {
                         return Task::none();
                     }
+                    let issuer = crate::services::connect::client::cache::issuing_api(
+                        &cfg.base_url,
+                        &crate::services::coincube_api_base_url(),
+                    );
                     let entry = crate::services::connect::client::cache::Account::from_cache(
                         &network_dir,
                         &email,
                     )
                     .ok()
-                    .flatten();
+                    .flatten()
+                    .filter(|entry| entry.issued_by(issuer.as_deref()));
                     // About may have completed re-registration while the
                     // async vault lookup ran: a saved id wins. Otherwise the
                     // id registration returned without saving it stays.
@@ -1131,12 +1145,18 @@ impl App {
         // The App's own data directory: the save never depends on a cache
         // field being bound to it.
         let network_dir = self.datadir.network_directory(self.cache.chain());
+        // The entry records the host that issued this session, so its token,
+        // device id and cursor are only ever used with that host.
+        let issuer = crate::services::connect::client::cache::issuing_api(
+            &client.base_url,
+            &crate::services::coincube_api_base_url(),
+        );
         self.served_session = ServedSession::Saving;
         let starting = self.set_signer_pipeline_start(cache::SignerPipelineStart::Starting);
         let save = Task::perform(
             async move {
                 use crate::services::connect::client::cache::{
-                    persist_restored_tokens, ConnectCache, ConnectCacheError,
+                    persist_served_tokens, ConnectCache, ConnectCacheError,
                 };
                 let saved = async {
                     tokio::fs::create_dir_all(network_dir.path())
@@ -1147,13 +1167,21 @@ impl App {
                     // cannot parse. It replaces a different token already
                     // stored for the account and makes the account active,
                     // without clearing a live re-registration claim or its
-                    // device id (a new login would).
+                    // device id (a new login would), unless that entry was
+                    // issued by another host.
                     let snapshot = match ConnectCache::from_file(&network_dir) {
                         Ok(snapshot) => snapshot,
                         Err(ConnectCacheError::NotFound) => ConnectCache::default(),
                         Err(e) => return Err(e),
                     };
-                    persist_restored_tokens(&network_dir, &email, &tokens, &snapshot).await
+                    persist_served_tokens(
+                        &network_dir,
+                        &email,
+                        &tokens,
+                        &snapshot,
+                        issuer.as_deref(),
+                    )
+                    .await
                 }
                 .await;
                 if let Err(e) = &saved {

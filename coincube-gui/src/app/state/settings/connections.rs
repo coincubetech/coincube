@@ -107,6 +107,9 @@ pub fn renewal_task(cache: &Cache) -> Option<Task<Message>> {
                     device_name,
                     app_version,
                     os_version,
+                    // A claimed re-registration never takes the cached-id
+                    // shortcut, so its host is not consulted.
+                    issuer: None,
                 },
                 &claim,
             )

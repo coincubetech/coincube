@@ -18,6 +18,16 @@ const EMAIL: &str = "synthetic@example.invalid";
 const CUBE_TOKEN: &str = "synthetic-test-token";
 const CUBE_BASE: &str = "https://connect.example/";
 
+/// How `connect.json` records the fixture Cube's host (`CUBE_BASE`), which
+/// is not the configured Connect API.
+fn cube_issuer() -> String {
+    crate::services::connect::client::cache::issuing_api(
+        CUBE_BASE,
+        &crate::services::coincube_api_base_url(),
+    )
+    .expect("the fixture Cube's host is not the configured API")
+}
+
 fn tokens(access: &str, refresh: &str) -> AccessTokenResponse {
     AccessTokenResponse {
         access_token: access.into(),
@@ -238,7 +248,8 @@ fn a_connect_served_cube_saves_exactly_its_own_session_at_open() {
                 "active_email": "other@example.invalid",
                 "accounts": [
                     {"email": EMAIL, "tokens": tokens("older-open", "older-refresh"),
-                        "device_id": "stored-device", "last_seen_event_seq": 9},
+                        "device_id": "stored-device", "last_seen_event_seq": 9,
+                        "api_base_url": cube_issuer()},
                     {"email": "other@example.invalid", "tokens": tokens("other-access", "other-refresh")}
                 ]
             }),
@@ -268,6 +279,7 @@ fn a_connect_served_cube_saves_exactly_its_own_session_at_open() {
         assert_eq!(entry.tokens.refresh_token, "saved-refresh");
         assert_eq!(entry.device_id.as_deref(), Some("stored-device"));
         assert_eq!(entry.last_seen_event_seq, Some(9));
+        assert_eq!(entry.api_base_url.as_deref(), Some(cube_issuer().as_str()));
         let other = file
             .accounts
             .iter()
@@ -320,7 +332,8 @@ fn a_connect_served_cube_fills_the_same_stream_fields_as_a_bitcoin_cube() {
             serde_json::json!({
                 "active_email": EMAIL,
                 "accounts": [{"email": EMAIL, "tokens": tokens("older-open", ""),
-                    "device_id": "stored-device", "last_seen_event_seq": 12}]
+                    "device_id": "stored-device", "last_seen_event_seq": 12,
+                    "api_base_url": cube_issuer()}]
             }),
         );
         let app = served_cube_with_stream(root.path(), "").await;
@@ -615,17 +628,26 @@ fn an_ended_session_ends_a_connect_served_stream_without_a_reconnect_loop() {
 }
 
 /// The shared file moved on before the stream started. The stream still
-/// starts on the Cube's own token: with the id stored for the account, or
-/// with the id registration returned when none was stored, or the signer
-/// list says Mobile signing could not start.
+/// starts on the Cube's own token: with the id stored for the account when
+/// the entry is the Cube's host's, or with the id registration returned, or
+/// the signer list says Mobile signing could not start. An id another host
+/// stored (a local Cube's sign-in on the configured API) is never used.
 #[test]
 fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
     let _guard = crate::app::session::test_guard();
     runtime().block_on(async {
-        for (stored, carried, expected) in [
-            (Some("stored-device"), "", Some("stored-device")),
-            (None, "returned-device", Some("returned-device")),
-            (None, "", None),
+        let cube_host = Some(cube_issuer());
+        for (stored, issuer, carried, expected) in [
+            (Some("stored-device"), cube_host.clone(), "", Some("stored-device")),
+            (Some("stored-device"), None, "", None),
+            (
+                Some("stored-device"),
+                None,
+                "returned-device",
+                Some("returned-device"),
+            ),
+            (None, None, "returned-device", Some("returned-device")),
+            (None, None, "", None),
         ] {
             let root = tempfile::tempdir().unwrap();
             let before = seed_bitcoin(root.path(), CUBE_TOKEN);
@@ -641,7 +663,7 @@ fn the_stream_starts_on_the_cube_token_after_the_file_moved_on() {
                 serde_json::json!({
                     "active_email": EMAIL,
                     "accounts": [{"email": EMAIL, "tokens": tokens("local-cube-token", "local-refresh"),
-                        "device_id": stored}]
+                        "device_id": stored, "api_base_url": issuer}]
                 }),
             );
             drop(app.update(trigger));

@@ -264,6 +264,12 @@ impl App {
                     // every registration site derives it from
                     // `signer_device_label`.
                     let device_name = crate::utils::device::signer_device_label(chain);
+                    // A cached device id is reused only from an entry the same host
+                    // issued (`Account::api_base_url`).
+                    let issuer = crate::services::connect::client::cache::issuing_api(
+                        &base_url,
+                        &crate::services::coincube_api_base_url(),
+                    );
                     unsaved_id = ensure_device_registered_best_effort(
                         &grpc_url,
                         tokens_arc.clone(),
@@ -272,6 +278,7 @@ impl App {
                         device_name,
                         env!("CARGO_PKG_VERSION").to_string(),
                         std::env::consts::OS.to_string(),
+                        issuer.as_deref(),
                     )
                     .await
                     .filter(|registered| carry_unsaved_id && !registered.persisted)
