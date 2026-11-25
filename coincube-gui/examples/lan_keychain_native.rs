@@ -35,6 +35,7 @@ async fn main() {
                 signer_xpub: fixture["keys"][index]["xpub"].as_str().unwrap().into(),
                 descriptor_sha256: hex::encode(hash),
             },
+            coincube_gui::chain::ChainId::Regtest,
         )
         .offer;
         let encoded = pairing::encode_offer(&offer).unwrap();
@@ -69,6 +70,7 @@ async fn main() {
         vault,
         vec![fingerprint],
         fingerprint,
+        coincube_gui::chain::ChainId::Regtest,
         &CoincubeDirectory::new(dir.clone()),
         &Default::default(),
     )

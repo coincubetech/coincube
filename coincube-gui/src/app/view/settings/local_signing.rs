@@ -239,6 +239,12 @@ fn waiting_body<'a>(
         } else {
             "This offer can no longer be scanned. Start a fresh pairing offer.".to_string()
         }))
+        // A phone that predates v3 pairing refuses this code at scan
+        // (signing identity contract §4.1, §4.6).
+        .push(page::muted(localized_format!(
+            "If COINCUBE Mobile reports an unsupported QR version, update COINCUBE Mobile.",
+            "Si COINCUBE Mobile indica una versión de QR no compatible, actualiza COINCUBE Mobile."
+        )))
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(if remaining > 0 {
             page::status(

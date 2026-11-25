@@ -412,6 +412,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Checked by the desktop from PR 8d.
+                        network: String::new(),
                         session_id,
                         // Empty under ECIES_V1.
                         signed_psbt: if plaintext { psbt_bytes } else { Vec::new() },
@@ -467,6 +469,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Checked by the desktop from PR 8d.
+                        network: String::new(),
                         session_id,
                         signed_psbt: Vec::new(),
                         signed_key_ids: vec!["10".into()],

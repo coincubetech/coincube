@@ -759,6 +759,12 @@ impl LocalSigningState {
                 return Task::none();
             }
         };
+        let Some(chain) = self.wallet_chain else {
+            self.flow = PairingFlow::Error(PairingError::InternalError(
+                "Couldn't identify the selected vault key; reload the wallet and try again.".into(),
+            ));
+            return Task::none();
+        };
         let GeneratedOffer { offer } = crate::phone_signer::pairing::generate_offer(
             fingerprint,
             &identity,
@@ -767,6 +773,7 @@ impl LocalSigningState {
                 signer_xpub: selected_key,
                 descriptor_sha256: self.descriptor_sha256.clone(),
             },
+            chain,
         );
         // Build the QR up front and fail closed if it can't be
         // rendered. Entering `Waiting` with `qr: None` would
@@ -821,6 +828,7 @@ impl LocalSigningState {
                     expected_vault_id,
                     signer_fps,
                     expected_signer_fp,
+                    chain,
                     &dir,
                     &run,
                 )
@@ -2049,6 +2057,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2094,6 +2103,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2179,6 +2189,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2217,6 +2228,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2433,6 +2445,7 @@ mod tests {
                 offer: crate::phone_signer::pairing::PairingOffer {
                     signer_xpub: String::new(),
                     descriptor_sha256: String::new(),
+                    network: String::new(),
                     version: 1,
                     cert_der_b64: String::new(),
                     cert_fp: String::new(),
@@ -2635,6 +2648,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 1,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -2667,6 +2681,7 @@ mod tests {
             offer: crate::phone_signer::pairing::PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 2,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),

@@ -26,7 +26,11 @@ use crate::phone_signer::identity::DesktopIdentity;
 /// the desktop can authenticate the phone it dialed instead of
 /// trusting whatever cert answered on the LAN. See
 /// `plans/PLAN-local-signer-pairing-phone-auth.md`.
-pub const PAIRING_PROTOCOL_VERSION: u32 = 2;
+///
+/// v3 (signing identity contract §4.1) adds `net`, the Vault's chain, and
+/// binds it into the proof. This desktop emits v3 only, for every chain;
+/// a phone that predates v3 refuses the code at scan.
+pub const PAIRING_PROTOCOL_VERSION: u32 = 3;
 /// Resource ceiling shared with Keychain: 283 bytes below QR version 40,
 /// medium ECC byte capacity. The production budget test reserves more margin.
 /// This is not a physical-camera scanning guarantee.
@@ -41,11 +45,12 @@ pub const MAX_PAIRING_QR_BYTES: usize = 2048;
 /// Changing it is a wire-breaking change — update both sides together.
 pub const PAIRING_PSK_LEN: usize = 16;
 
-/// Domain-separation prefix for the proof-of-QR-scan HMAC. The `-v2`
+/// Domain-separation prefix for the proof-of-QR-scan HMAC. The `-v3`
 /// suffix is part of the signed message: bump it (in lockstep with
-/// the phone) if the construction in [`pairing_proof`] ever changes,
-/// so a v2 proof can never be mistaken for a future v3 one.
-const PAIRING_PROOF_DOMAIN: &[u8] = b"coincube-pair-v2";
+/// the phone) if the construction in [`pairing_proof`] ever changes.
+/// It is the only domain either app computes or verifies (contract §4.2):
+/// no v2 offer is read, so the v2 domain is not kept.
+const PAIRING_PROOF_DOMAIN: &[u8] = b"coincube-pair-v3";
 
 /// Default lifetime of a pairing offer. Long enough to scan from
 /// across the room; short enough that an abandoned QR can't be
@@ -69,6 +74,13 @@ pub struct PairingOffer {
     /// Full hash over the canonical descriptor held by this desktop.
     #[serde(default, rename = "dh")]
     pub descriptor_sha256: String,
+    /// The Vault's chain as its Connect network id
+    /// (`Wallet.chain.api_str()`, canonical spelling). Added in v3 and
+    /// covered by the pairing proof, so a phone that answers for another
+    /// chain fails verification. Empty only on an offer this desktop did
+    /// not generate, which the listener refuses.
+    #[serde(default, rename = "net")]
+    pub network: String,
     /// Protocol version. Pin to [`PAIRING_PROTOCOL_VERSION`] for v1.
     #[serde(rename = "v")]
     pub version: u32,
@@ -127,7 +139,7 @@ pub struct GeneratedOffer {
     pub offer: PairingOffer,
 }
 
-/// The vault key a v2 offer commits to: the spendable xpub the user picked
+/// The vault key an offer commits to: the spendable xpub the user picked
 /// and the hash of the descriptor it belongs to.
 ///
 /// Bundled so [`generate_offer`] can require both without growing a third
@@ -159,11 +171,14 @@ pub struct OfferedKey {
 /// *struct* rather than two more `String` arguments so it can't be
 /// transposed with `phone_service_name` — all three are strings, and a swap
 /// would compile.)
+/// `chain` is the loaded Vault's chain; its Connect network id becomes the
+/// offer's `net` (v3).
 pub fn generate_offer(
     wallet_fingerprint: Fingerprint,
     identity: &DesktopIdentity,
     phone_service_name: String,
     key: OfferedKey,
+    chain: crate::chain::ChainId,
 ) -> GeneratedOffer {
     let expires_at_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -182,6 +197,7 @@ pub fn generate_offer(
         offer: PairingOffer {
             signer_xpub: key.signer_xpub,
             descriptor_sha256: key.descriptor_sha256,
+            network: chain.api_str().to_owned(),
             version: PAIRING_PROTOCOL_VERSION,
             cert_der_b64: identity.cert_der_b64(),
             cert_fp: identity.cert_fp(),
@@ -194,8 +210,8 @@ pub fn generate_offer(
 }
 
 /// Compute the proof-of-QR-scan: lowercase-hex `HMAC-SHA256` over the
-/// domain tag and BOTH cert fingerprints, keyed by the offer's
-/// per-offer secret. The phone computes this after scanning the QR
+/// domain tag, BOTH cert fingerprints and the offer's chain, keyed by the
+/// offer's per-offer secret. The phone computes this after scanning the QR
 /// and returns it in `PairingComplete.pairing_proof`; the desktop
 /// recomputes it to authenticate the phone before pinning.
 ///
@@ -204,7 +220,7 @@ pub fn generate_offer(
 ///
 /// ```text
 /// key = base64url_no_pad_decode(psk_b64)
-/// msg = "coincube-pair-v2" || desktop_cert_fp || phone_cert_fp   (raw bytes, no separators)
+/// msg = "coincube-pair-v3" || desktop_cert_fp || phone_cert_fp || net   (raw bytes, no separators)
 /// proof = lowercase_hex(HMAC-SHA256(key, msg))
 /// ```
 ///
@@ -214,24 +230,28 @@ pub fn generate_offer(
 /// the phone's own cert fp. Binding the MAC to both pins is what
 /// defeats a relay/substitution attacker: a peer that terminates TLS
 /// with a different cert produces a proof over a different
-/// `phone_cert_fp` than the desktop expects.
+/// `phone_cert_fp` than the desktop expects. `net` is the offer's chain
+/// (UTF-8, the canonical Connect network id), so a phone that computed the
+/// proof over another chain string fails verification (contract §4.2).
 ///
 /// Returns `Err` only when `psk_b64` isn't valid base64url.
 pub fn pairing_proof(
     psk_b64: &str,
     desktop_cert_fp: &str,
     phone_cert_fp: &str,
+    net: &str,
 ) -> Result<String, String> {
     let psk = URL_SAFE_NO_PAD
         .decode(psk_b64)
         .map_err(|e| format!("decode psk: {}", e))?;
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &psk);
     let mut msg = Vec::with_capacity(
-        PAIRING_PROOF_DOMAIN.len() + desktop_cert_fp.len() + phone_cert_fp.len(),
+        PAIRING_PROOF_DOMAIN.len() + desktop_cert_fp.len() + phone_cert_fp.len() + net.len(),
     );
     msg.extend_from_slice(PAIRING_PROOF_DOMAIN);
     msg.extend_from_slice(desktop_cert_fp.as_bytes());
     msg.extend_from_slice(phone_cert_fp.as_bytes());
+    msg.extend_from_slice(net.as_bytes());
     let tag = ring::hmac::sign(&key, &msg);
     Ok(tag.as_ref().iter().map(|b| format!("{:02x}", b)).collect())
 }
@@ -244,14 +264,16 @@ pub fn pairing_proof(
 /// `phone_cert_fp` MUST be the fingerprint the desktop captured from
 /// the live TLS handshake (the cert it is about to pin), not the
 /// phone-reported `phone_cert_fp` string — otherwise the binding is
-/// to a value the peer controls and the check proves nothing.
+/// to a value the peer controls and the check proves nothing. Likewise
+/// `net` is the desktop's own chain, never a phone-reported string.
 pub fn verify_pairing_proof(
     psk_b64: &str,
     desktop_cert_fp: &str,
     phone_cert_fp: &str,
+    net: &str,
     reported_proof: &str,
 ) -> bool {
-    let Ok(expected) = pairing_proof(psk_b64, desktop_cert_fp, phone_cert_fp) else {
+    let Ok(expected) = pairing_proof(psk_b64, desktop_cert_fp, phone_cert_fp, net) else {
         return false;
     };
     // Constant-time over the hex strings. A length difference (e.g. an
@@ -336,6 +358,7 @@ mod tests {
             &fresh_identity(),
             "s".repeat(MAX_PAIRING_QR_BYTES),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         assert!(encode_offer(&offer).is_err());
@@ -349,6 +372,7 @@ mod tests {
             &identity,
             "keychain-12345678".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         );
         let encoded = encode_offer(&g.offer).expect("encode");
         let decoded = decode_offer(&encoded).expect("decode");
@@ -369,6 +393,7 @@ mod tests {
             &identity,
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         let b = generate_offer(
@@ -376,6 +401,7 @@ mod tests {
             &identity,
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         // Distinct per offer (a reused psk would let a captured proof
@@ -393,8 +419,11 @@ mod tests {
 
     /// The whole encoded QR (not just the cert field) must stay inside the
     /// QR budget, measured at the widest payload the protocol allows: a
-    /// 111-char xpub, a 64-char descriptor hash, and a 63-char mDNS service
-    /// label (the DNS maximum). That worst case is ~1239 bytes today.
+    /// 111-char xpub, a 64-char descriptor hash, a 63-char mDNS service
+    /// label (the DNS maximum) and the longest v3 `net`,
+    /// `bitcoin-blake2b-testnet4`. The phone's cap is 2048 encoded
+    /// characters (`MAX_PAIRING_QR_BYTES`, contract §4.1), and the longest
+    /// payload this desktop can emit is pinned under it here.
     ///
     /// `QR_BUDGET` is derived from a real, measured ceiling rather than a
     /// guess: `iced::widget::qr_code::Data::new` encodes at error-correction
@@ -426,8 +455,17 @@ mod tests {
                 signer_xpub: xpub,
                 descriptor_sha256: "ab".repeat(32),
             },
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
         )
         .offer;
+        assert_eq!(
+            crate::chain::ChainId::ALL
+                .iter()
+                .map(|c| c.api_str().len())
+                .max(),
+            Some(offer.network.len()),
+            "measured with the longest network id"
+        );
         let encoded = encode_offer(&offer).unwrap();
         println!(
             "production offer with maximum DNS service label: {} bytes",
@@ -440,6 +478,7 @@ mod tests {
             encoded.len(),
             QR_BUDGET,
         );
+        assert!(encoded.len() <= MAX_PAIRING_QR_BYTES);
     }
 
     #[test]
@@ -449,14 +488,15 @@ mod tests {
             &fresh_identity(),
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         let desktop_fp = &g.cert_fp;
         let phone_fp = "ab".repeat(32); // any 64-hex string
-        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp).expect("compute");
+        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp, &g.network).expect("compute");
         assert_eq!(proof.len(), 64, "proof is 64 lowercase-hex chars");
         assert!(verify_pairing_proof(
-            &g.psk_b64, desktop_fp, &phone_fp, &proof
+            &g.psk_b64, desktop_fp, &phone_fp, &g.network, &proof
         ));
     }
 
@@ -467,51 +507,107 @@ mod tests {
             &fresh_identity(),
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         let desktop_fp = &g.cert_fp;
         let phone_fp = "ab".repeat(32);
-        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp).expect("compute");
+        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp, &g.network).expect("compute");
 
         // Wrong phone fp (the relay/substitution case): a peer that
         // terminates TLS with a different cert produces a proof over a
         // different phone fp than the desktop expects → rejected.
         let other_phone_fp = "cd".repeat(32);
         assert!(
-            !verify_pairing_proof(&g.psk_b64, desktop_fp, &other_phone_fp, &proof),
+            !verify_pairing_proof(&g.psk_b64, desktop_fp, &other_phone_fp, &g.network, &proof),
             "proof must not verify against a different phone cert fp",
         );
         // Wrong desktop fp.
         let other_desktop_fp = "ef".repeat(32);
         assert!(
-            !verify_pairing_proof(&g.psk_b64, &other_desktop_fp, &phone_fp, &proof),
+            !verify_pairing_proof(&g.psk_b64, &other_desktop_fp, &phone_fp, &g.network, &proof),
             "proof must not verify against a different desktop cert fp",
         );
     }
 
-    /// Shared cross-implementation known-answer vector. This is the
-    /// SAME tuple the keychain-app (Flutter) asserts on its side, so a
-    /// drift in either codebase's HMAC construction trips both vector
-    /// tests in lockstep. Do not change without changing the phone
-    /// side and bumping the domain tag — it's the wire protocol. See
-    /// plans/PLAN-local-signer-pairing-phone-auth.md.
+    /// Shared cross-implementation known-answer vector for the v3 proof
+    /// (signing identity contract §4.2). COINCUBE Mobile asserts the SAME
+    /// tuples in `test/services/local_signer/pairing_qr_test.dart`
+    /// ("matches the locked Rust ↔ Dart vector"), so a drift in either
+    /// codebase's HMAC construction trips both tests. Do not change without
+    /// changing the phone side and bumping the domain tag: it is the wire
+    /// protocol.
+    ///
+    /// psk = the 16 bytes 0x00..0x0f (`AAECAwQFBgcICQoLDA0ODw`),
+    /// desktop fp = "aa" x 32, phone fp = "bb" x 32.
     #[test]
     fn pairing_proof_known_answer_vector() {
-        // psk = 16 bytes 0x00..0x0f; fps = "aa".. and "bb"..
         let psk_b64 = "AAECAwQFBgcICQoLDA0ODw";
         let desktop_fp = "aa".repeat(32);
         let phone_fp = "bb".repeat(32);
-        let proof = pairing_proof(psk_b64, &desktop_fp, &phone_fp).expect("compute");
-        assert_eq!(
-            proof,
-            "87f118c74fd540810db273e2ff4c00ee805831dce43aa649553d636e795239b9",
-        );
-        assert!(verify_pairing_proof(
-            psk_b64,
-            &desktop_fp,
-            &phone_fp,
-            &proof
-        ));
+        for (net, expected) in [
+            (
+                "bitcoin-blake2b",
+                "ccc65575005c19fbb4826f49c68db719fc1c7f2bc0de4deea2c6e4d722c5263c",
+            ),
+            (
+                "mainnet",
+                "e7f46e42e05dd6a69c1f8372353d38fbfce4ee54d1c7ddd13bee54759ef5854a",
+            ),
+            (
+                "bitcoin-blake2b-testnet4",
+                "1c81ce3dea97020338d1dc09f88e9eaafdd100187f92fb7d3895d9fd8f5a6114",
+            ),
+        ] {
+            let proof = pairing_proof(psk_b64, &desktop_fp, &phone_fp, net).expect("compute");
+            assert_eq!(proof, expected, "{}", net);
+            assert!(verify_pairing_proof(
+                psk_b64,
+                &desktop_fp,
+                &phone_fp,
+                net,
+                &proof
+            ));
+        }
+        // The retired v2 vector no longer verifies under any chain: the
+        // domain and the message both changed.
+        let v2 = "87f118c74fd540810db273e2ff4c00ee805831dce43aa649553d636e795239b9";
+        for net in ["", "mainnet", "bitcoin-blake2b"] {
+            assert!(!verify_pairing_proof(
+                psk_b64,
+                &desktop_fp,
+                &phone_fp,
+                net,
+                v2
+            ));
+        }
+    }
+
+    /// v3 on every chain: the version is 3 and `net` is the chain's
+    /// canonical Connect network id, never the `bitcoin` alias.
+    #[test]
+    fn generated_offers_are_v3_with_the_chains_network() {
+        use crate::chain::ChainId;
+        for chain in ChainId::ALL {
+            let offer = generate_offer(
+                Fingerprint::default(),
+                &fresh_identity(),
+                "x".into(),
+                OfferedKey::default(),
+                chain,
+            )
+            .offer;
+            assert_eq!(offer.version, 3);
+            assert_eq!(offer.network, chain.api_str());
+            let json: serde_json::Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(encode_offer(&offer).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(json["v"], 3);
+            assert_eq!(json["net"], chain.api_str());
+        }
     }
 
     #[test]
@@ -521,6 +617,7 @@ mod tests {
             &fresh_identity(),
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         let other = generate_offer(
@@ -528,27 +625,49 @@ mod tests {
             &fresh_identity(),
             "x".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
         let desktop_fp = &g.cert_fp;
         let phone_fp = "ab".repeat(32);
-        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp).expect("compute");
+        let proof = pairing_proof(&g.psk_b64, desktop_fp, &phone_fp, &g.network).expect("compute");
 
         // A different psk (didn't scan THIS QR).
         assert!(!verify_pairing_proof(
             &other.psk_b64,
             desktop_fp,
             &phone_fp,
+            &g.network,
             &proof
         ));
         // Tampered proof.
         let mut tampered = proof.clone();
         tampered.replace_range(0..1, if proof.starts_with('0') { "1" } else { "0" });
         assert!(!verify_pairing_proof(
-            &g.psk_b64, desktop_fp, &phone_fp, &tampered
+            &g.psk_b64, desktop_fp, &phone_fp, &g.network, &tampered
         ));
         // Empty / missing (e.g. a pre-v2 phone).
-        assert!(!verify_pairing_proof(&g.psk_b64, desktop_fp, &phone_fp, ""));
+        assert!(!verify_pairing_proof(
+            &g.psk_b64, desktop_fp, &phone_fp, &g.network, ""
+        ));
+        // A proof computed over another chain (contract §4.2): the desktop
+        // verifies with its own `net`, so this fails.
+        let other_chain =
+            pairing_proof(&g.psk_b64, desktop_fp, &phone_fp, "bitcoin-blake2b").expect("compute");
+        assert_eq!(g.network, "mainnet");
+        assert!(!verify_pairing_proof(
+            &g.psk_b64,
+            desktop_fp,
+            &phone_fp,
+            &g.network,
+            &other_chain
+        ));
+        // Swapped fingerprints.
+        let swapped =
+            pairing_proof(&g.psk_b64, &phone_fp, desktop_fp, &g.network).expect("compute");
+        assert!(!verify_pairing_proof(
+            &g.psk_b64, desktop_fp, &phone_fp, &g.network, &swapped
+        ));
     }
 
     #[test]
@@ -559,6 +678,7 @@ mod tests {
             &identity,
             "keychain-deadbeef".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         );
         assert_eq!(g.offer.service_name, "keychain-deadbeef");
     }
@@ -571,6 +691,7 @@ mod tests {
             &identity,
             "keychain-00000000".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         );
         assert!(!is_expired(&g.offer));
         assert!(seconds_remaining(&g.offer) > 0);
@@ -587,6 +708,7 @@ mod tests {
             &identity,
             "keychain-12345678".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         );
         let raw = URL_SAFE_NO_PAD
             .decode(&g.offer.cert_der_b64)
@@ -609,6 +731,7 @@ mod tests {
             &identity,
             "keychain-12345678".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         );
         assert!(
             g.offer.cert_der_b64.len() < 1024,

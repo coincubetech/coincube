@@ -72,6 +72,12 @@ pub(crate) const REDIAL_BACKOFF: Duration = Duration::from_millis(750);
 /// equal this. The caller resolves it because an origin fingerprint
 /// belongs to a master key several levels above the account xpub and so
 /// cannot be derived from `offer.signer_xpub` here.
+///
+/// `expected_chain` is the chain of the Vault loaded now. The offer's `net`
+/// must equal it: a Bitcoin Vault and its Bitcoin Blake2b twin share a
+/// descriptor and so a vault id, and only `net` tells them apart. The
+/// phone's reported network must then be present and equal to it
+/// (contract §4.5, R2.4 and R2.5).
 // TODO(scope): 8 args because `expected_vault_id`, `signer_fingerprints` and
 // `expected_signer_fp` are passed loose. They're one concept — the identity a
 // phone must prove it holds — and bundling them into a `VaultTarget` would drop
@@ -87,6 +93,7 @@ pub async fn run_pairing(
     expected_vault_id: Fingerprint,
     signer_fingerprints: Vec<Fingerprint>,
     expected_signer_fp: Fingerprint,
+    expected_chain: crate::chain::ChainId,
     dir: &CoincubeDirectory,
     run: &PairingRun,
 ) -> Result<PairedPhone, PairingError> {
@@ -135,6 +142,7 @@ pub async fn run_pairing(
                 expected_vault_id,
                 &signer_fingerprints,
                 expected_signer_fp,
+                expected_chain,
                 dir,
                 run,
             ))
@@ -215,6 +223,7 @@ async fn try_pair_once(
     expected_vault_id: Fingerprint,
     signer_fingerprints: &[Fingerprint],
     expected_signer_fp: Fingerprint,
+    expected_chain: crate::chain::ChainId,
     dir: &CoincubeDirectory,
     run: &PairingRun,
 ) -> Result<PairedPhone, PairingError> {
@@ -262,9 +271,9 @@ async fn try_pair_once(
 
     let expected_pin_hex = validate_reported_tls_pin(&phone_pin, &complete)?;
 
-    // Proof-of-QR-scan (protocol v2). The phone returns an HMAC over
-    // both cert fingerprints keyed by the per-offer `psk` carried in
-    // the QR. Only a device that actually scanned this QR knows the
+    // Proof-of-QR-scan (protocol v3). The phone returns an HMAC over
+    // both cert fingerprints and the offer's `net`, keyed by the per-offer
+    // `psk` carried in the QR. Only a device that actually scanned this QR knows the
     // psk, so a valid proof is the desktop's evidence that the cert
     // it just captured belongs to the phone the user is holding —
     // without this, the unpinned dial (`connect_unpinned`) would pin
@@ -275,10 +284,25 @@ async fn try_pair_once(
     // who terminates TLS with a different cert — can't forward a
     // genuine phone's proof. See
     // plans/PLAN-local-signer-pairing-phone-auth.md.
+    // The offer is this desktop's own and must be a v3 offer for the chain
+    // loaded now. Checked before the proof, which covers `net`: a code made
+    // for the other chain of the same descriptor (a Bitcoin Vault and its
+    // Bitcoin Blake2b twin share the vault id the guard below compares) is
+    // refused here rather than as a phone fault.
+    if offer.version != crate::phone_signer::pairing::PAIRING_PROTOCOL_VERSION
+        || offer.network != expected_chain.api_str()
+    {
+        return Err(PairingError::InternalError(
+            "This pairing code was made for another network or an older version. Start \
+             pairing again to get a fresh one."
+                .into(),
+        ));
+    }
     if !crate::phone_signer::pairing::verify_pairing_proof(
         &offer.psk_b64,
         &offer.cert_fp,
         &expected_pin_hex,
+        &offer.network,
         complete.pairing_proof.trim(),
     ) {
         tracing::warn!(
@@ -345,7 +369,7 @@ async fn try_pair_once(
         ));
     }
 
-    // The v2 proof authenticates this TLS peer. It must report the one key
+    // The v3 proof authenticates this TLS peer. It must report the one key
     // selected in the scanned QR; only the phone's local record supplies ID.
     let reported = complete.signer_binding.as_ref().ok_or_else(|| {
         PairingError::InternalError(
@@ -362,6 +386,18 @@ async fn try_pair_once(
             .filter(|id| *id > 0)
             .is_none()
     {
+        return Err(PairingError::InternalError(
+            "Exact pairing identity mismatch; pair again.".into(),
+        ));
+    }
+    // The chain of the phone's selected record (contract §4.5): required on
+    // a v3 offer (R2.5) and equal to the offer's (R2.4).
+    if reported.network.is_empty() {
+        return Err(PairingError::InternalError(
+            "Update COINCUBE Mobile and pair again.".into(),
+        ));
+    }
+    if reported.network != offer.network {
         return Err(PairingError::InternalError(
             "Exact pairing identity mismatch; pair again.".into(),
         ));
@@ -803,6 +839,7 @@ mod tests {
             &identity,
             "keychain-test".into(),
             OfferedKey::default(),
+            crate::chain::ChainId::Bitcoin,
         )
         .offer;
 
@@ -813,6 +850,7 @@ mod tests {
             vault,
             &[vault],
             vault,
+            crate::chain::ChainId::Bitcoin,
             &dir,
             &PairingRun::default(),
         )
