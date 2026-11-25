@@ -788,7 +788,10 @@ fn the_first_start_survives_the_file_moving_on_after_the_save() {
 }
 
 /// An id held only in memory goes with the session when Connect refuses the
-/// device as revoked, as a stored one does.
+/// device as revoked, as a stored one does. Only the Cube's own chain folder
+/// is touched: the same email in `bitcoin/` may be an account on another
+/// Connect host, so a Bitcoin Cube clears that id itself when its own stream
+/// is refused.
 #[test]
 fn an_unsaved_device_id_is_dropped_on_a_revoked_device() {
     use crate::services::connect::grpc::trouble::Refusal;
@@ -1062,6 +1065,59 @@ fn a_global_auth_change_closes_the_connect_served_tab_and_leaves_the_bitcoin_one
             );
             assert_bitcoin_untouched(root.path(), &before);
         }
+    });
+}
+
+/// A remote duress lock delivered by a Connect-served Cube's stream records
+/// the account that stream runs on, so the locked screen trusts only that
+/// account's sessions to clear it. The Cube's session was saved from its
+/// panel's user, so the panel names the account even when the saved keyring
+/// sign-in is another account's; nothing falls back to the launch folder.
+#[test]
+fn a_remote_lock_from_a_connect_served_stream_names_the_cubes_account() {
+    let _guard = crate::app::session::test_guard();
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        seed_bitcoin(root.path(), CUBE_TOKEN);
+        // The saved sign-in is now a different account's.
+        let other = crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: "other-access".into(),
+            refresh_token: "other-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 5,
+                email: "other@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        };
+        state::connect::write_connect_secret(
+            state::connect::CONNECT_KEYRING_USER,
+            &serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        let before = bitcoin_state(root.path());
+
+        let mut app = served_cube_with_stream(root.path(), "cube-device").await;
+        assert_eq!(app.connect_email.as_deref(), Some(EMAIL));
+        assert_eq!(app.duress_activating_account().as_deref(), Some("7"));
+
+        let answered = outputs(app.update(Message::ConnectStream(
+            crate::services::connect::grpc::ConnectStreamMessage::DuressActivated {
+                unlock_at: None,
+                source: "remote".into(),
+            },
+        )))
+        .await;
+        assert!(answered
+            .iter()
+            .any(|m| matches!(m, Message::View(view::Message::DuressLockRemote))));
+
+        let lock = crate::services::duress::DuressLocalState::load(root.path()).unwrap();
+        assert!(lock.active);
+        assert!(lock.remote_lock);
+        assert_eq!(lock.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(lock.lock_account(), Some("7"));
+        assert_bitcoin_untouched(root.path(), &before);
     });
 }
 
