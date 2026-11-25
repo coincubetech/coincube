@@ -123,8 +123,14 @@ impl CoincubeClient {
     }
 
     pub fn new() -> Self {
-        let base_url = crate::services::coincube_api_base_url();
+        Self::with_base_url(crate::services::coincube_api_base_url())
+    }
 
+    /// A client for the Connect API at `base_url`. [`Self::new`] is this
+    /// with the app's configured base URL. The Connect signer pipeline uses
+    /// it with the base URL of the Cube's own client, so every request it
+    /// makes goes to the endpoint that Cube's session belongs to.
+    pub fn with_base_url(base_url: String) -> Self {
         log::info!(
             "Coincube Base URL: {}, Release = {}",
             base_url,

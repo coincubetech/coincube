@@ -21,6 +21,10 @@ mod transport_tests;
 /// Configuration for the realtime gRPC stream.
 #[derive(Debug, Clone)]
 pub struct ConnectStreamConfig {
+    /// Base URL of the Connect API that `grpc_url` was resolved from. The
+    /// stream itself does not use it; it travels with the address so the App
+    /// records the two together.
+    pub base_url: String,
     pub grpc_url: String,
     pub tokens: Arc<RwLock<AccessTokenResponse>>,
     pub device_id: String,
@@ -433,21 +437,29 @@ async fn refuse_device(
     }
 }
 
-/// Report a failure that isn't a refusal. An expired sign-in stays an
-/// `Error` so the App can tell it apart; the REST client refreshes the
-/// shared token and the next attempt uses it. Anything else is trouble:
-/// offline or Connect unreachable.
+/// Report a failure that isn't a refusal. A refused bearer is reported as
+/// [`ConnectStreamMessage::SessionEnded`] so the App can tell it apart; the
+/// next attempt reads the shared token again, so it picks up a new one if
+/// the App has installed one. Anything else is trouble: offline or Connect
+/// unreachable.
 async fn report_failure(
     channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
     status: &tonic::Status,
 ) {
-    let message = if status.code() == tonic::Code::Unauthenticated {
-        ConnectStreamMessage::Error(format!("Connect session expired ({})", status.message()))
+    if let Err(e) = channel.send(failure_message(status)).await {
+        log::warn!("[CONNECT GRPC] Failed to forward the failure: {}", e);
+    }
+}
+
+/// The message for a failure that isn't a refusal; see [`report_failure`].
+fn failure_message(status: &tonic::Status) -> ConnectStreamMessage {
+    if status.code() == tonic::Code::Unauthenticated {
+        ConnectStreamMessage::SessionEnded(format!(
+            "Connect session expired ({})",
+            status.message()
+        ))
     } else {
         ConnectStreamMessage::Trouble(trouble::status_trouble(status))
-    };
-    if let Err(e) = channel.send(message).await {
-        log::warn!("[CONNECT GRPC] Failed to forward the failure: {}", e);
     }
 }
 

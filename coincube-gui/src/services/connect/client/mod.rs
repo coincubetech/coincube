@@ -27,20 +27,55 @@ fn default_connect_grpc_tls() -> bool {
 ///   2. COINCUBE service-config endpoint (env-specific, all networks),
 ///   3. compile-time baked default (resilience if the endpoint is down).
 pub async fn resolve_connect_grpc_url() -> Option<String> {
+    resolve_connect_grpc_url_for(&crate::services::coincube_api_base_url()).await
+}
+
+/// As [`resolve_connect_grpc_url`], for the Connect API at `base_url`: the
+/// service config is fetched from that base URL. The baked default belongs to
+/// the app's configured API, so it is a fallback only when `base_url` is that
+/// one; a Cube whose session is on another endpoint is never handed the
+/// default endpoint's gRPC address.
+pub async fn resolve_connect_grpc_url_for(base_url: &str) -> Option<String> {
     if let Some(url) = reject_plaintext_in_release(runtime_grpc_url_override()) {
         return Some(url);
     }
-    coincube_grpc_url()
-        .await
-        .or_else(|| reject_plaintext_in_release(buildtime_grpc_url_default()))
+    grpc_url_or_baked_default(
+        coincube_grpc_url(base_url).await,
+        is_configured_base_url(base_url),
+        || reject_plaintext_in_release(buildtime_grpc_url_default()),
+    )
+}
+
+/// The fetched gRPC address, or the baked default when nothing was fetched
+/// and the endpoint asked is the app's configured one.
+fn grpc_url_or_baked_default(
+    fetched: Option<String>,
+    configured_endpoint: bool,
+    baked_default: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match fetched {
+        Some(url) => Some(url),
+        None if configured_endpoint => baked_default(),
+        None => None,
+    }
+}
+
+/// Whether `base_url` is the app's configured Connect API, ignoring a
+/// trailing slash.
+fn is_configured_base_url(base_url: &str) -> bool {
+    same_base_url(base_url, &crate::services::coincube_api_base_url())
+}
+
+fn same_base_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// Fetch the Connect signing gRPC URL from coincube-api. Best-effort: any
 /// network/parse failure yields `None` so the caller can fall back. The
 /// returned URL is normalized to a tonic-ready form (`https://…` when TLS,
 /// `http://…` otherwise) so `create_channel` enables TLS correctly.
-async fn coincube_grpc_url() -> Option<String> {
-    let base = crate::services::coincube_api_base_url();
+async fn coincube_grpc_url(base_url: &str) -> Option<String> {
+    let base = base_url.trim_end_matches('/');
     let url = format!("{base}/api/v1/connect/service-config");
     let https_only = !base.starts_with("http://");
     let client = reqwest::Client::builder()
@@ -107,7 +142,74 @@ fn runtime_grpc_url_override() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_connect_grpc_tls, normalize_grpc_url, CoincubeServiceConfig};
+    use super::{
+        coincube_grpc_url, default_connect_grpc_tls, grpc_url_or_baked_default,
+        is_configured_base_url, normalize_grpc_url, same_base_url, CoincubeServiceConfig,
+    };
+
+    /// The service config is fetched from the base URL the caller gives, so
+    /// a Cube whose session is on another endpoint asks that endpoint.
+    #[tokio::test]
+    async fn the_grpc_address_is_fetched_from_the_given_base_url() {
+        let server = httpmock::MockServer::start_async().await;
+        let config = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/connect/service-config");
+                then.status(200).json_body(serde_json::json!({
+                    "grpcUrl": "grpc.example.test:50051",
+                    "tls": false
+                }));
+            })
+            .await;
+
+        // A trailing slash on the base URL must not double the path's slash.
+        for base in [server.base_url(), format!("{}/", server.base_url())] {
+            assert_eq!(
+                coincube_grpc_url(&base).await.as_deref(),
+                Some("http://grpc.example.test:50051")
+            );
+        }
+        config.assert_hits_async(2).await;
+        assert!(!is_configured_base_url(&server.base_url()));
+    }
+
+    /// The baked default is the configured API's gRPC address. An endpoint
+    /// that is not the configured one never gets it.
+    #[test]
+    fn the_baked_default_is_a_fallback_for_the_configured_endpoint_only() {
+        let baked = || Some("https://baked.example.test:443".to_string());
+        let fetched = Some("https://fetched.example.test:443".to_string());
+
+        assert_eq!(
+            grpc_url_or_baked_default(fetched.clone(), true, baked),
+            fetched
+        );
+        assert_eq!(
+            grpc_url_or_baked_default(fetched.clone(), false, baked),
+            fetched
+        );
+        assert_eq!(
+            grpc_url_or_baked_default(None, true, baked).as_deref(),
+            Some("https://baked.example.test:443")
+        );
+        assert_eq!(grpc_url_or_baked_default(None, false, baked), None);
+    }
+
+    #[test]
+    fn base_urls_compare_without_their_trailing_slash() {
+        assert!(same_base_url(
+            "https://api.example.test",
+            "https://api.example.test/"
+        ));
+        assert!(!same_base_url(
+            "https://api.example.test",
+            "https://other.example.test"
+        ));
+        assert!(is_configured_base_url(
+            &crate::services::coincube_api_base_url()
+        ));
+    }
 
     #[test]
     fn normalize_adds_https_when_tls() {

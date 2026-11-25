@@ -476,6 +476,18 @@ fn validate_cache_update_guard(
 /// Acquires a write lock on the cache file so the update is atomic against
 /// concurrent `update_connect_cache` calls. Returns false when the account
 /// is absent or an About re-registration owns the cache claim.
+///
+/// Clearing is how a device id that Connect has revoked is discarded: only
+/// the id goes, and the account's session and event sequence stay.
+///
+/// A `false` answer to a clear means nothing was cleared, and the caller
+/// must not assume the id is gone. With no account there is nothing stored.
+/// With a live re-registration claim the id is left to that re-registration:
+/// it stores the new id if it succeeds, but puts the **old** id back if it
+/// fails or rolls back, so a caller discarding a revoked id has to check
+/// again once the claim is released. A claim counts as live while its
+/// process holds the claim's lock, and also when that lock cannot be read.
+/// A claim abandoned by an exited process does not block a clear.
 pub async fn set_device_id_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
@@ -1799,5 +1811,88 @@ mod tests {
             cache.active_account().map(|account| account.email.as_str()),
             Some("alice@example.com")
         );
+    }
+    /// Discarding a device id, as for one Connect has revoked: only the id
+    /// goes, and the next registration stores a new one.
+    #[tokio::test]
+    async fn clearing_a_device_id_keeps_the_session_and_lets_the_next_registration_store_one() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("revoked-device".into());
+        cache.accounts[0].last_seen_event_seq = Some(42);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let before = ConnectCache::from_file(&dir).unwrap();
+
+        assert!(set_device_id_for_email(&dir, email, None).await.unwrap());
+
+        let cleared = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(cleared.active_email, before.active_email);
+        let (account, was) = (
+            cleared.active_account().unwrap(),
+            before.active_account().unwrap(),
+        );
+        assert_eq!(account.device_id, None);
+        assert_eq!(account.email, was.email);
+        assert_eq!(account.tokens.access_token, was.tokens.access_token);
+        assert_eq!(account.tokens.refresh_token, was.tokens.refresh_token);
+        assert_eq!(account.last_seen_event_seq, Some(42));
+
+        assert!(set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "fresh-device",
+            &was.tokens.refresh_token
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("fresh-device")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A clear is refused while a re-registration holds the claim, and for
+    /// an account that is not in the cache. Neither changes the file.
+    #[tokio::test]
+    async fn clearing_a_device_id_is_refused_under_a_live_claim_and_for_an_unknown_account() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!set_device_id_for_email(&dir, "nobody@example.com", None)
+            .await
+            .unwrap());
+
+        // The claim is live only while it is held: it owns a file lock.
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let claimed = std::fs::read(&path).unwrap();
+        assert!(!set_device_id_for_email(&dir, email, None).await.unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), claimed);
+
+        // Once its process has let go, the claim is abandoned and the clear
+        // goes through, taking the abandoned claim with it.
+        drop(claim);
+        assert!(set_device_id_for_email(&dir, email, None).await.unwrap());
+        let cleared = ConnectCache::from_file(&dir).unwrap();
+        let account = cleared.active_account().unwrap();
+        assert_eq!(account.device_id, None);
+        assert_eq!(account.reregister_claim, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
     }
 }

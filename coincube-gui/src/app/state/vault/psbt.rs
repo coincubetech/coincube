@@ -1911,7 +1911,14 @@ fn build_keychain_if_ready(
     // The REST client's bearer is set asynchronously inside
     // `KeychainSignModal::launch()` (an async context) rather than here on
     // the synchronous `update` path, which can't `blocking_read` the token.
-    let coincube_client = crate::services::coincube::CoincubeClient::new();
+    // On the endpoint the Cube's signer pipeline is using, which the stream
+    // bootstrap records beside the gRPC address.
+    let coincube_client = crate::services::coincube::CoincubeClient::with_base_url(
+        cache
+            .connect_base_url
+            .clone()
+            .unwrap_or_else(crate::services::coincube_api_base_url),
+    );
     let modal = super::keychain_sign::KeychainSignModal::new(
         wallet.clone(),
         coincube_client,
