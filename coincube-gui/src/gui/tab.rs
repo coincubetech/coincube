@@ -3332,8 +3332,7 @@ impl Tab {
         // poll re-clears once the file is readable again.
         match crate::services::duress::DuressLocalState::load(root) {
             Ok(mut st) => {
-                st.active = false;
-                st.unlock_at = None;
+                st.clear_lock();
                 if let Err(e) = st.save(root) {
                     error!("duress: failed to clear local state: {e}");
                 }
@@ -10253,10 +10252,14 @@ mod duress_clear_check_tests {
         Tab::new(1, state)
     }
 
-    /// A remote lock of account 7 on a data directory with only BTCB2 Cubes.
+    /// A remote lock raised by account 7 on a data directory with only BTCB2
+    /// Cubes.
     fn btcb2_only_lock(label: &str) -> TempRoot {
         let root = TempRoot::new(label);
-        write_lock(&root.0, Some("7"));
+        write_lock(&root.0, None);
+        let mut state = crate::services::duress::DuressLocalState::load(&root.0).unwrap();
+        state.record_remote_lock_account(Some("7".into()));
+        state.save(&root.0).unwrap();
         std::fs::create_dir_all(root.0.join("bitcoin-blake2b")).unwrap();
         root
     }
@@ -10265,6 +10268,7 @@ mod duress_clear_check_tests {
         assert!(matches!(tab.state, State::Home(_)));
         let state = crate::services::duress::DuressLocalState::load(&root.0).unwrap();
         assert!(!state.active);
+        assert_eq!(state.locked_by_account_id, None);
     }
 
     #[test]

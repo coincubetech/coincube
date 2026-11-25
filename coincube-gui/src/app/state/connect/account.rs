@@ -6529,8 +6529,7 @@ impl ConnectAccountPanel {
                         let root = dir.path();
                         match crate::services::duress::DuressLocalState::load(root) {
                             Ok(mut st) if st.active => {
-                                st.active = false;
-                                st.unlock_at = None;
+                                st.clear_lock();
                                 if let Err(e) = st.save(root) {
                                     log::warn!(
                                         "[CONNECT] failed to clear local duress \
