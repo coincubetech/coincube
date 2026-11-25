@@ -768,15 +768,31 @@ mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 
-    /// Allocate a fresh temp `CoincubeDirectory` per test. We don't pull
-    /// `tempfile` into deps for one helper — `std::env::temp_dir()` plus
-    /// a uuid subfolder is sufficient and aligns with the test's
-    /// single-process scope.
-    fn fresh_dir() -> CoincubeDirectory {
-        let mut path = std::env::temp_dir();
-        path.push(format!("coincube-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&path).expect("mkdir tempdir");
-        CoincubeDirectory::new(path)
+    /// A per-test `CoincubeDirectory` that owns its temp directory and
+    /// removes it on drop, including when an assertion panics. Derefs to
+    /// the `CoincubeDirectory`, so `&dir`, `dir.path()` and `dir.clone()`
+    /// read as before; bind it for the whole test body.
+    struct TestDir {
+        dir: CoincubeDirectory,
+        _guard: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for TestDir {
+        type Target = CoincubeDirectory;
+        fn deref(&self) -> &CoincubeDirectory {
+            &self.dir
+        }
+    }
+
+    fn fresh_dir() -> TestDir {
+        let guard = tempfile::Builder::new()
+            .prefix("coincube-test-")
+            .tempdir()
+            .expect("mkdir tempdir");
+        TestDir {
+            dir: CoincubeDirectory::new(guard.path().to_path_buf()),
+            _guard: guard,
+        }
     }
 
     /// A binding whose descriptor commitment matches but whose other
