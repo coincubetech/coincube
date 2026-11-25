@@ -109,11 +109,6 @@ message PartialSignature {
   // The chain the phone signed for: the presented session's network, which the
   // desktop always states. Required: the desktop refuses an empty or different
   // value before verifying or merging.
-  //
-  // Desktop status: the three lines above quote the contract (§4.3) and are
-  // its target. Until desktop PR 8d, the LAN SigningSession carries an empty
-  // network and the desktop does not read this field; PR 8d states the paired
-  // record's chain on the session and adds the refusal above.
   string network = 5;
 }
 
