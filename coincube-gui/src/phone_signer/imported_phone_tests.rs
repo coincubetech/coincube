@@ -89,6 +89,8 @@ fn phone_for_key(input: &Value, policy: &PhonePolicy, index: usize) -> pairing_s
         vault_fingerprint: policy.transport_id(),
         transport_pubkey: vec![2; 33],
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     }
 }
 

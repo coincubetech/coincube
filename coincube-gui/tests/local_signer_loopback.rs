@@ -182,6 +182,8 @@ fn imported_pairing(
         vault_fingerprint: policy.transport_id(),
         transport_pubkey,
         fallback_addr: None,
+        network: Some(wallet.chain().api_str().into()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -560,6 +562,8 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     };
     let signer = PhoneSigner::new(
         transport,
@@ -650,6 +654,8 @@ async fn signer_against_chain_response(
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     };
     let signer = PhoneSigner::new(
         transport,
@@ -791,6 +797,8 @@ fn stale_or_wrong_exact_pairing_identity_is_not_a_capability() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: Vec::new(),
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     };
     assert!(phone.exact_signer(TEST_DESCRIPTOR).is_ok());
     let valid = phone.signer_binding.clone();

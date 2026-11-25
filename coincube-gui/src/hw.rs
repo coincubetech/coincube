@@ -2118,6 +2118,8 @@ mod tests {
             vault_fingerprint: Default::default(),
             transport_pubkey: Vec::new(),
             fallback_addr: fallback.map(|s| s.to_string()),
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 

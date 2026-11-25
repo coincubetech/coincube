@@ -99,6 +99,55 @@ pub struct PairedPhone {
     /// "Connect by IP" field for networks where mDNS is blocked.
     /// `host:port` form; `None` means rely on mDNS.
     pub fallback_addr: Option<String>,
+
+    /// The chain this pairing is for, as its Connect network id: the v3
+    /// offer's `net`, which the phone's record matched (signing identity
+    /// contract §4.5). `None` is a pairing made before v3, which is never
+    /// used to sign on any chain (master decision 21): it stays listed,
+    /// refused with [`PRE_V3_PAIRING`], so the user can remove it and tell
+    /// the phone.
+    #[serde(default)]
+    pub network: Option<String>,
+
+    /// The phone's capability list as `PairingComplete` reported it, recorded
+    /// at pairing and never refreshed afterwards (contract §4.5). A phone that
+    /// paired with a build lacking a capability is not dialled for what needs
+    /// it until it pairs again.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Signer-list copy for a pairing made before v3 (contract R2.6, legacy
+/// variant), shown for every Vault on every chain.
+pub const PRE_V3_PAIRING: &str =
+    "This pairing predates network-aware signing. Pair this phone again.";
+
+impl PairedPhone {
+    /// The notice the pairing screen shows before the user scans when this
+    /// phone already has a pairing for another chain, or one made before v3.
+    /// There is one pairing per phone and desktop (master decision 19), so
+    /// the new one replaces it. `None` when the stored pairing is for `chain`.
+    pub fn replaced_by_pairing_for(&self, chain: ChainId) -> Option<String> {
+        use crate::chain::ChainIdExt;
+        match self.network.as_deref() {
+            Some(net) if net == chain.api_str() => None,
+            Some(net) => Some(match ChainId::from_api_str(net) {
+                Some(other) => coincube_ui::localized_format!(
+                    "Paired for {}. Pairing it here replaces that pairing.",
+                    "Emparejado para {}. Emparejarlo aquí reemplaza ese emparejamiento.",
+                    other.label()
+                ),
+                None => coincube_ui::localized_format!(
+                    "Paired for another network. Pairing it here replaces that pairing.",
+                    "Emparejado para otra red. Emparejarlo aquí reemplaza ese emparejamiento."
+                ),
+            }),
+            None => Some(coincube_ui::localized_format!(
+                "Paired before network-aware signing. Pairing it here replaces that pairing.",
+                "Emparejado antes de la firma por red. Emparejarlo aquí reemplaza ese emparejamiento."
+            )),
+        }
+    }
 }
 
 /// QR-selected key independently resolved by the authenticated phone.
@@ -204,6 +253,9 @@ impl PairedPhone {
         use coincube_core::miniscript::{DescriptorPublicKey, ForEachKey};
         use sha2::{Digest, Sha256};
         let error = "Pair this phone again and select its exact imported account key.";
+        if self.network.is_none() {
+            return Err(PRE_V3_PAIRING.into());
+        }
         let binding = self.signer_binding.as_ref().ok_or(error)?;
         let scope = binding.imported_scope.as_ref().ok_or(error)?;
         let digest = Sha256::digest(descriptor.as_bytes());
@@ -278,6 +330,11 @@ impl PairedPhone {
         vault_keys: &[(String, Fingerprint)],
     ) -> Result<&SignerBinding, String> {
         let error = "Pair this phone again and select its exact vault key.";
+        // A pairing made before v3 is never used, on any chain (contract
+        // R2.6, legacy variant; master decision 21).
+        if self.network.is_none() {
+            return Err(PRE_V3_PAIRING.into());
+        }
         let binding = self.signer_binding.as_ref().ok_or(error)?;
         let member = vault_keys
             .iter()
@@ -819,6 +876,8 @@ mod tests {
             } else {
                 None
             },
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 
@@ -856,6 +915,115 @@ mod tests {
             serde_json::to_value(&prior).unwrap()
         );
     }
+    /// Master decision 21: a `paired-phones.json` written before v3 (rows
+    /// without `network` or `capabilities`) loads, and every row stays
+    /// listed, is refused with the pre-v3 copy, and can be removed with the
+    /// phone told as today.
+    #[test]
+    fn a_file_with_pre_v3_rows_loads_with_every_row_refused_and_removable() {
+        use sha2::{Digest, Sha256};
+        let dir = fresh_dir();
+        let descriptor = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
+        let digest: [u8; 32] = Sha256::digest(descriptor.as_bytes()).into();
+        let mut v2_rows = Vec::new();
+        for seed in [5u8, 6] {
+            let mut phone = sample_phone(seed);
+            bind_descriptor(&mut phone, digest);
+            phone.vault_fingerprint = hex::encode(&digest[..4]).parse().unwrap();
+            let mut json = serde_json::to_value(&phone).unwrap();
+            let row = json.as_object_mut().unwrap();
+            row.remove("network");
+            row.remove("capabilities");
+            v2_rows.push(json);
+        }
+        std::fs::write(
+            store_path(&dir),
+            serde_json::to_vec(&serde_json::json!({ "phones": v2_rows })).unwrap(),
+        )
+        .unwrap();
+        let file = load(&dir).unwrap();
+        assert_eq!(file.phones.len(), 2, "pre-v3 rows stay listed");
+        let vault_keys: Vec<(String, Fingerprint)> = Vec::new();
+        for phone in &file.phones {
+            assert_eq!(phone.network, None);
+            assert!(phone.capabilities.is_empty());
+            assert_eq!(phone.exact_signer(descriptor).unwrap_err(), PRE_V3_PAIRING);
+            assert_eq!(
+                phone
+                    .exact_signer_against(&hex::encode(digest), &vault_keys)
+                    .unwrap_err(),
+                PRE_V3_PAIRING
+            );
+        }
+        // Removable, and the phone is told, as today.
+        let removed = file.phones[0].cert_pin;
+        let after = unpair(&dir, &removed).unwrap();
+        assert_eq!(after.phones.len(), 1);
+        assert_eq!(after.pending_unpairs.len(), 1);
+        assert_eq!(after.pending_unpairs[0].cert_pin, removed);
+        // Nothing was written into the store's rows besides the removal.
+        assert_eq!(load(&dir).unwrap().phones[0].network, None);
+    }
+
+    /// One pairing per phone and desktop (master decision 19): pairing the
+    /// same phone for another chain replaces its row, keeps the user's name
+    /// and fallback address, and records the new chain and capabilities.
+    #[test]
+    fn pairing_for_another_chain_replaces_the_row_and_keeps_the_users_name() {
+        use super::super::pairing_transaction::PairingTransaction;
+        let dir = fresh_dir();
+        let mut bitcoin = sample_phone(8);
+        bitcoin.name = "Alice's phone".into();
+        bitcoin.fallback_addr = Some("192.0.2.8:1234".into());
+        upsert(&dir, bitcoin.clone()).unwrap();
+
+        let mut btcb2 = sample_phone(8);
+        btcb2.name = "Pixel".into();
+        btcb2.fallback_addr = None;
+        btcb2.network = Some("bitcoin-blake2b".into());
+        btcb2.capabilities = vec!["chain-identity-v1".into(), "btcb2-unified-v2".into()];
+        let transaction = PairingTransaction::prepare(&dir, "btcb2".into(), btcb2.clone()).unwrap();
+        transaction.write_candidate().unwrap();
+        transaction.decide().unwrap();
+        transaction.finish().unwrap();
+
+        let file = load(&dir).unwrap();
+        assert_eq!(file.phones.len(), 1, "one row per phone");
+        let row = &file.phones[0];
+        assert_eq!(row.network.as_deref(), Some("bitcoin-blake2b"));
+        assert_eq!(row.capabilities, btcb2.capabilities);
+        assert_eq!(row.name, "Alice's phone");
+        assert_eq!(row.fallback_addr.as_deref(), Some("192.0.2.8:1234"));
+    }
+
+    #[test]
+    fn the_pairing_screen_says_which_pairing_a_new_one_replaces() {
+        let mut phone = sample_phone(9);
+        phone.network = Some("mainnet".into());
+        assert_eq!(phone.replaced_by_pairing_for(ChainId::Bitcoin), None);
+        assert_eq!(
+            phone
+                .replaced_by_pairing_for(ChainId::BitcoinBlake2b)
+                .unwrap(),
+            "Paired for Bitcoin. Pairing it here replaces that pairing."
+        );
+        phone.network = Some("bitcoin-blake2b-testnet4".into());
+        assert_eq!(
+            phone.replaced_by_pairing_for(ChainId::Testnet4).unwrap(),
+            "Paired for Bitcoin Blake2b Testnet4. Pairing it here replaces that pairing."
+        );
+        phone.network = None;
+        assert!(phone
+            .replaced_by_pairing_for(ChainId::Bitcoin)
+            .unwrap()
+            .contains("before network-aware signing"));
+        phone.network = Some("future-chain".into());
+        assert!(phone
+            .replaced_by_pairing_for(ChainId::Bitcoin)
+            .unwrap()
+            .contains("another network"));
+    }
+
     #[test]
     fn unpair_queues_one_notice_and_pairing_again_drops_it() {
         let dir = fresh_dir();
@@ -1308,6 +1476,8 @@ mod tests {
             vault_fingerprint: Fingerprint::from([0xaa, 0xaa, 0xaa, 0xaa]),
             transport_pubkey: Vec::new(),
             fallback_addr: Some("10.0.0.5:8443".into()),
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         };
         save(
             &dir,
@@ -1327,6 +1497,8 @@ mod tests {
             vault_fingerprint: Fingerprint::from([0xbb, 0xbb, 0xbb, 0xbb]),
             transport_pubkey: Vec::new(),
             fallback_addr: None,
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         };
         let written = upsert_preserving_user_fields(&dir, fresh).expect("upsert");
 

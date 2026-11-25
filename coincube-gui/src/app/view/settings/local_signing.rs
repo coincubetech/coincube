@@ -174,8 +174,13 @@ fn key_subtitle(key: &PairableKey) -> Option<String> {
 fn pair_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     let body: Element<'a, Message> = match &state.flow {
         PairingFlow::Idle => idle_body(state),
-        PairingFlow::PhonePicker { discovered } => picker_body(discovered),
-        PairingFlow::Waiting { phone, offer, qr } => waiting_body(phone, offer, qr.as_ref()),
+        PairingFlow::PhonePicker { discovered } => picker_body(state, discovered),
+        PairingFlow::Waiting { phone, offer, qr } => waiting_body(
+            phone,
+            offer,
+            qr.as_ref(),
+            state.replaced_pairing_notice(&phone.cert_fp8),
+        ),
         PairingFlow::Error(e) => error_body(e),
     };
     page::group(
@@ -225,6 +230,7 @@ fn waiting_body<'a>(
     phone: &'a crate::phone_signer::mdns::DiscoveredPhone,
     offer: &'a crate::phone_signer::pairing::PairingOffer,
     qr: Option<&'a qr_code::Data>,
+    replaced: Option<String>,
 ) -> Element<'a, Message> {
     let remaining = crate::phone_signer::pairing::seconds_remaining(offer);
     let mut info = Column::new()
@@ -238,9 +244,15 @@ fn waiting_body<'a>(
             )
         } else {
             "This offer can no longer be scanned. Start a fresh pairing offer.".to_string()
-        }))
+        }));
+    // Pairing here replaces this phone's pairing for another chain, said
+    // before the user scans (master decision 19).
+    if let Some(notice) = replaced {
+        info = info.push(page::muted(notice));
+    }
+    info = info
         // A phone that predates v3 pairing refuses this code at scan
-        // (signing identity contract §4.1, §4.6).
+        // (contract §4.1, §4.6).
         .push(page::muted(localized_format!(
             "If COINCUBE Mobile reports an unsupported QR version, update COINCUBE Mobile.",
             "Si COINCUBE Mobile indica una versión de QR no compatible, actualiza COINCUBE Mobile."
@@ -249,7 +261,11 @@ fn waiting_body<'a>(
         .push(if remaining > 0 {
             page::status(
                 page::Status::Busy,
-                localized_format!("Waiting · expires in {}s", "En espera · vence en {} s", remaining),
+                localized_format!(
+                    "Waiting · expires in {}s",
+                    "En espera · vence en {} s",
+                    remaining
+                ),
             )
         } else {
             page::status(page::Status::Bad, localized_copy("Pairing offer expired"))
@@ -282,6 +298,7 @@ fn waiting_body<'a>(
 }
 
 fn picker_body<'a>(
+    state: &'a LocalSigningState,
     discovered: &'a [crate::phone_signer::mdns::DiscoveredPhone],
 ) -> Element<'a, Message> {
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
@@ -290,9 +307,15 @@ fn picker_body<'a>(
         let press = Some(local(LocalSigningMessage::PickPhone(fp8)));
         let id =
             iced::advanced::widget::Id::from(format!("tenshu.settings.pair.phone.{}", d.cert_fp8));
+        // Said before the user picks and scans: pairing here replaces a
+        // pairing this phone has for another chain.
+        let description = match state.replaced_pairing_notice(&d.cert_fp8) {
+            Some(notice) => format!("{} · {}", d.addr, notice),
+            None => d.addr.to_string(),
+        };
         rows.push(
             page::row(localized_format!("Phone {}", "Teléfono {}", d.cert_fp8))
-                .description(d.addr.to_string())
+                .description(description)
                 .control(if i == 0 {
                     page::primary(id, localized_copy("Pair"), press)
                 } else {
@@ -470,6 +493,14 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
             .is_ok();
         let (kind, word, detail) = if exact {
             (page::Status::Ok, "Paired", "Exact vault key paired.")
+        } else if p.network.is_none() {
+            // A pairing made before v3: kept visible and removable, never
+            // used to sign (contract R2.6, legacy variant).
+            (
+                page::Status::Warn,
+                "Pair again",
+                crate::phone_signer::pairing_store::PRE_V3_PAIRING,
+            )
         } else if has_full_binding && !removable {
             (
                 page::Status::Warn,
@@ -679,8 +710,9 @@ mod tests {
             addr: "192.168.100.95:54502".parse().unwrap(),
             instance_name: "x".into(),
         };
-        let _ = picker_body(&[]);
-        let _ = picker_body(std::slice::from_ref(&phone));
+        let state = LocalSigningState::default();
+        let _ = picker_body(&state, &[]);
+        let _ = picker_body(&state, std::slice::from_ref(&phone));
         let _ = error_body(&PairingError::ReplayRefused);
         let _ = error_body(&PairingError::OfferExpired);
     }

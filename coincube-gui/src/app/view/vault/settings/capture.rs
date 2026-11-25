@@ -184,6 +184,8 @@ fn pair_state(scenario: &str) -> LocalSigningState {
             vault_fingerprint: vault_id,
             transport_pubkey: Vec::new(),
             fallback_addr: None,
+            network: None,
+            capabilities: Vec::new(),
         });
     }
     state
