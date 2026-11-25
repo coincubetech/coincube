@@ -128,6 +128,12 @@ impl std::fmt::Debug for PhoneSigner {
 }
 
 impl PhoneSigner {
+    /// The same rule as the PSBT panel's `uses_unified_signatures`: a Vault on
+    /// Bitcoin Blake2b signs unified; an imported wallet never does.
+    fn uses_unified_signatures(&self) -> bool {
+        self.chain.is_blake2b() && matches!(self.policy.kind(), PhonePolicyKind::Vault(_))
+    }
+
     fn current_binding(&self) -> Result<&SignerBinding, HwiError> {
         match self.policy.kind() {
             PhonePolicyKind::Vault(_) => self.paired_phone.exact_signer_for(&self.policy),
@@ -261,7 +267,13 @@ impl HWI for PhoneSigner {
         signatures::authenticated_prevouts(psbt).map_err(HwiError::Device)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let request_id = uuid::Uuid::new_v4().to_string();
-        let psbt_bytes = psbt.serialize();
+        // One codec for both rails (`crate::mobile_signing`), selected by the
+        // wallet's signature format: a Bitcoin Blake2b Vault signs unified, an
+        // imported wallet ordinary signatures on every chain. On Bitcoin this
+        // is the plain serialisation.
+        let unified = self.uses_unified_signatures();
+        let psbt_bytes = crate::mobile_signing::signing_wire_psbt(unified, psbt.clone())
+            .map_err(|e| HwiError::Device(format!("encode psbt: {}", e)))?;
 
         // LAN is ECIES_V1, the same as the Connect rail. Both halves of the
         // key exchange must be present or we refuse the session outright:
@@ -430,7 +442,7 @@ impl HWI for PhoneSigner {
             .map_err(|e| {
                 HwiError::Device(format!("could not decrypt the signed transaction: {}", e))
             })?;
-        let signed: Psbt = Psbt::deserialize(&signed_bytes)
+        let signed: Psbt = crate::mobile_signing::returned_wire_psbt(unified, &signed_bytes)
             .map_err(|e| HwiError::Device(format!("decode signed psbt: {}", e)))?;
 
         if signed.unsigned_tx != psbt.unsigned_tx || signed.inputs.len() != psbt.inputs.len() {
@@ -445,7 +457,7 @@ impl HWI for PhoneSigner {
         }
         match self.policy.kind() {
             PhonePolicyKind::Vault(_) => {
-                signatures::merge_verified(psbt, &signed, &self.descriptor, binding)
+                signatures::merge_verified_for(unified, psbt, &signed, &self.descriptor, binding)
             }
             PhonePolicyKind::Imported { wallet, .. } => {
                 signatures::merge_imported_verified(psbt, &signed, wallet, binding)
@@ -544,3 +556,7 @@ mod signature_tests;
 #[cfg(test)]
 #[path = "imported_phone_tests.rs"]
 mod imported_phone_tests;
+
+#[cfg(test)]
+#[path = "unified_signature_tests.rs"]
+mod unified_signature_tests;

@@ -77,28 +77,9 @@ use crate::{
 /// stream is the primary channel; this just guarantees eventual delivery.
 const SESSION_POLL_INTERVAL_SECS: u64 = 4;
 
-// The authenticated wallet chain selects the wire codec, never remote bytes.
-fn signing_wire_psbt(chain: crate::chain::ChainId, psbt: Psbt) -> Result<Vec<u8>, String> {
-    if chain.is_blake2b() {
-        let internal =
-            coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt).map_err(|e| e.to_string())?;
-        coincube_core::psbt_unified::export_standard(&internal).map_err(|e| e.to_string())
-    } else {
-        Ok(psbt.serialize())
-    }
-}
-
-fn returned_wire_psbt(chain: crate::chain::ChainId, bytes: &[u8]) -> Result<Psbt, String> {
-    if chain.is_blake2b() {
-        // This strict importer accepts standard 0x21 and legacy internal records;
-        // it rejects duplicate/conflicting namespaces. Never retry a failed parse.
-        coincube_core::psbt_unified::import_standard(bytes)
-            .map(|internal| internal.psbt().clone())
-            .map_err(|e| e.to_string())
-    } else {
-        Psbt::deserialize(bytes).map_err(|e| e.to_string())
-    }
-}
+// The wallet's signature format selects the wire codec, never remote bytes.
+// One codec for both Mobile signing rails (`crate::mobile_signing`).
+use crate::mobile_signing::{returned_wire_psbt, signing_wire_psbt};
 
 /// Per-Keychain-signer state tracked while the user waits for them to
 /// approve and sign on their phone.
@@ -1138,7 +1119,10 @@ impl KeychainSignModal {
                 });
             }
         };
-        let psbt_bytes = match signing_wire_psbt(self.wallet.chain, psbt_to_sign) {
+        let psbt_bytes = match signing_wire_psbt(
+            super::psbt::uses_unified_signatures(&self.wallet),
+            psbt_to_sign,
+        ) {
             Ok(bytes) => bytes,
             Err(e) => {
                 return Self::fail_session_creation(&mut self.pending, index, |_| {
@@ -1808,7 +1792,7 @@ impl KeychainSignModal {
                 return false;
             }
         };
-        match returned_wire_psbt(self.wallet.chain, &bytes) {
+        match returned_wire_psbt(super::psbt::uses_unified_signatures(&self.wallet), &bytes) {
             Ok(psbt) => {
                 if let Err(e) = super::psbt::merge_signatures_pub(
                     super::psbt::uses_unified_signatures(&self.wallet),
@@ -4110,25 +4094,25 @@ pub(crate) mod tests {
             let f = fixture();
             let signed = unified(&f.psbt, &f.signers[0]);
             for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-                let wire = signing_wire_psbt(chain, signed.clone()).unwrap();
+                let wire = signing_wire_psbt(chain.is_blake2b(), signed.clone()).unwrap();
                 assert_ne!(wire, signed.serialize());
                 assert!(Psbt::deserialize(&wire).is_err());
-                let imported = returned_wire_psbt(chain, &wire).unwrap();
+                let imported = returned_wire_psbt(chain.is_blake2b(), &wire).unwrap();
                 assert_eq!(imported.serialize(), signed.serialize());
             }
             let bitcoin = legacy(&f.psbt, &f.signers[0]);
             assert_eq!(
-                signing_wire_psbt(ChainId::Bitcoin, bitcoin.clone()).unwrap(),
+                signing_wire_psbt(ChainId::Bitcoin.is_blake2b(), bitcoin.clone()).unwrap(),
                 bitcoin.serialize()
             );
             assert_eq!(
-                returned_wire_psbt(ChainId::Bitcoin, &bitcoin.serialize())
+                returned_wire_psbt(ChainId::Bitcoin.is_blake2b(), &bitcoin.serialize())
                     .unwrap()
                     .serialize(),
                 bitcoin.serialize()
             );
-            let wire = signing_wire_psbt(ChainId::BitcoinBlake2b, signed).unwrap();
-            assert!(returned_wire_psbt(ChainId::Bitcoin, &wire).is_err());
+            let wire = signing_wire_psbt(ChainId::BitcoinBlake2b.is_blake2b(), signed).unwrap();
+            assert!(returned_wire_psbt(ChainId::Bitcoin.is_blake2b(), &wire).is_err());
         }
 
         fn standard_refusal_wire(
@@ -4150,7 +4134,7 @@ pub(crate) mod tests {
                     .proprietary
                     .clone();
                     (
-                        signing_wire_psbt(ChainId::BitcoinBlake2b, invalid).unwrap(),
+                        signing_wire_psbt(ChainId::BitcoinBlake2b.is_blake2b(), invalid).unwrap(),
                         if case == "conflict" {
                             "conflicting signature"
                         } else {
@@ -4162,7 +4146,11 @@ pub(crate) mod tests {
                     let mut ambiguous = legacy(&f.psbt, &f.signers[0]);
                     ambiguous.inputs[0].proprietary = valid.inputs[0].proprietary.clone();
                     // Deliberately bypass the strict exporter to model hostile bytes.
-                    assert!(signing_wire_psbt(ChainId::BitcoinBlake2b, ambiguous.clone()).is_err());
+                    assert!(signing_wire_psbt(
+                        ChainId::BitcoinBlake2b.is_blake2b(),
+                        ambiguous.clone()
+                    )
+                    .is_err());
                     (ambiguous.serialize(), "Malformed signed PSBT")
                 }
                 "trailing-bytes" => {
@@ -4179,7 +4167,8 @@ pub(crate) mod tests {
             let f = fixture();
             let key = Arc::new(test_transport_key());
             let valid = unified(&f.psbt, &f.signers[0]);
-            let valid_wire = signing_wire_psbt(ChainId::BitcoinBlake2b, valid.clone()).unwrap();
+            let valid_wire =
+                signing_wire_psbt(ChainId::BitcoinBlake2b.is_blake2b(), valid.clone()).unwrap();
             for case in [
                 "invalid-signature",
                 "conflict",

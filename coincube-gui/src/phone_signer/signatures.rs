@@ -56,7 +56,38 @@ pub(super) fn authenticated_prevouts(
         .collect()
 }
 
+/// [`merge_verified_for`] on a Bitcoin chain: the semantics every existing
+/// negative test in `signature_tests.rs` pins.
+#[cfg(test)]
 pub(super) fn merge_verified(
+    original: &mut Psbt,
+    returned: &Psbt,
+    descriptor: &str,
+    binding: &SignerBinding,
+) -> Result<(), String> {
+    merge_verified_for(false, original, returned, descriptor, binding)
+}
+
+/// Verify a phone's signature delta for a Vault and merge it, atomically.
+///
+/// `unified` is the wallet's signature format (a Bitcoin Blake2b Vault), the
+/// same switch the wire codec takes (`crate::mobile_signing`). One verifier,
+/// chosen by it, no weaker than before on either chain:
+///
+/// - Every chain: the transaction and input count are the request's; prevouts
+///   come from authenticated previous transactions; every added signature
+///   belongs to the bound key at a derivation the descriptor produces for the
+///   spent script; every retained signature, unified or not, comes back
+///   intact; final fields are never imported.
+/// - Bitcoin: `SIGHASH_ALL` ECDSA and default-sighash Taproot additions, each
+///   verified here. A unified record is refused: no Bitcoin signer makes one.
+/// - Bitcoin Blake2b: only unified (`ALL|UNIFIED`) records may be added. A
+///   plain `SIGHASH_ALL` or Taproot addition is refused, since it would be
+///   replayable on Bitcoin. The merged result is verified by the same checks
+///   the Connect rail's merge runs (`verify_all_signatures`,
+///   `ensure_no_unsafe_legacy_alternative`) before anything is written.
+pub(super) fn merge_verified_for(
+    unified: bool,
     original: &mut Psbt,
     returned: &Psbt,
     descriptor: &str,
@@ -79,11 +110,16 @@ pub(super) fn merge_verified(
     let mut additions = 0;
     for (i, (before, after)) in original.inputs.iter().zip(&returned.inputs).enumerate() {
         validate_retained_vault_signatures(before, after)?;
-        if before.partial_sigs == after.partial_sigs
-            && before.tap_key_sig == after.tap_key_sig
-            && before.tap_script_sigs == after.tap_script_sigs
-        {
+        let added_unified = added_unified_records(before, after)?;
+        let legacy_changed = before.partial_sigs != after.partial_sigs
+            || before.tap_key_sig != after.tap_key_sig
+            || before.tap_script_sigs != after.tap_script_sigs;
+        if !legacy_changed && added_unified.is_empty() {
             continue;
+        }
+        // Each chain admits one kind of addition only.
+        if (unified && legacy_changed) || (!unified && !added_unified.is_empty()) {
+            return Err(reject());
         }
 
         let (expected, owned) =
@@ -100,12 +136,38 @@ pub(super) fn merge_verified(
             secp: &secp,
             cache: &mut cache,
         };
+        if unified {
+            input.check_unified_additions(&added_unified, &expected, &owned, &mut additions)?;
+            continue;
+        }
         input.verify_ecdsa_additions(after, &expected, &owned, &mut additions)?;
         input.verify_tap_key_addition(after, &expected, &owned_xonly, &mut additions)?;
         input.verify_tap_leaf_additions(after, &expected, &owned_xonly, &mut additions)?;
     }
     if additions == 0 {
         return Err(reject());
+    }
+    if unified {
+        // Only the unified records cross over; everything else stays the
+        // request's. Verified on the merged PSBT, which carries the prevouts
+        // and witness scripts, before `original` is touched.
+        let mut candidate = original.clone();
+        for (before, after) in candidate.inputs.iter_mut().zip(&returned.inputs) {
+            for (key, value) in &after.proprietary {
+                if coincube_core::psbt_unified::is_reserved_key(key) {
+                    before.proprietary.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        let merged = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(candidate.clone())
+            .map_err(|_| reject())?;
+        let secp = Secp256k1::verification_only();
+        coincube_core::unified_finalize::verify_all_signatures(&merged, &secp)
+            .map_err(|_| reject())?;
+        coincube_core::unified_finalize::ensure_no_unsafe_legacy_alternative(&merged, &secp)
+            .map_err(|_| reject())?;
+        *original = candidate;
+        return Ok(());
     }
     // BDK may also finalize while retaining partial signatures. Never import
     // response final scripts/witnesses (or any other metadata). The desktop
@@ -117,6 +179,27 @@ pub(super) fn merge_verified(
         before.tap_script_sigs = after.tap_script_sigs.clone();
     }
     Ok(())
+}
+
+/// The unified records `after` adds to `before`, by public key. A retained
+/// record that comes back altered or missing, or a record whose key is not a
+/// public key, is refused.
+fn added_unified_records(before: &Input, after: &Input) -> Result<Vec<PublicKey>, String> {
+    use coincube_core::psbt_unified::is_reserved_key;
+    if before
+        .proprietary
+        .iter()
+        .filter(|(k, _)| is_reserved_key(k))
+        .any(|(k, v)| after.proprietary.get(k) != Some(v))
+    {
+        return Err(reject_vault_delta());
+    }
+    after
+        .proprietary
+        .keys()
+        .filter(|k| is_reserved_key(k) && !before.proprietary.contains_key(k))
+        .map(|k| PublicKey::from_slice(&k.key).map_err(|_| reject_vault_delta()))
+        .collect()
 }
 
 fn reject_vault_delta() -> String {
@@ -213,6 +296,31 @@ struct VaultInputVerifier<'a, 'tx> {
 }
 
 impl VaultInputVerifier<'_, '_> {
+    /// Ownership and request checks for added unified records. Their
+    /// signatures are verified cryptographically on the merged PSBT, by the
+    /// shared unified verifier, before anything is written.
+    fn check_unified_additions(
+        &self,
+        added: &[PublicKey],
+        expected: &Input,
+        owned: &BTreeSet<PublicKey>,
+        additions: &mut i32,
+    ) -> Result<(), String> {
+        // The input's sighash request (absent or `ALL|UNIFIED`) is enforced
+        // by that verifier too, on the request's own field.
+        for pk in added {
+            if !owned.contains(pk)
+                || !expected.bip32_derivation.contains_key(&pk.inner)
+                || expected.bip32_derivation.get(&pk.inner)
+                    != self.before.bip32_derivation.get(&pk.inner)
+            {
+                return Err(reject_vault_delta());
+            }
+            *additions += 1;
+        }
+        Ok(())
+    }
+
     fn verify_ecdsa_additions(
         &mut self,
         after: &Input,
