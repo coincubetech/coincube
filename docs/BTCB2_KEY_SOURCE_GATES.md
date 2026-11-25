@@ -39,7 +39,8 @@ their own decision.
 
 Mobile keys were held back above until Lane B3. COINCUBE Mobile now signs
 BTCB2 with the unified signer and advertises `chain-identity-v1` and
-`btcb2-unified-v1`, and the desktop's signing client checks both before it
+`btcb2-unified-v2` (which replaced `btcb2-unified-v1`, master plan decisions 16
+and 22), and the desktop's signing client checks both before it
 prepares a BTCB2 session (`BTCB2_CONNECT_SIGNING_CLIENT.md`). This change
 re-enables the Mobile Keys card on BTCB2. The earlier gate is recorded on
 coincube #568, so this lift needs the same owner sign-off before merge.
