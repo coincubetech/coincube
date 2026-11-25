@@ -230,6 +230,9 @@ pub struct NavContext<'a> {
     /// [`MarketplaceServerFlags::OFF`](crate::app::features::MarketplaceServerFlags::OFF)
     /// until features load, hiding the section while the API stance is unknown.
     pub marketplace_flags: crate::app::features::MarketplaceServerFlags,
+    /// Whether AI access is available ([`crate::app::cache::Cache::ai_access_enabled`]).
+    /// Gates the AI access item in the Cube Settings rail.
+    pub ai_access: bool,
     pub cube_name: &'a str,
     /// The wallet names after "Spark" and "Vault" in the side panel. See
     /// [`crate::app::cache::WalletNames`].
@@ -288,6 +291,7 @@ impl<'a> NavContext<'a> {
             network: cache.chain(),
             p2p_test_coordinator: cache.p2p_test_coordinator,
             marketplace_flags: cache.marketplace_flags,
+            ai_access: cache.ai_access_enabled(),
             btcb2_server_enabled: cache.btcb2_server_enabled,
             btcb2_already_claimed: cache.btcb2_already_claimed,
             cube_name: "",

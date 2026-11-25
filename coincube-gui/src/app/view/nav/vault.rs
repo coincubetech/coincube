@@ -121,6 +121,7 @@ mod tests {
             network,
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
+            ai_access: false,
             cube_name: "test cube",
             spark_alias: None,
             vault_alias: None,

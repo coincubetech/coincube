@@ -92,6 +92,7 @@ fn set_duress_gate(gui: &mut GUI, pane_id: pane_grid::Pane, entitled: bool, enab
         duress_enabled: Some(enabled),
         bitcoin_blake2b_enabled: None,
         card_payments_enabled: None,
+        ai_access_enabled: None,
     });
 }
 
