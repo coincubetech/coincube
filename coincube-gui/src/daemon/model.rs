@@ -146,24 +146,31 @@ fn stored_spend_info(desc: &impl SpendAnalysis, psbt: &Psbt) -> PartialSpendInfo
         psbt.unsigned_tx.compute_txid(),
         error
     );
-    // A PSBT with an input or an output short of its transaction is read
-    // over the inputs both have; one with no input as a blank input.
-    let inputs = psbt.inputs.len().min(psbt.unsigned_tx.input.len()).max(1);
-    let per_input = (0..inputs).filter_map(|i| desc.spend_info(&single_input(psbt, i)).ok());
-    PartialSpendInfo::least_signed(per_input).unwrap_or_else(|| {
-        // Only an imported wallet whose own policy can't be read gets here,
-        // and then nothing else about it can be shown either: list the spend
-        // as not signed.
-        tracing::error!(
-            "Stored spend {}: no input could be analysed",
-            psbt.unsigned_tx.compute_txid()
-        );
-        PartialSpendInfo::primary_only(PathSpendInfo {
-            threshold: 1,
-            sigs_count: 0,
-            signed_pubkeys: HashMap::new(),
+    // Every input of the transaction counts. One without a PSBT input map
+    // reads as unsigned, and a transaction with no input as one blank input.
+    // (A deserialized PSBT always has one map per input and output; this is
+    // defensive.)
+    let inputs = psbt.unsigned_tx.input.len().max(1);
+    let per_input: Option<Vec<_>> = (0..inputs)
+        .map(|i| desc.spend_info(&single_input(psbt, i)).ok())
+        .collect();
+    per_input
+        .and_then(PartialSpendInfo::least_signed)
+        .unwrap_or_else(|| {
+            // An input that can't be analysed on its own makes the whole spend
+            // read as not signed rather than skipping it. Only an imported wallet
+            // whose own policy can't be read gets here, and then nothing else
+            // about it can be shown either.
+            tracing::error!(
+                "Stored spend {}: an input could not be analysed",
+                psbt.unsigned_tx.compute_txid()
+            );
+            PartialSpendInfo::primary_only(PathSpendInfo {
+                threshold: 1,
+                sigs_count: 0,
+                signed_pubkeys: HashMap::new(),
+            })
         })
-    })
 }
 
 /// Input `index` of `psbt` as a PSBT of its own, with one placeholder output:
@@ -846,10 +853,15 @@ mod tests {
         let one_input_signed = signed_on_input(two_inputs(), 0, "f714c228");
         let mut outputs_short = two_inputs();
         outputs_short.outputs.pop();
+        // Input 0 has both primary signatures; input 1 has no input map.
+        let mut inputs_short =
+            signed_on_input(signed_on_input(two_inputs(), 0, "f714c228"), 0, "2522f23c");
+        inputs_short.inputs.pop();
         for (psbt, error) in [
             (&sequences, "inconsistent"),
             (&one_input_signed, "inconsistent"),
             (&outputs_short, "malformed"),
+            (&inputs_short, "malformed"),
         ] {
             let refused = wallet.main_descriptor.spend_info(psbt).unwrap_err();
             assert!(refused.to_string().contains(error), "{refused}");
@@ -910,8 +922,12 @@ mod tests {
             Network::Bitcoin,
         );
         assert_eq!(spend.psbt, psbt);
-        assert_eq!(spend.sigs.primary_path().sigs_count, 0);
-        assert!(spend.sigs.primary_path().threshold >= 1);
+        // The per-input analysis ran: the wallet's own threshold, not the
+        // "no input could be analysed" placeholder.
+        let mut whole = psbt.clone();
+        whole.outputs.push(Default::default());
+        let expected = wallet.main_descriptor.spend_info(&whole).unwrap();
+        assert_eq!(spend.sigs, expected);
         assert!(spend.path_ready().is_none());
     }
 }
