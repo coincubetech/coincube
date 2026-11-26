@@ -441,6 +441,7 @@ fn only_a_real_seed_draws_a_mark() {
         format!("{id}:x"),
         format!("{id}:1:2"),
         format!("{id}:99999999999"),
+        format!("{id}:2147483648"),
     ] {
         assert!(!is_seed(&bad), "{bad:?}");
     }
@@ -463,4 +464,15 @@ fn a_bad_seed_draws_the_dot_and_never_poisons_the_cache() {
     assert!(layers(Some("9fb93534-081c-4253-b1e2-73a87984a8ab"))
         .accent
         .is_some());
+}
+
+/// Spec §2 bounds the variation to 0..=2^31-1. Like COINCUBE Mobile, a
+/// number beyond it draws the plain-UUID mark rather than `id:N`.
+#[test]
+fn a_variation_beyond_the_spec_draws_the_plain_mark() {
+    let id = "9fb93534-081c-4253-b1e2-73a87984a8ab";
+    assert_eq!(MAX_VARIATION, 2_147_483_647);
+    assert_eq!(seed(id, MAX_VARIATION).unwrap(), format!("{id}:2147483647"));
+    assert_eq!(seed(id, MAX_VARIATION + 1).unwrap(), id);
+    assert_eq!(seed(id, u32::MAX).unwrap(), id);
 }

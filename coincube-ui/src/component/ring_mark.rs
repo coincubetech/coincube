@@ -49,6 +49,8 @@ pub const MIN_SIZE: f32 = 24.0;
 /// FNV-1a 32-bit offset basis and prime.
 const FNV_OFFSET: u32 = 2_166_136_261;
 const FNV_PRIME: u32 = 16_777_619;
+/// The largest variation the spec allows (2^31 - 1, section 2).
+pub const MAX_VARIATION: u32 = i32::MAX as u32;
 /// Each draw is `0..DRAW_RANGE`.
 const DRAW_RANGE: u32 = 100_000;
 /// The start angle's scale. `6.28` is deliberate, not 2π: it is what the
@@ -67,6 +69,14 @@ pub fn seed(cube_id: &str, variation: u32) -> Option<String> {
     if !is_uuid_shape(&id) {
         return None;
     }
+    // Spec §2 bounds the variation to 0..=2^31-1. A number outside it is
+    // drawn as 0, the plain-UUID mark, as COINCUBE Mobile does, so both
+    // apps agree even on a value a conforming API never sends.
+    let variation = if variation > MAX_VARIATION {
+        0
+    } else {
+        variation
+    };
     Some(if variation == 0 {
         id
     } else {
@@ -75,7 +85,8 @@ pub fn seed(cube_id: &str, variation: u32) -> Option<String> {
 }
 
 /// Whether `seed` is one [`seed`] makes: a lowercase UUID, alone or followed
-/// by `:` and a decimal variation above 0 with no leading zero. The widgets
+/// by `:` and a decimal variation from 1 to [`MAX_VARIATION`] with no
+/// leading zero. The widgets
 /// draw only from such a seed, so a raw id passed by mistake (uppercase, or
 /// a numeric row id) draws the fallback dot, never a mark from another seed.
 pub fn is_seed(seed: &str) -> bool {
@@ -88,7 +99,7 @@ pub fn is_seed(seed: &str) -> bool {
             !v.is_empty()
                 && !v.starts_with('0')
                 && v.bytes().all(|b| b.is_ascii_digit())
-                && v.parse::<u32>().is_ok()
+                && v.parse::<u32>().is_ok_and(|v| v <= MAX_VARIATION)
         })
 }
 
