@@ -6449,24 +6449,37 @@ mod tests {
                 theme::Theme::light(),
             );
             let row = tree.bounds(&select_id(&key("a")));
-            let glyph = tree
+            let in_row = |bounds: &Rectangle| bounds.y >= row.y && bounds.y < row.y + row.height;
+            // The Cube is its ring mark, never the old glyph (RM7).
+            assert!(
+                !tree
+                    .text
+                    .iter()
+                    .any(|(value, bounds)| value == "\u{f1c8}" && in_row(bounds)),
+                "{:?}: the old Cube glyph is drawn",
+                window
+            );
+            // The 32px mark keeps its slot: the name starts after the row's
+            // 12px padding, then the mark and a 12px gap in the List, or the
+            // mark's 44px cell and the cell gap in the table (wide windows).
+            let name = tree
                 .text
                 .iter()
-                .filter(|(value, bounds)| {
-                    value == "\u{f1c8}" && bounds.y >= row.y && bounds.y < row.y + row.height
-                })
+                .find(|(value, bounds)| value == "Alpha" && in_row(bounds))
                 .map(|(_, bounds)| *bounds)
-                .next()
-                .expect("Cube avatar glyph inside mounted List row");
-            assert!(glyph.x >= row.x + 12.0 - 1.0, "{:?}: {:?}", window, glyph);
+                .expect("Cube name inside mounted List row");
+            let expected = if name.x > row.x + 12.0 + 32.0 + 12.0 + 1.0 {
+                row.x + 12.0 + AVATAR_WIDTH + CELL_GAP
+            } else {
+                row.x + 12.0 + 32.0 + 12.0
+            };
             assert!(
-                glyph.x + glyph.width <= row.x + 12.0 + 32.0 + 1.0,
+                (name.x - expected).abs() <= 1.0,
                 "{:?}: {:?} {:?}",
                 window,
-                glyph,
+                name,
                 row
             );
-            assert!(glyph.width <= 32.0 + 1.0 && glyph.height <= 32.0 + 1.0);
         }
     }
 
