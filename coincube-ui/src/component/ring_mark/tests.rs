@@ -418,3 +418,49 @@ fn marks_render_in_the_theme_colours() {
         }
     }
 }
+
+#[test]
+fn only_a_real_seed_draws_a_mark() {
+    let id = "9fb93534-081c-4253-b1e2-73a87984a8ab";
+    for seed in [
+        id.to_owned(),
+        format!("{id}:1"),
+        format!("{id}:17"),
+        format!("{id}:2147483647"),
+    ] {
+        assert!(is_seed(&seed), "{seed}");
+    }
+    for bad in [
+        String::new(),
+        "42".to_owned(),
+        id.to_uppercase(),
+        format!("{id}:0"),
+        format!("{id}:01"),
+        format!("{id}:"),
+        format!("{id}:-1"),
+        format!("{id}:x"),
+        format!("{id}:1:2"),
+        format!("{id}:99999999999"),
+    ] {
+        assert!(!is_seed(&bad), "{bad:?}");
+    }
+    // Every seed `seed()` makes passes.
+    for vector in fixture().vectors {
+        assert!(is_seed(&seed(&vector.cube_id, vector.variation).unwrap()));
+    }
+}
+
+/// A bad seed and no seed share the dot, whichever is drawn first: the cache
+/// never hands one a mark made from the other.
+#[test]
+fn a_bad_seed_draws_the_dot_and_never_poisons_the_cache() {
+    let _: Element<'_, ()> = ring_mark(Some(""), 36.0);
+    assert!(layers(None).accent.is_none());
+    assert!(layers(Some("")).accent.is_none());
+    assert!(layers(Some("9FB93534-081C-4253-B1E2-73A87984A8AB"))
+        .accent
+        .is_none());
+    assert!(layers(Some("9fb93534-081c-4253-b1e2-73a87984a8ab"))
+        .accent
+        .is_some());
+}

@@ -74,6 +74,24 @@ pub fn seed(cube_id: &str, variation: u32) -> Option<String> {
     })
 }
 
+/// Whether `seed` is one [`seed`] makes: a lowercase UUID, alone or followed
+/// by `:` and a decimal variation above 0 with no leading zero. The widgets
+/// draw only from such a seed, so a raw id passed by mistake (uppercase, or
+/// a numeric row id) draws the fallback dot, never a mark from another seed.
+pub fn is_seed(seed: &str) -> bool {
+    let (id, variation) = match seed.split_once(':') {
+        Some((id, variation)) => (id, Some(variation)),
+        None => (seed, None),
+    };
+    is_uuid_shape(id)
+        && variation.is_none_or(|v| {
+            !v.is_empty()
+                && !v.starts_with('0')
+                && v.bytes().all(|b| b.is_ascii_digit())
+                && v.parse::<u32>().is_ok()
+        })
+}
+
 /// 36 ASCII characters: lowercase hex in groups of 8-4-4-4-12, hyphenated.
 fn is_uuid_shape(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -118,13 +136,13 @@ impl Generator {
 /// One arc of a mark, on the 64 box. Angles are radians from the positive
 /// x-axis, increasing clockwise on screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Arc {
+pub struct RingArc {
     pub radius: f64,
     pub start: f64,
     pub sweep: f64,
 }
 
-impl Arc {
+impl RingArc {
     /// Whether an SVG path needs the large-arc flag for this arc.
     pub fn large_arc(&self) -> bool {
         self.sweep > std::f64::consts::PI
@@ -149,7 +167,7 @@ fn point(radius: f64, angle: f64) -> (f64, f64) {
 /// A Cube's mark: its arcs, outermost first, and which one is orange.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RingMark {
-    pub arcs: Vec<Arc>,
+    pub arcs: Vec<RingArc>,
     pub orange: usize,
 }
 
@@ -164,7 +182,7 @@ impl RingMark {
                 let ua = generator.next_draw();
                 let ul = generator.next_draw();
                 // Divide, then multiply, then add, as written in the spec.
-                Arc {
+                RingArc {
                     radius: 27.0 - 8.5 * f64::from(i),
                     start: (f64::from(ua) / f64::from(DRAW_RANGE)) * START_SCALE,
                     sweep: 2.2 + (f64::from(ul) / f64::from(DRAW_RANGE)) * 3.2,
@@ -238,11 +256,13 @@ struct Layers {
 const LAYER_CACHE_LIMIT: usize = 256;
 
 thread_local! {
-    static LAYER_CACHE: RefCell<HashMap<String, Layers>> = RefCell::new(HashMap::new());
+    static LAYER_CACHE: RefCell<HashMap<Option<String>, Layers>> = RefCell::new(HashMap::new());
 }
 
 fn layers(seed: Option<&str>) -> Layers {
-    let key = seed.unwrap_or_default().to_owned();
+    // Anything that is not a seed draws the dot, and is cached as `None`.
+    let seed = seed.filter(|seed| is_seed(seed));
+    let key = seed.map(str::to_owned);
     LAYER_CACHE.with(|cache| {
         if let Some(layers) = cache.borrow().get(&key) {
             return layers.clone();
@@ -298,8 +318,8 @@ fn mark_size(size: f32) -> f32 {
 }
 
 /// A Cube's mark at `size` px square, in the theme's ink and accent. `seed`
-/// comes from [`seed`]; with `None` (no usable UUID) only the centre dot is
-/// drawn, never a mark from a made-up seed.
+/// comes from [`seed`]; with `None`, or anything [`is_seed`] refuses, only
+/// the centre dot is drawn, never a mark from a made-up seed.
 ///
 /// The mark is decoration beside the Cube's name: always show the name with
 /// it. Wherever a Cube is chosen or confirmed, the name and network do that
