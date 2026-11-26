@@ -278,6 +278,7 @@ mod tests {
                 id: 7,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             app.panels.connect.account.step =
                 crate::app::state::connect::account::ConnectFlowStep::Dashboard;
@@ -346,6 +347,7 @@ mod tests {
             id: 7,
             email: "fixture@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app.panels.connect.account.step =
             crate::app::state::connect::account::ConnectFlowStep::Dashboard;

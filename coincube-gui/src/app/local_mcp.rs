@@ -3563,6 +3563,7 @@ mod feature_flag_tests {
             id: 2,
             email: "next@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         };
         drop(app.update(AppMessage::View(view::Message::ConnectAccount(
             view::ConnectAccountMessage::SetSession(

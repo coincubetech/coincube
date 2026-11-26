@@ -471,6 +471,7 @@ mod tests {
             user_id: id + 100,
             user: CubeMemberUser {
                 email: email.to_string(),
+                display_name: None,
             },
             joined_at: joined_at.to_string(),
         }

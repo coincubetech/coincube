@@ -5195,6 +5195,7 @@ mod app_preferences_sheet_tests {
                     id: 7,
                     email: "shell@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 });
                 home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
 
@@ -6008,6 +6009,7 @@ mod fork_auth_dispatch_tests {
                         id: 42,
                         email: "fixture@example.invalid".into(),
                         email_verified: Some(true),
+                        display_name: None,
                     },
                 };
                 drop(gui.update(Message::Pane(
@@ -6085,6 +6087,7 @@ mod fork_auth_dispatch_tests {
                             id: 42,
                             email: "fixture@example.invalid".into(),
                             email_verified: Some(true),
+                            display_name: None,
                         },
                         plan: None,
                         epoch: 0,
@@ -6197,6 +6200,7 @@ mod fork_auth_dispatch_tests {
                                             id: 99,
                                             email: "stale@example.invalid".into(),
                                             email_verified: Some(true),
+                                            display_name: None,
                                         },
                                     },
                                     0,
@@ -6327,6 +6331,7 @@ mod fork_auth_dispatch_tests {
                         id: 42,
                         email: "fixture@example.invalid".into(),
                         email_verified: Some(true),
+                        display_name: None,
                     },
                 };
                 drop(gui.update(Message::Pane(
@@ -6414,6 +6419,7 @@ mod fork_auth_dispatch_tests {
                             id: 42,
                             email: "fixture@example.invalid".into(),
                             email_verified: Some(true),
+                            display_name: None,
                         },
                         plan: None,
                         epoch: 0,
@@ -6583,6 +6589,7 @@ mod fork_auth_dispatch_tests {
                 id,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             home.connect_account.step =
                 crate::app::state::connect::account::ConnectFlowStep::Dashboard;
@@ -6610,6 +6617,7 @@ mod fork_auth_dispatch_tests {
                 id: 7,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             cold.connect_account.step = match case {
                 "direct" => crate::app::state::connect::account::ConnectFlowStep::Dashboard,
@@ -6819,6 +6827,7 @@ mod fork_auth_dispatch_tests {
                             id: 7,
                             email: "fixture@example.invalid".into(),
                             email_verified: Some(true),
+                            display_name: None,
                         }),
                         generation,
                         epoch,
@@ -6963,6 +6972,7 @@ mod fork_auth_dispatch_tests {
                         id: 0,
                         email: "synthetic@example.invalid".into(),
                         email_verified: None,
+                        display_name: None,
                     },
                 },
                 0,

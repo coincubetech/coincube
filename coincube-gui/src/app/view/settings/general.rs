@@ -1761,9 +1761,15 @@ fn notified_keyholders_row<'a>(ra: &RecoveryAlerts) -> page::PageRow<'a, Message
         for r in &ra.recipients.notified {
             // Tag beneficiaries so a mixed list stays honest under a
             // heading that says "keyholders". Keyholders read plain.
+            // The address the alert goes to, with the person's display name
+            // in front when they set one.
+            let who_line = crate::services::coincube::display_name::one_line(
+                r.display_name.as_deref(),
+                &r.email,
+            );
             let line = match r.role {
-                VaultMemberRole::Keyholder => r.email.clone(),
-                role => format!("{} — {}", r.email, role),
+                VaultMemberRole::Keyholder => who_line,
+                role => format!("{} — {}", who_line, role),
             };
             who = who.push(text(line).size(13));
         }
@@ -3011,6 +3017,7 @@ mod tests {
                 name: "alerts-off-with-keyholder",
                 recipients: vec![RecoveryRecipient {
                     email: "keyholder@example.invalid".into(),
+                    display_name: None,
                     role: VaultMemberRole::Keyholder,
                 }],
                 visible: &["Your keyholders will NOT be alerted"],
@@ -3036,10 +3043,17 @@ mod tests {
                 recipients: vec![
                     RecoveryRecipient {
                         email: "keyholder@example.invalid".into(),
+                        display_name: None,
                         role: VaultMemberRole::Keyholder,
                     },
                     RecoveryRecipient {
                         email: "beneficiary@example.invalid".into(),
+                        display_name: None,
+                        role: VaultMemberRole::Beneficiary,
+                    },
+                    RecoveryRecipient {
+                        email: "named@example.invalid".into(),
+                        display_name: Some("Nia Example".into()),
                         role: VaultMemberRole::Beneficiary,
                     },
                 ],
@@ -3047,6 +3061,8 @@ mod tests {
                 visible: &[
                     "keyholder@example.invalid",
                     "beneficiary@example.invalid — Beneficiary",
+                    // A name is shown in front of the address, never alone.
+                    "Nia Example · named@example.invalid — Beneficiary",
                     "2 members of this Vault have no email",
                 ],
                 hidden: &[

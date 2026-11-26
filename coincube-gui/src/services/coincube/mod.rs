@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod display_name;
 pub(crate) mod imported_checkpoint;
 pub mod network_anchor;
 pub mod network_status;
@@ -641,6 +642,20 @@ pub struct User {
     pub id: u32,
     pub email: String,
     pub email_verified: Option<bool>,
+    /// The name this person chose to be shown beside their email. `None` when
+    /// the server did not send the field (it predates display names);
+    /// `Some("")` when no name is set. A self-asserted label, never an
+    /// identity: show it through [`display_name::shown`], beside the email.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// `PUT /api/v1/user` body that changes only the display name. The API leaves
+/// the name alone when the field is absent and clears it when it is empty.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDisplayNameRequest<'a> {
+    pub display_name: &'a str,
 }
 
 /// The `source` this app reports when it asks for account deletion.
@@ -1653,8 +1668,12 @@ pub struct CubeMember {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CubeMemberUser {
     pub email: String,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2340,6 +2359,9 @@ pub struct ContactUser {
     /// `UserSummary`, not a full user); desktop was overly strict before.
     #[serde(default)]
     pub email_verified: Option<bool>,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// A contact row returned by `GET /api/v1/connect/contacts`.
@@ -2475,6 +2497,10 @@ pub struct Invite {
 pub struct ReceivedInvite {
     pub id: u64,
     pub owner_email: String,
+    /// The inviter's display name; see [`User::display_name`]. A label shown
+    /// beside `owner_email`, which stays the identity of who is inviting.
+    #[serde(default)]
+    pub owner_display_name: Option<String>,
     pub role: ContactRole,
     pub expires_at: String,
     pub created_at: String,
@@ -2628,6 +2654,9 @@ pub struct VaultMemberContactSummary {
 pub struct VaultMemberContactUserSummary {
     pub id: u64,
     pub email: String,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2746,6 +2775,9 @@ pub fn member_joined_after_vault(member_joined_at: &str, vault_created_at: &str)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryRecipient {
     pub email: String,
+    /// The person's display name when they set one: a label for the row. The
+    /// alert goes to `email`, and rows are deduplicated by `email`.
+    pub display_name: Option<String>,
     pub role: VaultMemberRole,
 }
 
@@ -2792,12 +2824,8 @@ pub fn recovery_recipients(members: &[VaultMemberResponse]) -> RecoveryRecipient
             if m.contact_id.is_none() {
                 continue;
             }
-            let email = m
-                .contact
-                .as_ref()
-                .and_then(|c| c.contact_user.as_ref())
-                .map(|u| u.email.as_str())
-                .unwrap_or("");
+            let user = m.contact.as_ref().and_then(|c| c.contact_user.as_ref());
+            let email = user.map(|u| u.email.as_str()).unwrap_or("");
             if email.is_empty() {
                 out.unreachable += 1;
                 continue;
@@ -2805,12 +2833,160 @@ pub fn recovery_recipients(members: &[VaultMemberResponse]) -> RecoveryRecipient
             if seen.insert(email.to_string()) {
                 out.notified.push(RecoveryRecipient {
                     email: email.to_string(),
+                    display_name: user.and_then(|u| display_name::shown(u.display_name.as_deref())),
                     role,
                 });
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod display_name_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Responses from a server that predates display names carry no such
+    /// field. Every people struct must still parse, with no name.
+    #[test]
+    fn older_responses_without_the_field_still_parse() {
+        let user: User = serde_json::from_value(
+            json!({"id": 7, "email": "ama@example.test", "emailVerified": true}),
+        )
+        .unwrap();
+        assert_eq!(user.display_name, None);
+
+        let member: CubeMember = serde_json::from_value(json!({
+            "id": 1, "userId": 7, "user": {"email": "ama@example.test"},
+            "joinedAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(member.user.email, "ama@example.test");
+        assert_eq!(member.user.display_name, None);
+
+        let contact: Contact = serde_json::from_value(json!({
+            "id": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contactUser": {"id": 7, "email": "ama@example.test"}
+        }))
+        .unwrap();
+        assert_eq!(contact.contact_user.unwrap().display_name, None);
+
+        let vault_member: VaultMemberResponse = serde_json::from_value(json!({
+            "id": 5, "contactId": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contact": {"id": 3, "contactUser": {"id": 7, "email": "ama@example.test"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            vault_member
+                .contact
+                .unwrap()
+                .contact_user
+                .unwrap()
+                .display_name,
+            None
+        );
+
+        let invite: ReceivedInvite = serde_json::from_value(json!({
+            "id": 9, "ownerEmail": "ama@example.test", "role": "keyholder",
+            "expiresAt": "2099-01-01T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(invite.owner_email, "ama@example.test");
+        assert_eq!(invite.owner_display_name, None);
+    }
+
+    #[test]
+    fn current_responses_carry_the_name_beside_the_email() {
+        let user: User = serde_json::from_value(json!({
+            "id": 7, "email": "ama@example.test", "emailVerified": true,
+            "displayName": "Ama Adeyemi"
+        }))
+        .unwrap();
+        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
+
+        let member: CubeMember = serde_json::from_value(json!({
+            "id": 1, "userId": 7,
+            "user": {"email": "ama@example.test", "displayName": "Ama Adeyemi"},
+            "joinedAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(member.user.display_name.as_deref(), Some("Ama Adeyemi"));
+        assert_eq!(member.user.email, "ama@example.test");
+
+        let contact: Contact = serde_json::from_value(json!({
+            "id": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contactUser": {"id": 7, "email": "ama@example.test", "displayName": "Ama Adeyemi"}
+        }))
+        .unwrap();
+        assert_eq!(
+            contact.contact_user.unwrap().display_name.as_deref(),
+            Some("Ama Adeyemi")
+        );
+
+        let vault_member: VaultMemberResponse = serde_json::from_value(json!({
+            "id": 5, "contactId": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contact": {"id": 3, "contactUser":
+                {"id": 7, "email": "ama@example.test", "displayName": "Ama Adeyemi"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            vault_member
+                .contact
+                .unwrap()
+                .contact_user
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Ama Adeyemi")
+        );
+
+        let invite: ReceivedInvite = serde_json::from_value(json!({
+            "id": 9, "ownerEmail": "ama@example.test", "ownerDisplayName": "Ama Adeyemi",
+            "role": "keyholder",
+            "expiresAt": "2099-01-01T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(invite.owner_display_name.as_deref(), Some("Ama Adeyemi"));
+        assert_eq!(invite.owner_email, "ama@example.test");
+    }
+
+    /// "No name set" is an empty string on the wire, and `null` is tolerated.
+    /// Neither is a name to show.
+    #[test]
+    fn empty_and_null_names_are_not_shown() {
+        for value in [json!(""), json!(null), json!("   ")] {
+            let user: User = serde_json::from_value(json!({
+                "id": 7, "email": "ama@example.test", "emailVerified": true,
+                "displayName": value
+            }))
+            .unwrap();
+            assert_eq!(display_name::shown(user.display_name.as_deref()), None);
+        }
+    }
+
+    /// A profile with no name serialises as it did before the field existed.
+    #[test]
+    fn a_profile_without_a_name_keeps_its_old_serialised_shape() {
+        let user = User {
+            id: 7,
+            email: "ama@example.test".into(),
+            email_verified: Some(true),
+            display_name: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&user).unwrap(),
+            json!({"id": 7, "email": "ama@example.test", "emailVerified": true})
+        );
+    }
+
+    #[test]
+    fn the_update_body_is_the_name_alone() {
+        assert_eq!(
+            serde_json::to_value(UpdateDisplayNameRequest { display_name: "" }).unwrap(),
+            json!({"displayName": ""})
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2829,11 +3005,44 @@ mod recovery_recipients_tests {
                 contact_user: Some(VaultMemberContactUserSummary {
                     id,
                     email: e.to_string(),
+                    display_name: None,
                 }),
             }),
             key: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn a_recipient_carries_their_name_and_is_still_keyed_by_email() {
+        let mut named = member(1, VaultMemberRole::Keyholder, Some("kay@example.com"));
+        named
+            .contact
+            .as_mut()
+            .unwrap()
+            .contact_user
+            .as_mut()
+            .unwrap()
+            .display_name = Some("Kay Example".into());
+        // The same address again under another name: one recipient, by email.
+        let mut again = member(2, VaultMemberRole::Beneficiary, Some("kay@example.com"));
+        again
+            .contact
+            .as_mut()
+            .unwrap()
+            .contact_user
+            .as_mut()
+            .unwrap()
+            .display_name = Some("Someone Else".into());
+        let got = recovery_recipients(&[named, again]);
+        assert_eq!(
+            got.notified,
+            vec![RecoveryRecipient {
+                email: "kay@example.com".into(),
+                display_name: Some("Kay Example".into()),
+                role: VaultMemberRole::Keyholder,
+            }]
+        );
     }
 
     #[test]
@@ -2847,10 +3056,12 @@ mod recovery_recipients_tests {
             vec![
                 RecoveryRecipient {
                     email: "kay@example.com".into(),
+                    display_name: None,
                     role: VaultMemberRole::Keyholder,
                 },
                 RecoveryRecipient {
                     email: "bea@example.com".into(),
+                    display_name: None,
                     role: VaultMemberRole::Beneficiary,
                 },
             ]

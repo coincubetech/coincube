@@ -2,6 +2,7 @@ pub mod account;
 pub mod cube;
 pub mod cube_members;
 pub mod delete_account;
+pub mod your_name;
 
 #[cfg(not(test))]
 pub(crate) const CONNECT_KEYRING_SERVICE: &str = if cfg!(debug_assertions) {

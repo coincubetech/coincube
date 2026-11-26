@@ -48,6 +48,7 @@ fn sign_in_home(gui: &mut GUI, pane_id: pane_grid::Pane) {
         id: 7,
         email: "shell@example.invalid".into(),
         email_verified: Some(true),
+        display_name: None,
     });
     home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
 }
@@ -790,6 +791,7 @@ fn assert_cube_auth_focus_case(path: &std::path::Path, signed_in_at_open: bool, 
             id: 7,
             email: "shell@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
     }
@@ -833,6 +835,7 @@ fn launcher_sheet_sign_out_invalidates_sibling_cube_session() {
             id: 7,
             email: "shell@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
         let mut gui = GUI::reviewer_app_home_gui(app, home);

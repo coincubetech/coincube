@@ -18,6 +18,7 @@ use super::{
 };
 use super::{
     BackupCodes, LoginReply, SecondFactorChallenge, TotpSetup, TwoFactorLogin, TwoFactorStatus,
+    UpdateDisplayNameRequest,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -476,6 +477,24 @@ impl CoincubeClient {
     pub async fn get_user(&self) -> Result<User, CoincubeError> {
         let url = format!("{}/api/v1/user", self.base_url);
         let res = self.client.get(&url).send().await?;
+        let res = res.check_success().await?;
+        Ok(res.json().await?)
+    }
+
+    /// `PUT /api/v1/user` (authenticated) with only `displayName`: sets the
+    /// name shown beside this account's email, or removes it when `name` is
+    /// empty. Answers with the updated profile as plain JSON. A server that
+    /// predates display names ignores the field and answers without one, so
+    /// the returned [`User::display_name`] is `None`. A name the API refuses
+    /// is a 400.
+    pub async fn update_display_name(&self, name: &str) -> Result<User, CoincubeError> {
+        let url = format!("{}/api/v1/user", self.base_url);
+        let res = self
+            .client
+            .put(&url)
+            .json(&UpdateDisplayNameRequest { display_name: name })
+            .send()
+            .await?;
         let res = res.check_success().await?;
         Ok(res.json().await?)
     }
@@ -4781,5 +4800,133 @@ mod account_deletion_tests {
                 CoincubeError::Unsuccessful(ref info) if info.status_code == code
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::*;
+    use httpmock::{Method as MockMethod, MockServer};
+    use serde_json::json;
+
+    fn signed_in(server: &MockServer) -> CoincubeClient {
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("name-jwt");
+        client
+    }
+
+    /// The profile as the API answers `PUT` and `GET /api/v1/user`: plain
+    /// JSON, with fields this app does not read.
+    fn profile(display_name: Option<&str>) -> serde_json::Value {
+        let mut body = json!({
+            "id": 7,
+            "uuid": "0b0e2a6e-0000-4000-8000-000000000000",
+            "email": "ama@example.test",
+            "emailVerified": true,
+            "phone": "",
+            "timezone": "UTC",
+        });
+        if let Some(name) = display_name {
+            body["displayName"] = json!(name);
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn saving_sends_only_the_name_and_reads_the_stored_one_back() {
+        let server = MockServer::start();
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt")
+                // Exactly this body: no email or phone, so nothing else on
+                // the profile can change.
+                .json_body(json!({ "displayName": "Ama Adeyemi" }));
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let user = signed_in(&server)
+            .update_display_name("Ama Adeyemi")
+            .await
+            .unwrap();
+        put.assert();
+        assert_eq!(user.id, 7);
+        assert_eq!(user.email, "ama@example.test");
+        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
+    }
+
+    #[tokio::test]
+    async fn a_blank_name_is_sent_as_empty_and_clears_it() {
+        let server = MockServer::start();
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .json_body(json!({ "displayName": "" }));
+            then.status(200).json_body(profile(Some("")));
+        });
+        let user = signed_in(&server).update_display_name("").await.unwrap();
+        put.assert();
+        assert_eq!(user.display_name.as_deref(), Some(""));
+    }
+
+    /// What a relaunch does: nothing is kept on this computer, and the name
+    /// comes back with the profile.
+    #[tokio::test]
+    async fn the_saved_name_comes_back_with_the_profile() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        signed_in(&server)
+            .update_display_name("Ama Adeyemi")
+            .await
+            .unwrap();
+        // A new client, as after a relaunch.
+        let user = signed_in(&server).get_user().await.unwrap();
+        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
+    }
+
+    #[tokio::test]
+    async fn a_server_without_display_names_answers_without_the_field() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        let client = signed_in(&server);
+        let saved = client.update_display_name("Ama Adeyemi").await.unwrap();
+        assert_eq!(saved.display_name, None);
+        assert_eq!(saved.email, "ama@example.test");
+        assert_eq!(client.get_user().await.unwrap().display_name, None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_name_keeps_the_status_and_the_message() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(400).body(
+                r#"{"success":false,"error":{"code":"BAD_REQUEST","message":"Display name must be 60 characters or fewer"}}"#,
+            );
+        });
+        let err = signed_in(&server)
+            .update_display_name(&"a".repeat(61))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoincubeError::Unsuccessful(ref info)
+                if info.status_code == 400 && info.text.contains("60 characters")
+        ));
     }
 }

@@ -2525,6 +2525,7 @@ mod tests {
             id: 99,
             email: "user99@example.com".to_string(),
             email_verified: Some(true),
+            display_name: None,
         });
         // The current network's list and the other network's, as read.
         drop(home.update(Message::Checked {
@@ -2609,6 +2610,7 @@ mod tests {
             id,
             email: format!("user{id}@example.com"),
             email_verified: Some(true),
+            display_name: None,
         };
         let mut home = home_with(&[]);
         home.developer_mode = true;
@@ -6380,6 +6382,7 @@ mod tests {
                 id: 7,
                 email: "owner@example.test".to_string(),
                 email_verified: Some(true),
+                display_name: None,
             });
             refused.cube_sync_errors.insert(
                 "cube-1".to_string(),

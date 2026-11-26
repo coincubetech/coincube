@@ -11,6 +11,7 @@ pub mod duress_contacts;
 pub mod duress_enroll;
 pub mod sign_in_prompt;
 mod two_factor;
+mod your_name;
 
 use coincube_ui::{
     color,
@@ -707,6 +708,12 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
             "Sign-in method",
             tenshu_text::body(localized_copy("Email · one-time code")).into(),
         )]));
+    let column = match your_name::section(state) {
+        Some(your_name) => column
+            .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
+            .push(your_name),
+        None => column,
+    };
     let mut column = column
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
         .push(group_title(localized_copy("What Connect provides")))
@@ -4018,6 +4025,7 @@ mod renewal_banner_tests {
             id: 7,
             email: "founder@example.com".to_string(),
             email_verified: Some(true),
+            display_name: None,
         }
     }
 
@@ -6775,6 +6783,7 @@ mod delete_account_view_tests {
             id: 1,
             email: "synthetic@example.test".to_string(),
             email_verified: Some(true),
+            display_name: None,
         });
         account
     }
@@ -6903,5 +6912,148 @@ mod delete_account_view_tests {
             render(&account, "delete-account-es-pending")
                 .assert_spanish("delete account pending (es)");
         });
+    }
+}
+
+#[cfg(test)]
+mod your_name_view_tests {
+    use super::*;
+    use crate::app::state::connect::your_name::YourNameNotice;
+    use crate::app::view::shared::landing::capture;
+    use crate::app::view::YourNameMessage;
+    use crate::services::coincube::User;
+
+    fn signed_in(saved: Option<&str>) -> ConnectAccountPanel {
+        let mut account = ConnectAccountPanel::new();
+        account.step = ConnectFlowStep::Dashboard;
+        account.user = Some(User {
+            id: 1,
+            email: "synthetic@example.test".to_string(),
+            email_verified: Some(true),
+            display_name: None,
+        });
+        account.your_name.saved = saved.map(str::to_string);
+        account
+    }
+
+    fn render(account: &ConnectAccountPanel, scenario: &str) -> capture::Inspection {
+        capture::inspect_full_window(
+            scenario,
+            connect_sheet(
+                account,
+                ConnectSheetPage::Sections(ConnectSheetSection::Account),
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        )
+    }
+
+    fn saves(messages: &[ConnectAccountMessage]) -> bool {
+        messages
+            .iter()
+            .any(|m| matches!(m, ConnectAccountMessage::YourName(YourNameMessage::Save)))
+    }
+
+    #[test]
+    fn the_field_is_absent_until_the_profile_carries_a_name() {
+        // Not read yet, or a server without display names: the Account
+        // section is exactly what it was.
+        let page = render(&signed_in(None), "your-name-absent");
+        assert!(!page.contains("Your name"));
+        assert!(page.contains("synthetic@example.test"));
+        assert!(page.contains("Sign out…"));
+    }
+
+    #[test]
+    fn the_field_is_offered_as_optional_beside_the_email() {
+        let page = render(&signed_in(Some("")), "your-name-empty");
+        assert!(page.contains("Your name"));
+        assert!(page.contains("Optional. People in your Cubes see it beside your email."));
+        // The account is still named by its email.
+        assert!(page.contains("synthetic@example.test"));
+        assert!(page.contains("Sign out…"));
+        assert!(page.has_focus(iced::advanced::widget::Id::new(
+            your_name::YOUR_NAME_INPUT_ID
+        )));
+    }
+
+    #[test]
+    fn save_is_live_only_when_the_field_differs_from_the_saved_name() {
+        let mut account = signed_in(Some("Ama Adeyemi"));
+        let unchanged = capture::click_text(
+            your_name::section(&account).unwrap(),
+            "Save",
+            0,
+            (1024, 400),
+        );
+        assert!(!saves(&unchanged));
+
+        account.your_name.edit("Ama A".into());
+        let changed = capture::click_text(
+            your_name::section(&account).unwrap(),
+            "Save",
+            0,
+            (1024, 400),
+        );
+        assert!(saves(&changed));
+
+        account.your_name.begin_save().unwrap();
+        let section = capture::inspect(
+            "your-name-saving",
+            your_name::section(&account).unwrap(),
+            (1024, 400),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(section.contains("Saving…"));
+        let busy = capture::click_text(
+            your_name::section(&account).unwrap(),
+            "Saving…",
+            0,
+            (1024, 400),
+        );
+        assert!(!saves(&busy), "one save at a time");
+    }
+
+    #[test]
+    fn each_outcome_has_one_line_in_english_and_spanish() {
+        for (notice, english) in [
+            (YourNameNotice::Saved, "Name saved."),
+            (YourNameNotice::Removed, "Name removed."),
+            (YourNameNotice::TooLong, "Use 60 characters or fewer."),
+            (
+                YourNameNotice::NotAllowed,
+                "That name can't be used. Use letters or numbers, and leave out @, < and >.",
+            ),
+            (
+                YourNameNotice::NotSaved,
+                "Your name wasn't saved. Try again.",
+            ),
+        ] {
+            let mut account = signed_in(Some(""));
+            account.your_name.notice = Some(notice);
+            let section = capture::inspect(
+                "your-name-notice",
+                your_name::section(&account).unwrap(),
+                (1024, 400),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(section.contains(english), "{:?}", notice);
+
+            coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                let section = capture::inspect(
+                    "your-name-notice-es",
+                    your_name::section(&account).unwrap(),
+                    (1024, 400),
+                    "dark",
+                    theme::Theme::dark(),
+                );
+                assert!(section.contains("Tu nombre"), "{:?}", notice);
+                assert!(!section.contains(english), "{:?}", notice);
+                section.assert_spanish("your-name");
+            });
+        }
     }
 }

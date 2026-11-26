@@ -106,7 +106,8 @@ pub struct PendingSession {
     /// the payload AAD in both directions, so it's needed again to open the
     /// signature envelope that comes back. Empty until a session is created.
     pub request_id: String,
-    /// Display label — `name (owner_email)` or `name (you)`.
+    /// Display label — `name (owner_email)`, `name (Owner Name · owner_email)`
+    /// when the owner set a display name, or `name (you)`.
     pub label: String,
     /// Latest known session status. Driven by `SessionEvent`s on the
     /// realtime stream; `Pending` between session-create and the first
@@ -975,12 +976,24 @@ impl KeychainSignModal {
                     key_id,
                     name,
                     owner_email,
+                    owner_display_name,
                     replay_protection,
                     ..
                 } => {
+                    // A contact's row names them by email, with their display
+                    // name in front when they set one. The email is always
+                    // there: the name is the contact's own label.
                     let suffix = owner_email
                         .as_deref()
-                        .map(|e| format!(" ({})", e))
+                        .map(|e| {
+                            format!(
+                                " ({})",
+                                crate::services::coincube::display_name::one_line(
+                                    owner_display_name.as_deref(),
+                                    e
+                                )
+                            )
+                        })
                         .unwrap_or_else(|| " (you)".to_string());
                     (
                         *fingerprint,
@@ -2948,6 +2961,7 @@ pub(crate) mod tests {
                     owner_user_id: 7,
                     name: "Fixture".into(),
                     owner_email: None,
+                    owner_display_name: None,
                     contact_id: None,
                     replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
                 },
@@ -2957,6 +2971,7 @@ pub(crate) mod tests {
                     owner_user_id: 8,
                     name: "Unresolved fixture".into(),
                     owner_email: None,
+                    owner_display_name: None,
                     contact_id: None,
                     replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
                 },
