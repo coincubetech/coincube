@@ -5219,6 +5219,93 @@ mod tests {
         )));
     }
 
+    /// An unrecorded Vault may still hold a Mobile key on Bitcoin Blake2b.
+    /// A restore into a BTCB2 Cube writes no Mobile-key record, and that phone
+    /// key can sign on this chain. The list cannot tell the restore from a
+    /// claim copy, so it offers Connect the same way it does on Bitcoin
+    /// (`Wallet::may_hold_keychain_key`). A recorded Vault still offers
+    /// Connect only for the keys it named, on every chain.
+    #[test]
+    fn an_unrecorded_blake2b_vault_offers_connect_for_every_key() {
+        use crate::chain::ChainId;
+        use view::vault::psbt::SigningKeyState;
+
+        let phone = fingerprint("f714c228");
+        let other = fingerprint("2522f23c");
+        let rows = |wallet: Wallet, loading: bool| {
+            let chain = wallet.chain;
+            let keychain =
+                loading.then(super::super::keychain_sign::tests::modal_with_live_session);
+            SignModal::new(
+                HashSet::new(),
+                Arc::new(wallet),
+                CoincubeDirectory::new(PathBuf::new()),
+                chain.bitcoin_network(),
+                false,
+                None,
+                keychain,
+                true,
+            )
+            .with_connect_account(ConnectAccountStatus::Owner)
+            .signing_paths()
+            .into_iter()
+            .find(|path| path.is_primary)
+            .unwrap()
+            .keys
+        };
+
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let unrecorded = wallet().with_chain(chain);
+            assert!(unrecorded.may_hold_keychain_key(&phone), "{}", chain);
+            assert!(unrecorded.may_hold_keychain_key(&other), "{}", chain);
+            assert!(
+                rows(unrecorded, true).iter().all(|row| matches!(
+                    &row.state,
+                    SigningKeyState::Disabled(reason)
+                        if reason.contains("Looking up Mobile signers")
+                )),
+                "{}: an unrecorded Vault waits on every key",
+                chain
+            );
+            assert!(
+                rows(wallet().with_chain(chain), false)
+                    .iter()
+                    .all(|row| matches!(row.state, SigningKeyState::NeedsSignIn(_))),
+                "{}: an unrecorded Vault offers Connect",
+                chain
+            );
+
+            let recorded = wallet()
+                .with_chain(chain)
+                .with_keychain_keys(HashMap::from([(phone, 7)]), true);
+            assert!(recorded.may_hold_keychain_key(&phone), "{}", chain);
+            assert!(!recorded.may_hold_keychain_key(&other), "{}", chain);
+            for row in rows(recorded, false) {
+                if row.fingerprint == phone {
+                    assert!(
+                        matches!(row.state, SigningKeyState::NeedsSignIn(_)),
+                        "{}",
+                        chain
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            &row.state,
+                            SigningKeyState::Disabled(reason)
+                                if reason == "Connect this signing device to sign."
+                        ),
+                        "{}: a key the record left out stays a device",
+                        chain
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn signing_paths_ask_a_signed_in_non_owner_to_switch_accounts() {
         use view::vault::psbt::SigningKeyState;
