@@ -1626,6 +1626,12 @@ pub struct ConnectAccountPanel {
     /// Account › Your name: the optional name shown beside this account's
     /// email to the people in its Cubes.
     pub your_name: YourNameState,
+    /// An interactive sign-in is on its way to the Dashboard. The sheet shows
+    /// the Account section the moment it is admitted, with no navigation to
+    /// trigger a load, so the profile for Your name is read at admission.
+    /// Restored, refreshed and shared sessions leave this unset: they read
+    /// the profile when the Account section is next opened.
+    your_name_read_pending: bool,
     /// This sign-in spent a backup code: how many are left, shown as a
     /// reminder until dismissed or a new set is made.
     pub backup_codes_notice: Option<u32>,
@@ -1696,6 +1702,7 @@ impl ConnectAccountPanel {
             two_factor: TwoFactorSettings::default(),
             delete_account: DeleteAccountState::default(),
             your_name: YourNameState::default(),
+            your_name_read_pending: false,
             backup_codes_notice: None,
             signing_in_with_authenticator: false,
         }
@@ -1931,6 +1938,7 @@ impl ConnectAccountPanel {
         self.two_factor.reset();
         self.delete_account.reset();
         self.your_name.reset();
+        self.your_name_read_pending = false;
         self.backup_codes_notice = None;
         self.signing_in_with_authenticator = false;
         self.step = ConnectFlowStep::CheckingSession;
@@ -2246,11 +2254,11 @@ impl ConnectAccountPanel {
         iced::Task::none()
     }
 
-    /// The profile read for Account › Your name when Account is the open
-    /// section: a section opened before the session was confirmed read
-    /// nothing, so the field would stay absent until the next visit.
-    fn your_name_if_open(&mut self) -> iced::Task<Message> {
-        if matches!(self.active_sub, ConnectSubMenu::Overview) {
+    /// The profile read for Account › Your name that an interactive sign-in
+    /// asked for (`your_name_read_pending`), performed once, as that sign-in
+    /// reaches the Dashboard.
+    fn your_name_after_sign_in(&mut self) -> iced::Task<Message> {
+        if std::mem::take(&mut self.your_name_read_pending) {
             self.load_your_name()
         } else {
             iced::Task::none()
@@ -2331,6 +2339,7 @@ impl ConnectAccountPanel {
         if !new_login {
             return loaded;
         }
+        self.your_name_read_pending = true;
         iced::Task::batch([
             loaded,
             iced::Task::done(Message::InAppConnectLoginCompleted {
@@ -3625,6 +3634,8 @@ impl ConnectAccountPanel {
         if self.user.as_ref().is_some_and(|u| u.id != user.id) {
             self.two_factor.reset();
             self.delete_account.reset();
+            // The name on screen was the other account's. A read asked for by
+            // this sign-in stays pending.
             self.your_name.reset();
             self.backup_codes_notice = None;
         }
@@ -5248,9 +5259,12 @@ impl ConnectAccountPanel {
         self.unverified = None;
         // Plan & billing opened while the session was still
         // being checked loaded nothing; load its history now,
-        // on every return path below. The same goes for the Account
-        // section's Your name field.
-        let billing = iced::Task::batch([self.billing_history_if_open(), self.your_name_if_open()]);
+        // on every return path below. With it goes the profile read a
+        // sign-in asked for, for the Account section's Your name field.
+        let billing = iced::Task::batch([
+            self.billing_history_if_open(),
+            self.your_name_after_sign_in(),
+        ]);
         // Cache the fetched state before any early return, so the
         // Duress tab reflects the enabled state on its first paint
         // rather than briefly showing enrollment CTAs.
@@ -5959,6 +5973,7 @@ impl ConnectAccountPanel {
         self.two_factor.reset();
         self.delete_account.reset();
         self.your_name.reset();
+        self.your_name_read_pending = false;
         self.backup_codes_notice = None;
         self.signing_in_with_authenticator = false;
         self.duress_contacts.clear();
@@ -6397,7 +6412,7 @@ impl ConnectAccountPanel {
                 self.unverified = None;
                 self.error = None;
                 let billing = self.billing_history_if_open();
-                return iced::Task::batch([billing, self.your_name_if_open()]);
+                return iced::Task::batch([billing, self.your_name_after_sign_in()]);
             }
 
             // ── Enrollment wizard (Phases 2 & 8) ──
@@ -12886,11 +12901,8 @@ mod plan_lifecycle_tests {
                 with_user,
                 state(enrolled, registered),
             );
-            // The control is a section that loads nothing of its own on
-            // reaching the Dashboard. (Overview no longer is one: it reads
-            // the profile for Account › Your name.)
             let other = units(
-                ConnectSubMenu::Security,
+                ConnectSubMenu::Overview,
                 with_user,
                 state(enrolled, registered),
             );
@@ -15445,12 +15457,13 @@ mod your_name_panel_tests {
         assert!(relaunched.your_name.notice.is_none());
     }
 
-    /// Signing in with the Account section already on screen: the sheet
-    /// shows Account as soon as the session is admitted, with no navigation
-    /// to trigger a load. The profile is read at that moment.
+    /// Signing in from the sheet: the sheet shows Account the moment the
+    /// sign-in is admitted, with no navigation to trigger a load, whichever
+    /// section's sign-in page the user started from. The profile is read at
+    /// that moment, once.
     #[test]
-    fn signing_in_with_account_open_reads_the_profile() {
-        use crate::services::coincube::{DuressCheckOutcome, DuressState};
+    fn an_interactive_sign_in_reads_the_profile_when_it_is_admitted() {
+        use crate::services::coincube::{DuressCheckOutcome, DuressState, LoginResponse};
         let server = MockServer::start();
         let get = server.mock(|when, then| {
             when.method(MockMethod::GET)
@@ -15458,12 +15471,7 @@ mod your_name_panel_tests {
                 .header("authorization", "Bearer name-jwt");
             then.status(200).json_body(profile(Some("Ama Adeyemi")));
         });
-        let admitted = |sub: ConnectSubMenu| {
-            let mut panel = signed_in(&server);
-            panel.step = ConnectFlowStep::CheckingDuress {
-                status: DuressGateStatus::Checking,
-            };
-            panel.active_sub = sub;
+        let admit = |panel: &mut ConnectAccountPanel| {
             let gen = panel.session_generation;
             let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
                 DuressCheckOutcome::Ok(DuressState {
@@ -15476,22 +15484,87 @@ mod your_name_panel_tests {
                 0,
             ));
             assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
-            (panel, task)
+            your_name_results(task)
         };
 
-        let (mut panel, task) = admitted(ConnectSubMenu::Overview);
-        assert!(panel.your_name.saved.is_none());
-        let results = your_name_results(task);
-        assert_eq!(results.len(), 1, "the profile is read on admission");
-        for m in results {
-            drop(name(&mut panel, m));
-        }
-        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
-        get.assert_hits(1);
+        // Started from another section's sign-in page: Account is what the
+        // sheet shows once signed in, while `active_sub` still names the
+        // section the user came from.
+        for sub in [ConnectSubMenu::Overview, ConnectSubMenu::PlanBilling] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.client = CoincubeClient::for_test(server.base_url());
+            panel.active_sub = sub;
+            panel.auth_commit_pending = true;
+            // The sign-in reply carries no display name.
+            drop(
+                panel.update_message(ConnectAccountMessage::AuthCommitAccepted {
+                    login: LoginResponse {
+                        requires_2fa: false,
+                        token: "name-jwt".into(),
+                        refresh_token: "name-refresh".into(),
+                        user: user(None),
+                    },
+                    epoch: 0,
+                    refreshed: false,
+                }),
+            );
+            drop(panel.update_message(ConnectAccountMessage::SessionLoaded {
+                user: user(None),
+                plan: None,
+                epoch: 0,
+            }));
+            assert!(panel.your_name.saved.is_none());
+            let before = get.hits();
+            let results = admit(&mut panel);
+            assert_eq!(results.len(), 1, "the profile is read on admission");
+            for m in results {
+                drop(name(&mut panel, m));
+            }
+            assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+            assert_eq!(get.hits(), before + 1);
 
-        // Another section open: nothing is read for a field that isn't shown.
-        let (_, task) = admitted(ConnectSubMenu::Security);
+            // Admitted again without a new sign-in (a retried check): no
+            // second read.
+            panel.step = ConnectFlowStep::CheckingDuress {
+                status: DuressGateStatus::Checking,
+            };
+            assert!(admit(&mut panel).is_empty());
+            assert_eq!(get.hits(), before + 1);
+        }
+    }
+
+    /// A session that was not signed in to just now (restored at launch,
+    /// refreshed, or shared by another tab) makes no profile request of its
+    /// own on admission. Its Account section reads the profile when opened.
+    #[test]
+    fn a_restored_or_shared_session_reads_no_profile_on_admission() {
+        use crate::services::coincube::{DuressCheckOutcome, DuressState};
+        let server = MockServer::start();
+        let get = server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let mut panel = signed_in(&server);
+        panel.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Checking,
+        };
+        let gen = panel.session_generation;
+        let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
+            DuressCheckOutcome::Ok(DuressState {
+                active: false,
+                unlock_at: None,
+                enrolled: false,
+                this_device_registered: true,
+            }),
+            gen,
+            0,
+        ));
+        assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
         assert!(your_name_results(task).is_empty());
+        get.assert_hits(0);
+        // Opening the Account section is what reads it.
+        open_account(&mut panel);
+        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
         get.assert_hits(1);
     }
 
