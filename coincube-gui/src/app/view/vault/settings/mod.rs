@@ -1392,7 +1392,9 @@ fn recovery_path_label(
     keys: &[Fingerprint],
     provider_keys: &HashMap<Fingerprint, ProviderKey>,
 ) -> String {
-    if sequence == u16::MAX && keys.iter().all(|fg| provider_keys.contains_key(fg)) {
+    if crate::services::coincube::vault_reconcile::is_safety_net_path(sequence, keys, |fg| {
+        provider_keys.contains_key(fg)
+    }) {
         localized_copy("Safety Net path").to_string()
     } else if several {
         localized_format!(

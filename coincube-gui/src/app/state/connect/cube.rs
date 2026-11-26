@@ -330,6 +330,9 @@ pub struct ConnectCubePanel {
     /// drop a member row only runs in the installer, and a Vault built
     /// mid-session re-enters through the same triggers.
     pub(super) vault_members_reconciled: bool,
+    /// The sealed-key-role pass has been started for this server cube row and
+    /// descriptor in this session. Reset with `vault_members_reconciled`.
+    pub(crate) key_roles_seal_started: bool,
     /// The server-side numeric ID — set after registering with the backend.
     /// Used in API paths: /connect/cubes/{server_cube_id}/...
     pub server_cube_id: Option<u64>,
@@ -456,6 +459,7 @@ impl ConnectCubePanel {
             vault_fingerprint_asserted: false,
             vault_descriptor: None,
             vault_members_reconciled: false,
+            key_roles_seal_started: false,
             server_cube_id: None,
             registration_error: None,
             owned_by_other_account: false,
@@ -553,6 +557,7 @@ impl ConnectCubePanel {
         // Same reasoning as the fingerprint latch: it means "already
         // reconciled against *this* server cube row", which dies with the id.
         self.vault_members_reconciled = false;
+        self.key_roles_seal_started = false;
         self.registration_error = None;
         self.owned_by_other_account = false;
         // Retire any attempt issued under the session that just ended: its
@@ -1012,6 +1017,16 @@ impl ConnectCubePanel {
                 // retry rather than waiting for a relaunch.
                 if !ok {
                     self.enc_pubkey_registered = false;
+                }
+            }
+
+            ConnectCubeMessage::KeyRolesSealed(stored) => {
+                // Nothing to render. A pass that could not finish reopens the
+                // latch so the next trigger tries again; it does not retry on
+                // its own, so a server without sealed roles costs one request
+                // per trigger and no loop.
+                if stored.is_none() {
+                    self.key_roles_seal_started = false;
                 }
             }
 
@@ -3606,5 +3621,28 @@ mod tests {
         assert!(!panel.ln_check_missing_cube_id);
         assert!(panel.ln_username_available.is_none());
         assert_eq!(panel.ln_username_input, "founder");
+    }
+}
+
+/// Mobile V3 Phase 1, Desktop PR T2: the latch of the sealed-key-role pass.
+#[cfg(test)]
+mod key_role_latch_tests {
+    use super::*;
+
+    #[test]
+    fn a_pass_that_could_not_finish_reopens_the_latch_and_a_finished_one_does_not() {
+        let mut panel = ConnectCubePanel::new(
+            None,
+            "cube-uuid".to_string(),
+            "Family Vault".to_string(),
+            "regtest".to_string(),
+            false,
+        );
+        assert!(!panel.key_roles_seal_started);
+        for (result, still_closed) in [(Some(0), true), (Some(3), true), (None, false)] {
+            panel.key_roles_seal_started = true;
+            drop(panel.update_message(ConnectCubeMessage::KeyRolesSealed(result)));
+            assert_eq!(panel.key_roles_seal_started, still_closed, "{:?}", result);
+        }
     }
 }

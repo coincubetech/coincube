@@ -2643,7 +2643,44 @@ pub struct VaultMemberResponse {
     pub contact: Option<VaultMemberContactSummary>,
     #[serde(default)]
     pub key: Option<VaultMemberKeySummary>,
+    /// Which phones already hold a sealed role for this member's key, and the
+    /// hash of the key each was sealed to. Served to the Vault's owner only;
+    /// absent on a server without sealed roles. Never the role itself.
+    #[serde(default)]
+    pub sealed_roles: Vec<SealedRoleRef>,
     pub created_at: String,
+}
+
+/// One entry of a vault member's `sealedRoles`: a phone that has a sealed
+/// role, and `recipientKeyHash` as this computer wrote it
+/// ([`crate::services::connect::crypto::key_role::recipient_key_hash`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRoleRef {
+    pub device_id: u64,
+    #[serde(default)]
+    pub recipient_key_hash: String,
+}
+
+/// One sealed role to store: an opaque blob for one key on one phone. The
+/// request carries no role in the clear, and must never gain one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRoleUpload {
+    /// The vault member's id.
+    pub member_id: u64,
+    /// The phone's signer device id.
+    pub device_id: u64,
+    /// Standard padded base64 of the sealed blob.
+    pub sealed: String,
+    pub recipient_key_hash: String,
+}
+
+/// `PUT /api/v1/connect/cubes/{cubeId}/vault/sealed-roles` body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutSealedRolesRequest {
+    pub sealed_roles: Vec<SealedRoleUpload>,
 }
 
 /// Vault lifecycle status. Drives W16-desktop's Keyholder-role gate:
@@ -2832,6 +2869,7 @@ mod recovery_recipients_tests {
                 }),
             }),
             key: None,
+            sealed_roles: Vec::new(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }
     }

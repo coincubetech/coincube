@@ -4675,6 +4675,70 @@ impl App {
         )
     }
 
+    /// Seals each Vault key's role (primary, recovery, safety net) to that
+    /// key's phone and stores the ciphertext with Connect, so COINCUBE Mobile
+    /// can show the role without Connect storing it in the clear
+    /// (`services::coincube::vault_reconcile::seal_cube_key_roles`).
+    ///
+    /// Tried when the Vault's member rows have been reconciled and again when
+    /// the signing rail's gRPC details arrive, whichever comes second finds
+    /// everything it needs: a loaded Vault, a signed-in client, a server cube
+    /// id and those details. Until then it does nothing and leaves the latch
+    /// open. Once a pass has stored what was missing the latch stays closed
+    /// for the session; a pass that could not finish reopens it
+    /// (`ConnectCubeMessage::KeyRolesSealed(None)`) for the next trigger.
+    /// Signing runs its own pass with the phones it has just resolved.
+    ///
+    /// Best-effort and silent: nothing waits on it, and no outcome of it
+    /// reaches the user. A server without sealed roles, a viewer who does not
+    /// own the Vault, or an offline phone just means no role tag yet.
+    fn seal_key_roles_task(&mut self) -> Task<Message> {
+        if self.panels.connect.cube.key_roles_seal_started {
+            return Task::none();
+        }
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        let Some(descriptor) = wallet.inheritance_descriptor() else {
+            return Task::none();
+        };
+        let (Some(client), Some(cube_server_id), Some(grpc_url), Some(tokens), Some(device_id)) = (
+            self.authenticated_coincube_client(),
+            self.cache.current_cube_server_id,
+            self.cache.connect_grpc_url.clone(),
+            self.cache.connect_tokens.clone(),
+            self.cache.connect_device_id.clone(),
+        ) else {
+            return Task::none();
+        };
+        let roles = crate::services::coincube::vault_reconcile::key_roles(descriptor, |fg| {
+            wallet.provider_keys.contains_key(fg)
+        });
+        let network = wallet.chain.api_str().to_owned();
+        self.panels.connect.cube.key_roles_seal_started = true;
+        Task::perform(
+            async move {
+                crate::services::coincube::vault_reconcile::seal_cube_key_roles(
+                    &client,
+                    cube_server_id,
+                    &roles,
+                    |vault_id| async move {
+                        crate::services::coincube::vault_reconcile::resolve_role_targets(
+                            &grpc_url, tokens, device_id, vault_id, &network,
+                        )
+                        .await
+                    },
+                )
+                .await
+            },
+            |stored| {
+                Message::View(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::KeyRolesSealed(stored),
+                ))
+            },
+        )
+    }
+
     /// Backfill this Cube's Vault identity
     /// (`plans/PLAN-vault-identity-unification.md` D4).
     ///
@@ -9448,7 +9512,19 @@ impl App {
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
-                return self.route_connect_panel_message(msg);
+                // The Vault's member rows are settled: the moment to seal
+                // each key's role to its phone.
+                let members_reconciled = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectCube(
+                        view::ConnectCubeMessage::VaultMembersReconciled(_)
+                    ))
+                );
+                let routed = self.route_connect_panel_message(msg);
+                if !members_reconciled {
+                    return routed;
+                }
+                return Task::batch([routed, self.seal_key_roles_task()]);
             }
             message @ (Message::View(
                 view::Message::ReceivedCelebrationActivity

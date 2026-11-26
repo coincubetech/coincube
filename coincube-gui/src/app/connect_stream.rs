@@ -925,7 +925,14 @@ impl App {
                 // tick — show `Connecting` until the first
                 // `ConnectStreamMessage::Connected` lands.
                 self.cache.connect_stream_status = ConnectionStatus::Connecting;
-                return self.set_signer_pipeline_start(cache::SignerPipelineStart::Idle);
+                // The rail's details are known now: if the Vault's member
+                // rows were reconciled before they arrived, this is the
+                // trigger that seals each key's role to its phone.
+                let seal = self.seal_key_roles_task();
+                return Task::batch([
+                    self.set_signer_pipeline_start(cache::SignerPipelineStart::Idle),
+                    seal,
+                ]);
             }
             None => {
                 tracing::debug!("Connect stream not started: missing grpc_url or device_id",);

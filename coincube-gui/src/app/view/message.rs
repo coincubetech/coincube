@@ -2136,6 +2136,11 @@ pub enum ConnectCubeMessage {
     /// (`crate::services::coincube::vault_reconcile`). Carries the number of
     /// member rows attached — background hygiene, never surfaced to the user.
     VaultMembersReconciled(usize),
+    /// The background pass that seals each key's role to its phone ended.
+    /// `Some(n)`: it ran to the end and stored `n` seals. `None`: it could
+    /// not finish, and may run again at the next trigger. Nothing is rendered
+    /// from it.
+    KeyRolesSealed(Option<usize>),
     CopyToClipboard(String),
     Error(String),
     Avatar(AvatarMessage),

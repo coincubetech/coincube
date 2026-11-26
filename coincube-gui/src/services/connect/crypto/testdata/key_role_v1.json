@@ -1,0 +1,38 @@
+{
+  "aad_hex": "636f696e637562652d636f6e6e6563742d6b65792d726f6c652d7631000000000000000005000000000000000c0000000000000022",
+  "blob_len": 77,
+  "cases": [
+    {
+      "blob_base64": "AkZtf8rlY+XLCaDRhwu1gDRIBGF4eaFJSc8iKF8brj8nMzMzMzMzMzMzMzMzple7u5NZ0fxx9yThLQ5Eg9Jy2OVJ4JxCAqnx0VpC814=",
+      "blob_hex": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27333333333333333333333333a657bbbb9359d1fc71f724e12d0e4483d272d8e549e09c4202a9f1d15a42f35e",
+      "plaintext_hex": "01010000000000000000000000000000",
+      "role": "primary",
+      "role_code": 1
+    },
+    {
+      "blob_base64": "AkZtf8rlY+XLCaDRhwu1gDRIBGF4eaFJSc8iKF8brj8nMzMzMzMzMzMzMzMzplS7u5NZ0fxx9yThLQ5Eg+B/2Aos66wGImkRM4vQBdw=",
+      "blob_hex": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27333333333333333333333333a654bbbb9359d1fc71f724e12d0e4483e07fd80a2cebac06226911338bd005dc",
+      "plaintext_hex": "01020000000000000000000000000000",
+      "role": "recovery",
+      "role_code": 2
+    },
+    {
+      "blob_base64": "AkZtf8rlY+XLCaDRhwu1gDRIBGF4eaFJSc8iKF8brj8nMzMzMzMzMzMzMzMzplW7u5NZ0fxx9yThLQ5Eg0+E2FDwErw6PdaxbcShqF0=",
+      "blob_hex": "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27333333333333333333333333a655bbbb9359d1fc71f724e12d0e44834f84d850f012bc3a3dd6b16dc4a1a85d",
+      "plaintext_hex": "01030000000000000000000000000000",
+      "role": "safety_net",
+      "role_code": 3
+    }
+  ],
+  "description": "Sealed key role, format 1. Shared by COINCUBE Desktop (seals) and COINCUBE Mobile (opens). Test keys only. The fixed ephemeral key and nonce exist to make the vector reproducible; real seals use fresh random ones, and reusing one nonce under one key as this file does across its three cases must never happen outside a vector.",
+  "device_id": 34,
+  "device_pubkey_hex": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+  "device_secret_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "ephemeral_secret_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "key_id": 12,
+  "label_hex": "636f696e637562652d636f6e6e6563742d6b65792d726f6c652d763100",
+  "nonce_hex": "333333333333333333333333",
+  "plaintext_len": 16,
+  "recipient_key_hash": "80337d0d8e5706ed55f07aebd904a26f025fdb8efa0049f497d221f78a974f59",
+  "vault_id": 5
+}
