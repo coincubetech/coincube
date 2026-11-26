@@ -5552,6 +5552,138 @@ mod tests {
         ms.shutdown();
     }
 
+    /// Which inconsistent Vault PSBTs `updatespend` stores. "Inconsistent" is
+    /// what `CoincubeDescriptor::partial_spend_info` refuses: inputs with
+    /// different `nSequence`, or with different per-input signature sets.
+    #[test]
+    fn update_spend_inconsistent_vault_psbt() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let vault = control.config.main_descriptor.as_vault().unwrap().clone();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let tx_a = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let tx_b = funding_tx(control, &[(1, 115_680, 34, false)]);
+        let op_a = bitcoin::OutPoint::new(tx_a.compute_txid(), 0);
+        let op_b = bitcoin::OutPoint::new(tx_b.compute_txid(), 1);
+        db_conn.new_txs(&[tx_a, tx_b]);
+        db_conn.new_unspent_coins(&[
+            Coin {
+                outpoint: op_a,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(100_000),
+                derivation_index: bip32::ChildNumber::from(13),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            },
+            Coin {
+                outpoint: op_b,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(115_680),
+                derivation_index: bip32::ChildNumber::from(34),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            },
+        ]);
+        let dest: HashMap<bitcoin::Address<address::NetworkUnchecked>, u64> = [(
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap(),
+            50_000,
+        )]
+        .iter()
+        .cloned()
+        .collect();
+        let new_spend = |feerate| match control
+            .create_spend(&dest, &[op_a, op_b], feerate, None)
+            .unwrap()
+        {
+            CreateSpendResult::Success { psbt, .. } => psbt,
+            _ => panic!("expect successful spend creation"),
+        };
+        // A primary-path key's signature on input 0 only. The signature bytes
+        // are not checked on Bitcoin; the key must carry a derivation in the
+        // input to be counted.
+        let sig = bitcoin::ecdsa::Signature::from_str("304402204004fcdbb9c0d0cbf585f58cee34dccb012efbd8fc2b0d5e97760045ae35803802201a0bd7ec2383e0b93748abc9946c8e17a8312e314dab85982aeba650e738cbf401").unwrap();
+        let sign_first_input_only = |mut psbt: Psbt| {
+            let key = psbt.inputs[0]
+                .bip32_derivation
+                .keys()
+                .copied()
+                .find(|key| {
+                    let mut candidate = psbt.clone();
+                    candidate.inputs[0]
+                        .partial_sigs
+                        .insert(bitcoin::PublicKey::new(*key), sig);
+                    vault.partial_spend_info(&candidate).is_err()
+                })
+                .expect("a primary-path key derivation on input 0");
+            psbt.inputs[0]
+                .partial_sigs
+                .insert(bitcoin::PublicKey::new(key), sig);
+            psbt
+        };
+
+        // A PSBT the wallet created reads fine.
+        let created = new_spend(2);
+        assert!(vault.partial_spend_info(&created).is_ok());
+
+        // 1. First insert, inputs with different nSequence.
+        let mut sequences = new_spend(3);
+        sequences.unsigned_tx.input[0].sequence = bitcoin::Sequence::from_height(10);
+        assert!(matches!(
+            vault.partial_spend_info(&sequences),
+            Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+        ));
+        let first_sequences = control.update_spend(sequences.clone());
+
+        // 2. First insert, signed on one input only.
+        let one_sig = sign_first_input_only(new_spend(4));
+        assert!(matches!(
+            vault.partial_spend_info(&one_sig),
+            Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+        ));
+        let first_one_sig = control.update_spend(one_sig.clone());
+
+        // 3. A consistent stored spend, then a signer's PSBT signed on one
+        //    input only, merged onto it.
+        let stored = new_spend(5);
+        control.update_spend(stored.clone()).unwrap();
+        let merge_one_sig = control.update_spend(sign_first_input_only(stored.clone()));
+        let merged = db_conn
+            .spend_tx(&stored.unsigned_tx.compute_txid())
+            .unwrap();
+
+        // All three are stored, and the stored row is one the analysis
+        // refuses: the GUI lists it with each input's least progress
+        // (`coincube-gui/src/daemon/model.rs`, `stored_spend_info`).
+        // `updatespend` keeps accepting them: a signer may legitimately sign
+        // only the inputs it knows, and rows already stored by older or
+        // external daemons would not go away anyway.
+        assert_eq!(first_sequences, Ok(()));
+        assert_eq!(first_one_sig, Ok(()));
+        assert_eq!(merge_one_sig, Ok(()));
+        for row in [
+            db_conn
+                .spend_tx(&sequences.unsigned_tx.compute_txid())
+                .unwrap(),
+            db_conn
+                .spend_tx(&one_sig.unsigned_tx.compute_txid())
+                .unwrap(),
+            merged,
+        ] {
+            assert!(matches!(
+                vault.partial_spend_info(&row),
+                Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+            ));
+        }
+
+        ms.shutdown();
+    }
+
     #[test]
     fn rbf_psbt() {
         let dummy_op_a = bitcoin::OutPoint::from_str(

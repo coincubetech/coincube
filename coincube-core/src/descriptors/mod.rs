@@ -1635,6 +1635,29 @@ mod tests {
             .to_string()
             .contains("Analyzed PSBT is inconsistent across inputs."));
 
+        // Read input by input, the least signed input is what all of them
+        // reached: no signature on the primary path, and the recovery path
+        // only where every input unlocks it.
+        let per_input = |psbt: &Psbt| {
+            psbt.inputs
+                .iter()
+                .zip(&psbt.unsigned_tx.input)
+                .map(|(psbt_in, txin)| desc.partial_spend_info_txin(psbt_in, txin))
+                .collect::<Vec<_>>()
+        };
+        let least = PartialSpendInfo::least_signed(per_input(&inconsistent_psbt)).unwrap();
+        assert_eq!(least.primary_path.threshold, 1);
+        assert_eq!(least.primary_path.sigs_count, 0);
+        assert!(least.primary_path.signed_pubkeys.is_empty());
+        assert!(least.recovery_paths.is_empty());
+        let mut one_unlocked = rec_psbt.clone();
+        one_unlocked.unsigned_tx.input[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        let least = PartialSpendInfo::least_signed(per_input(&one_unlocked)).unwrap();
+        assert!(least.recovery_paths.is_empty());
+        let least = PartialSpendInfo::least_signed(per_input(&rec_psbt)).unwrap();
+        assert_eq!(least, desc.partial_spend_info(&rec_psbt).unwrap());
+        assert!(PartialSpendInfo::least_signed(Vec::new()).is_none());
+
         // If we analyze a descriptor with a multisig we'll get the right threshold.
         let desc = CoincubeDescriptor::from_str("wsh(or_d(multi(2,[f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*,[00112233]xpub6FC8vmQGGfSuQGfKG5L73fZ7WjXit8TzfJYDKwTtHkhrbAhU5Kma41oenVq6aMnpgULJRXpQuxnVysyfdpRhVgD6vYe7XLbFDhmvYmDrAVq/<0;1>/*,[aabbccdd]xpub68XtbpvDM19d39wEKdvadHkZ4FGKf4tnryKzAacttp8BLX3uHj7eK8shRnFBhZ2UL83S9dwXe42Qm6eG6BkR1jy8XwUSNBcHKtET7j4V5FB/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#2kgxuax5").unwrap();
         let info = desc.partial_spend_info(&psbt).unwrap();

@@ -855,6 +855,42 @@ impl PartialSpendInfo {
         }
     }
 
+    /// The progress every one of `infos` has reached: per path, the least
+    /// signature count and the signers present in all of them, and a recovery
+    /// path only if every one of them makes it available. `None` if `infos`
+    /// is empty.
+    ///
+    /// For a PSBT whose inputs, analysed one by one, disagree (which
+    /// [`super::CoincubeDescriptor::partial_spend_info`] refuses as
+    /// inconsistent): the result never shows the spend as more signed than
+    /// its least signed input.
+    pub fn least_signed(infos: impl IntoIterator<Item = PartialSpendInfo>) -> Option<Self> {
+        fn keep_common(path: &mut PathSpendInfo, other: &PathSpendInfo) {
+            path.sigs_count = path.sigs_count.min(other.sigs_count);
+            path.signed_pubkeys.retain(|fingerprint, count| {
+                other.signed_pubkeys.get(fingerprint).is_some_and(|other| {
+                    *count = (*count).min(*other);
+                    true
+                })
+            });
+        }
+        let mut infos = infos.into_iter();
+        let mut common = infos.next()?;
+        for info in infos {
+            keep_common(&mut common.primary_path, &info.primary_path);
+            common.recovery_paths.retain(|timelock, path| {
+                match info.recovery_paths.get(timelock) {
+                    Some(other) => {
+                        keep_common(path, other);
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        Some(common)
+    }
+
     /// Get the number of signatures present for the primary path
     pub fn primary_path(&self) -> &PathSpendInfo {
         &self.primary_path
