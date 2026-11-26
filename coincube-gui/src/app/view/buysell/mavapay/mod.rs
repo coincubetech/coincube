@@ -548,7 +548,8 @@ impl MavapayState {
                 return ln_invoice.as_ref().map(|invoice| {
                     iced::Task::batch([
                         iced::Task::done(view::Message::Clipboard(invoice.clone())),
-                        iced::Task::done(view::Message::ShowError(
+                        iced::Task::done(view::Message::ShowToast(
+                            log::Level::Info,
                             "Invoice Copied to Clipboard".to_string(),
                         )),
                     ])
@@ -1334,7 +1335,8 @@ impl MavapayState {
             MavapayMessage::WriteInvoiceToClipboard => {
                 return Some(iced::Task::batch([
                     iced::Task::done(view::Message::Clipboard(quote.invoice.clone())),
-                    iced::Task::done(view::Message::ShowError(
+                    iced::Task::done(view::Message::ShowToast(
+                        log::Level::Info,
                         "Invoice Copied to Clipboard".to_string(),
                     )),
                 ]));

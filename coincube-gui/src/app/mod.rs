@@ -8686,7 +8686,9 @@ impl App {
                     panel,
                     self.panels.spark_overview.reload(None, None),
                     self.panels.spark_receive.stable_balance_settled(None),
-                    Task::done(Message::View(view::Message::ShowError(err))),
+                    Task::done(Message::View(view::Message::ShowError(
+                        state::spark::settings::stable_balance_failure_toast(&err),
+                    ))),
                 ]);
             }
             _ => {}

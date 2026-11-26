@@ -290,7 +290,8 @@ impl MeldState {
                 if let Some(address) = self.get_deposit_address() {
                     return Some(iced::Task::batch([
                         iced::Task::done(view::Message::Clipboard(address)),
-                        iced::Task::done(view::Message::ShowError(
+                        iced::Task::done(view::Message::ShowToast(
+                            log::Level::Info,
                             "Address copied to the clipboard".to_string(),
                         )),
                     ]));
