@@ -102,6 +102,8 @@ impl App {
                             .find(|c| c.id == cube_id && c.name == synced_name)
                         {
                             c.remote_synced = true;
+                            // The rename reached the Cube's Connect row.
+                            c.connect_registered = true;
                         }
                         Some(s)
                     })

@@ -11,6 +11,7 @@ use super::*;
 use crate::app::cache::{CubeMarkAccess, CubeMarkChange};
 use crate::app::view::settings::general::{
     avatar_row, MARK_BACK_ID, MARK_FAILED_LINE, MARK_REGENERATE_ID, MARK_SIGN_IN_LINE,
+    MARK_UNCONFIRMED_LINE,
 };
 use crate::app::view::shared::landing::capture;
 use crate::services::coincube::CoincubeClient;
@@ -265,7 +266,10 @@ fn a_failed_set_call_changes_nothing_and_says_so() {
         assert_eq!(app.cube_settings.mark_variation, 0, "status {}", status);
         assert_eq!(app.cache.cube_mark_seed, seed_before, "status {}", status);
         assert_eq!(saved_mark_variation(&app), 0, "status {}", status);
-        assert_eq!(app.cache.cube_mark_change, CubeMarkChange::Failed);
+        assert!(matches!(
+            app.cache.cube_mark_change,
+            CubeMarkChange::Failed { .. }
+        ));
         let shown = capture::inspect(
             "cube-mark-failed",
             avatar_row(&app.cache),
@@ -493,5 +497,215 @@ fn a_registration_in_flight_holds_the_buttons() {
         Message::View(view::Message::CubeMark(view::CubeMarkIntent::Regenerate)),
     );
     assert_eq!(app.cube_settings.mark_variation, 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The saved Cube, read back from its network's settings file.
+fn saved_cube(root: &std::path::Path) -> settings::CubeSettings {
+    let datadir = CoincubeDirectory::new(root.to_path_buf());
+    settings::Settings::from_file(&datadir.network_directory(crate::chain::ChainId::Bitcoin))
+        .unwrap()
+        .cubes
+        .into_iter()
+        .find(|cube| cube.id == MARK_CUBE)
+        .unwrap()
+}
+
+/// Save a Cube with the fixture's id, as Cube creation does.
+fn save_cube(root: &std::path::Path) {
+    let datadir = CoincubeDirectory::new(root.to_path_buf());
+    let network_dir = datadir.network_directory(crate::chain::ChainId::Bitcoin);
+    let cube = settings::CubeSettings::new_with_raw_id(
+        MARK_CUBE.into(),
+        "Fixture".into(),
+        crate::chain::ChainId::Bitcoin,
+    );
+    run(settings::update_settings_file(
+        &network_dir,
+        move |mut s| {
+            s.cubes.push(cube);
+            Some(s)
+        },
+    ))
+    .unwrap();
+}
+
+/// Open the saved Cube the way the loader does: its settings read from the
+/// file and handed to `App::new`.
+fn open_saved(root: &std::path::Path) -> App {
+    let (mut app, _) = super::shell_tests::bitcoin_app_with_settings(root, saved_cube(root));
+    app.sync_panel_derived_cache_fields();
+    app
+}
+
+/// A registered Cube renamed while signed out (which resets
+/// `remote_synced`) and reopened is still registered: Regenerate stays off
+/// with the sign-in line rather than offering a local change the next
+/// sign-in would overwrite.
+#[test]
+fn a_registered_cube_renamed_signed_out_reopens_signed_out() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("rename");
+    save_cube(&root);
+    let network_dir =
+        CoincubeDirectory::new(root.clone()).network_directory(crate::chain::ChainId::Bitcoin);
+    run(settings::mark_cube_synced(&network_dir, MARK_CUBE, None)).unwrap();
+
+    let mut app = open_saved(&root);
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+    settle(
+        &mut app,
+        Message::View(view::Message::Settings(
+            view::SettingsMessage::CubeNameSubmitted("Renamed".into()),
+        )),
+    );
+    let renamed = saved_cube(&root);
+    assert_eq!(renamed.name, "Renamed");
+    assert!(!renamed.remote_synced, "a local rename waits to sync");
+    assert!(renamed.connect_registered);
+
+    let reopened = open_saved(&root);
+    assert_eq!(reopened.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+    let shown = capture::inspect(
+        "cube-mark-renamed",
+        avatar_row(&reopened.cache),
+        OUTER,
+        "dark",
+        coincube_ui::theme::Theme::dark(),
+    );
+    assert!(shown.contains(MARK_SIGN_IN_LINE));
+    assert!(!shown.has_focus(Id::new(MARK_REGENERATE_ID)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A never-registered Cube opened signed out, then registered by the App's
+/// Connect panel after sign-in, stays registered after sign-out, and a
+/// fresh App opened from the file knows it too.
+#[test]
+fn an_in_app_registration_survives_sign_out_and_reopening() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("in-app-registration");
+    save_cube(&root);
+    let mut app = open_saved(&root);
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::Local);
+
+    let server = MockServer::start();
+    let tripwire = avatar_tripwire(&server);
+    let register = server.mock(|when, then| {
+        when.method(MockMethod::POST).path("/api/v1/connect/cubes");
+        then.status(200).json_body(json!({
+            "success": true,
+            "data": {
+                "id": SERVER_ID,
+                "uuid": MARK_CUBE,
+                "name": "Fixture",
+                "network": "mainnet",
+                "lightningAddress": null,
+                "status": "active"
+            }
+        }));
+    });
+    let mut client = CoincubeClient::for_test(server.base_url());
+    client.set_token("fixture-token");
+    app.panels.connect.cube.client = Some(client);
+    for message in outputs(app.panels.connect.cube.register_cube()) {
+        settle(&mut app, message);
+    }
+    register.assert();
+    assert_eq!(app.panels.connect.cube.server_cube_id, Some(SERVER_ID));
+    assert!(saved_cube(&root).connect_registered);
+    assert!(!saved_cube(&root).remote_synced);
+
+    app.panels.connect.cube.clear_client();
+    app.sync_panel_derived_cache_fields();
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+
+    let reopened = open_saved(&root);
+    assert_eq!(reopened.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+    tripwire.assert_hits(0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Signed in to a registered Cube whose registration failed this session:
+/// both buttons are off with one line, which does not show while a
+/// registration is in flight.
+#[test]
+fn a_failed_registration_says_connect_has_not_confirmed_the_cube() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("unconfirmed");
+    let server = MockServer::start();
+    let mut app = mark_app(&root);
+    app.panels.connect.set_cube_has_server_record(true);
+    let mut client = CoincubeClient::for_test(server.base_url());
+    client.set_token("fixture-token");
+    app.panels.connect.cube.client = Some(client);
+
+    let generation = app.panels.connect.cube.session_generation();
+    assert!(app
+        .panels
+        .connect
+        .cube
+        .begin_external_registration()
+        .is_some());
+    app.sync_panel_derived_cache_fields();
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::Waiting);
+    let in_flight = capture::inspect(
+        "cube-mark-registering",
+        avatar_row(&app.cache),
+        OUTER,
+        "dark",
+        coincube_ui::theme::Theme::dark(),
+    );
+    assert!(!in_flight.contains(MARK_UNCONFIRMED_LINE));
+
+    settle(
+        &mut app,
+        Message::View(view::Message::ConnectCube(
+            view::ConnectCubeMessage::CubeRegistered {
+                generation,
+                result: Err("Out of Cube slots".to_string().into()),
+            },
+        )),
+    );
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::Unconfirmed);
+    let shown = capture::inspect(
+        "cube-mark-unconfirmed",
+        avatar_row(&app.cache),
+        OUTER,
+        "dark",
+        coincube_ui::theme::Theme::dark(),
+    );
+    assert!(shown.contains(MARK_UNCONFIRMED_LINE));
+    assert!(!shown.has_focus(Id::new(MARK_REGENERATE_ID)));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A failure line belongs to the Connect session that saw it: signing out
+/// (or into another account) clears it.
+#[test]
+fn a_failure_line_does_not_outlive_its_session() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("failure-session");
+    let server = MockServer::start();
+    let mut app = mark_app(&root);
+    sign_in(&mut app, &server);
+    let generation = app.panels.connect.cube.session_generation();
+    app.cache.cube_mark_change = CubeMarkChange::Failed { generation };
+    app.sync_panel_derived_cache_fields();
+    assert_eq!(
+        app.cache.cube_mark_change,
+        CubeMarkChange::Failed { generation }
+    );
+    app.panels.connect.cube.clear_client();
+    sign_in(&mut app, &server);
+    assert_eq!(app.cache.cube_mark_change, CubeMarkChange::Idle);
+    let shown = capture::inspect(
+        "cube-mark-new-session",
+        avatar_row(&app.cache),
+        OUTER,
+        "dark",
+        coincube_ui::theme::Theme::dark(),
+    );
+    assert!(!shown.contains(MARK_FAILED_LINE));
     let _ = std::fs::remove_dir_all(&root);
 }

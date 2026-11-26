@@ -639,6 +639,7 @@
   "Connect didn't store this Cube's encrypted seed. Nothing was written — please try again.": "Connect no guardó la frase cifrada de este Cube. No se guardó nada. Inténtalo de nuevo.",
   "Connect doesn't recognise this Vault's network. Update COINCUBE.": "Connect no reconoce la red de este Vault. Actualiza COINCUBE.",
   "Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase.": "Connect tiene el registro de este Cube, pero no sus claves, así que no se puede restaurar desde aquí. Si todavía tienes este Cube en otro dispositivo, ábrelo allí y agrega un Kit de recuperación. También puedes importarlo con su frase de recuperación.",
+  "Connect hasn't confirmed this Cube yet.": "Connect aún no ha confirmado este Cube.",
   "Connect hasn't finished setting up this device for COINCUBE Mobile signing. Set it up now, or pair a phone over Wi-Fi to sign locally without Connect.": "Connect no ha terminado de configurar este dispositivo para firmar con COINCUBE Mobile. Configúralo ahora o vincula un teléfono por Wi-Fi para firmar localmente sin Connect.",
   "Connect live updates": "Actualizaciones en tiempo real de Connect",
   "Connect needs updating before COINCUBE Mobile can sign on Bitcoin Blake2b. Nothing was sent to the signer.": "Connect necesita actualizarse antes de que COINCUBE Mobile pueda firmar en Bitcoin Blake2b. No se envió nada al firmante.",

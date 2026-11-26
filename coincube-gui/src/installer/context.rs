@@ -177,6 +177,11 @@ pub struct Context {
     /// with the backend during Final. `None` when no cube settings
     /// were passed in.
     pub cube_name: Option<String>,
+    /// The Cube's ring-mark variation (`CubeSettings::mark_variation`), sent
+    /// when Final registers the Cube so a never-registered Cube keeps a mark
+    /// regenerated before it registered (API CA1). 0 when no cube settings
+    /// were passed in.
+    pub cube_mark_variation: u32,
     /// Vault members to fan out to the backend after the local install
     /// completes. Populated by `DefineDescriptor::apply()` for every
     /// keychain-sourced descriptor key. Empty when no such keys exist
@@ -412,6 +417,7 @@ impl Context {
             coincube_client,
             cube_encryption_key: None,
             cube_name: cube_settings.map(|cs| cs.name.clone()),
+            cube_mark_variation: cube_settings.map_or(0, |cs| cs.mark_variation),
             connect_vault_members: Vec::new(),
             connect_vault_timelock_days: None,
             restore_pin: None,

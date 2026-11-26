@@ -110,6 +110,7 @@ pub struct Final {
     coincube_client: Option<CoincubeClient>,
     cube_uuid: Option<String>,
     cube_name: Option<String>,
+    cube_mark_variation: u32,
     network: String,
     connect_vault_members: Vec<ConnectVaultMemberPayload>,
     connect_vault_timelock_days: Option<i32>,
@@ -139,6 +140,7 @@ impl Final {
             coincube_client: None,
             cube_uuid: None,
             cube_name: None,
+            cube_mark_variation: 0,
             network: String::new(),
             connect_vault_members: Vec::new(),
             connect_vault_timelock_days: None,
@@ -189,6 +191,7 @@ impl Step for Final {
         self.coincube_client.clone_from(&ctx.coincube_client);
         self.cube_uuid.clone_from(&ctx.cube_id);
         self.cube_name.clone_from(&ctx.cube_name);
+        self.cube_mark_variation = ctx.cube_mark_variation;
         self.network = ctx.bitcoin_config.chain.api_str().to_string();
         self.connect_vault_members
             .clone_from(&ctx.connect_vault_members);
@@ -246,6 +249,10 @@ impl Step for Final {
                     let members = self.connect_vault_members.clone();
                     let timelock = self.connect_vault_timelock_days;
                     let fingerprint = self.vault_fingerprint.clone();
+                    let mark_variation =
+                        crate::services::coincube::RegisterCubeRequest::mark_variation_for(
+                            self.cube_mark_variation,
+                        );
                     return Task::perform(
                         connect_vault::create_connect_vault(
                             client,
@@ -255,6 +262,7 @@ impl Step for Final {
                             members,
                             timelock,
                             fingerprint,
+                            mark_variation,
                         ),
                         Message::ConnectVaultCreated,
                     );

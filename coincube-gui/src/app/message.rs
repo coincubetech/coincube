@@ -126,6 +126,9 @@ pub enum Message {
     /// (`CubeResponse::mark_variation`). `None` from an API that predates
     /// the field, which leaves the local number alone.
     CubeMarkFromConnect(Option<u32>),
+    /// The open Cube's Connect registration succeeded: Connect has a row for
+    /// it (`CubeSettings::connect_registered`), which the App records.
+    CubeRegisteredWithConnect,
     /// Result of `PUT /connect/cubes/{id}/mark` from Regenerate or Back:
     /// the number the server kept, or why it failed. `generation` is the
     /// Connect session that issued it (`ConnectCubePanel::session_generation`);

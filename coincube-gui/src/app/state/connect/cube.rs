@@ -591,7 +591,9 @@ impl ConnectCubePanel {
     ///
     /// Registered and signed in goes through Connect; never registered stays
     /// local and rides the first registration. A registration in flight
-    /// waits, so a local change cannot race the number that request carries.
+    /// waits, so a local change cannot race the number that request carries;
+    /// a registered Cube whose registration failed this session is
+    /// `Unconfirmed`.
     pub fn mark_access(&self, not_owner: bool) -> crate::app::cache::CubeMarkAccess {
         use crate::app::cache::CubeMarkAccess;
         let signed_in = self.client.is_some();
@@ -600,6 +602,9 @@ impl ConnectCubePanel {
             CubeMarkAccess::NotOwner
         } else if signed_in && self.server_cube_id.is_some() {
             CubeMarkAccess::Connect
+        } else if !self.registering && signed_in && registered && self.registration_error.is_some()
+        {
+            CubeMarkAccess::Unconfirmed
         } else if self.registering || (signed_in && registered) {
             CubeMarkAccess::Waiting
         } else if registered {
@@ -1291,12 +1296,17 @@ impl ConnectCubePanel {
                 // local copy and the sidebar's seed.
                 let mark_task =
                     iced::Task::done(Message::CubeMarkFromConnect(cube_resp.mark_variation));
+                // Connect now has a row for this Cube: the App records it,
+                // so the Cube is still known to be registered after a
+                // sign-out and a relaunch.
+                let row_task = iced::Task::done(Message::CubeRegisteredWithConnect);
                 let mut tasks = vec![
                     enc_key_task,
                     vault_fp_task,
                     reconcile_members_task,
                     stable_balance_task,
                     mark_task,
+                    row_task,
                 ];
                 tasks.extend(reconcile_task);
                 tasks.extend(recheck_task);

@@ -5426,6 +5426,7 @@ impl Home {
                 // stops `CubeCreated` registering it a second time.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_registered = true;
                 }
                 // The account signed in while the Cube is created is its
                 // owner, registered or not: a registration that fails now is
@@ -5659,6 +5660,7 @@ impl Home {
                 // `finalize_passkey_cube_creation`, which does the same.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_registered = true;
                 }
                 // The creating account owns it, as on the passkey path.
                 cube.connect_owner = owner;

@@ -3737,7 +3737,7 @@ impl App {
             .set_cube_mark_variation(cube_settings.mark_variation);
         panels
             .connect
-            .set_cube_has_server_record(cube_settings.remote_synced);
+            .set_cube_has_server_record(cube_settings.is_connect_registered());
         let mut tasks = vec![];
         if wallet.is_imported() {
             if let Some(import) = cube_settings.bitcoin_import.clone() {
@@ -4108,7 +4108,7 @@ impl App {
             .set_cube_mark_variation(cube_settings.mark_variation);
         panels
             .connect
-            .set_cube_has_server_record(cube_settings.remote_synced);
+            .set_cube_has_server_record(cube_settings.is_connect_registered());
         let mut cache = cache;
         if fork {
             cache.clear_btcb2_fiat();
@@ -4951,6 +4951,7 @@ impl App {
                 self.set_cube_mark_variation_locally(target)
             }
             cache::CubeMarkAccess::Waiting
+            | cache::CubeMarkAccess::Unconfirmed
             | cache::CubeMarkAccess::NotOwner
             | cache::CubeMarkAccess::SignedOut => Task::none(),
         }
@@ -4978,10 +4979,41 @@ impl App {
             }
             Err(e) => {
                 log::warn!("failed to change the Cube's mark: {e}");
-                self.cache.cube_mark_change = cache::CubeMarkChange::Failed;
+                self.cache.cube_mark_change = cache::CubeMarkChange::Failed { generation };
                 Task::none()
             }
         }
+    }
+
+    /// Connect has a row for the open Cube (its panel's registration just
+    /// succeeded): record it in memory and the settings file, once, so a
+    /// sign-out or a relaunch still knows the Cube's mark number is the
+    /// server's. Never cleared.
+    fn record_cube_connect_row(&mut self) -> Task<Message> {
+        self.panels.connect.set_cube_has_server_record(true);
+        if self.cube_settings.connect_registered {
+            return Task::none();
+        }
+        self.cube_settings.connect_registered = true;
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.chain());
+        let cube_id = self.cube_settings.id.clone();
+        Task::perform(
+            async move {
+                settings::record_connect_row(&network_dir, &cube_id, None)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |res: Result<(), String>| {
+                if let Err(e) = res {
+                    // The next registration or Launcher listing writes it.
+                    log::warn!("failed to record the Cube's Connect registration: {e}");
+                }
+                Message::SettingsSaved
+            },
+        )
     }
 
     /// Record the open Cube's ring-mark variation in memory, the cache's
@@ -6566,7 +6598,18 @@ impl App {
         self.cache.current_cube_server_id = self.panels.connect.cube.server_cube_id;
         self.cache.cube_owned_by_other_account = self.panels.connect.cube.owned_by_other_account;
         // Regenerate and Back on Display read this; resolved after the
-        // ownership mirror above so both describe the same tick.
+        // ownership mirror above so both describe the same tick. The Cube's
+        // settings can learn it is registered mid-session; the panel's
+        // flag only ever rises.
+        if self.cube_settings.is_connect_registered() {
+            self.panels.connect.set_cube_has_server_record(true);
+        }
+        // A failure line belongs to the Connect session that saw it.
+        if let cache::CubeMarkChange::Failed { generation } = self.cache.cube_mark_change {
+            if generation != self.panels.connect.cube.session_generation() {
+                self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
+            }
+        }
         self.cache.cube_mark_access = self
             .panels
             .connect
@@ -9683,6 +9726,9 @@ impl App {
             }
             Message::CubeMarkSet { generation, result } => {
                 return self.on_cube_mark_set(generation, result);
+            }
+            Message::CubeRegisteredWithConnect => {
+                return self.record_cube_connect_row();
             }
             message @ (Message::CubeSparkStableBalanceReported
             | Message::SparkStableBalanceFromConnect(_)
@@ -15358,6 +15404,18 @@ pub(crate) mod shell_tests {
     /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
     /// with the account grant on so the claim entry is available.
     pub(crate) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+        bitcoin_app_with_settings(
+            root,
+            settings::CubeSettings::new("Fixture".into(), crate::chain::ChainId::Bitcoin),
+        )
+    }
+
+    /// [`bitcoin_app`] opening `cube_settings`, as the loader passes a saved
+    /// Cube's settings to `App::new`.
+    pub(crate) fn bitcoin_app_with_settings(
+        root: &std::path::Path,
+        cube_settings: settings::CubeSettings,
+    ) -> (App, Arc<Wallet>) {
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let wallet = Arc::new(Wallet::new(descriptor.clone()));
         let cfg: coincubed::config::Config = toml::from_str(&format!(
@@ -15387,7 +15445,7 @@ pub(crate) mod shell_tests {
             daemon,
             CoincubeDirectory::new(root.to_path_buf()),
             None,
-            settings::CubeSettings::new("Fixture".into(), chain),
+            cube_settings,
             None,
         );
         drop(startup);

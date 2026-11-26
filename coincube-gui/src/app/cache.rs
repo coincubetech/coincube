@@ -155,6 +155,10 @@ pub enum CubeMarkAccess {
     Waiting,
     /// Another Connect account owns this Cube: the mark only, no buttons.
     NotOwner,
+    /// Signed in to a Cube Connect has a row for, but the last registration
+    /// failed, so its server id is unknown. Both buttons are disabled, with
+    /// one line saying Connect hasn't confirmed the Cube.
+    Unconfirmed,
     /// Registered and signed in: the set call (`PUT /connect/cubes/{id}/mark`)
     /// changes the number, and the local copy follows the response.
     Connect,
@@ -175,8 +179,9 @@ pub enum CubeMarkChange {
     /// A set call is in flight, issued under the Connect session with this
     /// generation (`ConnectCubePanel::session_generation`).
     Saving { generation: u64 },
-    /// The last set call failed; the mark was not changed.
-    Failed,
+    /// The last set call, issued under the Connect session with this
+    /// generation, failed; the mark was not changed. A new session clears it.
+    Failed { generation: u64 },
 }
 
 /// Progress of the last Cube rename, shown under the Cube name field.

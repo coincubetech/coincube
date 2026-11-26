@@ -495,10 +495,43 @@ pub async fn mark_cube_synced(
                 cube.connect_owner = owner;
             }
             cube.remote_synced = true;
+            cube.connect_registered = true;
         }
         Some(settings)
     })
     .await
+}
+
+/// Record that Connect has a row for a Cube ([`CubeSettings::connect_registered`])
+/// and, when the listing carried one, its mark number. Used by the App when
+/// its Connect panel registers the open Cube, and by the Launcher for every
+/// local Cube a current Connect listing shows. A Cube no longer in the file
+/// is left alone; the rest of the file is unchanged.
+pub async fn record_connect_row(
+    network_dir: &NetworkDirectory,
+    cube_id: &str,
+    mark_variation: Option<u32>,
+) -> Result<(), SettingsError> {
+    update_settings_file(network_dir, |settings| {
+        Some(with_connect_row(settings, cube_id, mark_variation))
+    })
+    .await
+}
+
+/// [`record_connect_row`]'s update, as a total function so a missed lookup
+/// can never turn into the `None` that deletes the file.
+fn with_connect_row(
+    mut settings: Settings,
+    cube_id: &str,
+    mark_variation: Option<u32>,
+) -> Settings {
+    if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+        cube.connect_registered = true;
+        if let Some(variation) = mark_variation {
+            cube.mark_variation = variation;
+        }
+    }
+    settings
 }
 
 /// The highest ring-mark variation the API accepts (`0..=2^31-1`, API CA1).
@@ -734,6 +767,10 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Cubes represent user accounts that can contain multiple features (Vault, Liquid wallet, etc.)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CubeSettings {
@@ -791,6 +828,15 @@ pub struct CubeSettings {
     /// Defaults to `false` so that existing cubes are picked up by catch-up sync.
     #[serde(default)]
     pub remote_synced: bool,
+    /// Connect has a row for this Cube: set the first time a registration,
+    /// a sync or a Connect listing shows one, and never cleared. Unlike
+    /// [`Self::remote_synced`], which a rename resets to mean "something is
+    /// waiting to sync", this says whether the Cube's mark number is the
+    /// server's (`mark_variation`, D-R2). Read through
+    /// [`Self::is_connect_registered`]. Files written before the field load
+    /// as `false`, and `false` writes nothing, so they round-trip unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub connect_registered: bool,
     pub created_at: i64,
     /// The Vault wallet for this Cube (optional - may not be set up yet)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1136,6 +1182,7 @@ impl CubeSettings {
             backed_up: false,
             mfa_done: false,
             remote_synced: false,
+            connect_registered: false,
             unit_setting: unit::UnitSetting::default(),
             fiat_price: Some(fiat::PriceSetting::default()), // Initialize with default (enabled: true)
             pending_spark_shift: None,
@@ -1285,6 +1332,13 @@ impl CubeSettings {
         } else {
             self.has_recovery_kit()
         }
+    }
+
+    /// Whether Connect has a row for this Cube. `remote_synced` still counts,
+    /// for files written before [`Self::connect_registered`] existed: it is
+    /// only ever true once a registration or sync has succeeded.
+    pub fn is_connect_registered(&self) -> bool {
+        self.connect_registered || self.remote_synced
     }
 
     /// Classifies this Cube's relationship to Connect for the card indicator
@@ -5753,6 +5807,58 @@ mod test {
             restored.mark_seed().as_deref(),
             Some("9fb93534-081c-4253-b1e2-73a87984a8ab:3")
         );
+    }
+
+    /// A Cube file without `connect_registered` loads as not registered and
+    /// is written back byte for byte; the field, once set, survives the
+    /// rename that resets `remote_synced`, and either one counts.
+    #[test]
+    fn connect_registered_is_optional_round_trips_and_outlives_remote_synced() {
+        use super::{with_connect_row, CubeSettings, Settings};
+
+        let old = r#"{
+  "cubes": [
+    {
+      "id": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+      "name": "Savings",
+      "network": "bitcoin",
+      "created_at": 0
+    }
+  ]
+}"#;
+        let settings: Settings = serde_json::from_str(old).unwrap();
+        assert!(!settings.cubes[0].connect_registered);
+        assert!(!settings.cubes[0].is_connect_registered());
+        let written = serde_json::to_vec_pretty(&settings).unwrap();
+        assert!(!String::from_utf8_lossy(&written).contains("connect_registered"));
+        let rewritten =
+            serde_json::to_vec_pretty(&serde_json::from_slice::<Settings>(&written).unwrap())
+                .unwrap();
+        assert_eq!(rewritten, written, "an old file round-trips byte for byte");
+
+        // An older file whose Cube was synced counts as registered.
+        let mut legacy: CubeSettings = settings.cubes[0].clone();
+        legacy.remote_synced = true;
+        assert!(legacy.is_connect_registered());
+
+        // The Launcher's listing or an in-App registration records the row,
+        // and a later rename (which clears `remote_synced`) leaves it.
+        let mut recorded = with_connect_row(settings, "9fb93534-081c-4253-b1e2-73a87984a8ab", None);
+        let cube = &mut recorded.cubes[0];
+        assert!(cube.connect_registered);
+        assert_eq!(cube.mark_variation, 0, "no number listed, none written");
+        cube.remote_synced = false;
+        let json = serde_json::to_string(cube).unwrap();
+        assert!(json.contains(r#""connect_registered":true"#));
+        let restored: CubeSettings = serde_json::from_str(&json).unwrap();
+        assert!(restored.is_connect_registered());
+
+        // A listed number is written with it; a missing Cube leaves the file.
+        let recorded = with_connect_row(recorded, "9fb93534-081c-4253-b1e2-73a87984a8ab", Some(4));
+        assert_eq!(recorded.cubes[0].mark_variation, 4);
+        let unchanged = with_connect_row(recorded.clone(), "missing", Some(9));
+        assert_eq!(unchanged.cubes.len(), 1);
+        assert_eq!(unchanged.cubes[0].mark_variation, 4);
     }
 
     /// The settings update behind Regenerate and adoption touches only the

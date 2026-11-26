@@ -208,6 +208,9 @@ pub(crate) fn cube_name_status(
 /// session: the server's number wins at the next sign-in (D-R2), so the
 /// buttons are disabled rather than offering a local change.
 pub(crate) const MARK_SIGN_IN_LINE: &str = "Sign in to Connect to change this Cube's mark.";
+/// The line the Avatar row shows when Connect has a row for the Cube but its
+/// registration failed this session, so the mark cannot be changed yet.
+pub(crate) const MARK_UNCONFIRMED_LINE: &str = "Connect hasn't confirmed this Cube yet.";
 /// The line the Avatar row shows when the set call failed. One line for every
 /// failure, Connect's duress refusal included.
 pub(crate) const MARK_FAILED_LINE: &str = "Couldn't change the mark. Nothing was changed.";
@@ -229,10 +232,10 @@ pub(crate) fn avatar_row<'a>(cache: &'a cache::Cache) -> Element<'a, Message> {
     let variation = cache.cube_mark_variation;
     let mut row = match access {
         CubeMarkAccess::SignedOut => row.description(localized_copy(MARK_SIGN_IN_LINE)),
-        _ if cache.cube_mark_change == CubeMarkChange::Failed => row.line(page::status(
-            page::Status::Bad,
-            localized_copy(MARK_FAILED_LINE),
-        )),
+        CubeMarkAccess::Unconfirmed => row.description(localized_copy(MARK_UNCONFIRMED_LINE)),
+        _ if matches!(cache.cube_mark_change, CubeMarkChange::Failed { .. }) => row.line(
+            page::status(page::Status::Bad, localized_copy(MARK_FAILED_LINE)),
+        ),
         _ => row,
     };
     if variation > 0 {
@@ -3393,7 +3396,7 @@ mod mark_row_tests {
 
     fn cube_mark_cache_failed(access: CubeMarkAccess) -> cache::Cache {
         cache::Cache {
-            cube_mark_change: CubeMarkChange::Failed,
+            cube_mark_change: CubeMarkChange::Failed { generation: 0 },
             ..cache(access, 1)
         }
     }
@@ -3446,6 +3449,14 @@ mod mark_row_tests {
             )
         });
         assert!(signed_out.contains("Inicia sesión en Connect para cambiar la marca de este Cube."));
+        let unconfirmed = render_in(Language::Spanish, || {
+            inspect(
+                "mark-row-es-unconfirmed",
+                &cache(CubeMarkAccess::Unconfirmed, 0),
+            )
+        });
+        unconfirmed.assert_spanish("Cube Settings › Display, Avatar row unconfirmed");
+        assert!(unconfirmed.contains("Connect aún no ha confirmado este Cube."));
         let failed = render_in(Language::Spanish, || {
             inspect(
                 "mark-row-es-failed",

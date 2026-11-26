@@ -200,9 +200,10 @@ impl Home {
                 self.remote_cubes = remote_only;
                 self.connect_off_cubes = connect_off.into_iter().collect();
                 // Connect's number is the record: show it now, and write
-                // any differing one into the Cube's settings file. Only a
-                // current result gets here, so a late, older listing can
-                // never write an older number.
+                // any differing one into the Cube's settings file, with the
+                // fact that Connect has a row for every listed local Cube.
+                // Only a current result gets here, so a late, older listing
+                // can never write an older number.
                 self.adopt_mark_variations(&marks);
                 return persist_mark_variations(self.datadir_path.clone(), marks);
             }
@@ -214,16 +215,17 @@ impl Home {
     }
 }
 
-/// Each listed Cube's ring-mark variation by UUID, for the Cubes whose
-/// response carried one. An API that predates the field sends none, and
-/// the local numbers stand.
-pub(crate) type MarkVariations = std::collections::HashMap<String, u32>;
+/// Every listed Cube by UUID, with its ring-mark variation when the response
+/// carried one. An API that predates the field sends none, and the local
+/// numbers stand; the Cube is still listed, so Connect has a row for it.
+pub(crate) type MarkVariations = std::collections::HashMap<String, Option<u32>>;
 
 type RemoteListing = (Vec<RemoteCube>, Vec<String>, MarkVariations);
 
 /// Write each listed number into the local Cube's settings file where it
-/// differs, off the UI thread. A Cube whose number already matches is not
-/// rewritten.
+/// differs, and record that Connect has a row for each listed local Cube
+/// (`CubeSettings::connect_registered`), off the UI thread. A Cube already
+/// recorded with a matching number is not rewritten.
 fn persist_mark_variations(
     datadir: crate::dir::CoincubeDirectory,
     marks: MarkVariations,
@@ -237,11 +239,12 @@ fn persist_mark_variations(
                 let Some(&variation) = marks.get(&cube.id) else {
                     continue;
                 };
-                if variation == cube.mark_variation {
+                let new_mark = variation.filter(|v| *v != cube.mark_variation);
+                if cube.connect_registered && new_mark.is_none() {
                     continue;
                 }
                 let nd = datadir.network_directory(cube.network);
-                if let Err(e) = settings::set_cube_mark_variation(&nd, &cube.id, variation).await {
+                if let Err(e) = settings::record_connect_row(&nd, &cube.id, new_mark).await {
                     log::warn!(
                         "[LAUNCHER] Failed to record Connect's mark for cube {}: {}",
                         cube.id,
@@ -258,7 +261,7 @@ fn persist_mark_variations(
 fn server_mark_variations(server_cubes: &[CubeResponse]) -> MarkVariations {
     server_cubes
         .iter()
-        .filter_map(|sc| sc.mark_variation.map(|v| (sc.uuid.clone(), v)))
+        .map(|sc| (sc.uuid.clone(), sc.mark_variation))
         .collect()
 }
 
@@ -270,8 +273,11 @@ impl Home {
             return;
         }
         let adopt = |cube: &mut crate::app::settings::CubeSettings| {
-            if let Some(&variation) = marks.get(&cube.id) {
-                cube.mark_variation = variation;
+            if let Some(&listed) = marks.get(&cube.id) {
+                cube.connect_registered = true;
+                if let Some(variation) = listed {
+                    cube.mark_variation = variation;
+                }
             }
         };
         if let super::State::Cubes { cubes, .. } = &mut self.state {
@@ -482,6 +488,37 @@ mod tests {
         assert_eq!(saved_local_mark(dir.path()), 3);
     }
 
+    /// Every local Cube a current Connect listing shows is recorded as
+    /// registered (`CubeSettings::connect_registered`), with or without a
+    /// mark number, which heals Cubes whose `remote_synced` a rename reset.
+    #[tokio::test]
+    async fn listing_records_each_listed_local_cube_as_registered() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/api/v1/connect/cubes");
+            then.status(200)
+                .json_body(json!({"data": [cube(1, "local")]}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(dir.path().to_path_buf());
+        let saved = || {
+            settings::Settings::from_file(&datadir.network_directory(ChainId::BitcoinBlake2b))
+                .unwrap()
+                .cubes
+                .into_iter()
+                .find(|cube| cube.id == "local")
+                .unwrap()
+        };
+        let mut home = home(dir.path(), server.base_url());
+        assert!(!saved().is_connect_registered());
+        for message in outputs(home.fetch_remote_cubes()).await {
+            let persist = home.update(message);
+            assert!(outputs(persist).await.is_empty());
+        }
+        assert!(saved().connect_registered);
+        assert_eq!(saved().mark_variation, 0);
+    }
+
     /// The Cubes on screen take the listed numbers at once.
     #[test]
     fn adopting_marks_updates_the_cubes_on_screen() {
@@ -505,7 +542,10 @@ mod tests {
             create_cube: false,
             source: ChainId::Bitcoin,
         };
-        let marks = super::MarkVariations::from([("other".to_owned(), 6), ("here".to_owned(), 2)]);
+        let marks = super::MarkVariations::from([
+            ("other".to_owned(), Some(6)),
+            ("here".to_owned(), Some(2)),
+        ]);
         home.adopt_mark_variations(&marks);
         assert_eq!(home.network_catalog[0].1[0].mark_variation, 6);
         let State::Cubes { cubes, .. } = &home.state else {
