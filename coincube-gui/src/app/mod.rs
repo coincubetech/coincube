@@ -4703,6 +4703,65 @@ impl App {
     ///
     /// Best-effort: a failed write costs one more launch before the id appears,
     /// and never blocks or affects anything the user is doing.
+    /// Seals each Vault key's role (primary, recovery, safety net) to that
+    /// key's phone and stores the ciphertext with Connect, so COINCUBE Mobile
+    /// can show the role while Connect never learns it
+    /// (`services::coincube::vault_reconcile::seal_cube_key_roles`).
+    ///
+    /// Started once per Cube open, after the Vault's member rows have been
+    /// reconciled; signing runs its own pass. A no-op until there is a loaded
+    /// Vault, a signed-in client, a server cube id and the signing rail's
+    /// gRPC details, and it leaves the latch open in that case.
+    ///
+    /// Best-effort and silent: nothing waits on it, and no outcome of it
+    /// reaches the user. A server without sealed roles, a viewer who does not
+    /// own the Vault, or an offline phone just means no role tag yet.
+    fn seal_key_roles_task(&mut self) -> Task<Message> {
+        if self.panels.connect.cube.key_roles_seal_started {
+            return Task::none();
+        }
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        let Some(descriptor) = wallet.inheritance_descriptor() else {
+            return Task::none();
+        };
+        let (Some(client), Some(cube_server_id), Some(grpc_url), Some(tokens), Some(device_id)) = (
+            self.authenticated_coincube_client(),
+            self.cache.current_cube_server_id,
+            self.cache.connect_grpc_url.clone(),
+            self.cache.connect_tokens.clone(),
+            self.cache.connect_device_id.clone(),
+        ) else {
+            return Task::none();
+        };
+        let roles = crate::services::coincube::vault_reconcile::key_roles(descriptor, |fg| {
+            wallet.provider_keys.contains_key(fg)
+        });
+        self.panels.connect.cube.key_roles_seal_started = true;
+        Task::perform(
+            async move {
+                crate::services::coincube::vault_reconcile::seal_cube_key_roles(
+                    &client,
+                    cube_server_id,
+                    &roles,
+                    |vault_id| async move {
+                        crate::services::coincube::vault_reconcile::resolve_role_targets(
+                            &grpc_url, tokens, device_id, vault_id,
+                        )
+                        .await
+                    },
+                )
+                .await
+            },
+            |stored| {
+                Message::View(view::Message::ConnectCube(
+                    view::ConnectCubeMessage::KeyRolesSealed(stored),
+                ))
+            },
+        )
+    }
+
     fn vault_fingerprint_backfill_task(&mut self) -> Task<Message> {
         let Some(wallet) = self.wallet.as_ref() else {
             return Task::none();
@@ -9448,7 +9507,19 @@ impl App {
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
-                return self.route_connect_panel_message(msg);
+                // The Vault's member rows are settled: the moment to seal
+                // each key's role to its phone.
+                let members_reconciled = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectCube(
+                        view::ConnectCubeMessage::VaultMembersReconciled(_)
+                    ))
+                );
+                let routed = self.route_connect_panel_message(msg);
+                if !members_reconciled {
+                    return routed;
+                }
+                return Task::batch([routed, self.seal_key_roles_task()]);
             }
             message @ (Message::View(
                 view::Message::ReceivedCelebrationActivity

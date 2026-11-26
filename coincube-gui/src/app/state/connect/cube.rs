@@ -330,6 +330,9 @@ pub struct ConnectCubePanel {
     /// drop a member row only runs in the installer, and a Vault built
     /// mid-session re-enters through the same triggers.
     pub(super) vault_members_reconciled: bool,
+    /// The sealed-key-role pass has been started for this server cube row and
+    /// descriptor in this session. Reset with `vault_members_reconciled`.
+    pub(crate) key_roles_seal_started: bool,
     /// The server-side numeric ID — set after registering with the backend.
     /// Used in API paths: /connect/cubes/{server_cube_id}/...
     pub server_cube_id: Option<u64>,
@@ -456,6 +459,7 @@ impl ConnectCubePanel {
             vault_fingerprint_asserted: false,
             vault_descriptor: None,
             vault_members_reconciled: false,
+            key_roles_seal_started: false,
             server_cube_id: None,
             registration_error: None,
             owned_by_other_account: false,
@@ -553,6 +557,7 @@ impl ConnectCubePanel {
         // Same reasoning as the fingerprint latch: it means "already
         // reconciled against *this* server cube row", which dies with the id.
         self.vault_members_reconciled = false;
+        self.key_roles_seal_started = false;
         self.registration_error = None;
         self.owned_by_other_account = false;
         // Retire any attempt issued under the session that just ended: its
@@ -1013,6 +1018,11 @@ impl ConnectCubePanel {
                 if !ok {
                     self.enc_pubkey_registered = false;
                 }
+            }
+
+            ConnectCubeMessage::KeyRolesSealed(_stored) => {
+                // Nothing to render, and no retry: a phone still without a
+                // sealed role gets one at the next Cube open or signing.
             }
 
             ConnectCubeMessage::VaultMembersReconciled(_added) => {

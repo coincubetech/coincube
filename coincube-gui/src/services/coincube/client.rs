@@ -1334,6 +1334,25 @@ impl CoincubeClient {
         Ok(resp.data)
     }
 
+    /// PUT /api/v1/connect/cubes/{cubeId}/vault/sealed-roles — store one
+    /// sealed role per (vault member, phone). Vault owner only. The body is
+    /// ciphertext and ids; Connect never learns a role. A server that
+    /// predates the endpoint answers 404 or 405, which the caller treats like
+    /// any other failure: nothing depends on this call.
+    pub async fn put_vault_sealed_roles(
+        &self,
+        cube_id: u64,
+        req: super::PutSealedRolesRequest,
+    ) -> Result<(), CoincubeError> {
+        let url = format!(
+            "{}/api/v1/connect/cubes/{}/vault/sealed-roles",
+            self.base_url, cube_id
+        );
+        let res = self.client.put(&url).json(&req).send().await?;
+        res.check_success().await?;
+        Ok(())
+    }
+
     /// GET /api/v1/connect/cubes/{cubeId}/vault — fetch the existing vault
     /// (404s if none exists).
     pub async fn get_connect_vault(

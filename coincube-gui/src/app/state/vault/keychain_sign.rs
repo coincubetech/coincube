@@ -290,6 +290,9 @@ pub enum KeychainSignMessage {
     Classified(Result<ClassifiedSigners, OpError>),
     /// Result of `ResolveSigners(vault_id)`.
     SignersResolved(Result<ResolveSignersResponse, OpError>),
+    /// The background pass that seals each key's role to its phone finished
+    /// (how many seals were stored). Nothing in signing waits on or reads it.
+    KeyRolesSealed(usize),
     /// Result of a single `CreateSigningSession` call, keyed by the
     /// fingerprint of the signer being addressed.
     SessionCreated(Fingerprint, Result<SigningSession, OpError>),
@@ -860,6 +863,42 @@ impl KeychainSignModal {
                     .map_err(OpError::from_status)
             },
             |r| Message::KeychainSign(KeychainSignMessage::SignersResolved(r)),
+        )
+    }
+
+    /// Seals each Vault key's role to the phones `ResolveSigners` just
+    /// returned, where one has no seal yet or re-registered with another key
+    /// (`vault_reconcile::seal_missing_key_roles`). Independent of the signing
+    /// steps: its result is ignored and its failures are only logged.
+    fn seal_key_roles_task(&self, resp: &ResolveSignersResponse) -> Task<Message> {
+        use crate::services::coincube::vault_reconcile::{
+            key_roles, seal_missing_key_roles, RoleTarget,
+        };
+        let (Some(classified), Some(descriptor)) = (
+            self.classified.as_ref(),
+            self.wallet.inheritance_descriptor(),
+        ) else {
+            return Task::none();
+        };
+        let targets: Vec<RoleTarget> = resp.targets.iter().map(RoleTarget::from).collect();
+        if targets.is_empty() {
+            return Task::none();
+        }
+        let roles = key_roles(descriptor, |fg| self.wallet.provider_keys.contains_key(fg));
+        let vault = classified.vault.clone();
+        let client = self.coincube_client.clone();
+        let tokens = self.tokens.clone();
+        let cube_server_id = self.cube_server_id;
+        Task::perform(
+            async move {
+                // The REST client's bearer is set inside async steps of this
+                // modal; set it here too so this task does not depend on
+                // their order.
+                let mut client = client;
+                client.set_token(&tokens.read().await.access_token);
+                seal_missing_key_roles(&client, cube_server_id, &vault, &roles, &targets).await
+            },
+            |stored| Message::KeychainSign(KeychainSignMessage::KeyRolesSealed(stored)),
         )
     }
 
@@ -2049,8 +2088,14 @@ impl KeychainSignModal {
                     self.phase = Phase::AllDone;
                 }
             },
+            Message::KeychainSign(KeychainSignMessage::KeyRolesSealed(_)) => {}
             Message::KeychainSign(KeychainSignMessage::SignersResolved(res)) => match res {
-                Ok(r) => return self.on_signers_resolved(r),
+                Ok(r) => {
+                    // Beside signing, never in its way: the phones are
+                    // resolved, so seal any key role one of them lacks.
+                    let seal = self.seal_key_roles_task(&r);
+                    return Task::batch([self.on_signers_resolved(r), seal]);
+                }
                 Err(e) => {
                     self.error = if e.auth {
                         Some(e.message)

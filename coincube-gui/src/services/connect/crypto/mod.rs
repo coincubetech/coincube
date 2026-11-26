@@ -11,6 +11,8 @@
 //! - [`key_resolve`] — the single point where a Connect-served key row becomes
 //!   a usable `Xpub`: open the envelope (or accept a legacy plaintext column),
 //!   then run the validation that used to happen server-side.
+//! - [`key_role`] — a key's role in a Vault, sealed to that key's phone under
+//!   its own domain label, so Connect relays it without learning it.
 //! - [`transport`] — the signing rail's per-device transport keypair and the
 //!   envelope codec that makes PSBTs and signatures end-to-end (Track B).
 //!
@@ -21,6 +23,7 @@
 
 pub mod cube_enc_key;
 pub mod key_resolve;
+pub mod key_role;
 pub mod transport;
 
 pub use cube_enc_key::{

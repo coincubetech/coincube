@@ -526,6 +526,7 @@ mod tests {
                 xpub: String::new(),
                 derivation_path: String::new(),
             }),
+            sealed_roles: Vec::new(),
             created_at: String::new(),
         }
     }

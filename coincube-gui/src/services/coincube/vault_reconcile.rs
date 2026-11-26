@@ -36,7 +36,11 @@ use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 
 use super::{
     classify_cube_key_ownership, AddVaultMemberRequest, CoincubeClient, ConnectVaultResponse,
-    CubeKeyOwnership, CubeKeyRaw, VaultMemberRole,
+    CubeKeyOwnership, CubeKeyRaw, PutSealedRolesRequest, SealedRoleUpload, VaultMemberRole,
+};
+use crate::services::connect::crypto::is_sealable_transport_pubkey;
+use crate::services::connect::crypto::key_role::{
+    recipient_key_hash, seal_key_role, KeyRole, KeyRoleBinding,
 };
 
 /// Every signer fingerprint the descriptor uses, across the primary path
@@ -262,6 +266,266 @@ pub async fn reconcile_cube_vault_members(
     )
     .await
     .attached
+}
+
+/// Whether a recovery path is the Safety Net: the maximum timelock, held only
+/// by provider keys. One rule, shared by the Vault settings view (which names
+/// the path) and the sealed key role (which tells a phone its key sits there).
+pub(crate) fn is_safety_net_path(
+    sequence: u16,
+    keys: &[Fingerprint],
+    is_provider_key: impl Fn(&Fingerprint) -> bool,
+) -> bool {
+    sequence == u16::MAX && keys.iter().all(is_provider_key)
+}
+
+/// Each descriptor signer's role: Primary by membership of the primary path;
+/// otherwise Safety Net or Recovery by the path it sits in
+/// ([`is_safety_net_path`]).
+///
+/// A key sits in one path as Vaults are built today. If one is ever in two,
+/// the first wins (primary, then recovery paths by timelock) and it is logged.
+pub(crate) fn key_roles(
+    descriptor: &CoincubeDescriptor,
+    is_provider_key: impl Fn(&Fingerprint) -> bool,
+) -> std::collections::HashMap<Fingerprint, KeyRole> {
+    let policy = descriptor.policy();
+    let mut roles = std::collections::HashMap::new();
+    let mut place = |fingerprint: Fingerprint, role: KeyRole| {
+        if let Some(first) = roles.get(&fingerprint) {
+            if *first != role {
+                tracing::warn!(
+                    target: "coincube_gui::signing",
+                    %fingerprint,
+                    "Key role: a key sits in more than one path; keeping the first",
+                );
+            }
+            return;
+        }
+        roles.insert(fingerprint, role);
+    };
+    for fingerprint in policy.primary_path().thresh_origins().1.into_keys() {
+        place(fingerprint, KeyRole::Primary);
+    }
+    // `recovery_paths` is ordered by timelock.
+    for (sequence, path) in policy.recovery_paths().iter() {
+        let mut keys: Vec<Fingerprint> = path.thresh_origins().1.into_keys().collect();
+        keys.sort();
+        let role = if is_safety_net_path(*sequence, &keys, &is_provider_key) {
+            KeyRole::SafetyNet
+        } else {
+            KeyRole::Recovery
+        };
+        for fingerprint in keys {
+            place(fingerprint, role);
+        }
+    }
+    roles
+}
+
+/// A phone `ResolveSigners` returned for a Vault: what a role is sealed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleTarget {
+    pub device_id: String,
+    pub key_id: String,
+    pub key_fingerprint: String,
+    pub transport_pubkey: Vec<u8>,
+}
+
+/// The sealed roles this Vault's phones are missing: one per resolved phone
+/// that has no seal yet, or whose seal was made to a key it no longer has.
+///
+/// Skipped, to be picked up by a later pass: a target whose ids are not
+/// numbers, whose transport key cannot be sealed to, whose key is not a
+/// keyholder member of this Vault, or whose fingerprint is not a signer of
+/// this descriptor. Nothing here is fatal and nothing is guessed.
+pub(crate) fn missing_sealed_roles(
+    vault: &ConnectVaultResponse,
+    roles: &std::collections::HashMap<Fingerprint, KeyRole>,
+    targets: &[RoleTarget],
+) -> Vec<SealedRoleUpload> {
+    use base64::Engine as _;
+    let mut out = Vec::new();
+    for target in targets {
+        let (Ok(device_id), Ok(key_id)) = (
+            target.device_id.parse::<u64>(),
+            target.key_id.parse::<u64>(),
+        ) else {
+            continue;
+        };
+        if !is_sealable_transport_pubkey(&target.transport_pubkey) {
+            continue;
+        }
+        let Some(member) = vault
+            .members
+            .iter()
+            .find(|m| m.key_id == Some(key_id) && m.role == VaultMemberRole::Keyholder)
+        else {
+            continue;
+        };
+        let Some(role) = target
+            .key_fingerprint
+            .parse::<Fingerprint>()
+            .ok()
+            .and_then(|fingerprint| roles.get(&fingerprint).copied())
+        else {
+            continue;
+        };
+        let hash = recipient_key_hash(&target.transport_pubkey);
+        // Already sealed to this phone's current key: nothing to do.
+        if member
+            .sealed_roles
+            .iter()
+            .any(|s| s.device_id == device_id && s.recipient_key_hash == hash)
+        {
+            continue;
+        }
+        // One seal per (member, phone), whatever the resolver repeats.
+        if out
+            .iter()
+            .any(|u: &SealedRoleUpload| u.member_id == member.id && u.device_id == device_id)
+        {
+            continue;
+        }
+        let binding = KeyRoleBinding {
+            vault_id: vault.id,
+            key_id,
+            device_id,
+        };
+        match seal_key_role(&target.transport_pubkey, &binding, role) {
+            Ok(blob) => out.push(SealedRoleUpload {
+                member_id: member.id,
+                device_id,
+                sealed: base64::engine::general_purpose::STANDARD.encode(blob),
+                recipient_key_hash: hash,
+            }),
+            Err(e) => tracing::warn!(
+                target: "coincube_gui::signing",
+                key_id,
+                device_id,
+                "Key role: could not seal: {}",
+                e,
+            ),
+        }
+    }
+    out
+}
+
+/// Seals and stores the roles this Vault's phones are missing. Returns how
+/// many were stored.
+///
+/// Best-effort, like everything in this module: a server without the endpoint,
+/// a viewer who is not the Vault's owner, or any other failure is logged and
+/// costs nothing but a missing role tag on the phone until a later pass. It
+/// must never fail Vault creation, the launch path or signing, so it returns a
+/// count and no error.
+///
+/// What the server receives is ciphertext, ids and a hash of a public key.
+/// The role stays a label on the phone: sealing hides it from Connect and
+/// proves nothing about who wrote it.
+pub(crate) async fn seal_missing_key_roles(
+    client: &CoincubeClient,
+    cube_server_id: u64,
+    vault: &ConnectVaultResponse,
+    roles: &std::collections::HashMap<Fingerprint, KeyRole>,
+    targets: &[RoleTarget],
+) -> usize {
+    let sealed_roles = missing_sealed_roles(vault, roles, targets);
+    if sealed_roles.is_empty() {
+        return 0;
+    }
+    let count = sealed_roles.len();
+    match client
+        .put_vault_sealed_roles(cube_server_id, PutSealedRolesRequest { sealed_roles })
+        .await
+    {
+        Ok(()) => count,
+        Err(e) => {
+            tracing::debug!(
+                target: "coincube_gui::signing",
+                cube_server_id,
+                "Key role: sealed roles not stored (retried at the next pass): {}",
+                e,
+            );
+            0
+        }
+    }
+}
+
+/// Cube-open pass: read the Vault as its owner sees it, ask `resolve` which
+/// phones hold its keys (`ResolveSigners`), and seal what is missing.
+///
+/// `resolve` is the gRPC call, passed in so this stays a REST-only module and
+/// tests can stand in for the resolver. Any failure, including a Cube with no
+/// Connect vault, returns `0`.
+pub(crate) async fn seal_cube_key_roles<F, Fut>(
+    client: &CoincubeClient,
+    cube_server_id: u64,
+    roles: &std::collections::HashMap<Fingerprint, KeyRole>,
+    resolve: F,
+) -> usize
+where
+    F: FnOnce(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<RoleTarget>, String>>,
+{
+    if roles.is_empty() {
+        return 0;
+    }
+    let Ok(vault) = client.get_connect_vault(cube_server_id).await else {
+        return 0;
+    };
+    let targets = match resolve(vault.id).await {
+        Ok(targets) => targets,
+        Err(e) => {
+            tracing::debug!(
+                target: "coincube_gui::signing",
+                cube_server_id,
+                "Key role: signers not resolved (retried at the next pass): {}",
+                e,
+            );
+            return 0;
+        }
+    };
+    seal_missing_key_roles(client, cube_server_id, &vault, roles, &targets).await
+}
+
+impl From<&crate::services::connect::grpc::connect_v1::SignerTarget> for RoleTarget {
+    fn from(target: &crate::services::connect::grpc::connect_v1::SignerTarget) -> Self {
+        Self {
+            device_id: target.device_id.clone(),
+            key_id: target.key_id.clone(),
+            key_fingerprint: target.key_fingerprint.clone(),
+            transport_pubkey: target.transport_pubkey.clone(),
+        }
+    }
+}
+
+/// `ResolveSigners(vault_id)` over the signing rail, as [`RoleTarget`]s. The
+/// one network call of the cube-open pass that is not REST.
+pub(crate) async fn resolve_role_targets(
+    grpc_url: &str,
+    tokens: std::sync::Arc<
+        tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>,
+    >,
+    desktop_device_id: String,
+    vault_id: u64,
+) -> Result<Vec<RoleTarget>, String> {
+    use crate::services::connect::grpc::{
+        create_channel, interceptor::AuthInterceptor, session::GrpcSessionClient,
+    };
+    let channel = create_channel(grpc_url)
+        .await
+        .map_err(|e| format!("gRPC channel: {}", e))?;
+    let access_token = tokens.read().await.access_token.clone();
+    let mut client = GrpcSessionClient::new(
+        channel,
+        AuthInterceptor::with_device_id(&access_token, desktop_device_id),
+    );
+    let resolved = client
+        .resolve_signers(vault_id.to_string())
+        .await
+        .map_err(|status| status.code().to_string())?;
+    Ok(resolved.targets.iter().map(RoleTarget::from).collect())
 }
 
 #[cfg(test)]
@@ -500,5 +764,448 @@ mod tests {
         vault.assert();
         // A local-only Vault is not a broken Vault: stop at the 404.
         assert_eq!(keys.hits(), 0);
+    }
+}
+
+/// Mobile V3 Phase 1, Desktop PR T2: a key's role, sealed to its phone.
+#[cfg(test)]
+mod key_role_tests {
+    use super::*;
+    use crate::services::connect::crypto::key_role::{open_key_role, KEY_ROLE_BLOB_LEN};
+    use base64::Engine as _;
+    use coincube_core::miniscript::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use httpmock::prelude::HttpMockRequest;
+    use httpmock::{Method, MockServer};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    /// Primary `f5acc2fd`, one recovery path holding `8a64f2a9`.
+    const RECOVERY_DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+    const PRIMARY: &str = "f5acc2fd";
+    const RECOVERY: &str = "8a64f2a9";
+
+    fn fp(s: &str) -> Fingerprint {
+        Fingerprint::from_str(s).unwrap()
+    }
+
+    fn roles() -> HashMap<Fingerprint, KeyRole> {
+        key_roles(
+            &CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap(),
+            |_| false,
+        )
+    }
+
+    /// A phone: its transport secret (which only the phone holds) and key.
+    fn phone(seed: u8) -> (SecretKey, Vec<u8>) {
+        let sk = SecretKey::from_slice(&[seed; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(&Secp256k1::new(), &sk)
+            .serialize()
+            .to_vec();
+        (sk, pk)
+    }
+
+    fn target(device_id: u64, key_id: u64, fingerprint: &str, pubkey: &[u8]) -> RoleTarget {
+        RoleTarget {
+            device_id: device_id.to_string(),
+            key_id: key_id.to_string(),
+            key_fingerprint: fingerprint.to_string(),
+            transport_pubkey: pubkey.to_vec(),
+        }
+    }
+
+    /// The Vault as its owner reads it: member 100 holds key 1 (primary),
+    /// member 101 key 2 (recovery). `sealed` lists `(member, device, hash)`.
+    fn vault_json(sealed: &[(u64, u64, String)]) -> serde_json::Value {
+        let member = |id: u64, key_id: u64| {
+            let seals: Vec<serde_json::Value> = sealed
+                .iter()
+                .filter(|(member_id, _, _)| *member_id == id)
+                .map(
+                    |(_, device_id, hash)| json!({"deviceId": device_id, "recipientKeyHash": hash}),
+                )
+                .collect();
+            let mut m = json!({
+                "id": id, "keyId": key_id, "role": "keyholder",
+                "createdAt": "2026-04-18T00:00:00Z"
+            });
+            if !seals.is_empty() {
+                m["sealedRoles"] = json!(seals);
+            }
+            m
+        };
+        json!({
+            "id": 5, "cubeId": 42, "timelockDays": 180,
+            "timelockExpiresAt": "2026-10-15T00:00:00Z",
+            "lastResetAt": "2026-04-18T00:00:00Z", "status": "active",
+            "members": [member(100, 1), member(101, 2)],
+            "createdAt": "2026-04-18T00:00:00Z", "updatedAt": "2026-04-18T00:00:00Z"
+        })
+    }
+
+    fn vault(sealed: &[(u64, u64, String)]) -> ConnectVaultResponse {
+        serde_json::from_value(vault_json(sealed)).unwrap()
+    }
+
+    fn open(upload: &SealedRoleUpload, secret: &SecretKey, key_id: u64) -> KeyRole {
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(&upload.sealed)
+            .unwrap();
+        assert_eq!(blob.len(), KEY_ROLE_BLOB_LEN);
+        open_key_role(
+            secret,
+            &KeyRoleBinding {
+                vault_id: 5,
+                key_id,
+                device_id: upload.device_id,
+            },
+            &blob,
+        )
+        .expect("the phone opens its own role")
+    }
+
+    #[test]
+    fn roles_follow_the_path_a_key_sits_in() {
+        let roles = roles();
+        assert_eq!(roles.get(&fp(PRIMARY)), Some(&KeyRole::Primary));
+        assert_eq!(roles.get(&fp(RECOVERY)), Some(&KeyRole::Recovery));
+        assert_eq!(roles.len(), 2);
+    }
+
+    /// The Safety Net rule the Vault settings view names a path by: the
+    /// maximum timelock, held only by provider keys.
+    #[test]
+    fn safety_net_is_the_maximum_timelock_held_only_by_provider_keys() {
+        let a = fp("aaaaaaaa");
+        let b = fp("bbbbbbbb");
+        let only_a = |f: &Fingerprint| *f == a;
+        assert!(is_safety_net_path(u16::MAX, &[a], only_a));
+        assert!(
+            !is_safety_net_path(u16::MAX, &[a, b], only_a),
+            "a non-provider key"
+        );
+        assert!(
+            !is_safety_net_path(u16::MAX - 1, &[a], only_a),
+            "not the maximum"
+        );
+        assert!(!is_safety_net_path(10, &[a], only_a));
+        assert!(!is_safety_net_path(u16::MAX, &[b], only_a));
+
+        // A descriptor whose recovery path is that path gives its key the
+        // Safety Net role; the same path held by an ordinary key is Recovery.
+        let desc = CoincubeDescriptor::from_str(
+            &RECOVERY_DESC
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("older(10)", "older(65535)"),
+        )
+        .unwrap();
+        let as_provider = key_roles(&desc, |f| *f == fp(RECOVERY));
+        assert_eq!(as_provider.get(&fp(RECOVERY)), Some(&KeyRole::SafetyNet));
+        assert_eq!(as_provider.get(&fp(PRIMARY)), Some(&KeyRole::Primary));
+        let ordinary = key_roles(&desc, |_| false);
+        assert_eq!(ordinary.get(&fp(RECOVERY)), Some(&KeyRole::Recovery));
+    }
+
+    #[test]
+    fn one_seal_per_resolved_phone_and_each_opens_to_its_keys_role() {
+        let (primary_sk, primary_pk) = phone(0x41);
+        let (recovery_sk, recovery_pk) = phone(0x42);
+        let uploads = missing_sealed_roles(
+            &vault(&[]),
+            &roles(),
+            &[
+                target(34, 1, PRIMARY, &primary_pk),
+                target(35, 2, RECOVERY, &recovery_pk),
+            ],
+        );
+        assert_eq!(uploads.len(), 2);
+        assert_eq!((uploads[0].member_id, uploads[0].device_id), (100, 34));
+        assert_eq!((uploads[1].member_id, uploads[1].device_id), (101, 35));
+        assert_eq!(open(&uploads[0], &primary_sk, 1), KeyRole::Primary);
+        assert_eq!(open(&uploads[1], &recovery_sk, 2), KeyRole::Recovery);
+        assert_eq!(
+            uploads[0].recipient_key_hash,
+            recipient_key_hash(&primary_pk)
+        );
+        // Every blob is the same size, whatever the role.
+        assert_eq!(uploads[0].sealed.len(), uploads[1].sealed.len());
+        assert_eq!(uploads[0].sealed.len(), 104);
+    }
+
+    #[test]
+    fn only_phones_with_no_seal_or_a_changed_key_are_sealed_to() {
+        let (_, primary_pk) = phone(0x41);
+        let (recovery_sk, recovery_pk) = phone(0x42);
+        let targets = [
+            target(34, 1, PRIMARY, &primary_pk),
+            target(35, 2, RECOVERY, &recovery_pk),
+        ];
+        // Both already sealed to their current keys: quiet.
+        let settled = vault(&[
+            (100, 34, recipient_key_hash(&primary_pk)),
+            (101, 35, recipient_key_hash(&recovery_pk)),
+        ]);
+        assert!(missing_sealed_roles(&settled, &roles(), &targets).is_empty());
+
+        // The recovery phone re-registered: its seal was made to an old key.
+        let (_, old_pk) = phone(0x43);
+        let changed = vault(&[
+            (100, 34, recipient_key_hash(&primary_pk)),
+            (101, 35, recipient_key_hash(&old_pk)),
+        ]);
+        let uploads = missing_sealed_roles(&changed, &roles(), &targets);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!((uploads[0].member_id, uploads[0].device_id), (101, 35));
+        assert_eq!(open(&uploads[0], &recovery_sk, 2), KeyRole::Recovery);
+
+        // A second phone for a key that has a seal on another phone.
+        let (second_sk, second_pk) = phone(0x44);
+        let uploads =
+            missing_sealed_roles(&settled, &roles(), &[target(36, 2, RECOVERY, &second_pk)]);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].device_id, 36);
+        assert_eq!(open(&uploads[0], &second_sk, 2), KeyRole::Recovery);
+    }
+
+    #[test]
+    fn what_cannot_be_sealed_is_skipped_not_guessed() {
+        let (_, pk) = phone(0x41);
+        let skipped = [
+            // No registered transport key, or one that is not a sealable key.
+            target(34, 1, PRIMARY, &[]),
+            target(34, 1, PRIMARY, &[0u8; 33]),
+            target(34, 1, PRIMARY, &pk[..32]),
+            // Ids that are not numbers.
+            RoleTarget {
+                device_id: "phone".into(),
+                ..target(34, 1, PRIMARY, &pk)
+            },
+            RoleTarget {
+                key_id: String::new(),
+                ..target(34, 1, PRIMARY, &pk)
+            },
+            // A key that is not a member of this Vault.
+            target(34, 9, PRIMARY, &pk),
+            // A fingerprint that is not a signer of this descriptor.
+            target(34, 1, "deadbeef", &pk),
+            target(34, 1, "not-hex", &pk),
+        ];
+        for t in &skipped {
+            assert!(
+                missing_sealed_roles(&vault(&[]), &roles(), std::slice::from_ref(t)).is_empty(),
+                "{:?}",
+                t
+            );
+        }
+        // An observer row for the key is not a keyholder: no role.
+        let mut observer = vault(&[]);
+        observer.members[0].role = VaultMemberRole::Observer;
+        assert!(
+            missing_sealed_roles(&observer, &roles(), &[target(34, 1, PRIMARY, &pk)]).is_empty()
+        );
+        // The resolver repeating a phone yields one seal.
+        let twice = [target(34, 1, PRIMARY, &pk), target(34, 1, PRIMARY, &pk)];
+        assert_eq!(missing_sealed_roles(&vault(&[]), &roles(), &twice).len(), 1);
+    }
+
+    #[test]
+    fn the_upload_names_ids_ciphertext_and_a_hash_and_nothing_else() {
+        let (_, pk) = phone(0x41);
+        let uploads = missing_sealed_roles(&vault(&[]), &roles(), &[target(34, 1, PRIMARY, &pk)]);
+        let body = serde_json::to_value(PutSealedRolesRequest {
+            sealed_roles: uploads,
+        })
+        .unwrap();
+        let entry = body["sealedRoles"][0].as_object().unwrap();
+        let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["deviceId", "memberId", "recipientKeyHash", "sealed"]);
+        assert_eq!(body.as_object().unwrap().len(), 1);
+    }
+
+    /// A request body with a role in the clear, or blobs of differing size,
+    /// does not match this mock, so the test's `assert_hits` fails.
+    fn carries_only_sealed_roles(req: &HttpMockRequest) -> bool {
+        let Some(body) = req.body.as_ref() else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(body).to_lowercase();
+        for word in ["primary", "recovery", "safety", "path", "role\"", "kind"] {
+            // `sealedRoles` is the one place "role" may appear.
+            if text.replace("sealedroles", "").contains(word) {
+                return false;
+            }
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return false;
+        };
+        let Some(entries) = json["sealedRoles"].as_array() else {
+            return false;
+        };
+        !entries.is_empty()
+            && entries.iter().all(|entry| {
+                entry["sealed"]
+                    .as_str()
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+                    .is_some_and(|blob| blob.len() == KEY_ROLE_BLOB_LEN)
+                    && entry["recipientKeyHash"]
+                        .as_str()
+                        .is_some_and(|h| h.len() == 64)
+            })
+    }
+
+    fn client(server: &MockServer) -> CoincubeClient {
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("role-jwt");
+        client
+    }
+
+    async fn resolved(targets: Vec<RoleTarget>) -> Result<Vec<RoleTarget>, String> {
+        Ok(targets)
+    }
+
+    /// After a Vault is registered it has no seals: the pass that follows
+    /// stores one per resolved phone, and nothing in the request says which
+    /// role is which.
+    #[tokio::test]
+    async fn a_new_vault_gets_one_seal_per_resolved_phone_and_no_role_in_the_clear() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .json_body(json!({"success": true, "data": vault_json(&[])}));
+        });
+        let put = server.mock(|when, then| {
+            when.method(Method::PUT)
+                .path("/api/v1/connect/cubes/42/vault/sealed-roles")
+                .header("authorization", "Bearer role-jwt")
+                .matches(carries_only_sealed_roles);
+            then.status(200)
+                .json_body(json!({"success": true, "data": {"stored": []}}));
+        });
+        let (_, primary_pk) = phone(0x41);
+        let (_, recovery_pk) = phone(0x42);
+        let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |vault_id| {
+            assert_eq!(vault_id, 5);
+            resolved(vec![
+                target(34, 1, PRIMARY, &primary_pk),
+                target(35, 2, RECOVERY, &recovery_pk),
+            ])
+        })
+        .await;
+        assert_eq!(stored, 2);
+        put.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn a_settled_vault_sends_nothing() {
+        let server = MockServer::start();
+        let (_, primary_pk) = phone(0x41);
+        let sealed = [(100, 34, recipient_key_hash(&primary_pk))];
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .json_body(json!({"success": true, "data": vault_json(&sealed)}));
+        });
+        let put = server.mock(|when, then| {
+            when.method(Method::PUT)
+                .path("/api/v1/connect/cubes/42/vault/sealed-roles");
+            then.status(200);
+        });
+        // Key 2's owner has no phone registered: `ResolveSigners` lists it as
+        // unresolved, so it is not among the targets.
+        let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |_| {
+            resolved(vec![target(34, 1, PRIMARY, &primary_pk)])
+        })
+        .await;
+        assert_eq!(stored, 0);
+        put.assert_hits(0);
+    }
+
+    /// An older server, a viewer who does not own the Vault, a Cube with no
+    /// Connect vault, an unreachable rail: each is a quiet zero, never an
+    /// error for the caller to act on.
+    #[tokio::test]
+    async fn every_failure_is_a_quiet_zero() {
+        let (_, pk) = phone(0x41);
+        let targets = vec![target(34, 1, PRIMARY, &pk)];
+
+        for put_status in [404, 405, 400, 423, 500] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(Method::GET)
+                    .path("/api/v1/connect/cubes/42/vault");
+                then.status(200)
+                    .json_body(json!({"success": true, "data": vault_json(&[])}));
+            });
+            let put = server.mock(|when, then| {
+                when.method(Method::PUT)
+                    .path("/api/v1/connect/cubes/42/vault/sealed-roles");
+                then.status(put_status).body("{}");
+            });
+            let t = targets.clone();
+            let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |_| resolved(t)).await;
+            assert_eq!(stored, 0, "PUT {}", put_status);
+            put.assert_hits(1);
+        }
+
+        // No Connect vault for this Cube: the resolver is never asked.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(404).body("{}");
+        });
+        let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |_| async {
+            panic!("no vault, so nothing to resolve")
+        })
+        .await;
+        assert_eq!(stored, 0);
+
+        // The rail is down: nothing is sent.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .json_body(json!({"success": true, "data": vault_json(&[])}));
+        });
+        let put = server.mock(|when, then| {
+            when.method(Method::PUT)
+                .path("/api/v1/connect/cubes/42/vault/sealed-roles");
+            then.status(200);
+        });
+        let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |_| async {
+            Err("unavailable".to_string())
+        })
+        .await;
+        assert_eq!(stored, 0);
+        put.assert_hits(0);
+
+        // A Vault with no descriptor signers to name: no request at all.
+        let stored = seal_cube_key_roles(&client(&server), 42, &HashMap::new(), |_| async {
+            panic!("nothing to seal, so nothing to resolve")
+        })
+        .await;
+        assert_eq!(stored, 0);
+    }
+
+    /// A server that predates sealed roles sends no `sealedRoles` on members.
+    #[test]
+    fn a_vault_response_without_sealed_roles_still_parses() {
+        let v = vault(&[]);
+        assert!(v.members.iter().all(|m| m.sealed_roles.is_empty()));
+        let v = vault(&[(100, 34, "ab".repeat(32))]);
+        assert_eq!(
+            v.members[0].sealed_roles,
+            vec![crate::services::coincube::SealedRoleRef {
+                device_id: 34,
+                recipient_key_hash: "ab".repeat(32),
+            }]
+        );
     }
 }

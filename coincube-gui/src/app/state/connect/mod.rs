@@ -370,6 +370,7 @@ impl ConnectPanel {
     ) {
         if self.cube.vault_descriptor != descriptor {
             self.cube.vault_members_reconciled = false;
+            self.cube.key_roles_seal_started = false;
         }
         self.cube.vault_descriptor = descriptor;
     }

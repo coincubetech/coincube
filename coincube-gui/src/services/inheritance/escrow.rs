@@ -358,6 +358,7 @@ mod tests {
             role,
             contact: None,
             key,
+            sealed_roles: Vec::new(),
             created_at: "2026-06-22T00:00:00Z".into(),
         }
     }
