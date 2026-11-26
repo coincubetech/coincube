@@ -50,6 +50,10 @@ pub struct YourNameState {
     loading: Option<u64>,
     /// The token of the save in flight, if any.
     sending: Option<u64>,
+    /// The last edit was longer than the field holds, so `draft` is only its
+    /// beginning. Such a draft is never saved: what was cut off may have been
+    /// the name, and saving the kept part could even clear the saved one.
+    draft_cut: bool,
 }
 
 impl YourNameState {
@@ -95,16 +99,24 @@ impl YourNameState {
         }
     }
 
-    /// The field changed. Nothing is cut to fit: a name over the limit is
-    /// refused with a line saying so when the user saves, not shortened behind
-    /// their back. The bound here only stops a huge paste from being held.
+    /// The field changed. A name over the limit is refused with a line saying
+    /// so when the user saves, not shortened behind their back.
+    ///
+    /// The field holds at most [`DRAFT_MAX_CHARS`] characters, so that a huge
+    /// paste is not kept. Text beyond that is dropped from the field, and the
+    /// edit is remembered as cut: Save then refuses it as too long whatever
+    /// the kept part looks like. Without that, 240 spaces followed by a name
+    /// would be kept as 240 spaces and saved as a blank field, removing the
+    /// saved name. The next edit that fits clears the mark.
     pub fn edit(&mut self, value: String) {
         if self.saving || self.saved.is_none() {
             return;
         }
+        let cut = value.chars().nth(DRAFT_MAX_CHARS).is_some();
         let value: String = value.chars().take(DRAFT_MAX_CHARS).collect();
         self.notice = None;
-        self.draft = (Some(value.as_str()) != self.saved.as_deref()).then_some(value);
+        self.draft_cut = cut;
+        self.draft = (cut || Some(value.as_str()) != self.saved.as_deref()).then_some(value);
     }
 
     /// Starts a save when the field holds a name that differs from the saved
@@ -112,6 +124,12 @@ impl YourNameState {
     /// token, or `None` when nothing should be sent.
     pub fn begin_save(&mut self) -> Option<(String, u64)> {
         if !self.can_save() {
+            return None;
+        }
+        // Only part of what was entered is in the field: refuse it, and send
+        // nothing. In particular never a clear.
+        if self.draft_cut {
+            self.notice = Some(YourNameNotice::TooLong);
             return None;
         }
         let name = match display_name::normalize(self.draft.as_deref().unwrap_or_default()) {
@@ -123,7 +141,7 @@ impl YourNameState {
         };
         if Some(name.as_str()) == self.saved.as_deref() {
             // Only spacing differed: there is nothing to save.
-            self.draft = None;
+            self.clear_draft();
             self.notice = None;
             return None;
         }
@@ -163,7 +181,7 @@ impl YourNameState {
                     YourNameNotice::Saved
                 });
                 self.saved = Some(name);
-                self.draft = None;
+                self.clear_draft();
                 None
             }
             // The server accepted the request but knows no name field, so
@@ -194,12 +212,17 @@ impl YourNameState {
 
     fn set_saved(&mut self, name: Option<String>) {
         if name.is_none() {
-            self.draft = None;
+            self.clear_draft();
             self.notice = None;
-        } else if self.draft.as_deref() == name.as_deref() {
-            self.draft = None;
+        } else if !self.draft_cut && self.draft.as_deref() == name.as_deref() {
+            self.clear_draft();
         }
         self.saved = name;
+    }
+
+    fn clear_draft(&mut self) {
+        self.draft = None;
+        self.draft_cut = false;
     }
 
     fn next(&mut self) -> u64 {
@@ -319,6 +342,105 @@ mod tests {
         // Padding does not count toward the limit.
         state.edit(format!("   {}   ", "a".repeat(60)));
         assert_eq!(state.begin_save().unwrap().0, "a".repeat(60));
+    }
+
+    /// Review finding on PR 1584: with "Ama" saved, pasting 240 spaces and
+    /// then "Kofi" must not be saved as a blank field. The text the user gave
+    /// held a name; cutting it to the spaces and sending a clear would remove
+    /// their name instead of refusing the paste.
+    #[test]
+    fn an_oversized_paste_is_never_saved_as_a_clear() {
+        let mut state = with_name("Ama");
+        state.edit(format!("{}Kofi", " ".repeat(240)));
+        assert!(state.begin_save().is_none(), "nothing is sent");
+        assert!(!state.saving);
+        assert_eq!(state.notice, Some(YourNameNotice::TooLong));
+        assert_eq!(state.saved.as_deref(), Some("Ama"));
+        // Save stays refused however often it is pressed.
+        assert!(state.begin_save().is_none());
+        assert!(!state.saving);
+
+        // The same paste the other way round: the kept part is a fine name,
+        // but it is not what was entered, so it is not saved either.
+        state.edit(format!("Kofi{}Adeyemi", " ".repeat(240)));
+        assert_eq!(state.value().trim(), "Kofi");
+        assert!(state.begin_save().is_none());
+        assert_eq!(state.notice, Some(YourNameNotice::TooLong));
+
+        // A cut paste whose kept part equals the saved name is still a draft,
+        // and still refused.
+        state.edit(format!("Ama{}", " ".repeat(400)));
+        assert!(state.draft.is_some());
+        assert!(state.begin_save().is_none());
+
+        // The next edit that fits is judged on its own.
+        state.edit("Kofi".into());
+        assert_eq!(state.notice, None);
+        let (name, _) = state.begin_save().expect("a fitting edit is sent");
+        assert_eq!(name, "Kofi");
+    }
+
+    /// Deliberately emptying the box still removes the name, including after
+    /// an oversized paste was refused.
+    #[test]
+    fn emptying_the_field_still_removes_the_name() {
+        for blank in ["", " ", "\t  \n"] {
+            let mut state = with_name("Ama");
+            state.edit(format!("{}Kofi", " ".repeat(240)));
+            assert!(state.begin_save().is_none());
+            state.edit(blank.into());
+            let (name, seq) = state.begin_save().expect("a blank field is a clear");
+            assert_eq!(name, "");
+            assert!(state.save_finished(Ok(Some(String::new())), seq).is_none());
+            assert_eq!(state.saved.as_deref(), Some(""));
+            assert_eq!(state.notice, Some(YourNameNotice::Removed));
+        }
+        // Whitespace that fits the field is an ordinary blank, not a cut.
+        let mut state = with_name("Ama");
+        state.edit(" ".repeat(240));
+        assert_eq!(state.begin_save().expect("fits: a clear").0, "");
+    }
+
+    /// Over the limit only before normalisation, and whitespace around a
+    /// valid name: judged by what the name is once tidied, as the API does.
+    #[test]
+    fn padding_is_tidied_and_the_limit_is_counted_after_it() {
+        // 60 characters padded to 240: fits the field, saves the 60.
+        let sixty = "a".repeat(60);
+        let mut state = with_name("Ama");
+        state.edit(format!("{}{}{}", " ".repeat(90), sixty, " ".repeat(90)));
+        assert_eq!(state.begin_save().unwrap().0, sixty);
+
+        // Inner runs collapse: 61 raw characters, 60 once tidied.
+        let mut state = with_name("Ama");
+        state.edit(format!("{}  {}", "a".repeat(30), "b".repeat(29)));
+        assert_eq!(state.begin_save().unwrap().0.chars().count(), 60);
+
+        // 61 after tidying is too long, with nothing sent.
+        let mut state = with_name("Ama");
+        state.edit(format!("  {}  ", "a".repeat(61)));
+        assert!(state.begin_save().is_none());
+        assert_eq!(state.notice, Some(YourNameNotice::TooLong));
+
+        // Whitespace around a valid name.
+        let mut state = with_name("Ama");
+        state.edit("\t Kofi Adeyemi \n".into());
+        assert_eq!(state.begin_save().unwrap().0, "Kofi Adeyemi");
+
+        // Padding around the saved name is no change, and sends nothing.
+        let mut state = with_name("Ama");
+        state.edit("  Ama  ".into());
+        assert!(state.begin_save().is_none());
+        assert!(state.draft.is_none());
+        assert_eq!(state.notice, None);
+
+        // The same name padded past what the field holds was cut: refused,
+        // never mistaken for "no change" or for a clear.
+        let mut state = with_name("Ama");
+        state.edit(format!("{}Ama", " ".repeat(300)));
+        assert!(state.begin_save().is_none());
+        assert_eq!(state.notice, Some(YourNameNotice::TooLong));
+        assert_eq!(state.saved.as_deref(), Some("Ama"));
     }
 
     #[test]
