@@ -17,10 +17,6 @@
 /// Matches the API's `UserDisplayNameMaxRunes`.
 pub const MAX_CHARS: usize = 60;
 
-/// How many characters of a name a one-line label keeps before an ellipsis, so
-/// a long name cannot push the email beside it out of a clipped line.
-const ONE_LINE_NAME_CHARS: usize = 32;
-
 /// Why a typed name can't be saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -75,19 +71,20 @@ pub fn shown(raw: Option<&str>) -> Option<String> {
     normalize(raw?).ok().filter(|name| !name.is_empty())
 }
 
-/// One line naming a person: `Name · email`, or the email alone without a
-/// name. The email is always whole; a long name is shortened instead.
+/// One line naming a person: `email · Name`, or the email alone without a
+/// name.
+///
+/// The email comes first on purpose. It is the identity, so a clipped line
+/// loses the name and never the address. It also keeps the address intact
+/// beside a right-to-left name: text is laid out by the Unicode bidirectional
+/// algorithm, and a Hebrew or Arabic name placed *before* an address that
+/// starts with a digit would pull that digit across to the name's side
+/// (`א · 1abc@example.com` displays as `1 · אabc@example.com`). With the
+/// address first, everything before the name is left-to-right text that the
+/// name cannot reorder.
 pub fn one_line(name: Option<&str>, email: &str) -> String {
     match shown(name) {
-        Some(name) => {
-            let mut chars = name.chars();
-            let head: String = chars.by_ref().take(ONE_LINE_NAME_CHARS).collect();
-            if chars.next().is_some() {
-                format!("{}… · {email}", head.trim_end())
-            } else {
-                format!("{head} · {email}")
-            }
-        }
+        Some(name) => format!("{email} · {name}"),
         None => email.to_string(),
     }
 }
@@ -235,20 +232,41 @@ mod tests {
     }
 
     #[test]
-    fn one_line_keeps_the_whole_email() {
+    fn one_line_puts_the_whole_email_first() {
         assert_eq!(one_line(None, "ama@example.com"), "ama@example.com");
         assert_eq!(one_line(Some(""), "ama@example.com"), "ama@example.com");
         assert_eq!(
             one_line(Some("Ama Adeyemi"), "ama@example.com"),
-            "Ama Adeyemi · ama@example.com"
+            "ama@example.com · Ama Adeyemi"
         );
         // A refused name is not shown.
         assert_eq!(
             one_line(Some("boss@bank.example"), "ama@example.com"),
             "ama@example.com"
         );
+        // The longest name still follows the whole address.
         let long = "N".repeat(60);
-        let line = one_line(Some(&long), "ama@example.com");
-        assert_eq!(line, format!("{}… · ama@example.com", "N".repeat(32)));
+        assert_eq!(
+            one_line(Some(&long), "ama@example.com"),
+            format!("ama@example.com · {long}")
+        );
+    }
+
+    /// A right-to-left name must not be able to reorder the address. Placed
+    /// first, a Hebrew or Arabic name would take an address's leading digit
+    /// to its own side of the line; placed after the address it cannot,
+    /// because nothing before it is right-to-left or neutral-then-digit.
+    #[test]
+    fn a_right_to_left_name_always_follows_the_address() {
+        for name in ["אבי כהן", "محمد علي", "א", "١٢٣ علي"] {
+            for email in ["1abc@example.com", "ama@example.com", "007@example.org"] {
+                let line = one_line(Some(name), email);
+                assert!(line.starts_with(email), "{:?}", line);
+                assert!(line.ends_with(name), "{:?}", line);
+                // Nothing right-to-left, and no digit-reordering context,
+                // precedes the name: the prefix is the address and " · ".
+                assert_eq!(&line[..line.len() - name.len()], format!("{email} · "));
+            }
+        }
     }
 }

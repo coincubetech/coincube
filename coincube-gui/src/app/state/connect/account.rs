@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::delete_account::{deletion_failure, DeleteAccountState, DELETE_ACCOUNT_POLICY_URL};
-use super::your_name::{profile_name, save_failure, YourNameState};
+use super::your_name::{save_failure, YourNameState};
 use super::{
     delete_connect_secret, read_connect_secret, write_connect_secret, CONNECT_KEYRING_USER,
 };
@@ -2218,15 +2218,14 @@ impl ConnectAccountPanel {
             }
             YourNameMessage::Loaded(result, seq) => {
                 let name = match result {
-                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile_name(&profile)),
+                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile.display_name),
                     _ => Err(()),
                 };
                 self.your_name.loaded(name, seq);
-                self.adopt_saved_name();
             }
             YourNameMessage::Saved(result, seq) => {
                 let result = match result {
-                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile_name(&profile)),
+                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile.display_name),
                     Ok(_) => Err(YourNameFailure::Other),
                     Err(failure) => Err(failure),
                 };
@@ -2242,16 +2241,19 @@ impl ConnectAccountPanel {
                         logout,
                     ]);
                 }
-                self.adopt_saved_name();
             }
         }
         iced::Task::none()
     }
 
-    /// Keeps the signed-in profile's name in step with what Your name knows.
-    fn adopt_saved_name(&mut self) {
-        if let (Some(user), Some(saved)) = (self.user.as_mut(), self.your_name.saved.as_ref()) {
-            user.display_name = Some(saved.clone());
+    /// The profile read for Account › Your name when Account is the open
+    /// section: a section opened before the session was confirmed read
+    /// nothing, so the field would stay absent until the next visit.
+    fn your_name_if_open(&mut self) -> iced::Task<Message> {
+        if matches!(self.active_sub, ConnectSubMenu::Overview) {
+            self.load_your_name()
+        } else {
+            iced::Task::none()
         }
     }
 
@@ -5246,8 +5248,9 @@ impl ConnectAccountPanel {
         self.unverified = None;
         // Plan & billing opened while the session was still
         // being checked loaded nothing; load its history now,
-        // on every return path below.
-        let billing = self.billing_history_if_open();
+        // on every return path below. The same goes for the Account
+        // section's Your name field.
+        let billing = iced::Task::batch([self.billing_history_if_open(), self.your_name_if_open()]);
         // Cache the fetched state before any early return, so the
         // Duress tab reflects the enabled state on its first paint
         // rather than briefly showing enrollment CTAs.
@@ -6393,7 +6396,8 @@ impl ConnectAccountPanel {
                 self.signed_out_by = None;
                 self.unverified = None;
                 self.error = None;
-                return self.billing_history_if_open();
+                let billing = self.billing_history_if_open();
+                return iced::Task::batch([billing, self.your_name_if_open()]);
             }
 
             // ── Enrollment wizard (Phases 2 & 8) ──
@@ -12882,8 +12886,11 @@ mod plan_lifecycle_tests {
                 with_user,
                 state(enrolled, registered),
             );
+            // The control is a section that loads nothing of its own on
+            // reaching the Dashboard. (Overview no longer is one: it reads
+            // the profile for Account › Your name.)
             let other = units(
-                ConnectSubMenu::Overview,
+                ConnectSubMenu::Security,
                 with_user,
                 state(enrolled, registered),
             );
@@ -15423,9 +15430,7 @@ mod your_name_panel_tests {
         assert_eq!(panel.your_name.saved.as_deref(), Some("Ama Adeyemi"));
         assert_eq!(panel.your_name.value(), "Ama Adeyemi");
         assert_eq!(panel.your_name.notice, Some(YourNameNotice::Saved));
-        let signed_in_user = panel.user.as_ref().unwrap();
-        assert_eq!(signed_in_user.display_name.as_deref(), Some("Ama Adeyemi"));
-        assert_eq!(signed_in_user.email, EMAIL, "the email is untouched");
+        assert_eq!(panel.user.as_ref().unwrap().email, EMAIL);
 
         // Relaunch: a new panel holds nothing; the server now has the name.
         no_name.delete();
@@ -15438,6 +15443,56 @@ mod your_name_panel_tests {
         open_account(&mut relaunched);
         assert_eq!(relaunched.your_name.value(), "Ama Adeyemi");
         assert!(relaunched.your_name.notice.is_none());
+    }
+
+    /// Signing in with the Account section already on screen: the sheet
+    /// shows Account as soon as the session is admitted, with no navigation
+    /// to trigger a load. The profile is read at that moment.
+    #[test]
+    fn signing_in_with_account_open_reads_the_profile() {
+        use crate::services::coincube::{DuressCheckOutcome, DuressState};
+        let server = MockServer::start();
+        let get = server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let admitted = |sub: ConnectSubMenu| {
+            let mut panel = signed_in(&server);
+            panel.step = ConnectFlowStep::CheckingDuress {
+                status: DuressGateStatus::Checking,
+            };
+            panel.active_sub = sub;
+            let gen = panel.session_generation;
+            let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
+                DuressCheckOutcome::Ok(DuressState {
+                    active: false,
+                    unlock_at: None,
+                    enrolled: false,
+                    this_device_registered: true,
+                }),
+                gen,
+                0,
+            ));
+            assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
+            (panel, task)
+        };
+
+        let (mut panel, task) = admitted(ConnectSubMenu::Overview);
+        assert!(panel.your_name.saved.is_none());
+        let results = your_name_results(task);
+        assert_eq!(results.len(), 1, "the profile is read on admission");
+        for m in results {
+            drop(name(&mut panel, m));
+        }
+        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+        get.assert_hits(1);
+
+        // Another section open: nothing is read for a field that isn't shown.
+        let (_, task) = admitted(ConnectSubMenu::Security);
+        assert!(your_name_results(task).is_empty());
+        get.assert_hits(1);
     }
 
     #[test]
@@ -15460,10 +15515,6 @@ mod your_name_panel_tests {
         put.assert();
         assert_eq!(panel.your_name.saved.as_deref(), Some(""));
         assert_eq!(panel.your_name.notice, Some(YourNameNotice::Removed));
-        assert_eq!(
-            panel.user.as_ref().unwrap().display_name.as_deref(),
-            Some("")
-        );
     }
 
     #[test]
@@ -15596,7 +15647,6 @@ mod your_name_panel_tests {
         other.id = 8;
         drop(name(&mut panel, YourNameMessage::Loaded(Ok(other), seq)));
         assert!(panel.your_name.saved.is_none());
-        assert_eq!(panel.user.as_ref().unwrap().display_name, None);
     }
 
     #[test]
@@ -15621,6 +15671,5 @@ mod your_name_panel_tests {
             YourNameMessage::Saved(Ok(user(Some("Kofi"))), sent),
         ));
         assert!(panel.your_name.saved.is_none());
-        assert_eq!(panel.user.as_ref().unwrap().display_name, None);
     }
 }

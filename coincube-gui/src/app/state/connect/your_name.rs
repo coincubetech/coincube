@@ -12,8 +12,12 @@
 
 use crate::{
     app::view::YourNameFailure,
-    services::coincube::{display_name, CoincubeError, User},
+    services::coincube::{display_name, CoincubeError},
 };
+
+/// The most text the field holds. Far above the 60-character limit, so
+/// over-long text reaches the "too long" line instead of being cut.
+const DRAFT_MAX_CHARS: usize = 4 * display_name::MAX_CHARS;
 
 /// The one line under the field after the last action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,8 +66,13 @@ impl YourNameState {
         self.saved.is_some() && self.draft.is_some() && !self.saving
     }
 
-    /// Starts a profile read. Returns its token.
+    /// Starts a profile read, as the Account section opens. Returns its
+    /// token. The line left by an earlier visit's save goes; one for a save
+    /// still in flight stays out of the way until that save reports.
     pub fn begin_load(&mut self) -> u64 {
+        if !self.saving {
+            self.notice = None;
+        }
         let seq = self.next();
         self.loading = Some(seq);
         seq
@@ -86,12 +95,14 @@ impl YourNameState {
         }
     }
 
-    /// The field changed. Typing is capped at the longest name the API takes.
+    /// The field changed. Nothing is cut to fit: a name over the limit is
+    /// refused with a line saying so when the user saves, not shortened behind
+    /// their back. The bound here only stops a huge paste from being held.
     pub fn edit(&mut self, value: String) {
         if self.saving || self.saved.is_none() {
             return;
         }
-        let value: String = value.chars().take(display_name::MAX_CHARS).collect();
+        let value: String = value.chars().take(DRAFT_MAX_CHARS).collect();
         self.notice = None;
         self.draft = (Some(value.as_str()) != self.saved.as_deref()).then_some(value);
     }
@@ -139,6 +150,10 @@ impl YourNameState {
         }
         self.sending = None;
         self.saving = false;
+        // A profile read begun while this save was in flight may have been
+        // answered from before it. Its reply is dropped, so it cannot put the
+        // old name back.
+        self.loading = None;
         match result {
             Ok(Some(name)) => {
                 let name = shown_or_empty(&name);
@@ -206,12 +221,6 @@ impl From<display_name::Refusal> for YourNameNotice {
 /// sent something that is not a name this app accepts.
 fn shown_or_empty(name: &str) -> String {
     display_name::shown(Some(name)).unwrap_or_default()
-}
-
-/// The `displayName` of a profile the server answered with, for
-/// [`YourNameState::loaded`] and [`YourNameState::save_finished`].
-pub fn profile_name(user: &User) -> Option<String> {
-    user.display_name.clone()
 }
 
 /// An auth refusal (401/403) means the session ended and goes to the app's
@@ -297,10 +306,24 @@ mod tests {
     }
 
     #[test]
-    fn typing_is_capped_and_unchanged_text_is_not_a_draft() {
+    fn a_name_over_the_limit_is_refused_with_a_line_not_cut_short() {
         let mut state = with_name("Ama");
-        state.edit("a".repeat(80));
-        assert_eq!(state.value().chars().count(), display_name::MAX_CHARS);
+        // A 70-character paste is kept whole in the field ...
+        state.edit("a".repeat(70));
+        assert_eq!(state.value().chars().count(), 70);
+        // ... and Save says why it can't be saved, sending nothing.
+        assert!(state.begin_save().is_none());
+        assert!(!state.saving);
+        assert_eq!(state.notice, Some(YourNameNotice::TooLong));
+        assert_eq!(state.value().chars().count(), 70);
+        // Padding does not count toward the limit.
+        state.edit(format!("   {}   ", "a".repeat(60)));
+        assert_eq!(state.begin_save().unwrap().0, "a".repeat(60));
+    }
+
+    #[test]
+    fn unchanged_text_is_not_a_draft() {
+        let mut state = with_name("Ama");
         state.edit("Ama".into());
         assert!(state.draft.is_none());
         assert!(!state.can_save());
@@ -389,6 +412,17 @@ mod tests {
         assert!(state.save_finished(Ok(Some("Kofi".into())), save).is_none());
         assert_eq!(state.saved.as_deref(), Some("Kofi"));
 
+        // A read begun *during* a save, answered from before the save and
+        // delivered after it, does not put the old name back.
+        let mut state = with_name("Ama");
+        state.edit("Kofi".into());
+        let (_, save) = state.begin_save().unwrap();
+        let read = state.begin_load();
+        assert!(state.save_finished(Ok(Some("Kofi".into())), save).is_none());
+        state.loaded(Ok(Some("Ama".into())), read);
+        assert_eq!(state.saved.as_deref(), Some("Kofi"));
+        assert_eq!(state.notice, Some(YourNameNotice::Saved));
+
         // A superseded read is dropped.
         let mut state = YourNameState::default();
         let first = state.begin_load();
@@ -411,6 +445,24 @@ mod tests {
         state.loaded(Ok(Some("Ama Adeyemi".into())), seq);
         assert!(state.draft.is_none());
         assert_eq!(state.value(), "Ama Adeyemi");
+    }
+
+    #[test]
+    fn reopening_the_account_section_clears_the_last_outcome_line() {
+        let mut state = with_name("");
+        state.edit("Ama".into());
+        let (_, seq) = state.begin_save().unwrap();
+        assert!(state.save_finished(Ok(Some("Ama".into())), seq).is_none());
+        assert_eq!(state.notice, Some(YourNameNotice::Saved));
+        let seq = state.begin_load();
+        assert_eq!(state.notice, None);
+        state.loaded(Ok(Some("Ama".into())), seq);
+        assert_eq!(state.notice, None);
+        // Text typed and not yet saved is kept across the visit.
+        state.edit("Ama A".into());
+        let seq = state.begin_load();
+        state.loaded(Ok(Some("Ama".into())), seq);
+        assert_eq!(state.value(), "Ama A");
     }
 
     #[test]

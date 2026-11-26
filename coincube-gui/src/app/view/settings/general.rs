@@ -1762,7 +1762,7 @@ fn notified_keyholders_row<'a>(ra: &RecoveryAlerts) -> page::PageRow<'a, Message
             // Tag beneficiaries so a mixed list stays honest under a
             // heading that says "keyholders". Keyholders read plain.
             // The address the alert goes to, with the person's display name
-            // in front when they set one.
+            // after it when they set one.
             let who_line = crate::services::coincube::display_name::one_line(
                 r.display_name.as_deref(),
                 &r.email,
@@ -3061,8 +3061,8 @@ mod tests {
                 visible: &[
                     "keyholder@example.invalid",
                     "beneficiary@example.invalid — Beneficiary",
-                    // A name is shown in front of the address, never alone.
-                    "Nia Example · named@example.invalid — Beneficiary",
+                    // A name follows the address, never alone.
+                    "named@example.invalid · Nia Example — Beneficiary",
                     "2 members of this Vault have no email",
                 ],
                 hidden: &[

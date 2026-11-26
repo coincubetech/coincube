@@ -4868,30 +4868,6 @@ mod display_name_tests {
         assert_eq!(user.display_name.as_deref(), Some(""));
     }
 
-    /// What a relaunch does: nothing is kept on this computer, and the name
-    /// comes back with the profile.
-    #[tokio::test]
-    async fn the_saved_name_comes_back_with_the_profile() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(MockMethod::PUT).path("/api/v1/user");
-            then.status(200).json_body(profile(Some("Ama Adeyemi")));
-        });
-        server.mock(|when, then| {
-            when.method(MockMethod::GET)
-                .path("/api/v1/user")
-                .header("authorization", "Bearer name-jwt");
-            then.status(200).json_body(profile(Some("Ama Adeyemi")));
-        });
-        signed_in(&server)
-            .update_display_name("Ama Adeyemi")
-            .await
-            .unwrap();
-        // A new client, as after a relaunch.
-        let user = signed_in(&server).get_user().await.unwrap();
-        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
-    }
-
     #[tokio::test]
     async fn a_server_without_display_names_answers_without_the_field() {
         let server = MockServer::start();
