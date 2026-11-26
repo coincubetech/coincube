@@ -359,9 +359,34 @@ impl State for SparkSettings {
     }
 }
 
+/// Toast for a failed "Auto-convert received bitcoin" save. The bridge's
+/// error is technical (a `SparkClientError` rendering), so it goes to the
+/// log under the reference and the toast says what happened in plain words.
+/// The switch has already been rolled back when this shows.
+pub fn stable_balance_failure_toast(detail: &str) -> String {
+    crate::user_error::UserError::logged(
+        "Couldn't change auto-convert",
+        "Your setting is unchanged. Check your connection and try again.",
+        crate::user_error::CC_SPK,
+        true,
+        detail,
+    )
+    .toast()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_balance_failure_toast_hides_the_bridge_error() {
+        let detail = "SparkClientError: Rpc { code: -32000, message: \"sdk rejected toggle\" }";
+        let toast = stable_balance_failure_toast(detail);
+        assert!(!toast.contains("SparkClientError"));
+        assert!(!toast.contains("sdk rejected toggle"));
+        assert!(toast.starts_with("Couldn't change auto-convert"));
+        assert!(toast.contains(crate::user_error::CC_SPK));
+    }
 
     /// The off question opens only for a switch that is on and idle, and
     /// Keep or the turn-off itself closes it.
