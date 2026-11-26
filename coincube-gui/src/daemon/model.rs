@@ -864,7 +864,7 @@ mod tests {
             (&inputs_short, "malformed"),
         ] {
             let refused = wallet.main_descriptor.spend_info(psbt).unwrap_err();
-            assert!(refused.to_string().contains(error), "{refused}");
+            assert!(refused.to_string().contains(error), "{}", refused);
 
             let spend = listed(psbt.clone());
             assert_eq!(spend.psbt, *psbt);
