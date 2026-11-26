@@ -4,6 +4,37 @@ use super::*;
 impl App {
     /// Register the current Connect device and bring its signing stream online.
     pub(super) fn ensure_connect_ready(&mut self) -> Task<Message> {
+        // A Bitcoin Blake2b Cube still on the session it was opened with
+        // brings its pipeline up from that session. Until that session is
+        // saved, this is the retry: save it again (`save_served_session`).
+        if self.runs_on_opening_session() {
+            match &self.served_session {
+                ServedSession::Saved { .. } => {}
+                ServedSession::Saving => return Task::none(),
+                ServedSession::NotSaved | ServedSession::Failed => {
+                    self.served_session = ServedSession::NotSaved;
+                    let save = self.save_served_session();
+                    // A local Cube that cannot save a whole session (no
+                    // matching saved sign-in) takes the Bitcoin path below,
+                    // which uses the session in `connect.json` or says none
+                    // was found, instead of doing nothing.
+                    if self.cache.connect_served || self.served_session == ServedSession::Saving {
+                        return save;
+                    }
+                }
+            }
+        }
+        // On such a Cube every step below runs on its own session: the
+        // access token is its client's, never the one `connect.json` holds
+        // now (I3). `None` on every other Cube.
+        let pinned_tokens = self.pinned_tokens();
+        if self.cache.connect_served && pinned_tokens.is_none() {
+            return Task::none();
+        }
+        // A retry once the session is saved keeps the retry state shown:
+        // the bootstrap's own failures answer with a notice, not a message
+        // this App could clear a "starting" state on. It reads ready once
+        // the stream is up.
         // The user is signed in to Connect but the signing stream
         // isn't ready. Run the same device-registration + stream
         // bootstrap the in-app login flow does, sourcing tokens
@@ -13,12 +44,16 @@ impl App {
         // ServiceConfig, meaning Connect/Keychain relay signing is
         // unavailable there no matter how often the user retries —
         // we say so and point them at local Wi-Fi pairing instead.
-        let network = self.cache.network;
+        let chain = self.cache.chain();
+        let base_url = self.connect_base_url();
         let datadir = self.cache.datadir_path.clone();
-        let expected_email = self
-            .connect_email
-            .clone()
-            .or_else(|| self.cache.connect_email.clone());
+        let expected_email = match &self.served_session {
+            ServedSession::Saved { email, .. } if self.cache.connect_served => Some(email.clone()),
+            _ => self
+                .connect_email
+                .clone()
+                .or_else(|| self.cache.connect_email.clone()),
+        };
         let shared_auth = if self.connect_email == expected_email {
             self.connect_auth.clone()
         } else {
@@ -40,13 +75,20 @@ impl App {
         // tokens (the same source the device bootstrap uses) and feed
         // the result back through the normal `CubeRegistered` path so
         // `current_cube_server_id` still populates.
+        // Only an entry this host issued (`Account::api_base_url`) gives a
+        // token, device id or cursor here: a session another host issued is
+        // never presented to this one.
+        let issuer = crate::services::connect::client::cache::issuing_api(
+            &base_url,
+            &crate::services::coincube_api_base_url(),
+        );
         let cube_registration = if self.cache.current_cube_server_id.is_some() {
             Task::none()
         } else if self.panels.connect.account.is_authenticated() {
             self.panels.connect.ensure_cube_registered()
         } else if let Some(generation) = self.panels.connect.cube.begin_external_registration() {
             let datadir = datadir.clone();
-            let net_str = settings::network_to_api_string(network);
+            let net_str = settings::network_to_api_string(chain);
             let cube_name = self.cube_settings.name.clone();
             // Report this Cube's Vault presence so other devices can
             // evaluate the duress vault gate (PLAN-duress-vault-gate
@@ -60,6 +102,11 @@ impl App {
             let cube_spark_stable_balance = self.cube_settings.spark_stable_balance;
             let cube_uuid = cube_uuid.clone();
             let registration_email = expected_email.clone();
+            let registration_base_url = base_url.clone();
+            let registration_pin = pinned_tokens
+                .as_ref()
+                .map(|tokens| tokens.access_token.clone());
+            let registration_issuer = issuer.clone();
             Task::perform(
                 async move {
                     use crate::services::coincube::{CoincubeClient, RegisterCubeRequest};
@@ -69,16 +116,24 @@ impl App {
                         "EnsureConnectReady: no active Connect email to register the cube"
                             .to_string()
                     })?;
-                    let account = Account::from_cache(&datadir.network_directory(network), &email)
-                        .ok()
-                        .flatten()
-                        .ok_or_else(|| {
-                            "EnsureConnectReady: no cached Connect session to \
+                    let access_token = match registration_pin {
+                        Some(pinned) => pinned,
+                        None => {
+                            Account::from_cache(&datadir.network_directory(chain), &email)
+                                .ok()
+                                .flatten()
+                                .filter(|account| account.issued_by(registration_issuer.as_deref()))
+                                .ok_or_else(|| {
+                                    "EnsureConnectReady: no cached Connect session to \
                                  register the cube"
-                                .to_string()
-                        })?;
-                    let mut client = CoincubeClient::new();
-                    client.set_token(&account.tokens.access_token);
+                                        .to_string()
+                                })?
+                                .tokens
+                                .access_token
+                        }
+                    };
+                    let mut client = CoincubeClient::with_base_url(registration_base_url);
+                    client.set_token(&access_token);
                     client
                         .register_cube(RegisterCubeRequest {
                             uuid,
@@ -108,6 +163,7 @@ impl App {
             // part a second press is actually asking for.
             Task::none()
         };
+        let carry_unsaved_id = pinned_tokens.is_some();
         let bootstrap = Task::perform(
             async move {
                 use crate::services::connect::client::cache::Account;
@@ -117,7 +173,7 @@ impl App {
                     Message::View(view::Message::ShowToast(log::Level::Info, msg.to_string()))
                 };
 
-                let network_dir = datadir.network_directory(network);
+                let network_dir = datadir.network_directory(chain);
                 let Some(expected_email) = expected_email else {
                     tracing::warn!(
                         "EnsureConnectReady: no active Connect email to match connect.json"
@@ -127,32 +183,39 @@ impl App {
                          a phone over Wi-Fi to sign locally.",
                     );
                 };
-                let Some(account) = Account::from_cache(&network_dir, &expected_email)
-                    .ok()
-                    .flatten()
-                else {
-                    tracing::warn!(
-                        "EnsureConnectReady: no cached Connect account for active email"
-                    );
-                    return info_toast(
-                        "Couldn't find this Connect session. Sign in to Connect, or pair \
-                         a phone over Wi-Fi to sign locally.",
-                    );
+                // A Connect-served Cube's tokens are its own, whatever
+                // `connect.json` holds now; every other Cube reads the file.
+                let (email, cached_tokens) = match pinned_tokens {
+                    Some(pinned) => (expected_email, pinned),
+                    None => {
+                        let Some(account) = Account::from_cache(&network_dir, &expected_email)
+                            .ok()
+                            .flatten()
+                            .filter(|account| account.issued_by(issuer.as_deref()))
+                        else {
+                            tracing::warn!(
+                                "EnsureConnectReady: no cached Connect account for active email"
+                            );
+                            return info_toast(
+                                "Couldn't find this Connect session. Sign in to Connect, or \
+                                 pair a phone over Wi-Fi to sign locally.",
+                            );
+                        };
+                        (account.email, account.tokens)
+                    }
                 };
-                let email = account.email.clone();
+                let pinned = carry_unsaved_id;
                 let tokens_arc =
-                    connect_registration_auth(shared_auth, account.tokens, &network_dir, &email)
+                    connect_registration_auth(shared_auth, cached_tokens, &network_dir, &email)
                         .await;
 
                 let Some(grpc_url) =
-                    crate::services::connect::client::resolve_connect_grpc_url().await
+                    crate::services::connect::client::resolve_connect_grpc_url_for(&base_url).await
                 else {
                     // No gRPC endpoint for this network — Connect
                     // relay signing can't work here. Don't pretend
                     // a retry will help.
-                    tracing::info!(
-                        "EnsureConnectReady: no Connect gRPC URL available for {network}"
-                    );
+                    tracing::info!("EnsureConnectReady: no Connect gRPC URL available for {chain}");
                     return info_toast(
                         "Mobile signing over Connect isn't available on this network. \
                          Pair a phone over Wi-Fi to sign locally instead.",
@@ -161,8 +224,13 @@ impl App {
 
                 // Same helper as every other registration path — see
                 // the note on the in-app login path above.
-                let device_name = crate::utils::device::device_label();
-                let Some(_device_id) = ensure_device_registered_best_effort(
+                let device_name = crate::utils::device::signer_device_label(chain);
+                // An id that could not be saved (the shared file moved on)
+                // still serves a Connect-served Cube pinned to its session;
+                // every other Cube needs it saved, as before.
+                // A cached device id is reused only from an entry the same host
+                // issued (`issuer` above).
+                let Some(registered) = ensure_device_registered_best_effort(
                     &grpc_url,
                     tokens_arc.clone(),
                     &network_dir,
@@ -170,9 +238,10 @@ impl App {
                     device_name,
                     env!("CARGO_PKG_VERSION").to_string(),
                     std::env::consts::OS.to_string(),
+                    issuer.as_deref(),
                 )
                 .await
-                else {
+                .filter(|registered| registered.persisted || pinned) else {
                     return info_toast(
                         "Couldn't register this device with Connect. Try again, or pair a \
                          phone over Wi-Fi to sign locally.",
@@ -183,11 +252,12 @@ impl App {
                 // bring the stream up so the cache fields populate,
                 // then the user can retry Sign via Keychain.
                 Message::TriggerConnectStreamReady {
-                    network,
+                    chain,
                     datadir,
                     tokens: tokens_arc,
                     email,
                     cube_uuid,
+                    device_id: (!registered.persisted).then_some(registered.device_id),
                 }
             },
             |m| m,
@@ -249,7 +319,20 @@ impl App {
                     // out drops the stream.
                     Refusal::DeviceRevoked => {
                         log::warn!("[CONNECT] This computer was removed from the Connect account");
+                        // Its signer devices are revoked too, in every chain
+                        // folder: discard their ids so the next sign-in
+                        // registers afresh and none is replayed. Read the
+                        // account before the teardown below clears it.
+                        let discard = self.discard_connect_device_ids();
+                        // The stream is parked for good after this refusal
+                        // and waits for the App to drop it. The sign-out below
+                        // does that only when the panel was signed in; at
+                        // start-up the stream runs from the saved session
+                        // before the panel has authenticated, and on a removed
+                        // computer it never will. So drop it here.
+                        self.clear_connect_session_state();
                         Task::batch([
+                            discard,
                             Task::done(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)),
                             Task::done(Message::View(view::Message::ConnectAccount(
                                 view::ConnectAccountMessage::LogOut,
@@ -261,10 +344,14 @@ impl App {
                     Refusal::Unexplained => self.set_connect_status(ConnectionStatus::RenewFailed),
                 }
             }
-            M::Error(err) => {
-                // An in-stream error or an expired sign-in. The REST client
-                // refreshes the shared token (or signs out if Connect
-                // refuses), and the stream retries with it.
+            // A Connect-served Bitcoin Blake2b Cube cannot take another
+            // session while open (I3), so an ended one ends its Connect
+            // services for good instead of retrying for ever.
+            M::SessionEnded(err) if self.cache.connect_served => self.end_served_session(err),
+            // Elsewhere an ended session is handled like an in-stream error:
+            // the stream retries with backoff and reads the shared token
+            // again on each attempt.
+            M::Error(err) | M::SessionEnded(err) => {
                 log::warn!("[CONNECT GRPC] Stream error: {}", err);
                 if matches!(
                     self.cache.connect_stream_status,
@@ -274,133 +361,11 @@ impl App {
                 }
                 self.set_connect_status(ConnectionStatus::Reconnecting)
             }
-            M::SessionEvent(session_event) => {
-                log::info!(
-                    "[CONNECT GRPC] SessionEvent seq={} type={:?} session={}",
-                    session_event.event_seq,
-                    session_event.event_type,
-                    session_event.session_id,
-                );
-                // Persist the latest seq so a restart resumes from the
-                // right cursor. Best-effort — log and continue on error.
-                let seq = session_event.event_seq;
-                let persist_task = if let Some(email) = self.connect_email.clone() {
-                    let network_dir = self.datadir.network_directory(self.cache.chain());
-                    Task::perform(
-                        async move {
-                            if let Err(e) =
-                                crate::services::connect::client::cache::set_last_seen_event_seq_for_email(
-                                    &network_dir,
-                                    &email,
-                                    seq,
-                                )
-                                .await
-                            {
-                                log::warn!(
-                                    "[CONNECT GRPC] Failed to persist last_seen_event_seq={}: {}",
-                                    seq,
-                                    e,
-                                );
-                            }
-                        },
-                        |_| Message::CacheUpdated,
-                    )
-                } else {
-                    Task::none()
-                };
-                // Fan the event out via Message::KeychainSign(StreamEvent).
-                // It travels through the standard update path and is
-                // delegated to the active PSBT modal (if any) by
-                // `PsbtState`'s catchall arm — modals that don't
-                // recognise the session_id are no-ops.
-                let dispatch_task = Task::done(Message::KeychainSign(
-                    crate::app::state::vault::keychain_sign::KeychainSignMessage::StreamEvent(
-                        session_event,
-                    ),
-                ));
-                Task::batch([persist_task, dispatch_task])
-            }
+            M::SessionEvent(session_event) => self.handle_connect_session_event(session_event),
             M::DuressActivated { unlock_at, source } => {
-                // Phase 7b: remote duress activation. Persist active state to
-                // DuressLocalState (at the data-dir root) WITHOUT wiping —
-                // remote activation can be accidental, so local Cube data is
-                // left intact. The UI lock is sequenced AFTER the persist (it's
-                // the task's completion message, not a parallel batch) so the
-                // cryptic screen never appears before `active` is durable; if
-                // the app exits right after seeing the lock, the relaunch
-                // reconcile still routes back into duress.
-                log::warn!(
-                    "[CONNECT GRPC] Duress activated remotely (source={})",
-                    source
-                );
-                let root = self.datadir.path().to_path_buf();
-                Task::perform(
-                    async move {
-                        // load() already maps a missing file to Ok(default); a
-                        // real parse/IO error must NOT be papered over with a
-                        // default that save() then writes back, clobbering valid
-                        // state (enrolled / account_id / encrypted code). Skip
-                        // the persist on a real read error — the UI still locks
-                        // below, and the DuressLockRemote backstop / session-check
-                        // re-sync handle durability.
-                        let mut st = match crate::services::duress::DuressLocalState::load(&root) {
-                            Ok(st) => st,
-                            Err(e) => {
-                                log::warn!(
-                                    "[CONNECT GRPC] reading duress state failed; \
-                                     not overwriting: {e}"
-                                );
-                                return;
-                            }
-                        };
-                        st.active = true;
-                        st.unlock_at = unlock_at;
-                        // Retry: a failed persist would let a relaunch reconcile
-                        // (which keys off st.active) drop back to the normal Home
-                        // flow with Cube data intact while the server is still in
-                        // duress. The DuressLockRemote handler re-persists as a
-                        // final backstop tied to the UI lock.
-                        for attempt in 1..=3 {
-                            match st.save(&root) {
-                                Ok(()) => break,
-                                Err(e) => log::warn!(
-                                    "[CONNECT GRPC] persist remote duress state \
-                                     attempt {attempt}/3 failed: {e}"
-                                ),
-                            }
-                        }
-                    },
-                    |_| Message::View(view::Message::DuressLockRemote),
-                )
+                self.handle_connect_duress_activated(unlock_at, source)
             }
-            M::DuressCleared => {
-                log::info!("[CONNECT GRPC] Duress cleared remotely");
-                let root = self.datadir.path().to_path_buf();
-                Task::perform(
-                    async move {
-                        // As above: skip on a real read error so a transient
-                        // failure can't clobber valid state with a default. The
-                        // cryptic screen's own server poll re-syncs the cleared
-                        // state on the next check.
-                        let mut st = match crate::services::duress::DuressLocalState::load(&root) {
-                            Ok(st) => st,
-                            Err(e) => {
-                                log::warn!(
-                                    "[CONNECT GRPC] reading duress state failed; \
-                                     not overwriting: {e}"
-                                );
-                                return;
-                            }
-                        };
-                        st.active = false;
-                        st.unlock_at = None;
-                        if let Err(e) = st.save(&root) {
-                            log::warn!("[CONNECT GRPC] Failed to clear remote duress state: {e}");
-                        }
-                    },
-                    |_| Message::CacheUpdated,
-                )
-            }
+            M::DuressCleared => self.handle_connect_duress_cleared(),
             M::DuressDisabled { account_id } => {
                 // Issue 2: duress disabled account-wide on another device. Disarm
                 // THIS device locally (clear Cube PIN hashes + local state +
@@ -425,6 +390,248 @@ impl App {
         }
     }
 
+    fn handle_connect_session_event(
+        &self,
+        session_event: crate::services::connect::grpc::connect_v1::SessionEvent,
+    ) -> Task<Message> {
+        log::info!(
+            "[CONNECT GRPC] SessionEvent seq={} type={:?} session={}",
+            session_event.event_seq,
+            session_event.event_type,
+            session_event.session_id,
+        );
+        // Persist the latest seq so a restart resumes from the
+        // right cursor. Best-effort — log and continue on error.
+        let seq = session_event.event_seq;
+        let persist_task = if let Some(email) = self.connect_email.clone() {
+            let network_dir = self.datadir.network_directory(self.cache.chain());
+            // The cursor is this stream's host's: an entry another host
+            // issued keeps its own.
+            let issuer = crate::services::connect::client::cache::issuing_api(
+                &self.connect_base_url(),
+                &crate::services::coincube_api_base_url(),
+            );
+            // This Cube's own cursor: another Cube of the account resumes
+            // from its own.
+            let cube_id = self.cube_settings.id.clone();
+            Task::perform(
+                async move {
+                    if let Err(e) =
+                        crate::services::connect::client::cache::set_last_seen_event_seq_for_email(
+                            &network_dir,
+                            &email,
+                            seq,
+                            issuer.as_deref(),
+                            Some(cube_id.as_str()),
+                        )
+                        .await
+                    {
+                        log::warn!(
+                            "[CONNECT GRPC] Failed to persist last_seen_event_seq={}: {}",
+                            seq,
+                            e,
+                        );
+                    }
+                },
+                |_| Message::CacheUpdated,
+            )
+        } else {
+            Task::none()
+        };
+        // Fan the event out via Message::KeychainSign(StreamEvent).
+        // It travels through the standard update path and is
+        // delegated to the active PSBT modal (if any) by
+        // `PsbtState`'s catchall arm — modals that don't
+        // recognise the session_id are no-ops.
+        let dispatch_task = Task::done(Message::KeychainSign(
+            crate::app::state::vault::keychain_sign::KeychainSignMessage::StreamEvent(
+                session_event,
+            ),
+        ));
+        Task::batch([persist_task, dispatch_task])
+    }
+
+    fn handle_connect_duress_activated(
+        &self,
+        unlock_at: Option<chrono::DateTime<chrono::Utc>>,
+        source: String,
+    ) -> Task<Message> {
+        // Phase 7b: remote duress activation. Persist active state to
+        // DuressLocalState (at the data-dir root) WITHOUT wiping —
+        // remote activation can be accidental, so local Cube data is
+        // left intact. The UI lock is sequenced AFTER the persist (it's
+        // the task's completion message, not a parallel batch) so the
+        // cryptic screen never appears before `active` is durable; if
+        // the app exits right after seeing the lock, the relaunch
+        // reconcile still routes back into duress.
+        log::warn!(
+            "[CONNECT GRPC] Duress activated remotely (source={})",
+            source
+        );
+        let root = self.datadir.path().to_path_buf();
+        let activating_account = self.duress_activating_account();
+        let origin = self.duress_lock_origin();
+        Task::perform(
+            async move {
+                // load() already maps a missing file to Ok(default); a
+                // real parse/IO error must NOT be papered over with a
+                // default that save() then writes back, clobbering valid
+                // state (enrolled / account_id / encrypted code). Skip
+                // the persist on a real read error — the UI still locks
+                // below, and the DuressLockRemote backstop / session-check
+                // re-sync handle durability.
+                let mut st = match crate::services::duress::DuressLocalState::load(&root) {
+                    Ok(st) => st,
+                    Err(e) => {
+                        log::warn!(
+                            "[CONNECT GRPC] reading duress state failed; \
+                             not overwriting: {e}"
+                        );
+                        return;
+                    }
+                };
+                st.active = true;
+                st.unlock_at = unlock_at;
+                // The locked screen then trusts only this account's saved
+                // sessions to confirm the clear (decision 26).
+                st.record_remote_lock_account(activating_account, origin);
+                // Retry: a failed persist would let a relaunch reconcile
+                // (which keys off st.active) drop back to the normal Home
+                // flow with Cube data intact while the server is still in
+                // duress. The DuressLockRemote handler re-persists as a
+                // final backstop tied to the UI lock.
+                for attempt in 1..=3 {
+                    match st.save(&root) {
+                        Ok(()) => break,
+                        Err(e) => log::warn!(
+                            "[CONNECT GRPC] persist remote duress state \
+                             attempt {attempt}/3 failed: {e}"
+                        ),
+                    }
+                }
+            },
+            |_| Message::View(view::Message::DuressLockRemote),
+        )
+    }
+
+    /// The Connect user id of the account this App's stream runs on: the
+    /// panel's signed-in user when it is the stream's account, else the saved
+    /// keyring sign-in when that is the stream's account (the panel's user is
+    /// not loaded yet while a restored session's stream already runs), else
+    /// none. The keyring sign-in was issued by the configured API, so a
+    /// Connect-served Cube on another host never takes its user id: that id
+    /// names an account on a different server.
+    pub(crate) fn duress_activating_account(&self) -> Option<String> {
+        let email = self.connect_email.as_deref()?;
+        if let Some(user) = self.panels.connect.account.user.as_ref() {
+            if user.email == email {
+                return Some(user.id.to_string());
+            }
+        }
+        if self
+            .duress_lock_origin()
+            .is_some_and(|origin| origin.api_base_url != crate::services::coincube_api_base_url())
+        {
+            return None;
+        }
+        let saved = crate::app::state::connect::account::load_session_from_keyring()?;
+        (saved.email() == email).then(|| saved.user_id().to_string())
+    }
+
+    /// Where this App's stream account lives, for a remote lock it raises
+    /// (see [`crate::services::duress::DuressLocalState::locked_by_origin`]):
+    /// on a Bitcoin Blake2b Cube, its chain folder, which alone holds its
+    /// session, and the Connect API its session came from (a Connect-served
+    /// Cube's endpoint, a local Cube's panel client). On a Bitcoin Cube none,
+    /// and the locked screen keeps using the configured API and the launch
+    /// network's folder.
+    pub(crate) fn duress_lock_origin(&self) -> Option<crate::services::duress::LockOrigin> {
+        let chain = self.cache.chain();
+        if !chain.is_blake2b() {
+            return None;
+        }
+        let api_base_url = if self.cache.connect_served {
+            self.cache.connect_api_base_url()?
+        } else {
+            self.connect_base_url()
+        };
+        Some(crate::services::duress::LockOrigin {
+            api_base_url,
+            chain,
+        })
+    }
+
+    fn handle_connect_duress_cleared(&self) -> Task<Message> {
+        log::info!("[CONNECT GRPC] Duress cleared remotely");
+        let root = self.datadir.path().to_path_buf();
+        Task::perform(
+            async move {
+                // As above: skip on a real read error so a transient
+                // failure can't clobber valid state with a default. The
+                // cryptic screen's own server poll re-syncs the cleared
+                // state on the next check.
+                let mut st = match crate::services::duress::DuressLocalState::load(&root) {
+                    Ok(st) => st,
+                    Err(e) => {
+                        log::warn!(
+                            "[CONNECT GRPC] reading duress state failed; \
+                             not overwriting: {e}"
+                        );
+                        return;
+                    }
+                };
+                st.clear_lock();
+                if let Err(e) = st.save(&root) {
+                    log::warn!("[CONNECT GRPC] Failed to clear remote duress state: {e}");
+                }
+            },
+            |_| Message::CacheUpdated,
+        )
+    }
+
+    /// Discard the signer device ids stored for the signed-in account, in
+    /// every chain folder; on a Connect-served Cube, in its own chain folder
+    /// only, since the same email elsewhere may be an account on another
+    /// Connect host and the Cube never writes another chain's state (I3).
+    /// The account is read now, before the sign-out that follows a removal
+    /// clears it.
+    fn discard_connect_device_ids(&self) -> Task<Message> {
+        use crate::services::connect::client::cache::{
+            discard_device_id_in_chain_folders, DeviceIdDiscard,
+        };
+        let Some(email) = self
+            .connect_email
+            .clone()
+            .or_else(|| self.cache.connect_email.clone())
+        else {
+            return Task::none();
+        };
+        let datadir = self.cache.datadir_path.clone();
+        let chains: Vec<crate::chain::ChainId> = if self.cache.connect_served {
+            vec![self.cache.chain()]
+        } else {
+            crate::chain::ChainId::ALL.to_vec()
+        };
+        Task::perform(
+            async move {
+                for (chain, outcome) in
+                    discard_device_id_in_chain_folders(&datadir, &email, chains).await
+                {
+                    match outcome {
+                        DeviceIdDiscard::Discarded => {
+                            log::info!("[CONNECT] Discarded the revoked device id for {chain}")
+                        }
+                        DeviceIdDiscard::Kept => log::warn!(
+                            "[CONNECT] The revoked device id for {chain} is still stored; \
+                             it will be refused again when a Cube on that chain opens"
+                        ),
+                    }
+                }
+            },
+            |()| Message::ConnectDeviceIdsDiscarded,
+        )
+    }
+
     /// The Connect control, its panel and renewal; everything else routes on.
     pub(super) fn update_connect_chrome(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -445,6 +652,7 @@ impl App {
                     Task::none()
                 }
             }
+            Message::ConnectDeviceIdsDiscarded => Task::none(),
             Message::ConnectSignedOutBy(reason) => {
                 self.cache.connect_signed_out_by = Some(reason);
                 self.cache.connect_panel_open = false;
@@ -582,6 +790,17 @@ impl App {
 }
 
 impl App {
+    /// The Connect API this Cube's signer pipeline talks to: the base URL of
+    /// the Cube's own client. On a Bitcoin Cube that is the panel's client,
+    /// built on the app's configured API. A Bitcoin Blake2b Cube that was
+    /// opened with a session uses the endpoint that session was admitted on.
+    pub(super) fn connect_base_url(&self) -> String {
+        self.fork_connect_client
+            .as_ref()
+            .map(|client| client.base_url.clone())
+            .unwrap_or_else(|| self.panels.connect.account.client.base_url.clone())
+    }
+
     pub(super) fn connect_stream_ready(
         &mut self,
         cfg: Option<(
@@ -616,9 +835,54 @@ impl App {
                 let network_dir = self
                     .cache
                     .datadir_path
-                    .network_directory(self.cache.network);
-                let cached_account =
-                    crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
+                    .network_directory(self.cache.chain());
+                if self.cache.connect_served {
+                    // Pinned to the Cube's own session (I3). The shared file
+                    // may hold a newer token for this account; its entry still
+                    // gives the device id and the event cursor, which belong
+                    // to the account and this computer, not to a token, but
+                    // only while the entry is this Cube's host's: another
+                    // host issued neither.
+                    let pinned =
+                        self.is_pinned_session(&cfg.base_url, &current.access_token, &email);
+                    drop(current);
+                    if !pinned {
+                        return Task::none();
+                    }
+                    let issuer = crate::services::connect::client::cache::issuing_api(
+                        &cfg.base_url,
+                        &crate::services::coincube_api_base_url(),
+                    );
+                    let entry = crate::services::connect::client::cache::Account::from_cache(
+                        &network_dir,
+                        &email,
+                    )
+                    .ok()
+                    .flatten()
+                    .filter(|entry| entry.issued_by(issuer.as_deref()));
+                    // About may have completed re-registration while the
+                    // async vault lookup ran: a saved id wins. Otherwise the
+                    // id registration returned without saving it stays.
+                    if let Some(saved) = entry
+                        .as_ref()
+                        .and_then(|entry| entry.device_id.clone())
+                        .filter(|id| !id.trim().is_empty())
+                    {
+                        cfg.device_id = saved;
+                    }
+                    if cfg.device_id.trim().is_empty() {
+                        return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
+                    }
+                    cfg.last_seen_seq = cfg.last_seen_seq.max(
+                        entry
+                            .map(|entry| entry.event_seq_for(Some(&self.cube_settings.id)))
+                            .unwrap_or(0),
+                    );
+                } else {
+                    let cached_account =
+                        crate::services::connect::client::cache::ConnectCache::from_file(
+                            &network_dir,
+                        )
                         .ok()
                         .and_then(|cache| cache.active_account().cloned())
                         .filter(|account| {
@@ -626,20 +890,23 @@ impl App {
                                 && account.tokens.access_token == current.access_token
                                 && account.tokens.refresh_token == current.refresh_token
                         });
-                drop(current);
-                let Some(account) = cached_account else {
-                    return Task::none();
-                };
-                let Some(device_id) = account.device_id.filter(|id| !id.trim().is_empty()) else {
-                    return Task::none();
-                };
-                // About may have completed re-registration while the
-                // async vault lookup ran. Install its current id, not
-                // the one captured before that await.
-                cfg.device_id = device_id;
-                cfg.last_seen_seq = cfg
-                    .last_seen_seq
-                    .max(account.last_seen_event_seq.unwrap_or(0));
+                    drop(current);
+                    let Some(account) = cached_account else {
+                        return Task::none();
+                    };
+                    let Some(device_id) =
+                        account.device_id.clone().filter(|id| !id.trim().is_empty())
+                    else {
+                        return Task::none();
+                    };
+                    // About may have completed re-registration while the
+                    // async vault lookup ran. Install its current id, not
+                    // the one captured before that await.
+                    cfg.device_id = device_id;
+                    cfg.last_seen_seq = cfg
+                        .last_seen_seq
+                        .max(account.event_seq_for(Some(&self.cube_settings.id)));
+                }
                 tracing::info!(
                     "Connect stream ready (device_id={}, last_seen_seq={})",
                     cfg.device_id,
@@ -649,6 +916,7 @@ impl App {
                 // PSBT modal in particular) can spin up a
                 // GrpcSessionClient on demand.
                 self.cache.connect_grpc_url = Some(cfg.grpc_url.clone());
+                self.cache.connect_base_url = Some(cfg.base_url.clone());
                 self.cache.connect_tokens = Some(cfg.tokens.clone());
                 self.cache.connect_device_id = Some(cfg.device_id.clone());
                 self.cache.connect_email = Some(email);
@@ -657,32 +925,62 @@ impl App {
                 // tick — show `Connecting` until the first
                 // `ConnectStreamMessage::Connected` lands.
                 self.cache.connect_stream_status = ConnectionStatus::Connecting;
+                // The rail's details are known now: if the Vault's member
+                // rows were reconciled before they arrived, this is the
+                // trigger that seals each key's role to its phone.
+                let seal = self.seal_key_roles_task();
+                return Task::batch([
+                    self.set_signer_pipeline_start(cache::SignerPipelineStart::Idle),
+                    seal,
+                ]);
             }
             None => {
                 tracing::debug!("Connect stream not started: missing grpc_url or device_id",);
+                // A Connect-served Cube whose session is saved says so,
+                // with a retry, rather than leaving the signer list waiting.
+                if self.runs_on_opening_session()
+                    && matches!(self.served_session, ServedSession::Saved { .. })
+                    && self.connect_stream_config.is_none()
+                {
+                    return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
+                }
             }
         }
         Task::none()
     }
 
+    /// Moves a Connect-served Cube's signer pipeline start-up along and tells
+    /// the current panel, so an open signer list follows it at once (it reads
+    /// the state on the next message it gets). Nothing is sent when the state
+    /// does not change, so on every other Cube this stays silent.
+    fn set_signer_pipeline_start(&mut self, start: cache::SignerPipelineStart) -> Task<Message> {
+        if self.cache.signer_pipeline_start == start {
+            return Task::none();
+        }
+        self.cache.signer_pipeline_start = start;
+        stream_health_dispatch(self.cache.connect_stream_status)
+    }
+
     pub(super) fn trigger_connect_stream_ready(
         &mut self,
-        network: coincube_core::miniscript::bitcoin::Network,
+        chain: crate::chain::ChainId,
         datadir: CoincubeDirectory,
         tokens: Arc<
             tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>,
         >,
         email: String,
         cube_uuid: Option<String>,
+        device_id: Option<String>,
     ) -> Task<Message> {
         if self.in_app_refresh_commit.is_some() {
             self.deferred_connect_stream_triggers
                 .push(Message::TriggerConnectStreamReady {
-                    network,
+                    chain,
                     datadir,
                     tokens,
                     email,
                     cube_uuid,
+                    device_id,
                 });
             return Task::none();
         }
@@ -695,19 +993,25 @@ impl App {
                     async move {
                         drop(wait_tokens.read().await);
                         Message::TriggerConnectStreamReady {
-                            network,
+                            chain,
                             datadir,
                             tokens: retry_tokens,
                             email,
                             cube_uuid,
+                            device_id,
                         }
                     },
                     |message| message,
                 );
             }
         };
-        let network_dir = datadir.network_directory(network);
-        let owns_cached_session =
+        // A Connect-served Cube takes only its own session, whatever the
+        // shared `connect.json` holds now (I3); every other Cube only the
+        // session the file holds.
+        let owns_session = if self.cache.connect_served {
+            self.is_pinned_session(&self.connect_base_url(), &current.access_token, &email)
+        } else {
+            let network_dir = datadir.network_directory(chain);
             crate::services::connect::client::cache::ConnectCache::from_file(&network_dir)
                 .ok()
                 .and_then(|cache| cache.active_account().cloned())
@@ -715,9 +1019,10 @@ impl App {
                     account.email == email
                         && account.tokens.access_token == current.access_token
                         && account.tokens.refresh_token == current.refresh_token
-                });
+                })
+        };
         drop(current);
-        if !owns_cached_session {
+        if !owns_session {
             return Task::none();
         }
         self.connect_auth = Some(tokens.clone());
@@ -725,6 +1030,494 @@ impl App {
         self.cache.connect_tokens = Some(tokens.clone());
         self.cache.connect_email = Some(email.clone());
         self.cache.has_connect_session = true;
-        connect_stream_ready_task(network, datadir, tokens, email, cube_uuid)
+        connect_stream_ready_task(
+            chain,
+            self.connect_base_url(),
+            datadir,
+            tokens,
+            email,
+            cube_uuid,
+            device_id.filter(|_| self.cache.connect_served),
+        )
+    }
+
+    /// Whether this Bitcoin Blake2b Cube brings its signer pipeline up from
+    /// the session it was opened with, saving it at open: always when it is
+    /// Connect-served, and for a local Cube while it still holds that
+    /// session (`fork_connect_client`, PR 5). Only a Connect-served Cube is
+    /// also pinned to it; a local one then runs the Bitcoin path, and once
+    /// that session ends its panel signs in as a Bitcoin Cube's does.
+    fn runs_on_opening_session(&self) -> bool {
+        self.cache.chain().is_blake2b()
+            && (self.cache.connect_served || self.fork_connect_client.is_some())
+    }
+
+    /// The session a Connect-served Bitcoin Blake2b Cube's signer pipeline
+    /// is pinned to (I3): the Cube's own client, for the account its session
+    /// was saved for at open. `None` on every other Cube, and before the
+    /// session is saved.
+    fn pinned_connect_session(&self) -> Option<crate::app::connect_session::ConnectSession> {
+        if !self.cache.connect_served {
+            return None;
+        }
+        let ServedSession::Saved { email, .. } = &self.served_session else {
+            return None;
+        };
+        Some(crate::app::connect_session::ConnectSession {
+            client: self.fork_connect_client.clone()?,
+            account: email.clone(),
+        })
+    }
+
+    /// Whether a pipeline entry's endpoint, bearer and account are the
+    /// session this Cube is pinned to, compared by the one comparison every
+    /// Connect session check uses (`connect_session::same_session`). False
+    /// whenever nothing is pinned.
+    pub(super) fn is_pinned_session(
+        &self,
+        base_url: &str,
+        access_token: &str,
+        email: &str,
+    ) -> bool {
+        let Some(pinned) = self.pinned_connect_session() else {
+            return false;
+        };
+        let mut client = pinned.client.clone();
+        client.base_url = base_url.to_string();
+        client.set_token(access_token);
+        crate::app::connect_session::same_session(
+            &pinned,
+            &crate::app::connect_session::ConnectSession {
+                client,
+                account: email.to_string(),
+            },
+        )
+    }
+
+    /// The tokens a Connect-served Cube's pipeline runs on: its client's
+    /// access token and the refresh token saved with it at open. `None` on
+    /// every other Cube, and before the session is saved.
+    fn pinned_tokens(&self) -> Option<crate::services::connect::client::auth::AccessTokenResponse> {
+        let pinned = self.pinned_connect_session()?;
+        let ServedSession::Saved { refresh_token, .. } = &self.served_session else {
+            return None;
+        };
+        let access_token = pinned.client.token().filter(|t| !t.trim().is_empty())?;
+        Some(
+            crate::services::connect::client::auth::AccessTokenResponse {
+                access_token: access_token.to_string(),
+                refresh_token: refresh_token.clone(),
+                expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
+            },
+        )
+    }
+
+    /// Save a Connect-served Bitcoin Blake2b Cube's session to its chain
+    /// folder, once its admitted panel has reached its dashboard and the
+    /// account email is known (Desktop plan PR 3). A Bitcoin Cube gets its
+    /// `connect.json` from an in-Cube sign-in; this Cube has none, and its
+    /// admitted panel must not be sent the login messages (it answers an
+    /// accepted commit by revoking its client, which closes the Cube). So the
+    /// App writes the session with the guarded writer a keyring restore uses
+    /// and then runs the login completion itself. Does nothing on any other
+    /// Cube, or once the session is saving or saved.
+    pub(super) fn save_served_session(&mut self) -> Task<Message> {
+        if !self.runs_on_opening_session() || self.served_session != ServedSession::NotSaved {
+            return Task::none();
+        }
+        let Some(client) = self.fork_connect_client.as_ref() else {
+            return Task::none();
+        };
+        let account = &self.panels.connect.account;
+        let Some(token) = client.token().filter(|t| !t.trim().is_empty()) else {
+            return Task::none();
+        };
+        let Some(email) = account
+            .user
+            .as_ref()
+            .map(|user| user.email.clone())
+            .filter(|email| !email.is_empty())
+        else {
+            return Task::none();
+        };
+        // The panel must still hold the Cube's own client: a panel that lost
+        // it is being torn down, and nothing is written for it.
+        if !account.is_authenticated()
+            || account.client.token() != Some(token)
+            || account.client.base_url != client.base_url
+        {
+            return Task::none();
+        }
+        let saved_refresh = account.saved_refresh_token_for(token);
+        // A local Cube is not pinned and later Cubes of the account restore
+        // this file, so it writes only a whole session, as a Bitcoin sign-in
+        // commit does. Without the saved sign-in's refresh token it writes
+        // nothing and signs in through the Bitcoin path once its opening
+        // session ends.
+        if !self.cache.connect_served && saved_refresh.is_none() {
+            return Task::none();
+        }
+        let tokens = crate::services::connect::client::auth::AccessTokenResponse {
+            access_token: token.to_string(),
+            // The saved sign-in's refresh token only when it is this same
+            // session. A Connect-served Cube never refreshes, and the gRPC
+            // interceptor and the stream send the access token only, so an
+            // empty one is never sent anywhere.
+            refresh_token: saved_refresh.unwrap_or_default(),
+            expires_at: chrono::Utc::now().timestamp() + 30 * 24 * 60 * 60,
+        };
+        let epoch = account.auth_epoch();
+        // The App's own data directory: the save never depends on a cache
+        // field being bound to it.
+        let network_dir = self.datadir.network_directory(self.cache.chain());
+        // The entry records the host that issued this session, so its token,
+        // device id and cursor are only ever used with that host.
+        let issuer = crate::services::connect::client::cache::issuing_api(
+            &client.base_url,
+            &crate::services::coincube_api_base_url(),
+        );
+        self.served_session = ServedSession::Saving;
+        let starting = self.set_signer_pipeline_start(cache::SignerPipelineStart::Starting);
+        let save = Task::perform(
+            async move {
+                use crate::services::connect::client::cache::{
+                    persist_served_tokens, ConnectCache, ConnectCacheError,
+                };
+                let saved = async {
+                    tokio::fs::create_dir_all(network_dir.path())
+                        .await
+                        .map_err(|e| ConnectCacheError::WritingFile(e.to_string()))?;
+                    // A fresh snapshot: the guard refuses only a change made
+                    // between this read and the locked write, or a file it
+                    // cannot parse. It replaces a different token already
+                    // stored for the account and makes the account active,
+                    // without clearing a live re-registration claim or its
+                    // device id (a new login would), unless that entry was
+                    // issued by another host.
+                    let snapshot = match ConnectCache::from_file(&network_dir) {
+                        Ok(snapshot) => snapshot,
+                        Err(ConnectCacheError::NotFound) => ConnectCache::default(),
+                        Err(e) => return Err(e),
+                    };
+                    persist_served_tokens(
+                        &network_dir,
+                        &email,
+                        &tokens,
+                        &snapshot,
+                        issuer.as_deref(),
+                    )
+                    .await
+                }
+                .await;
+                if let Err(e) = &saved {
+                    tracing::warn!("Couldn't save this Cube's Connect session: {e}");
+                }
+                Message::ConnectServedSessionSaved {
+                    email,
+                    tokens,
+                    epoch,
+                    saved: saved.is_ok(),
+                }
+            },
+            |message| message,
+        );
+        Task::batch([starting, save])
+    }
+
+    /// The save started by [`Self::save_served_session`] settled. Saved, the
+    /// Cube runs the login completion a Bitcoin Cube runs after its in-Cube
+    /// sign-in: it registers the signer device and brings the stream up.
+    /// Refused, the signer list says Mobile signing could not start and
+    /// offers to try again; the Cube is otherwise unaffected.
+    pub(super) fn connect_served_session_saved(
+        &mut self,
+        email: String,
+        tokens: crate::services::connect::client::auth::AccessTokenResponse,
+        epoch: u64,
+        saved: bool,
+    ) -> Task<Message> {
+        // A teardown since the write started leaves nothing to continue.
+        if self.served_session != ServedSession::Saving
+            || self.fork_connect_client.as_ref().and_then(|c| c.token())
+                != Some(tokens.access_token.as_str())
+        {
+            return Task::none();
+        }
+        if !saved {
+            self.served_session = ServedSession::Failed;
+            return self.set_signer_pipeline_start(cache::SignerPipelineStart::Failed);
+        }
+        self.served_session = ServedSession::Saved {
+            email: email.clone(),
+            refresh_token: tokens.refresh_token.clone(),
+        };
+        self.connect_login_completed(tokens.access_token, tokens.refresh_token, email, epoch)
+    }
+
+    /// A Connect-served Cube's session ended on the server. Its backend is
+    /// bound to that session (I3), so it is not retried: the fork teardown
+    /// runs, and the Cube asks to be reopened. A Cube promoted to its managed
+    /// node loses its Connect services only and keeps its node. Pending
+    /// signing requests are cancelled first, best effort: the ended session
+    /// may refuse the cancel too, and the server lets them expire.
+    fn end_served_session(&mut self, reason: String) -> Task<Message> {
+        log::warn!("[CONNECT GRPC] This Cube's Connect session ended: {reason}");
+        let cancel = match (self.daemon.clone(), self.panels.current_mut()) {
+            (daemon, Some(panel)) => panel.update(
+                daemon,
+                &self.cache,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::CancelKeychainSign,
+                )),
+            ),
+            _ => Task::none(),
+        };
+        if self.requires_connect() {
+            self.invalidate_fork_session();
+        } else {
+            // It keeps the reopen notice (`revoke_local_connect_services`).
+            self.revoke_local_connect_services();
+        }
+        cancel
+    }
+}
+
+#[cfg(test)]
+mod chain_scope_tests {
+    use crate::app::settings::network_to_api_string;
+    use crate::chain::ChainId;
+    use crate::dir::CoincubeDirectory;
+
+    /// The signer pipeline resolves its Connect folder and the network name
+    /// it sends from the Cube's `ChainId`. On every chain that pre-dates the
+    /// fork that is exactly what the `bitcoin::Network` it used to carry
+    /// gave, so existing installs keep their folder, their `connect.json`
+    /// and their registration.
+    #[test]
+    fn a_bitcoin_family_cube_keeps_its_connect_folder_and_network_name() {
+        let root = CoincubeDirectory::new(std::path::PathBuf::from("/coincube"));
+        for chain in ChainId::ALL.iter().copied().filter(|c| !c.is_blake2b()) {
+            let network = chain.bitcoin_network();
+            assert_eq!(
+                root.network_directory(chain).path(),
+                root.network_directory(network).path(),
+                "{chain:?}"
+            );
+            assert_eq!(
+                network_to_api_string(chain),
+                network_to_api_string(network),
+                "{chain:?}"
+            );
+        }
+    }
+
+    /// A `bitcoin::Network` cannot tell Bitcoin Blake2b from Bitcoin: carried
+    /// through the pipeline it would point a Bitcoin Blake2b Cube at the
+    /// Bitcoin folder and register it as `mainnet`.
+    #[test]
+    fn a_bitcoin_blake2b_cube_gets_its_own_connect_folder_and_network_name() {
+        let root = CoincubeDirectory::new(std::path::PathBuf::from("/coincube"));
+        for (chain, dir, name) in [
+            (
+                ChainId::BitcoinBlake2b,
+                "bitcoin-blake2b",
+                "bitcoin-blake2b",
+            ),
+            (
+                ChainId::BitcoinBlake2bTestnet4,
+                "bitcoin-blake2b-testnet4",
+                "bitcoin-blake2b-testnet4",
+            ),
+        ] {
+            assert_eq!(
+                root.network_directory(chain).path(),
+                root.path().join(dir),
+                "{chain:?}"
+            );
+            assert_eq!(network_to_api_string(chain), name, "{chain:?}");
+
+            let lossy = chain.bitcoin_network();
+            assert_ne!(
+                root.network_directory(lossy).path(),
+                root.network_directory(chain).path()
+            );
+            assert_ne!(network_to_api_string(lossy), name);
+        }
+    }
+
+    /// A tripwire for three files, not a proof: the pipeline's own files must
+    /// not go back to the lossy network. It matches the accessor written on
+    /// one line, so a reformatted or aliased read slips past it, and it does
+    /// not cover `app/mod.rs` or `gui/tab.rs`, which have legitimate uses of
+    /// the lossy network (the duress check in `gui/tab.rs` among them, left
+    /// on it deliberately so a Bitcoin sign-in keeps confirming a clear).
+    /// `a_fork_cube_snapshots_the_connect_cache_of_its_own_chain_folder` in
+    /// `app/mod.rs` covers a call site there.
+    #[test]
+    fn the_signer_pipeline_never_reads_the_lossy_cache_network() {
+        for (file, source) in [
+            ("app/connect_stream.rs", include_str!("connect_stream.rs")),
+            ("app/connect_auth.rs", include_str!("connect_auth.rs")),
+            (
+                "app/state/settings/connections.rs",
+                include_str!("state/settings/connections.rs"),
+            ),
+        ] {
+            // Built at run time so this test's own text is not a match.
+            let lossy = ["cache", "network"].join(".");
+            for (number, line) in source.lines().enumerate() {
+                assert!(
+                    !line.contains(&lossy),
+                    "{file}:{} reads the lossy network: {}",
+                    number + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_duress_tests {
+    use crate::services::coincube::User;
+    use crate::services::duress::clear_check::tests::{crate_dir_entries, write_lock, TempRoot};
+    use crate::services::duress::DuressLocalState;
+
+    fn signed_in_app(root: &TempRoot) -> super::App {
+        let mut app = crate::app::shell_tests::bitcoin_app_with_id(&root.0, "remote-duress");
+        app.connect_email = Some("b@example.com".into());
+        app.panels.connect.account.user = Some(User {
+            id: 7,
+            email: "b@example.com".into(),
+            email_verified: Some(true),
+            display_name: None,
+        });
+        app
+    }
+
+    fn run(task: iced::Task<super::Message>) {
+        use iced::futures::StreamExt;
+        if let Some(stream) = iced_runtime::task::into_stream(task) {
+            drop(iced::futures::executor::block_on(
+                stream.collect::<Vec<_>>(),
+            ));
+        }
+    }
+
+    fn persist_remote_lock(app: &super::App) {
+        run(app.handle_connect_duress_activated(None, "remote".into()));
+    }
+
+    /// Account 3 enrolled duress on this computer and is not locked.
+    fn enrolled_as_3(root: &TempRoot) {
+        write_lock(&root.0, Some("3"));
+        let mut state = DuressLocalState::load(&root.0).unwrap();
+        state.active = false;
+        state.enrolled = true;
+        state.save(&root.0).unwrap();
+    }
+
+    #[test]
+    fn a_remote_lock_records_the_account_whose_stream_delivered_it() {
+        let before = crate_dir_entries();
+        let root = TempRoot::new("remote-lock-account");
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(
+            state.account_id, None,
+            "the enrolment's identity is untouched"
+        );
+        assert_eq!(state.lock_account(), Some("7"));
+        drop(app);
+        assert_eq!(crate_dir_entries(), before);
+    }
+
+    #[test]
+    fn a_remote_lock_by_another_account_leaves_the_enrolment_on_its_own_account() {
+        let root = TempRoot::new("remote-lock-enrolled");
+        enrolled_as_3(&root);
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+        assert_eq!(state.lock_account(), Some("7"));
+
+        // The remote-disable reconcile still acts on the enrolling account,
+        // and not on the account that raised the lock.
+        let disarm = |account: &str| {
+            iced::futures::executor::block_on(crate::app::reconcile_duress_disarm(
+                root.dir(),
+                account.to_string(),
+            ))
+            .unwrap()
+        };
+        assert!(!disarm("7"));
+        assert_eq!(
+            DuressLocalState::load(&root.0)
+                .unwrap()
+                .account_id
+                .as_deref(),
+            Some("3")
+        );
+        assert!(disarm("3"));
+    }
+
+    #[test]
+    fn a_panel_user_that_is_not_the_streams_account_is_not_recorded() {
+        let root = TempRoot::new("remote-lock-mismatch");
+        let mut app = signed_in_app(&root);
+        app.connect_email = Some("someone-else@example.com".into());
+        persist_remote_lock(&app);
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(state.active);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.lock_account(), None);
+    }
+
+    #[test]
+    fn before_the_panel_loads_its_user_the_keyring_names_the_streams_account() {
+        let save = |id: u32, email: &str| {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "requires_2fa": false, "token": "synthetic", "refresh_token": "synthetic-refresh",
+                "user": {"id": id, "email": email},
+            }))
+            .unwrap();
+            crate::app::state::connect::write_connect_secret(
+                crate::app::state::connect::CONNECT_KEYRING_USER,
+                &bytes,
+            )
+            .unwrap();
+        };
+        let root = TempRoot::new("remote-lock-keyring");
+        let mut app = signed_in_app(&root);
+        app.panels.connect.account.user = None;
+        save(5, "someone-else@example.com");
+        assert_eq!(app.duress_activating_account(), None);
+        save(7, "b@example.com");
+        assert_eq!(app.duress_activating_account().as_deref(), Some("7"));
+        persist_remote_lock(&app);
+        crate::app::state::connect::delete_connect_secret(
+            crate::app::state::connect::CONNECT_KEYRING_USER,
+        );
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert_eq!(state.locked_by_account_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn a_remote_clear_forgets_the_account_that_raised_the_lock() {
+        let root = TempRoot::new("remote-lock-cleared");
+        enrolled_as_3(&root);
+        let app = signed_in_app(&root);
+        persist_remote_lock(&app);
+        run(app.handle_connect_duress_cleared());
+        let state = DuressLocalState::load(&root.0).unwrap();
+        assert!(!state.active);
+        assert_eq!(state.locked_by_account_id, None);
+        assert_eq!(state.account_id.as_deref(), Some("3"));
     }
 }

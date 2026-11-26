@@ -20,9 +20,15 @@ pub enum ConnectStreamMessage {
     Connected,
     SessionEvent(connect_v1::SessionEvent),
     Disconnected(String),
-    /// An error Connect reported inside a running stream, or an expired
-    /// sign-in. The stream keeps running or reconnects.
+    /// An error Connect reported inside a running stream. The stream keeps
+    /// running.
     Error(String),
+    /// Connect refused the stream's bearer: the session it runs on has ended.
+    /// Typed, where it used to be an [`Self::Error`] string, so a consumer
+    /// can tell an ended session from an in-stream error. The stream itself
+    /// still retries with backoff; what to do about the session is the
+    /// consumer's decision.
+    SessionEnded(String),
     /// Live updates stopped for a reason that isn't about this device: no
     /// network, or Connect not answering. The stream retries with backoff.
     Trouble(trouble::Trouble),

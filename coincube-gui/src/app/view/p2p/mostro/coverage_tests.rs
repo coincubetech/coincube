@@ -111,6 +111,52 @@ fn chat_and_acknowledgements_do_not_replace_trade_status() {
 }
 
 #[test]
+fn saved_wire_status_restores_buyer_invoice_view_without_a_relay_order() {
+    let mut saved = session();
+    saved
+        .messages
+        .push(message(10, "waiting-buyer-invoice", None));
+    let restored = trade_from_session(&saved);
+    assert_eq!(restored.status, TradeStatus::WaitingBuyerInvoice);
+    assert_eq!(
+        restored.last_dm_action.as_deref(),
+        Some("WaitingBuyerInvoice")
+    );
+    assert!(restored.countdown_start_ts.is_none());
+    assert_eq!(saved.messages[0].action, "waiting-buyer-invoice");
+}
+
+#[test]
+fn chat_dispatch_rejects_a_changed_recipient_from_reloaded_trade() {
+    let mut saved = session();
+    let original = Keys::generate().public_key();
+    let changed = Keys::generate().public_key();
+    let original_hex = original.to_hex();
+    let changed_hex = changed.to_hex();
+    saved.counterparty_trade_pubkey = Some(changed_hex.clone());
+    saved.admin_trade_pubkey = Some(original_hex.clone());
+    let reloaded: TradeSession =
+        serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+
+    assert_eq!(
+        chat_recipient(&reloaded, ChatTarget::Peer, Some(&original_hex)).unwrap_err(),
+        CHAT_RECIPIENT_CHANGED
+    );
+    assert_eq!(
+        chat_recipient(&reloaded, ChatTarget::Admin, Some(&changed_hex)).unwrap_err(),
+        CHAT_RECIPIENT_CHANGED
+    );
+    assert_eq!(
+        chat_recipient(&reloaded, ChatTarget::Peer, Some(&changed_hex)).unwrap(),
+        (changed, "chat")
+    );
+    assert_eq!(
+        chat_recipient(&reloaded, ChatTarget::Admin, Some(&original_hex)).unwrap(),
+        (original, "dispute chat")
+    );
+}
+
+#[test]
 fn hold_invoice_uses_latest_valid_payment_payload_only() {
     let mut s = session();
     for action in ["PayInvoice", "WaitingSellerToPay", "BuyerTookOrder"] {
@@ -570,4 +616,74 @@ fn chat_identity_derivation_is_symmetric_and_invalid_indices_fail() {
     );
     assert!(shared_chat_hex(&alice, Some("not-hex")).is_none());
     assert!(shared_chat_hex(&alice, None).is_none());
+}
+
+#[test]
+fn restored_status_maps_every_wire_status_like_the_relay_status() {
+    // Every kebab-case status the restore response can carry must map to the
+    // same TradeStatus once stored as a session action as it does when it
+    // arrives as a live order status.
+    for wire in [
+        "active",
+        "canceled",
+        "canceled-by-admin",
+        "settled-by-admin",
+        "completed-by-admin",
+        "dispute",
+        "expired",
+        "fiat-sent",
+        "settled-hold-invoice",
+        "pending",
+        "success",
+        "waiting-buyer-invoice",
+        "waiting-payment",
+        "cooperatively-canceled",
+        "in-progress",
+    ] {
+        let status: Status = wire.parse().unwrap();
+        let action = restored_status_action(wire);
+        assert_eq!(
+            dm_action_to_status(&action),
+            Some(map_trade_status(&status)),
+            "{wire} -> {action}"
+        );
+    }
+    // The invoice form keys off the `WaitingBuyerInvoice` action name.
+    assert_eq!(
+        restored_status_action("waiting-buyer-invoice"),
+        "WaitingBuyerInvoice"
+    );
+    // Unknown values are kept verbatim.
+    assert_eq!(restored_status_action("mystery"), "mystery");
+}
+
+#[test]
+fn restored_session_kind_stores_the_users_own_side() {
+    use mostro_core::order::Kind;
+    assert_eq!(restored_session_kind(Some(&Kind::Sell), "taker"), "buy");
+    assert_eq!(restored_session_kind(Some(&Kind::Buy), "taker"), "sell");
+    assert_eq!(restored_session_kind(Some(&Kind::Sell), "creator"), "sell");
+    assert_eq!(restored_session_kind(Some(&Kind::Buy), "creator"), "buy");
+    assert_eq!(restored_session_kind(Some(&Kind::Buy), "unknown"), "buy");
+    assert_eq!(restored_session_kind(None, "taker"), "unknown");
+}
+
+#[test]
+fn chat_history_keeps_only_chat_messages_of_trades_that_have_them() {
+    let mut with_chat = session();
+    with_chat.messages = vec![
+        message(1, "PayInvoice", None),
+        message(2, "SendDm", None),
+        message(3, "AdminDm", None),
+    ];
+    let mut without_chat = session();
+    without_chat.order_id = "00000000-0000-4000-8000-000000000002".into();
+    without_chat.messages = vec![message(1, "FiatSent", None)];
+    let history = chat_history_from_sessions(&[with_chat.clone(), without_chat]);
+    assert_eq!(history.len(), 1);
+    let chats = &history[&with_chat.order_id];
+    assert_eq!(
+        chats.iter().map(|m| m.action.as_str()).collect::<Vec<_>>(),
+        ["SendDm", "AdminDm"]
+    );
 }

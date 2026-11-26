@@ -37,6 +37,29 @@ pub fn get_or_create_device_fingerprint() -> String {
     fingerprint
 }
 
+/// The name this computer registers under as a Connect signer device for a
+/// Cube on `chain`.
+///
+/// A Bitcoin Blake2b Cube registers its own signer device, with the transport
+/// key of its own chain folder, so one computer has a second device row on the
+/// server. The chain is appended there so the two can be told apart. On every
+/// other chain this is [`device_label`], unchanged: the first registration
+/// names a device for good, so the name must not move for existing installs.
+///
+/// The suffix is the chain's user-facing `ChainIdExt::label`, so that label is
+/// also sent to Connect and stored there. Rewording it changes the name a new
+/// Bitcoin Blake2b registration uses; devices already registered keep theirs.
+pub fn signer_device_label(chain: crate::chain::ChainId) -> String {
+    use crate::chain::ChainIdExt;
+
+    let label = device_label();
+    if chain.is_blake2b() {
+        format!("{label} · {}", chain.label())
+    } else {
+        label
+    }
+}
+
 pub fn device_label() -> String {
     let host = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -84,5 +107,33 @@ mod tests {
         // not which test's value won.
         assert!(!super::get_or_create_device_fingerprint().is_empty());
         assert!(path.is_file(), "{:?}", path);
+    }
+
+    /// The first registration names a signer device for good, so the name a
+    /// Bitcoin-family Cube registers under must not move. Only a Bitcoin
+    /// Blake2b Cube, which registers a device of its own, says its chain.
+    #[test]
+    fn signer_device_label_names_the_chain_only_on_bitcoin_blake2b() {
+        use crate::chain::ChainId;
+
+        let plain = super::device_label();
+        for chain in ChainId::ALL {
+            let label = super::signer_device_label(chain);
+            if chain.is_blake2b() {
+                // The literal, not `chain.label()`: this string is sent to
+                // Connect, so a change to it should be seen here.
+                let suffix = match chain {
+                    ChainId::BitcoinBlake2b => " · Bitcoin Blake2b",
+                    _ => " · Bitcoin Blake2b Testnet4",
+                };
+                assert_eq!(label, format!("{}{}", plain, suffix));
+            } else {
+                assert_eq!(label, plain, "{chain:?}");
+            }
+        }
+        assert_ne!(
+            super::signer_device_label(ChainId::BitcoinBlake2b),
+            super::signer_device_label(ChainId::BitcoinBlake2bTestnet4),
+        );
     }
 }

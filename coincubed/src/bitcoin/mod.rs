@@ -5,10 +5,11 @@
 pub mod d;
 pub mod electrum;
 pub mod esplora;
+pub mod maturity;
 pub mod poller;
 
 use crate::bitcoin::d::{BitcoindError, CachedTxGetter, LSBlockEntry};
-use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 pub use d::{MempoolEntry, MempoolEntryFees, SyncProgress};
 
 use std::{collections::HashMap, fmt, net, sync};
@@ -18,7 +19,9 @@ use miniscript::bitcoin::{self, address, bip32::ChildNumber};
 // A spent coin's outpoint together with its spend transaction's txid, height and time.
 type SpentCoin = (bitcoin::OutPoint, bitcoin::Txid, i32, u32);
 
-const COINBASE_MATURITY: i32 = 100;
+// Bitcoin's 100 blocks: the floor every chain shares. Backends filter on it;
+// the poller then applies the chain's own rule (`maturity::coinbase_is_mature`).
+use maturity::COINBASE_MATURITY;
 
 /// Information about a block
 #[derive(Debug, Clone, Eq, PartialEq, Copy)]
@@ -115,6 +118,43 @@ impl SyncProgressCache {
             self.headers.load(Relaxed),
             self.blocks.load(Relaxed),
         )
+    }
+}
+
+/// A best block and its header time, as the poller last read them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TipWithTime {
+    pub tip: BlockChainTip,
+    pub time: u32,
+}
+
+/// The chain tip and its header time, published by the poller so a new spend's
+/// anti-fee-sniping locktime can be set without taking the `BitcoinInterface`
+/// mutex (same rationale as [`SyncProgressCache`]).
+///
+/// Every spend draft needs this. Over Esplora the poller holds that mutex for a
+/// whole wallet sync, a long series of HTTP requests, so reading the tip through
+/// the backend left the Send form at "Calculating…" until the sync ended. The
+/// cached tip can trail the real one by a poll. That only makes the locktime a
+/// little lower, which is still valid.
+#[derive(Debug, Default)]
+pub struct TipTimeCache {
+    latest: sync::Mutex<Option<TipWithTime>>,
+}
+
+impl TipTimeCache {
+    pub fn store(&self, latest: TipWithTime) {
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(latest);
+    }
+
+    /// `None` until the poller has published a tip.
+    pub fn load(&self) -> Option<TipWithTime> {
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Forget the published tip, so spends stop using it.
+    pub fn clear(&self) {
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -585,7 +625,38 @@ impl WalletRecordReplay {
     }
 }
 
+/// Broadcasts a transaction without the [`BitcoinInterface`] it came from.
+/// See [`BitcoinInterface::detached_broadcaster`].
+pub type DetachedBroadcaster =
+    sync::Arc<dyn Fn(&bitcoin::Transaction) -> Result<(), String> + Send + Sync>;
+
 pub trait BitcoinInterface: Send {
+    /// For an imported wallet on a Bitcoin Core/Knots backend, the furthest
+    /// derivation range end of either branch on the node. Outputs the node
+    /// reports can belong to any index up to here, on either branch, so mapping
+    /// them must look this far.
+    fn imported_range_end(&self) -> Option<u32> {
+        None
+    }
+    /// Re-read the imported range from the node before mapping its outputs.
+    /// Only a Bitcoin Core/Knots backend has one; see [`Self::imported_range_end`].
+    fn refresh_imported_range(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Keep an imported wallet's imported range ahead of its allocated indices.
+    /// Only a Bitcoin Core/Knots backend has a range to keep; Core does not top
+    /// up inactive descriptors itself.
+    fn keep_imported_range_ahead(
+        &mut self,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        _highest_index: u32,
+        _discovery_target: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         Err("Wallet record replay requires a regular Bitcoin Core/Knots backend".into())
     }
@@ -656,6 +727,15 @@ pub trait BitcoinInterface: Send {
 
     /// Get the timestamp set in the best block's header.
     fn tip_time(&self) -> Option<u32>;
+
+    /// The header time of `tip`, for the poller. Like [`Self::try_chain_tip`] it
+    /// must not use an interactive retry budget: the poller holds the backend
+    /// mutex while it waits. The default asks for the best block's time, which
+    /// is the tip's or a later block's, so a locktime from it can only be lower.
+    fn try_tip_time(&self, _tip: &BlockChainTip) -> Result<u32, String> {
+        self.tip_time()
+            .ok_or_else(|| "The backend did not report the tip's time".to_string())
+    }
 
     /// Check whether this former tip is part of the current best chain.
     fn is_in_chain(&self, tip: &BlockChainTip) -> bool;
@@ -783,6 +863,21 @@ pub trait BitcoinInterface: Send {
     /// Broadcast this transaction to the Bitcoin P2P network
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), String>;
 
+    /// A handle that broadcasts exactly like [`Self::broadcast_tx`] but owns
+    /// what it needs, so it can be called without holding this interface.
+    ///
+    /// The daemon shares one interface behind a mutex, and the poller holds
+    /// that mutex for a whole wallet sync. A broadcast sent through the mutex
+    /// therefore waits for the sync in flight, which on a remote backend with
+    /// many addresses is minutes. The daemon takes this handle once at startup
+    /// and broadcasts through it instead.
+    ///
+    /// `None` (the default) for a backend with nothing to share safely; its
+    /// broadcasts keep going through [`Self::broadcast_tx`].
+    fn detached_broadcaster(&self) -> Option<DetachedBroadcaster> {
+        None
+    }
+
     /// Request that the next [`Self::sync_wallet`] call bypass any
     /// short-circuit optimisations (e.g. the smart-poll tip-guard
     /// on the Esplora backend) and do a full sync against the
@@ -800,11 +895,7 @@ pub trait BitcoinInterface: Send {
 
     /// Trigger a rescan of the block chain for transactions related to this descriptor since
     /// the given date.
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String>;
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String>;
 
     /// Rescan progress percentage. Between 0 and 1.
     fn rescan_progress(&self) -> Option<f64>;
@@ -927,6 +1018,31 @@ fn legacy_confirmed_conflicting_spender(
 }
 
 impl BitcoinInterface for d::BitcoinD {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range.map(|range| range.watched)
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.refresh_imported_range((receive, change))
+            .map_err(|e| e.to_string())
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        let [receive, change] = descs else {
+            return Err("An imported wallet has exactly two branch descriptors".into());
+        };
+        self.widen_imported_range((receive, change), highest_index, discovery_target)
+            .map_err(|e| e.to_string())
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         if self.local_fork_chain.is_some() {
             return Err("Wallet record replay is available for regular Bitcoin only".into());
@@ -1118,6 +1234,10 @@ impl BitcoinInterface for d::BitcoinD {
 
     fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
         self.chain_tip_result().map_err(|e| e.to_string())
+    }
+
+    fn try_tip_time(&self, tip: &BlockChainTip) -> Result<u32, String> {
+        self.try_block_time(&tip.hash)
     }
 
     fn try_sync_progress(&self) -> Result<SyncProgress, String> {
@@ -1324,11 +1444,7 @@ impl BitcoinInterface for d::BitcoinD {
         }
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         // FIXME: in theory i think this could potentially fail to actually start the rescan.
         self.start_rescan(desc, timestamp)
             .map_err(|e| e.to_string())
@@ -1645,11 +1761,7 @@ impl BitcoinInterface for electrum::Electrum {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -1768,6 +1880,15 @@ impl BitcoinInterface for esplora::Esplora {
         self.client().broadcast_tx(tx).map_err(|e| e.to_string())
     }
 
+    fn detached_broadcaster(&self) -> Option<DetachedBroadcaster> {
+        // The same client, so the same provider order, cooldowns and admission
+        // checks as `broadcast_tx`: only the interface mutex is left out.
+        let client = self.shared_client();
+        Some(sync::Arc::new(move |tx| {
+            client.broadcast_tx(tx).map_err(|e| e.to_string())
+        }))
+    }
+
     fn wallet_transaction(
         &self,
         txid: &bitcoin::Txid,
@@ -1794,11 +1915,7 @@ impl BitcoinInterface for esplora::Esplora {
         SyncProgress::new(1.0, blocks, blocks)
     }
 
-    fn start_rescan(
-        &mut self,
-        _desc: &descriptors::CoincubeDescriptor,
-        _timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, _desc: &WalletDescriptor, _timestamp: u32) -> Result<(), String> {
         self.trigger_rescan();
         Ok(())
     }
@@ -1823,6 +1940,25 @@ impl BitcoinInterface for esplora::Esplora {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.lock().unwrap().imported_range_end()
+    }
+    fn refresh_imported_range(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        self.lock().unwrap().refresh_imported_range(descs)
+    }
+    fn keep_imported_range_ahead(
+        &mut self,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        highest_index: u32,
+        discovery_target: u32,
+    ) -> Result<(), String> {
+        self.lock()
+            .unwrap()
+            .keep_imported_range_ahead(descs, highest_index, discovery_target)
+    }
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         self.lock().unwrap().request_wallet_record_replay()
     }
@@ -1980,15 +2116,15 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().broadcast_tx(tx)
     }
 
+    fn detached_broadcaster(&self) -> Option<DetachedBroadcaster> {
+        self.lock().unwrap().detached_broadcaster()
+    }
+
     fn request_eager_sync(&mut self) {
         self.lock().unwrap().request_eager_sync();
     }
 
-    fn start_rescan(
-        &mut self,
-        desc: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn start_rescan(&mut self, desc: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.lock().unwrap().start_rescan(desc, timestamp)
     }
 
@@ -2006,6 +2142,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn tip_time(&self) -> Option<u32> {
         self.lock().unwrap().tip_time()
+    }
+
+    fn try_tip_time(&self, tip: &BlockChainTip) -> Result<u32, String> {
+        self.lock().unwrap().try_tip_time(tip)
     }
 
     fn wallet_transaction(

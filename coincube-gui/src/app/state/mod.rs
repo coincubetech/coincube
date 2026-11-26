@@ -3,7 +3,6 @@ pub mod buysell;
 pub mod connect;
 mod global_home;
 pub mod imported_bitcoin;
-pub mod liquid;
 pub mod preferences;
 pub mod settings;
 pub mod spark;
@@ -29,12 +28,6 @@ pub use global_home::GlobalHome;
 pub(crate) use global_home::{
     default_transfer_direction, effective_transfer_max_sat, effective_transfer_min_sat,
 };
-pub use liquid::overview::LiquidOverview;
-pub use liquid::receive::LiquidReceive;
-pub use liquid::send::LiquidSend;
-pub use liquid::settings::LiquidSettings;
-pub use liquid::swap::LiquidSwap;
-pub use liquid::transactions::LiquidTransactions;
 pub use spark::{SparkOverview, SparkReceive, SparkSend, SparkSettings, SparkTransactions};
 pub use vault::coins::CoinsPanel;
 pub use vault::label::LabelsEdited;
@@ -89,6 +82,14 @@ pub fn redirect(menu: Menu) -> Task<Message> {
     Task::done(Message::View(view::Message::Menu(menu)))
 }
 
+/// Open Cube › Activity filtered to `wallet`. Activity is the one full
+/// history list; a wallet's "History" shortcut lands there.
+pub fn view_all_activity(wallet: view::activity::WalletFilter) -> Task<Message> {
+    Task::done(Message::View(view::Message::Activity(
+        view::activity::ActivityMessage::ViewAll(wallet),
+    )))
+}
+
 /// Returns the confirmed and unconfirmed balances from `coins`, as well
 /// as:
 /// - the `OutPoint`s of those coins, if any, for which the current
@@ -109,32 +110,26 @@ pub fn coins_summary(
     let mut expiring_coins = Vec::new();
     let mut remaining_seq = None;
     for coin in coins {
-        if coin.spend_info.is_none() {
-            // Include unconfirmed coins from self in confirmed balance.
-            if coin_is_owned(coin) {
-                balance += coin.amount;
-                // Only consider confirmed coins for remaining seq
-                // (they would not be considered as expiring so we can also skip that part)
-                if coin.block_height.is_none() {
-                    continue;
-                }
-                if let Some(timelock) = timelock {
-                    let seq = remaining_sequence(coin, tip_height, timelock);
-                    // Only Vault coins have a recovery deadline.
-                    if seq <= timelock as u32 * 10 / 100 {
-                        expiring_coins.push(coin.outpoint);
-                    }
-                    if let Some(last) = &mut remaining_seq {
-                        if seq < *last {
-                            *last = seq
-                        }
-                    } else {
-                        remaining_seq = Some(seq);
-                    }
-                }
-            } else {
-                unconfirmed_balance += coin.amount;
+        if coin.spend_info.is_some() {
+            continue;
+        }
+        if !coin_is_owned(coin) {
+            unconfirmed_balance += coin.amount;
+            continue;
+        }
+
+        // Include unconfirmed coins from self in confirmed balance.
+        balance += coin.amount;
+        // Only confirmed coins can have a recovery deadline.
+        if coin.block_height.is_none() {
+            continue;
+        }
+        if let Some(timelock) = timelock {
+            let seq = remaining_sequence(coin, tip_height, timelock);
+            if seq <= timelock as u32 * 10 / 100 {
+                expiring_coins.push(coin.outpoint);
             }
+            remaining_seq = Some(remaining_seq.map_or(seq, |last: u32| last.min(seq)));
         }
     }
     (balance, unconfirmed_balance, expiring_coins, remaining_seq)

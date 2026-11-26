@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod display_name;
 pub(crate) mod imported_checkpoint;
 pub mod network_anchor;
 pub mod network_status;
@@ -190,6 +191,34 @@ impl std::fmt::Display for CoincubeError {
 
 impl std::error::Error for CoincubeError {}
 
+fn network_user_error(err: &reqwest::Error) -> crate::user_error::UserError {
+    use crate::user_error::*;
+
+    // The URL is already stripped (see `From<reqwest::Error>`), but
+    // the *kind* survives — which is the part worth telling the
+    // user apart, because the remedy differs.
+    let (title, guidance, reference) = if err.is_timeout() {
+        (
+            "Can't reach COINCUBE | Connect",
+            "The server took too long to respond. Check your internet connection and try again.",
+            CC_NET_TIMEOUT,
+        )
+    } else if err.is_connect() {
+        (
+            "No connection",
+            "You appear to be offline. Reconnect to the internet and try again.",
+            CC_NET_OFFLINE,
+        )
+    } else {
+        (
+            "Can't reach COINCUBE | Connect",
+            RETRY_GUIDANCE,
+            CC_NET_UNKNOWN,
+        )
+    };
+    UserError::logged(title, guidance, reference, true, err)
+}
+
 impl From<&CoincubeError> for crate::user_error::UserError {
     /// Turns a transport/API failure into copy a person can act on.
     ///
@@ -214,27 +243,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
         use crate::user_error::*;
 
         match e {
-            CoincubeError::Network(err) => {
-                // The URL is already stripped (see `From<reqwest::Error>`), but
-                // the *kind* survives — which is the part worth telling the
-                // user apart, because the remedy differs.
-                let (title, guidance, reference) = if err.is_timeout() {
-                    (
-                        "Can't reach COINCUBE | Connect",
-                        "The server took too long to respond. Check your internet connection and try again.",
-                        CC_NET_TIMEOUT,
-                    )
-                } else if err.is_connect() {
-                    (
-                        "No connection",
-                        "You appear to be offline. Reconnect to the internet and try again.",
-                        CC_NET_OFFLINE,
-                    )
-                } else {
-                    ("Can't reach COINCUBE | Connect", RETRY_GUIDANCE, CC_NET_UNKNOWN)
-                };
-                UserError::logged(title, guidance, reference, true, err)
-            }
+            CoincubeError::Network(err) => network_user_error(err),
 
             CoincubeError::Unsuccessful(info) => {
                 let status = info.status_code;
@@ -633,6 +642,40 @@ pub struct User {
     pub id: u32,
     pub email: String,
     pub email_verified: Option<bool>,
+    /// The name this person chose to be shown beside their email. `None` when
+    /// the server did not send the field (it predates display names);
+    /// `Some("")` when no name is set. A self-asserted label, never an
+    /// identity: show it through [`display_name::shown`], beside the email.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// `PUT /api/v1/user` body that changes only the display name. The API leaves
+/// the name alone when the field is absent and clears it when it is empty.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDisplayNameRequest<'a> {
+    pub display_name: &'a str,
+}
+
+/// The `source` this app reports when it asks for account deletion.
+pub const ACCOUNT_DELETION_SOURCE: &str = "desktop";
+
+/// `POST /api/v1/user/deletion-request` body.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountDeletionRequestBody<'a> {
+    pub source: &'a str,
+}
+
+/// A request to delete the COINCUBE account, as `GET`/`POST
+/// /api/v1/user/deletion-request` return it (plain JSON, no `data` envelope).
+/// An operator completes the deletion; until then `status` is `"pending"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDeletionRequest {
+    pub status: String,
+    /// RFC 3339, UTC.
+    pub requested_at: String,
+    pub source: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1112,22 +1155,6 @@ pub struct FeaturesResponse {
     /// `marketplace_enabled` is on. Fails closed (absent → off).
     #[serde(default, alias = "p2pEnabled", alias = "p2p_enabled")]
     pub p2p_enabled: Option<bool>,
-    /// Account-scoped grandfather flag for the Liquid wallet (sunset phase 1).
-    /// `Some(true)` means this account may create/see a Liquid wallet on a
-    /// fresh install; absent/`Some(false)` means it may not.
-    ///
-    /// **Only meaningful on an authenticated call.** `/connect/features` is
-    /// wrapped in *optional* JWT auth, so an anonymous request returns
-    /// `false` silently rather than erroring — there is no way to distinguish
-    /// "not granted" from "we forgot the bearer token". The desktop only ever
-    /// fetches features after `set_token` (see
-    /// `ConnectAccountPanel::post_login_tasks`), which is what makes this
-    /// readable at all.
-    ///
-    /// A `false` here never hides an *existing* Liquid wallet — see
-    /// [`crate::app::features::LiquidGate`], which OR's this with local state.
-    #[serde(default, alias = "liquidEnabled", alias = "liquid_enabled")]
-    pub liquid_enabled: Option<bool>,
     /// Per-user launch flag for the Duress Mode surface (`duressEnabled`).
     /// `Some(true)` means the server permits this account to see the duress
     /// enrollment/management UI; absent/`Some(false)` means it doesn't.
@@ -1136,8 +1163,9 @@ pub struct FeaturesResponse {
     /// unreachable API all read as *off*, so the public launch build ships
     /// duress dark and never surfaces the untested setup on a stale response.
     ///
-    /// The same authenticated-only caveat as `liquid_enabled` applies — the
-    /// desktop only fetches features after `set_token` (see
+    /// **Only meaningful on an authenticated call.** `/connect/features` is
+    /// wrapped in *optional* JWT auth, so an anonymous request returns `false`
+    /// silently. The desktop only fetches features after `set_token` (see
     /// `ConnectAccountPanel::post_login_tasks`), so this is only meaningful on
     /// a signed-in call.
     ///
@@ -1173,6 +1201,13 @@ pub struct FeaturesResponse {
         alias = "card_payments_enabled"
     )]
     pub card_payments_enabled: Option<bool>,
+    /// AI access (local MCP) is available to this account
+    /// (`aiAccessEnabled`, the Connect `ai_access` flag). Fails closed:
+    /// absent, unloaded or unreachable reads as off, so AI access stays
+    /// hidden and no local AI client is served. See
+    /// `ConnectAccountPanel::ai_access_server_enabled`.
+    #[serde(default, alias = "aiAccessEnabled", alias = "ai_access_enabled")]
+    pub ai_access_enabled: Option<bool>,
 }
 
 // ── Checkout / Billing ──────────────────────────────────────────────────────
@@ -1633,8 +1668,12 @@ pub struct CubeMember {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CubeMemberUser {
     pub email: String,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1775,6 +1814,68 @@ pub struct CubeKeyRaw {
     /// `#[serde(default)]` so a pre-annotation backend deserialises as before.
     #[serde(default)]
     pub recovery_role: String,
+    /// Whether this key's phone can sign Bitcoin Blake2b (`btcb2Signing`,
+    /// coincube-api#526). Connect sends it only on a Bitcoin Blake2b Cube and
+    /// omits it on every other Cube. Read it through
+    /// [`Self::btcb2_signing_refusal`], which applies the Cube's chain and
+    /// fails closed when the field is missing where it is expected.
+    #[serde(default, rename = "btcb2Signing")]
+    pub btcb2_signing: Option<Btcb2Signing>,
+}
+
+/// What Connect says about a key's phone on a Bitcoin Blake2b Cube: the same
+/// answer `ResolveSigners` gives at signing time for that key and device
+/// (coincube-api#526).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Btcb2Signing {
+    /// `can_sign`: the key's phone is registered to its owner and its
+    /// COINCUBE Mobile has Bitcoin Blake2b signing.
+    CanSign,
+    /// `cannot_sign`: the phone's COINCUBE Mobile is too old.
+    CannotSign,
+    /// `unavailable`: the phone was removed, or is now another account's.
+    Unavailable,
+    /// `unknown`: the key names no phone, so Connect cannot tell yet.
+    Unknown,
+    /// A value this build does not know. Treated as [`Self::Unknown`]: a newer
+    /// server's answer never makes a key addable.
+    Unrecognised(String),
+}
+
+impl Btcb2Signing {
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "can_sign" => Self::CanSign,
+            "cannot_sign" => Self::CannotSign,
+            "unavailable" => Self::Unavailable,
+            "unknown" => Self::Unknown,
+            other => Self::Unrecognised(other.to_string()),
+        }
+    }
+}
+
+/// Lenient: a value that is not a string becomes [`Btcb2Signing::Unrecognised`]
+/// rather than failing the whole key list, which Mobile signing and Vault
+/// reconcile read too. That one key then fails closed.
+impl<'de> Deserialize<'de> for Btcb2Signing {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(value) => Self::from_wire(&value),
+            other => Self::Unrecognised(other.to_string()),
+        })
+    }
+}
+
+/// Why a Mobile key cannot be added to a new Vault on a Bitcoin Blake2b Cube.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Btcb2SigningRefusal {
+    /// `cannot_sign`: COINCUBE Mobile on the phone needs updating.
+    AppOutdated,
+    /// `unavailable`: the phone is no longer registered.
+    PhoneUnregistered,
+    /// `unknown`, an unrecognised value, or no value at all (an API older
+    /// than coincube-api#526): the phone could not be confirmed.
+    PhoneUnconfirmed,
 }
 
 /// `recoveryRole` value marking a key as the Cube's owner-self recovery
@@ -1814,6 +1915,46 @@ impl CubeKeyRaw {
     /// be placed in a Vault until its owner re-shares it.
     pub fn is_envelope_invalid(&self) -> bool {
         self.status == KEY_STATUS_ENVELOPE_INVALID
+    }
+
+    /// Whether this key may be added to a new Vault on `chain`, as far as its
+    /// phone goes: `None` when it may, else why not.
+    ///
+    /// Off Bitcoin Blake2b the field is not consulted, so every Bitcoin key
+    /// stays as addable as before. On Bitcoin Blake2b only `can_sign` is
+    /// addable; everything else fails closed, including a missing field, which
+    /// means the server predates the field and cannot vouch for the phone.
+    pub fn btcb2_signing_refusal(
+        &self,
+        chain: crate::chain::ChainId,
+    ) -> Option<Btcb2SigningRefusal> {
+        if !chain.is_blake2b() {
+            return None;
+        }
+        match self.btcb2_signing {
+            Some(Btcb2Signing::CanSign) => None,
+            Some(Btcb2Signing::CannotSign) => Some(Btcb2SigningRefusal::AppOutdated),
+            Some(Btcb2Signing::Unavailable) => Some(Btcb2SigningRefusal::PhoneUnregistered),
+            Some(Btcb2Signing::Unknown) | Some(Btcb2Signing::Unrecognised(_)) | None => {
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed)
+            }
+        }
+    }
+
+    /// Whether this key is listed for a Cube on `chain`: the one chain filter
+    /// on the key list the Vault editor shares across chains.
+    ///
+    /// On Bitcoin Blake2b only a key on exactly this chain is listed (the
+    /// phone's Bitcoin Blake2b key). On a Bitcoin-family Cube a key on either
+    /// Bitcoin Blake2b chain is left out and every other key is listed as
+    /// before, so a Bitcoin network string this build does not parse is not
+    /// newly hidden.
+    pub fn listed_on_chain(&self, chain: crate::chain::ChainId) -> bool {
+        if chain.is_blake2b() {
+            self.network == chain.api_str()
+        } else {
+            !crate::chain::ChainId::from_api_str(&self.network).is_some_and(|c| c.is_blake2b())
+        }
     }
 }
 
@@ -2218,6 +2359,9 @@ pub struct ContactUser {
     /// `UserSummary`, not a full user); desktop was overly strict before.
     #[serde(default)]
     pub email_verified: Option<bool>,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// A contact row returned by `GET /api/v1/connect/contacts`.
@@ -2353,6 +2497,10 @@ pub struct Invite {
 pub struct ReceivedInvite {
     pub id: u64,
     pub owner_email: String,
+    /// The inviter's display name; see [`User::display_name`]. A label shown
+    /// beside `owner_email`, which stays the identity of who is inviting.
+    #[serde(default)]
+    pub owner_display_name: Option<String>,
     pub role: ContactRole,
     pub expires_at: String,
     pub created_at: String,
@@ -2506,6 +2654,9 @@ pub struct VaultMemberContactSummary {
 pub struct VaultMemberContactUserSummary {
     pub id: u64,
     pub email: String,
+    /// See [`User::display_name`]. A label shown beside `email`.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2521,7 +2672,44 @@ pub struct VaultMemberResponse {
     pub contact: Option<VaultMemberContactSummary>,
     #[serde(default)]
     pub key: Option<VaultMemberKeySummary>,
+    /// Which phones already hold a sealed role for this member's key, and the
+    /// hash of the key each was sealed to. Served to the Vault's owner only;
+    /// absent on a server without sealed roles. Never the role itself.
+    #[serde(default)]
+    pub sealed_roles: Vec<SealedRoleRef>,
     pub created_at: String,
+}
+
+/// One entry of a vault member's `sealedRoles`: a phone that has a sealed
+/// role, and `recipientKeyHash` as this computer wrote it
+/// ([`crate::services::connect::crypto::key_role::recipient_key_hash`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRoleRef {
+    pub device_id: u64,
+    #[serde(default)]
+    pub recipient_key_hash: String,
+}
+
+/// One sealed role to store: an opaque blob for one key on one phone. The
+/// request carries no role in the clear, and must never gain one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRoleUpload {
+    /// The vault member's id.
+    pub member_id: u64,
+    /// The phone's signer device id.
+    pub device_id: u64,
+    /// Standard padded base64 of the sealed blob.
+    pub sealed: String,
+    pub recipient_key_hash: String,
+}
+
+/// `PUT /api/v1/connect/cubes/{cubeId}/vault/sealed-roles` body.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutSealedRolesRequest {
+    pub sealed_roles: Vec<SealedRoleUpload>,
 }
 
 /// Vault lifecycle status. Drives W16-desktop's Keyholder-role gate:
@@ -2624,6 +2812,9 @@ pub fn member_joined_after_vault(member_joined_at: &str, vault_created_at: &str)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryRecipient {
     pub email: String,
+    /// The person's display name when they set one: a label for the row. The
+    /// alert goes to `email`, and rows are deduplicated by `email`.
+    pub display_name: Option<String>,
     pub role: VaultMemberRole,
 }
 
@@ -2670,12 +2861,8 @@ pub fn recovery_recipients(members: &[VaultMemberResponse]) -> RecoveryRecipient
             if m.contact_id.is_none() {
                 continue;
             }
-            let email = m
-                .contact
-                .as_ref()
-                .and_then(|c| c.contact_user.as_ref())
-                .map(|u| u.email.as_str())
-                .unwrap_or("");
+            let user = m.contact.as_ref().and_then(|c| c.contact_user.as_ref());
+            let email = user.map(|u| u.email.as_str()).unwrap_or("");
             if email.is_empty() {
                 out.unreachable += 1;
                 continue;
@@ -2683,12 +2870,160 @@ pub fn recovery_recipients(members: &[VaultMemberResponse]) -> RecoveryRecipient
             if seen.insert(email.to_string()) {
                 out.notified.push(RecoveryRecipient {
                     email: email.to_string(),
+                    display_name: user.and_then(|u| display_name::shown(u.display_name.as_deref())),
                     role,
                 });
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod display_name_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Responses from a server that predates display names carry no such
+    /// field. Every people struct must still parse, with no name.
+    #[test]
+    fn older_responses_without_the_field_still_parse() {
+        let user: User = serde_json::from_value(
+            json!({"id": 7, "email": "ama@example.test", "emailVerified": true}),
+        )
+        .unwrap();
+        assert_eq!(user.display_name, None);
+
+        let member: CubeMember = serde_json::from_value(json!({
+            "id": 1, "userId": 7, "user": {"email": "ama@example.test"},
+            "joinedAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(member.user.email, "ama@example.test");
+        assert_eq!(member.user.display_name, None);
+
+        let contact: Contact = serde_json::from_value(json!({
+            "id": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contactUser": {"id": 7, "email": "ama@example.test"}
+        }))
+        .unwrap();
+        assert_eq!(contact.contact_user.unwrap().display_name, None);
+
+        let vault_member: VaultMemberResponse = serde_json::from_value(json!({
+            "id": 5, "contactId": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contact": {"id": 3, "contactUser": {"id": 7, "email": "ama@example.test"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            vault_member
+                .contact
+                .unwrap()
+                .contact_user
+                .unwrap()
+                .display_name,
+            None
+        );
+
+        let invite: ReceivedInvite = serde_json::from_value(json!({
+            "id": 9, "ownerEmail": "ama@example.test", "role": "keyholder",
+            "expiresAt": "2099-01-01T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(invite.owner_email, "ama@example.test");
+        assert_eq!(invite.owner_display_name, None);
+    }
+
+    #[test]
+    fn current_responses_carry_the_name_beside_the_email() {
+        let user: User = serde_json::from_value(json!({
+            "id": 7, "email": "ama@example.test", "emailVerified": true,
+            "displayName": "Ama Adeyemi"
+        }))
+        .unwrap();
+        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
+
+        let member: CubeMember = serde_json::from_value(json!({
+            "id": 1, "userId": 7,
+            "user": {"email": "ama@example.test", "displayName": "Ama Adeyemi"},
+            "joinedAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(member.user.display_name.as_deref(), Some("Ama Adeyemi"));
+        assert_eq!(member.user.email, "ama@example.test");
+
+        let contact: Contact = serde_json::from_value(json!({
+            "id": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contactUser": {"id": 7, "email": "ama@example.test", "displayName": "Ama Adeyemi"}
+        }))
+        .unwrap();
+        assert_eq!(
+            contact.contact_user.unwrap().display_name.as_deref(),
+            Some("Ama Adeyemi")
+        );
+
+        let vault_member: VaultMemberResponse = serde_json::from_value(json!({
+            "id": 5, "contactId": 3, "role": "keyholder", "createdAt": "2026-11-01T00:00:00Z",
+            "contact": {"id": 3, "contactUser":
+                {"id": 7, "email": "ama@example.test", "displayName": "Ama Adeyemi"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            vault_member
+                .contact
+                .unwrap()
+                .contact_user
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Ama Adeyemi")
+        );
+
+        let invite: ReceivedInvite = serde_json::from_value(json!({
+            "id": 9, "ownerEmail": "ama@example.test", "ownerDisplayName": "Ama Adeyemi",
+            "role": "keyholder",
+            "expiresAt": "2099-01-01T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(invite.owner_display_name.as_deref(), Some("Ama Adeyemi"));
+        assert_eq!(invite.owner_email, "ama@example.test");
+    }
+
+    /// "No name set" is an empty string on the wire, and `null` is tolerated.
+    /// Neither is a name to show.
+    #[test]
+    fn empty_and_null_names_are_not_shown() {
+        for value in [json!(""), json!(null), json!("   ")] {
+            let user: User = serde_json::from_value(json!({
+                "id": 7, "email": "ama@example.test", "emailVerified": true,
+                "displayName": value
+            }))
+            .unwrap();
+            assert_eq!(display_name::shown(user.display_name.as_deref()), None);
+        }
+    }
+
+    /// A profile with no name serialises as it did before the field existed.
+    #[test]
+    fn a_profile_without_a_name_keeps_its_old_serialised_shape() {
+        let user = User {
+            id: 7,
+            email: "ama@example.test".into(),
+            email_verified: Some(true),
+            display_name: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&user).unwrap(),
+            json!({"id": 7, "email": "ama@example.test", "emailVerified": true})
+        );
+    }
+
+    #[test]
+    fn the_update_body_is_the_name_alone() {
+        assert_eq!(
+            serde_json::to_value(UpdateDisplayNameRequest { display_name: "" }).unwrap(),
+            json!({"displayName": ""})
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2707,11 +3042,45 @@ mod recovery_recipients_tests {
                 contact_user: Some(VaultMemberContactUserSummary {
                     id,
                     email: e.to_string(),
+                    display_name: None,
                 }),
             }),
             key: None,
+            sealed_roles: Vec::new(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn a_recipient_carries_their_name_and_is_still_keyed_by_email() {
+        let mut named = member(1, VaultMemberRole::Keyholder, Some("kay@example.com"));
+        named
+            .contact
+            .as_mut()
+            .unwrap()
+            .contact_user
+            .as_mut()
+            .unwrap()
+            .display_name = Some("Kay Example".into());
+        // The same address again under another name: one recipient, by email.
+        let mut again = member(2, VaultMemberRole::Beneficiary, Some("kay@example.com"));
+        again
+            .contact
+            .as_mut()
+            .unwrap()
+            .contact_user
+            .as_mut()
+            .unwrap()
+            .display_name = Some("Someone Else".into());
+        let got = recovery_recipients(&[named, again]);
+        assert_eq!(
+            got.notified,
+            vec![RecoveryRecipient {
+                email: "kay@example.com".into(),
+                display_name: Some("Kay Example".into()),
+                role: VaultMemberRole::Keyholder,
+            }]
+        );
     }
 
     #[test]
@@ -2725,10 +3094,12 @@ mod recovery_recipients_tests {
             vec![
                 RecoveryRecipient {
                     email: "kay@example.com".into(),
+                    display_name: None,
                     role: VaultMemberRole::Keyholder,
                 },
                 RecoveryRecipient {
                     email: "bea@example.com".into(),
+                    display_name: None,
                     role: VaultMemberRole::Beneficiary,
                 },
             ]
@@ -3878,7 +4249,7 @@ impl RecoverableVault {
     }
 
     /// Whether the master seed is escrowed for this caller — the Full-Cube
-    /// tier, which restores the entire Cube (Liquid + Spark + Vault) rather
+    /// tier, which restores the entire Cube (Spark + Vault) rather
     /// than just the watch-only Vault.
     pub fn has_seed_tier(&self) -> bool {
         self.available_tiers.iter().any(|t| t == "seed")
@@ -4560,7 +4931,7 @@ mod cube_has_vault_tests {
 #[cfg(test)]
 mod features_response_duress_tests {
     //! `duressEnabled` transport (PLAN-feature-flags PR 1). Mirrors the
-    //! `liquidEnabled`/`marketplaceEnabled` shape: absent → `None` (treated
+    //! `marketplaceEnabled` shape: absent → `None` (treated
     //! false, fail-closed), and both the camelCase wire key and the snake_case
     //! alias parse to the same field.
     use super::FeaturesResponse;
@@ -4592,6 +4963,17 @@ mod features_response_duress_tests {
         let off: FeaturesResponse =
             serde_json::from_value(features_json(json!({ "duressEnabled": false }))).unwrap();
         assert_eq!(off.duress_enabled, Some(false));
+    }
+
+    /// Liquid removal: the client no longer reads `liquidEnabled`, and the
+    /// API still sends it. An unknown key must be ignored, not refused.
+    #[test]
+    fn a_retired_liquid_enabled_key_is_ignored() {
+        let resp: FeaturesResponse = serde_json::from_value(features_json(
+            json!({ "liquidEnabled": false, "duressEnabled": true }),
+        ))
+        .expect("the retired liquidEnabled key still parses");
+        assert_eq!(resp.duress_enabled, Some(true));
     }
 
     #[test]
@@ -5599,5 +5981,130 @@ mod two_factor_tests {
             client.get_two_factor_status().await,
             Err(CoincubeError::NotFound)
         ));
+    }
+}
+
+#[cfg(test)]
+mod btcb2_signing_tests {
+    use super::{Btcb2Signing, Btcb2SigningRefusal, CubeKeyRaw};
+    use crate::chain::ChainId;
+
+    /// A `/keys` element as coincube-api#526 serves it; `btcb2Signing` only
+    /// when given.
+    fn key_json(network: &str, btcb2_signing: Option<serde_json::Value>) -> CubeKeyRaw {
+        let mut value = serde_json::json!({
+            "id": 1,
+            "name": "Pixel",
+            "fingerprint": "8a550171",
+            "derivationPath": "m/48'/0'/0'/2'",
+            "network": network,
+            "status": "active",
+        });
+        if let Some(signing) = btcb2_signing {
+            value["btcb2Signing"] = signing;
+        }
+        serde_json::from_value(value).expect("a /keys element parses")
+    }
+
+    #[test]
+    fn btcb2_signing_parses_each_value_and_fails_closed() {
+        for (wire, parsed) in [
+            ("can_sign", Btcb2Signing::CanSign),
+            ("cannot_sign", Btcb2Signing::CannotSign),
+            ("unavailable", Btcb2Signing::Unavailable),
+            ("unknown", Btcb2Signing::Unknown),
+            (
+                "CAN_SIGN",
+                Btcb2Signing::Unrecognised("CAN_SIGN".to_string()),
+            ),
+            ("", Btcb2Signing::Unrecognised(String::new())),
+        ] {
+            let key = key_json("bitcoin-blake2b", Some(serde_json::json!(wire)));
+            assert_eq!(key.btcb2_signing, Some(parsed), "{wire}");
+        }
+        // A value that is not a string fails that key closed, not the list.
+        for odd in [
+            serde_json::json!(5),
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let key = key_json("bitcoin-blake2b", Some(odd.clone()));
+            assert!(
+                matches!(key.btcb2_signing, Some(Btcb2Signing::Unrecognised(_))),
+                "{}",
+                odd
+            );
+            assert_eq!(
+                key.btcb2_signing_refusal(ChainId::BitcoinBlake2b),
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed)
+            );
+        }
+        let list: Vec<CubeKeyRaw> = serde_json::from_value(serde_json::json!([
+            {"id": 1, "name": "a", "fingerprint": "8a550171", "derivationPath": "m/0",
+             "network": "bitcoin-blake2b", "status": "active", "btcb2Signing": 5},
+            {"id": 2, "name": "b", "fingerprint": "8a550172", "derivationPath": "m/0",
+             "network": "bitcoin-blake2b", "status": "active", "btcb2Signing": "can_sign"},
+        ]))
+        .expect("one odd value does not fail the list");
+        assert_eq!(list[1].btcb2_signing, Some(Btcb2Signing::CanSign));
+        // Absent (Connect omits it off Bitcoin Blake2b) and null both read as
+        // no value.
+        assert_eq!(key_json("mainnet", None).btcb2_signing, None);
+        assert_eq!(
+            key_json("mainnet", Some(serde_json::Value::Null)).btcb2_signing,
+            None
+        );
+    }
+
+    #[test]
+    fn btcb2_signing_refusal_per_value_and_chain() {
+        let cases = [
+            (Some("can_sign"), None),
+            (Some("cannot_sign"), Some(Btcb2SigningRefusal::AppOutdated)),
+            (
+                Some("unavailable"),
+                Some(Btcb2SigningRefusal::PhoneUnregistered),
+            ),
+            (Some("unknown"), Some(Btcb2SigningRefusal::PhoneUnconfirmed)),
+            (
+                Some("phone_on_fire"),
+                Some(Btcb2SigningRefusal::PhoneUnconfirmed),
+            ),
+            // An API older than coincube-api#526 cannot vouch for the phone.
+            (None, Some(Btcb2SigningRefusal::PhoneUnconfirmed)),
+        ];
+        for chain in ChainId::ALL {
+            for (wire, refusal) in &cases {
+                let key = key_json(chain.api_str(), wire.map(|w| serde_json::json!(w)));
+                let expected = if chain.is_blake2b() { *refusal } else { None };
+                assert_eq!(
+                    key.btcb2_signing_refusal(chain),
+                    expected,
+                    "{chain:?} {wire:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn listed_on_chain_matches_the_cube_chain() {
+        for key_chain in ChainId::ALL {
+            let key = key_json(key_chain.api_str(), None);
+            for cube_chain in ChainId::ALL {
+                let expected = if cube_chain.is_blake2b() {
+                    key_chain == cube_chain
+                } else {
+                    !key_chain.is_blake2b()
+                };
+                assert_eq!(
+                    key.listed_on_chain(cube_chain),
+                    expected,
+                    "key {key_chain:?} on Cube {cube_chain:?}"
+                );
+            }
+        }
+        // A Bitcoin-family Cube does not newly hide a string it can't parse.
+        assert!(key_json("bitcoin", None).listed_on_chain(ChainId::Bitcoin));
+        assert!(!key_json("bitcoin", None).listed_on_chain(ChainId::BitcoinBlake2b));
     }
 }

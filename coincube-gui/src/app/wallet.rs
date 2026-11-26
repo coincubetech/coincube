@@ -271,6 +271,20 @@ impl Wallet {
         self.inheritance_descriptor().is_some()
     }
 
+    /// Whether Bump fee and Cancel can replace this wallet's unconfirmed
+    /// sends. The daemon builds replacements for a Vault and for an imported
+    /// wallet, on every chain.
+    pub fn supports_replacement(&self) -> bool {
+        self.supports_inheritance() || self.is_imported()
+    }
+
+    /// The spending policy the Vault screens show and sign against: a
+    /// Vault's inheritance policy, or an imported wallet's single path.
+    /// `None` only for an imported shape the policy view cannot express.
+    pub fn policy(&self) -> Option<coincube_core::descriptors::CoincubePolicy> {
+        self.main_descriptor.policy().ok()
+    }
+
     /// No inheritance clock exists for a public descriptor import.
     pub fn recovery_timelock(&self) -> Option<u16> {
         self.inheritance_descriptor()
@@ -535,11 +549,27 @@ impl Wallet {
         self
     }
 
-    /// The Vault records which of its keys came from the COINCUBE Keychain,
-    /// and none did. An unrecorded Vault may still hold one, so it is not
+    /// The Vault cannot hold a Mobile key: it recorded which of its keys came
+    /// from COINCUBE Mobile and none did, or it is an imported wallet, which
+    /// never has one. An unrecorded Vault may still hold one, so it is not
     /// counted here.
+    ///
+    /// The record is written by the descriptor editor when the Vault is
+    /// built, or later by the Local Signing backfill from Connect's key list
+    /// (`keychain_backfill`), so it can lag behind Connect. It hides the
+    /// Wi-Fi pairing entry only; the Connect signing flow still asks Connect
+    /// who the signers are (`build_keychain_if_ready`).
     pub fn lacks_keychain_key(&self) -> bool {
-        self.keychain_keys_recorded && self.keychain_key_ids.is_empty()
+        self.is_imported() || (self.keychain_keys_recorded && self.keychain_key_ids.is_empty())
+    }
+
+    /// Whether `fingerprint` could be a key held in COINCUBE Mobile, and so
+    /// reachable through Connect. Certain once the Vault recorded which keys
+    /// came from it; a Vault without that record may still hold one, so any
+    /// of its keys could be. An imported wallet never has one.
+    pub fn may_hold_keychain_key(&self, fingerprint: &Fingerprint) -> bool {
+        !self.is_imported()
+            && (!self.keychain_keys_recorded || self.keychain_key_ids.contains_key(fingerprint))
     }
 
     /// Record which keys came from the COINCUBE Keychain, and whether that
@@ -613,19 +643,23 @@ impl Wallet {
                 }
             }
         } else {
-            self.main_descriptor
-                .receive_descriptor()
-                .as_descriptor()
-                .for_each_key(|key| {
-                    if let DescriptorPublicKey::XPub(xpub) = key {
-                        if let Some((fingerprint, _)) = &xpub.origin {
-                            descriptor_keys.insert(*fingerprint);
-                        }
-                    }
-                    true
-                });
+            self.collect_receive_descriptor_keys(&mut descriptor_keys);
         }
         descriptor_keys
+    }
+
+    fn collect_receive_descriptor_keys(&self, descriptor_keys: &mut HashSet<Fingerprint>) {
+        self.main_descriptor
+            .receive_descriptor()
+            .as_descriptor()
+            .for_each_key(|key| {
+                if let DescriptorPublicKey::XPub(xpub) = key {
+                    if let Some((fingerprint, _)) = &xpub.origin {
+                        descriptor_keys.insert(*fingerprint);
+                    }
+                }
+                true
+            });
     }
 
     pub fn load_from_settings(self, wallet_settings: WalletSettings) -> Result<Self, WalletError> {
@@ -771,7 +805,7 @@ impl Wallet {
         keys: &HashSet<Fingerprint>,
     ) -> Result<Self, WalletError> {
         let chain = chain.into();
-        // Load only Vault mnemonics, skip Liquid wallet mnemonics (managed by Breez SDK)
+        // Load only Vault mnemonics: skip master-seed and legacy `-liquid_` files
         let master_signers = match MasterSigner::from_datadir_with_password_filtered_for_chain(
             datadir_path.path(),
             chain,
@@ -1202,6 +1236,12 @@ mod tests {
         assert_eq!(wallet.name, cube.name);
         assert!(wallet.is_imported());
         assert!(!wallet.supports_inheritance());
+        // Bump fee and Cancel work as for a Vault, Bitcoin Blake2b included.
+        assert!(wallet.supports_replacement());
+        assert!(wallet
+            .clone()
+            .with_chain(crate::chain::ChainId::BitcoinBlake2b)
+            .supports_replacement());
         assert_eq!(wallet.recovery_timelock(), None);
         assert!(wallet.signer.is_none());
         assert!(!wallet.id().is_legacy());

@@ -1,7 +1,7 @@
 # BTCB2 managed pruned node
 
 The authenticated Bitcoin Blake2b installer offers a pruned local Bitcoin Knots
-node, pinned to `29.4.1.knots20260508`, for mainnet and testnet4. Connect remains
+node, pinned to `29.5.1.knots20260508`, for mainnet and testnet4. Connect remains
 the wallet backend while the companion node completes initial block download;
 the app then switches automatically after exact-chain local admission. The
 installer labels the software, chain, pruning and outbound-only connectivity.
@@ -24,10 +24,151 @@ Ordinary Bitcoin, absent or different schedules, pre-fork headers, inactive fork
 and inconsistent tips are refused. This is local-node trust, not an independent
 header proof or Connect anchor. RDTS expiry is not an admission requirement.
 
-Connect authentication remains runtime-only, including tokens on a saved local
-node's fallback configuration. The loader can restart an already admitted local
+No Connect token is kept in a saved local node's fallback configuration. The
+Cube's Connect session itself is saved as a Bitcoin Cube's is, in the chain
+folder's `connect.json`, and restored at reopen (`BTCB2_VAULT_APP.md`,
+"Connect signer bootstrap"). The loader can restart an already admitted local
 backend without a Connect feature-status request. Account unlock/session setup
 continues to use the existing authenticated Cube flow.
+
+## Upgrading an install provisioned with `29.4.1.knots20260508`
+
+The pin moved to `29.5.1.knots20260508` because it changes consensus on both
+scheduled networks; a `29.4.1` node would follow a different chain. No released
+build has shipped the Blake2b node, so this affects internal installs only.
+
+Opening the Cube handles each step of the upgrade itself; the same applies to
+any later pin bump.
+
+- **The pinned binary is re-provisioned on open.** Only the pinned version is
+  searched or started, so after a bump the old binary no longer counts as
+  installed. Before the loader starts the managed node it checks for
+  `<coincube datadir>/bitcoind-blake2b/bitcoin-29.5.1.knots20260508/bin/bitcoind`
+  and, when it is missing, downloads the pinned release and verifies it exactly
+  as the installer does (`DownloadVerification::for_flavor`: the signed
+  `SHA256SUMS` under the pinned Knots key, then the archive's checksum in it)
+  before unpacking it under the family's lifecycle lock
+  (`ensure_pinned_fork_binary`). The archive is unpacked into a private
+  staging directory and its version directory moved into place only once the
+  executable is complete, so an interrupted or failed unpack never leaves a
+  binary that would count as installed. A failed download or verification
+  installs nothing. It does not stop the start by itself: a pinned node that
+  is already running needs no binary on disk and is reused. Its reason is
+  shown (with Retry) only when the start then needs the missing binary. The
+  unpack is refused while another app process owns the node. The old `bitcoin-29.4.1.knots20260508/`
+  directory is left on disk and never started.
+- **A still-running older build is replaced, not reused.** A Blake2b node's
+  flavour cannot be read from its subversion, but its build can: the start
+  reads `getnetworkinfo.subversion` and reuses the node only when it is the
+  pinned build (`/Satoshi:29.5.1/Knots:20260508/`, `classify_blake2b_build`).
+  The build date comes from the explicit `Knots:` field, not from a
+  user-agent comment inside the client segment. A positively read other build
+  is stopped and the pinned binary started in its place, as a Bitcoin flavour
+  switch is. A subversion that cannot be read (no answer, an empty string, or
+  not the `/Satoshi:<version>…/` shape) refuses the start and leaves that node
+  running: it may be a busy, healthy node another Cube shares. Identifying the
+  build uses a short-timeout probe and is bounded to about 5 s in total,
+  since the family lifecycle lock is held. The
+  replacement binary is resolved before anything is stopped, and the stop is
+  refused while another app process owns the node. A freshly started node that
+  reports another build is killed and refused.
+- **First start rewinds the chainstate.** `29.4.1` wrote no
+  chainstate-revalidation markers, so `29.5.1` rewinds once to just below the
+  earliest revalidation deployment's start and reconnects from there: mainnet
+  from `973440` (tip `973439`), testnet4 from `151550` (tip `151549`; the RDTS
+  extension range from `152963` is covered by the same rewind). Headless
+  `bitcoind` does not prompt. On the mainnet service node this took about nine
+  minutes before `Done loading`; the Cube shows "Connecting" meanwhile. The
+  "Found invalid chain … Chain state database corruption likely" warnings
+  logged during the reconnect are expected and are not treated as a failure.
+- **A pruned datadir that cannot be revalidated offers a resync.** If the
+  block or undo data the rewind needs has been pruned (likely with the 550 MB
+  or 5 GB prune targets), Knots exits with "The active chain must be
+  revalidated for current consensus rules, but required block data has been
+  pruned". The start reads only what that launch appended to the node's
+  `debug.log` (after a startup log shrink, only what follows the last
+  startup banner), recognises the message, stops respawning and reports
+  `StartInternalBitcoindError::PrunedRevalidationRequired`. The Cube's error
+  page then offers **Delete chain data and resync** beside Retry (the Retry
+  cooldown never hides it). It deletes only `blocks/` and `chainstate/` for
+  that network (directly under `bitcoind-blake2b/datadir/` on mainnet, since
+  Knots keeps mainnet in the datadir root; under
+  `bitcoind-blake2b/datadir/testnet4/` on testnet4) and starts the Cube again.
+  `bitcoin.conf`, the cookie, node wallets, the log and the Bitcoin node's
+  datadir are untouched. While the error page is shown and the deletion runs,
+  nothing serves the wallet: the start fails before the wallet daemon is
+  started.
+  - **Which backend serves the wallet during the resync.** A Cube still on
+    Connect with the node pending keeps that configuration: once the
+    replacement node starts, Connect serves the wallet (with a Connect
+    session) while the node downloads the chain, and the Cube switches to the
+    node when it has synced, as after installation.
+  - **A Cube whose wallet already runs on its local node** (the common case:
+    pruned by default, promoted after its first sync) cannot stay on the node
+    for the resync: a node in initial block download cannot admit the wallet
+    (`DaemonHandle::start_with_local_node` requires a completed IBD), so every
+    open would fail. The resync therefore moves it back to Connect first, the
+    inverse of the App's promotion: `daemon.toml` gets the chain's Connect
+    endpoint as its backend (no token is written), the local node becomes
+    `pending_bitcoind` with `auto_switch_to_pending = true`, `fallback_esplora`
+    is cleared and the poll interval returns to the Esplora one. The loader
+    then reopens the Cube on Connect with the session it carries, and from
+    there it is a Cube before its first promotion: Connect serves the wallet
+    while the node resyncs, and the App switches back to the node once it has
+    synced, under the usual holds (not during a Vault scan, and not to a
+    pruned node that no longer holds this Vault's history). The node keeps
+    the Vault's watch-only wallet, which coincubed registered with
+    `load_on_startup`, so the node reloads it when it starts and follows the
+    new chain from genesis; this has not been checked against a real pruned
+    resync yet. The local-backend loader carries the unlock's Connect session
+    for this recovery; the local open does not need it (the global
+    availability check reads only the client's address, with its token
+    cleared), and any sign-in change clears it.
+    Nothing is deleted unless the Cube will be able to reopen:
+    - Without an authenticated Connect session the resync is refused, and the
+      page says to sign in from Home, reopen the Cube and resync.
+    - Connect must confirm that the reopen would be admitted: Bitcoin Blake2b
+      enabled for the account, and Connect's chain anchor available and
+      trusted (`confirm_connect_reopen`). Otherwise the resync is refused and
+      the page says to reopen the Cube to try again (an expired session, for
+      example, needs a fresh unlock).
+    - A node backend that is not the managed Blake2b node is refused.
+    - A sign-in change or closing the Cube while the resync runs stops it
+      from changing anything not yet changed (checked under the locks, just
+      before `daemon.toml` is rewritten).
+    - `daemon.toml` is rewritten (atomically, and only if it is unchanged
+      since it was read) after every refusal below has passed, under the same
+      locks, immediately before the deletion
+      (`resync_managed_fork_chain_data_then`). If the rewrite fails, nothing
+      is deleted. If the deletion then fails, the Cube is already on Connect
+      and the next resync finishes it.
+    - A sign-out after the move revokes the loader like any Connect loader's;
+      the Cube then opens on Connect after the next sign-in. A result that
+      finds the Cube on Connect without a session asks for sign-in instead
+      of reopening.
+  - **Refusals.** The resync is refused while any Cube owns the node, while
+    the node's own datadir lock (`.lock`, the same `fcntl`/`LockFileEx` lock
+    `bitcoind` takes) is held by another process, while anything accepts
+    connections on the recorded RPC port (a plain TCP connect, so a missing
+    cookie never makes an occupied port look idle), or when that network has
+    no readable managed configuration (`resync_managed_fork_chain_data`).
+    The datadir lock is held through the deletion.
+  - **Results.** A failed resync is shown with its reason and offered again;
+    a partial deletion is finished by the next one. A result is bound to the
+    loader and resync that started it, so it never reaches another Cube
+    opened in the same tab, and one that finishes after the Connect session
+    was revoked keeps the revocation's refusal.
+
+Not covered: the background installer and Settings still drop Blake2b
+node-setup messages, so the loader is the only re-provisioning path. The
+positive install path is only exercised against the real signed release; unit
+tests cover the skip, fetch, refusal and staged-publish cases with the
+vendored manifest. The resync is one click with no confirmation, and an
+owner on either Blake2b network blocks it. A pruned local-backend Cube is
+recovered only through Connect: without a Connect account that has Bitcoin
+Blake2b, it has no in-app recovery, and the resync refuses it with nothing
+deleted. The move back to Connect sends the Vault's address queries to Connect
+until the node is promoted again.
 
 ## What is isolated, and where
 
@@ -41,7 +182,7 @@ its encoding:
 |---|---|---|
 | Providers | `Core`, `Knots` | `KnotsBlake2b` only |
 | Root under the COINCUBE datadir | `bitcoind/` | `bitcoind-blake2b/` |
-| Binaries | `bitcoind/bitcoin-<version>/bin/bitcoind` | `bitcoind-blake2b/bitcoin-29.4.1.knots20260508/bin/bitcoind` |
+| Binaries | `bitcoind/bitcoin-<version>/bin/bitcoind` | `bitcoind-blake2b/bitcoin-29.5.1.knots20260508/bin/bitcoind` |
 | Node datadir, `bitcoin.conf`, cookies, chainstate | `bitcoind/datadir/…` | `bitcoind-blake2b/datadir/…` |
 | Flavour ledger | `bitcoind/managed_node_state.json` | `bitcoind-blake2b/managed_node_state.json` |
 | Lock directory | `bitcoind/` | `bitcoind-blake2b/` |
@@ -201,7 +342,7 @@ flavour ledger.
 ### Release verification
 
 The Blake2b release is published under the Knots URL scheme
-(`https://bitcoinknots.org/files/29.x/29.4.1.knots20260508/`) and signed by the
+(`https://bitcoinknots.org/files/29.x/29.5.1.knots20260508/`) and signed by the
 already-pinned Knots key (`KNOTS_SIGNING_KEY_FINGERPRINT`,
 `1A3E761F19D2CC7785C5502EA291A2C45D0C504A`). No new trust root is introduced:
 `DownloadVerification::for_flavor` builds the same `ReleaseManifest`
@@ -215,10 +356,15 @@ archive name the provider derives (`arm64-apple-darwin`, `x86_64-apple-darwin`,
 ## Daemon dependency: chain health on a Blake2b node
 
 Activating the provider needs `coincubed` to read the hardfork's status. The
-fields below are taken from Knots tag `v29.4.1.knots20260508`
-(`src/rpc/blockchain.cpp`, `src/kernel/chainparams.cpp`,
-`src/chainparamsbase.cpp`); they are **not** what the desktop's existing
-`reduced_data` probe assumes.
+fields below were taken from Knots tag `v29.4.1.knots20260508` and rechecked
+at the pinned `v29.5.1.knots20260508` (`src/rpc/blockchain.cpp`,
+`src/kernel/chainparams.cpp`, `src/chainparamsbase.cpp`); they are **not** what
+the desktop's existing `reduced_data` probe assumes. `29.5.1` adds a
+`deployments.long_coinbase_maturity` entry, which the probe ignores, and omits
+`difficulty` from `getblockchaininfo`/`getblockheader` for header-v2 blocks
+(reporting `difficulty_blake2b` instead); `coincubed` reads neither, and the
+launcher's local-node activity reader converts `difficulty_blake2b` to a
+difficulty multiple.
 
 ### `getdeploymentinfo`
 
@@ -265,7 +411,7 @@ fields below are taken from Knots tag `v29.4.1.knots20260508`
 | Network | `Blake2bHeight` | `RdtsExpiryTime` |
 |---|---|---|
 | mainnet | `961640` | `1819756800` (2027-09-01 00:00 UTC) |
-| testnet4 | `150308` | `1791903600` (2026-10-13 15:00 UTC) |
+| testnet4 | `150308` | `1806537600` (2027-04-01 00:00 UTC; `1791903600`, 2026-10-13, before `29.5.1`) |
 | regtest | unscheduled by default | unscheduled by default |
 
 Source: `src/kernel/chainparams.cpp` at the tag (mainnet `CMainParams`,

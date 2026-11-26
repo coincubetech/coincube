@@ -88,6 +88,70 @@ impl App {
         Task::batch([forwarded, refresh])
     }
 
+    /// The transaction detail page showing on the current route whose Back
+    /// goes to Cube › Activity, the one history list: a Vault or Spark
+    /// transaction always, a PSBT when Activity opened it. `None` leaves
+    /// Close to the page. While an imported Vault's own panel holds a Vault
+    /// route, the Vault panels behind it are not showing, whatever they hold.
+    fn activity_detail_showing(&self) -> Option<ActivityDetail> {
+        if self
+            .panels
+            .imported_bitcoin
+            .as_ref()
+            .is_some_and(|imported| imported.handles_route(&self.panels.current))
+        {
+            return None;
+        }
+        match &self.panels.current {
+            Menu::Vault(menu::VaultSubMenu::Transactions(_)) => self
+                .panels
+                .transactions
+                .as_ref()
+                .is_some_and(|panel| panel.has_selection())
+                .then_some(ActivityDetail::VaultTransaction),
+            Menu::Vault(menu::VaultSubMenu::PSBTs(_)) => self
+                .panels
+                .psbts
+                .as_ref()
+                .is_some_and(|panel| panel.returns_to_activity())
+                .then_some(ActivityDetail::Psbt),
+            Menu::Spark(menu::SparkSubMenu::Transactions(_)) => self
+                .panels
+                .spark_transactions
+                .has_selection()
+                .then_some(ActivityDetail::SparkPayment),
+            _ => None,
+        }
+    }
+
+    /// Back from a transaction detail page goes to Cube › Activity; see
+    /// [`Self::activity_detail_showing`].
+    pub(super) fn activity_detail_back_applies(&self) -> bool {
+        self.activity_detail_showing().is_some()
+    }
+
+    /// Close the detail page that is showing and open Cube › Activity. Only
+    /// that page's selection is cleared: the other wallet panels stay alive
+    /// across routes and keep what they hold (a PSBT open from its own list,
+    /// with any signing in progress, survives Back from a Spark payment).
+    pub(super) fn route_activity_detail_back(&mut self) -> Task<Message> {
+        match self.activity_detail_showing() {
+            Some(ActivityDetail::VaultTransaction) => {
+                if let Some(panel) = self.panels.transactions.as_mut() {
+                    panel.clear_selection();
+                }
+            }
+            Some(ActivityDetail::Psbt) => {
+                if let Some(panel) = self.panels.psbts.as_mut() {
+                    panel.clear_selection();
+                }
+            }
+            Some(ActivityDetail::SparkPayment) => self.panels.spark_transactions.clear_selection(),
+            None => return Task::none(),
+        }
+        self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity))
+    }
+
     pub(super) fn route_activity_detail(
         &mut self,
         target: state::activity::ActivityTarget,
@@ -112,7 +176,7 @@ impl App {
                 if self.panels.psbts.is_some() {
                     let load = self.set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
                     let panel = self.panels.psbts.as_mut().expect("checked above");
-                    panel.preselect(tx);
+                    panel.preselect_from_activity(tx);
                     return load;
                 }
             }
@@ -132,27 +196,15 @@ impl App {
                 );
                 return Task::batch([load, select]);
             }
-            state::activity::ActivityTarget::Liquid(payment) => {
-                if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                    self.panels.current = Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                    let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                    let select = panel.update(
-                        self.daemon.clone(),
-                        &self.cache,
-                        Message::View(view::Message::PreselectPayment(payment)),
-                    );
-                    return Task::batch([load, select]);
-                }
-            }
-            state::activity::ActivityTarget::Refundable(refundable) => {
-                if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                    let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                    panel.preselect_refundable(refundable);
-                    self.panels.current = Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                    return load;
-                }
-            }
         }
         Task::none()
     }
+}
+
+/// A transaction detail page whose Back goes to Cube › Activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityDetail {
+    VaultTransaction,
+    Psbt,
+    SparkPayment,
 }

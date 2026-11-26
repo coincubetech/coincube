@@ -1,6 +1,8 @@
 pub mod account;
 pub mod cube;
 pub mod cube_members;
+pub mod delete_account;
+pub mod your_name;
 
 #[cfg(not(test))]
 pub(crate) const CONNECT_KEYRING_SERVICE: &str = if cfg!(debug_assertions) {
@@ -369,6 +371,7 @@ impl ConnectPanel {
     ) {
         if self.cube.vault_descriptor != descriptor {
             self.cube.vault_members_reconciled = false;
+            self.cube.key_roles_seal_started = false;
         }
         self.cube.vault_descriptor = descriptor;
     }
@@ -591,6 +594,29 @@ mod tests {
         // Unauthenticated → still a no-op (no client to call with).
         let _ = panel.ensure_cube_registered();
         assert!(!panel.cube.enc_pubkey_registered);
+    }
+
+    /// The sealed-key-role pass is per Vault too: a rebuilt Vault has other
+    /// keys in other paths, so its latch reopens with the descriptor.
+    #[test]
+    fn a_changed_descriptor_reopens_the_key_role_latch() {
+        let mut panel = ConnectPanel::new(
+            None,
+            "cube-uuid".to_string(),
+            "Family Vault".to_string(),
+            "regtest".to_string(),
+            false,
+        );
+        let desc =
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap();
+        panel.set_vault_descriptor(Some(desc.clone()));
+        panel.cube.key_roles_seal_started = true;
+        panel.set_vault_descriptor(Some(desc));
+        assert!(panel.cube.key_roles_seal_started);
+        panel.set_vault_descriptor(Some(
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC_2).unwrap(),
+        ));
+        assert!(!panel.cube.key_roles_seal_started);
     }
 
     /// A Vault built or rebuilt mid-session has a membership nobody has

@@ -31,7 +31,7 @@
 /// Every item on that list is now closed:
 ///
 /// - **Unlock works.** `crate::passkey_unlock` runs the assertion, derives the
-///   seed through HKDF + BIP39, and hands it to the Liquid and Spark loaders as
+///   seed through HKDF + BIP39, and hands it to the Cube signer and the Spark loader as
 ///   `SeedSource::InMemory` — a passkey Cube has no seed file, and the loaders
 ///   no longer assume one.
 /// - **The Recovery Kit carries the seed** (**I11**). A re-authentication
@@ -121,6 +121,71 @@ pub const CUBE_MEMBERS_UI_ENABLED: bool = is_truthy(option_env!("COINCUBE_CUBE_M
 /// stays dark until both ship. When `false`, the "Recover a Vault" sidebar entry
 /// is hidden; the panel code still compiles but is unreachable via UI.
 pub const RECOVER_VAULT_ENABLED: bool = is_truthy(option_env!("COINCUBE_ENABLE_RECOVER_VAULT"));
+
+/// Developer override for Cube → Settings → AI access (local MCP).
+///
+/// AI access is normally switched **per account** by the Connect `ai_access`
+/// flag (`aiAccessEnabled` on `GET /connect/features`, default off, granted
+/// per user through the admin feature-flag API). See
+/// [`crate::app::features::ai_access_enabled`] for the full gate.
+///
+/// Setting `COINCUBE_ENABLE_AI_ACCESS` at build time forces AI access on in
+/// that build for every Cube, signed in or not. It exists for local
+/// development and test builds (regtest without a Connect account). Release
+/// builds must leave it unset; it defaults to `false`.
+pub const AI_ACCESS_ENABLED: bool = is_truthy(option_env!("COINCUBE_ENABLE_AI_ACCESS"));
+
+/// Runtime view of [`AI_ACCESS_ENABLED`]. Production code reads this, so
+/// tests can exercise both states regardless of how the test binary was
+/// built (CI builds without the variable, i.e. with the override off).
+pub fn ai_access_build_override() -> bool {
+    #[cfg(test)]
+    if let Some(value) = test_override::AI_ACCESS.with(std::cell::Cell::get) {
+        return value;
+    }
+    AI_ACCESS_ENABLED
+}
+
+/// Per-thread overrides for runtime flag views. Test-only.
+#[cfg(test)]
+pub mod test_override {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static AI_ACCESS: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// Force [`super::ai_access_build_override`] on this thread until the
+    /// guard drops.
+    #[must_use = "the override ends when the guard is dropped"]
+    pub fn ai_access(value: bool) -> Guard {
+        let previous = AI_ACCESS.with(|cell| cell.replace(Some(value)));
+        Guard { previous }
+    }
+
+    pub struct Guard {
+        previous: Option<bool>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            AI_ACCESS.with(|cell| cell.set(self.previous));
+        }
+    }
+}
+
+/// Whether the Vault signer picker offers an imported wallet's keys stored in
+/// this Cube (the import's Keys step) as signers.
+///
+/// On by default; `COINCUBE_ENABLE_IMPORTED_KEY_SIGNING=false` at build time
+/// turns it off. Enabled once the inventory anchor's release gate passed:
+/// `contrib/release/macos/run-signed-imported-anchor-probe.sh`, signed with
+/// the profile's Developer ID certificate (SHA-256 `01e32b73…`), passed every
+/// restart and fault phase on 2026-11-17. That probe cannot show durability
+/// across sudden power loss. Hardware wallets and PSBT files sign imported
+/// wallets either way.
+pub const IMPORTED_KEY_SIGNING_ENABLED: bool =
+    !is_falsy(option_env!("COINCUBE_ENABLE_IMPORTED_KEY_SIGNING"));
 
 /// Whether the **owner keychain recovery** surfaces (PLAN-owner-keychain-recovery)
 /// are shown. This is the "protect with my phone" Recovery-Kit branch: the owner

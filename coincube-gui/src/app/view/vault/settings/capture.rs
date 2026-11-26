@@ -154,6 +154,7 @@ fn pair_state(scenario: &str) -> LocalSigningState {
             offer: PairingOffer {
                 signer_xpub: String::new(),
                 descriptor_sha256: String::new(),
+                network: String::new(),
                 version: 2,
                 cert_der_b64: String::new(),
                 cert_fp: String::new(),
@@ -183,6 +184,8 @@ fn pair_state(scenario: &str) -> LocalSigningState {
             vault_fingerprint: vault_id,
             transport_pubkey: Vec::new(),
             fallback_addr: None,
+            network: None,
+            capabilities: Vec::new(),
         });
     }
     state
@@ -290,6 +293,8 @@ impl Fixture {
                 cube_name: "Synthetic Cube".to_owned(),
                 has_vault: scenario != "wallet_imported",
                 has_imported_bitcoin: scenario == "wallet_imported",
+                // As the App sets it: an imported wallet has no Keychain key.
+                vault_lacks_keychain_key: scenario == "wallet_imported",
                 ..Cache::default()
             },
             pairing: pair_state(scenario),
@@ -353,7 +358,7 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         network: cache.chain(),
         p2p_test_coordinator: cache.p2p_test_coordinator,
         marketplace_flags: cache.marketplace_flags,
-        liquid_gate: cache.liquid_gate,
+        ai_access: cache.ai_access_enabled(),
         btcb2_server_enabled: cache.btcb2_server_enabled,
         btcb2_already_claimed: cache.btcb2_already_claimed,
         cube_name: &cache.cube_name,
@@ -566,8 +571,44 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     }
 }
 
+/// An imported Vault's Wallet tab names its policy and the keys stored in
+/// the Cube, offering Add recovery words only when none are stored.
 #[tokio::test]
-async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() {
+async fn imported_wallet_tab_shows_its_policy_and_stored_keys() {
+    use crate::home::restore_frame::rendered_labels;
+    for (stored, add, count) in [
+        (Some(0), true, None),
+        (Some(1), false, Some("1 from recovery words")),
+        (None, false, None),
+    ] {
+        let mut fixture = Fixture::new("wallet_imported", SettingsOption::Wallet);
+        fixture.cache.imported_stored_keys = stored;
+        let shown = rendered_labels(fixture.render("wallet_imported")).await;
+        assert!(
+            shown.iter().any(|label| label == "Normal spending"),
+            "{:?}",
+            shown
+        );
+        assert_eq!(
+            shown.iter().any(|label| label == "Add recovery words"),
+            add,
+            "{:?}: {:?}",
+            stored,
+            shown
+        );
+        if let Some(count) = count {
+            assert!(
+                shown.iter().any(|label| label.contains(count)),
+                "{:?}",
+                shown
+            );
+        }
+        assert!(!shown.iter().any(|label| label.contains("no local keys")));
+    }
+}
+
+#[tokio::test]
+async fn mounted_settings_pair_route_accepts_vault_and_hides_it_for_imported_wallet() {
     // Settings routes are tabs on the pinned page head's rule (W5); the Cube
     // sidebar contains only the Settings entry. Exercise the mounted choice
     // in its actual location.
@@ -594,6 +635,13 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
         element
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        if scenario == "wallet_imported" {
+            // No phone can pair for an imported wallet, as for a Vault
+            // without a Keychain key: it has no Mobile tab
+            // (`frame::tests::imported_bitcoin_has_the_vault_tabs_without_phone_pairing`).
+            // "Mobile" here is the Wallet page's own Unavailable row.
+            continue;
+        }
         let pair_bounds = labels
             .0
             .iter()
@@ -652,24 +700,16 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
                 &viewport,
             );
         }
-        if scenario == "wallet_imported" {
-            assert!(
-                messages.is_empty(),
-                "disabled imported Pair settings choice emitted an intent: {:?}",
-                messages
-            );
-        } else {
-            assert!(
-                matches!(
-                    messages.as_slice(),
-                    [Message::FocusAction(id), Message::Menu(Menu::Vault(
-                        VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))
-                    ))] if id == &Id::new("tenshu.settings.route.vault.pair")
-                ),
-                "eligible Pair settings choice must focus and route once: {:?}",
-                messages
-            );
-        }
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::FocusAction(id), Message::Menu(Menu::Vault(
+                    VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))
+                ))] if id == &Id::new("tenshu.settings.route.vault.pair")
+            ),
+            "eligible Pair settings choice must focus and route once: {:?}",
+            messages
+        );
     }
 }
 
@@ -695,15 +735,7 @@ async fn actual_vault_settings_capture_matrix() {
         "data_rows",
         "data_conflict",
     ] {
-        let section = if scenario.starts_with("wallet") {
-            SettingsOption::Wallet
-        } else if scenario.starts_with("node") {
-            SettingsOption::Node
-        } else if scenario.starts_with("pair") {
-            SettingsOption::LocalSigning
-        } else {
-            SettingsOption::ImportExport
-        };
+        let section = capture_settings_section(scenario);
         for (theme_name, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -714,170 +746,208 @@ async fn actual_vault_settings_capture_matrix() {
                 vec![(1440, 900), (1024, 768)]
             };
             for (width, height) in sizes {
-                let mut renderer = <iced::Renderer as Headless>::new(
-                    coincube_ui::font::REGULAR,
-                    iced::Pixels(16.0),
-                    Some("tiny-skia"),
+                assert_vault_settings_capture(
+                    scenario,
+                    section,
+                    theme_name,
+                    &theme,
+                    (width, height),
+                    directory.as_deref(),
+                    sha.as_deref(),
                 )
-                .await
-                .expect("software renderer");
-                let fixture = Fixture::new(scenario, section);
-                let mut element = fixture.render(scenario);
-                let mut tree = Tree::new(element.as_widget());
-                let size = iced::Size::new(width as f32, height as f32);
-                let node = element.as_widget_mut().layout(
-                    &mut tree,
-                    &renderer,
-                    &layout::Limits::new(iced::Size::ZERO, size),
-                );
-                let mut labels = Labels::default();
-                element.as_widget_mut().operate(
-                    &mut tree,
-                    Layout::new(&node),
-                    &renderer,
-                    &mut labels,
-                );
-                assert_labels(scenario, &labels, width);
-                if scenario == "wallet_default" {
-                    assert_mounted_wallet_policy(&labels, width);
-                }
-                if let Some(directory) = &directory {
-                    let viewport = iced::Rectangle::with_size(size);
-                    let mut redraw_messages = Vec::new();
-                    element.as_widget_mut().update(
-                        &mut tree,
-                        &iced::Event::Window(iced::window::Event::RedrawRequested(
-                            std::time::Instant::now(),
-                        )),
-                        Layout::new(&node),
-                        iced::mouse::Cursor::Unavailable,
-                        &renderer,
-                        &mut iced::advanced::clipboard::Null,
-                        &mut iced::advanced::Shell::new(&mut redraw_messages),
-                        &viewport,
-                    );
-                    assert!(
-                        redraw_messages
-                            .iter()
-                            .all(|message| matches!(message, Message::Scroll(_))),
-                        "{}: redraw emitted an action intent",
-                        scenario
-                    );
-                    element.as_widget().draw(
-                        &tree,
-                        &mut renderer,
-                        &theme,
-                        &iced::advanced::renderer::Style {
-                            text_color: theme.colors.text.primary,
-                        },
-                        Layout::new(&node),
-                        iced::mouse::Cursor::Unavailable,
-                        &viewport,
-                    );
-                    let pixels = renderer.screenshot(
-                        iced::Size::new(width, height),
-                        1.0,
-                        theme.colors.general.background,
-                    );
-                    let name = format!("r11a-{scenario}-{theme_name}-{width}x{height}.png");
-                    image::save_buffer(
-                        Path::new(directory).join(&name),
-                        &pixels,
-                        width,
-                        height,
-                        image::ColorType::Rgba8,
-                    )
-                    .unwrap();
-                    let hash = hex::encode(Sha256::digest(&pixels));
-                    let image_hash = hex::encode(Sha256::digest(
-                        fs::read(Path::new(directory).join(&name)).unwrap(),
-                    ));
-                    let record = serde_json::json!({
-                        "fixture": "r11a-actual-iced",
-                        "source_sha": sha.as_deref().expect("capture source SHA"),
-                        "scenario": scenario,
-                        "theme": theme_name,
-                        "width": width,
-                        "height": height,
-                        "file": name,
-                        "pixel_sha256": hash,
-                        "image_sha256": image_hash,
-                    });
-                    let mut manifest = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(Path::new(directory).join("manifest.jsonl"))
-                        .unwrap();
-                    writeln!(manifest, "{record}").unwrap();
-                }
-                if scenario == "wallet_imported" {
-                    assert!(fixture.cache.has_imported_bitcoin);
-                    assert!(!fixture.cache.has_vault);
-                    let context = fixture_nav_context(&fixture.cache);
-                    let items = crate::app::view::nav::tertiary::items_for(&fixture.menu, &context)
-                        .expect("imported wallet settings rail");
-                    let pair = items
-                        .iter()
-                        .find(|item| item.label == "Mobile")
-                        .expect("imported Pair nav item");
-                    let reason = pair
-                        .disabled_reason
-                        .as_deref()
-                        .expect("imported Pair must explain its denial");
-                    assert!(
-                        reason.contains("unavailable for imported wallets")
-                            && reason.contains("no Mobile-eligible key"),
-                        "imported Pair denial reason changed: {}",
-                        reason
-                    );
-                }
-                if scenario == "pair_idle" || scenario == "data_rows" {
-                    let target = if scenario == "pair_idle" {
-                        "Pair phone"
-                    } else {
-                        "Open Backup & protection"
-                    };
-                    let bounds = labels
-                        .0
-                        .iter()
-                        .find(|(label, _)| label == target)
-                        .unwrap_or_else(|| panic!("{}: missing {}", scenario, target))
-                        .1;
-                    let mut messages = Vec::new();
-                    let viewport = iced::Rectangle::with_size(size);
-                    for event in [
-                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
-                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
-                    ] {
-                        element.as_widget_mut().update(
-                            &mut tree,
-                            &iced::Event::Mouse(event),
-                            Layout::new(&node),
-                            iced::mouse::Cursor::Available(bounds.center()),
-                            &renderer,
-                            &mut iced::advanced::clipboard::Null,
-                            &mut iced::advanced::Shell::new(&mut messages),
-                            &viewport,
-                        );
-                    }
-                    if scenario == "pair_idle" {
-                        // A Tenshu action may focus itself before its intent.
-                        assert!(matches!(
-                            messages.last(),
-                            Some(Message::Settings(SettingsMessage::LocalSigning(
-                                LocalSigningMessage::StartPairing
-                            )))
-                        ));
-                    } else {
-                        assert!(matches!(
-                            messages.last(),
-                            Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
-                                CubeSettingsOption::Recovery
-                            ))))
-                        ));
-                    }
-                }
+                .await;
             }
+        }
+    }
+}
+
+fn capture_settings_section(scenario: &str) -> SettingsOption {
+    if scenario.starts_with("wallet") {
+        SettingsOption::Wallet
+    } else if scenario.starts_with("node") {
+        SettingsOption::Node
+    } else if scenario.starts_with("pair") {
+        SettingsOption::LocalSigning
+    } else {
+        SettingsOption::ImportExport
+    }
+}
+
+async fn assert_vault_settings_capture(
+    scenario: &str,
+    section: SettingsOption,
+    theme_name: &str,
+    theme: &theme::Theme,
+    (width, height): (u32, u32),
+    directory: Option<&str>,
+    sha: Option<&str>,
+) {
+    let mut renderer = <iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    )
+    .await
+    .expect("software renderer");
+    let fixture = Fixture::new(scenario, section);
+    let mut element = fixture.render(scenario);
+    let mut tree = Tree::new(element.as_widget());
+    let size = iced::Size::new(width as f32, height as f32);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, size),
+    );
+    let mut labels = Labels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    assert_labels(scenario, &labels, width);
+    if scenario == "wallet_default" {
+        assert_mounted_wallet_policy(&labels, width);
+    }
+    if let Some(directory) = directory {
+        let viewport = iced::Rectangle::with_size(size);
+        let mut redraw_messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            )),
+            Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut redraw_messages),
+            &viewport,
+        );
+        assert!(
+            redraw_messages
+                .iter()
+                .all(|message| matches!(message, Message::Scroll(_))),
+            "{}: redraw emitted an action intent",
+            scenario
+        );
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            theme,
+            &iced::advanced::renderer::Style {
+                text_color: theme.colors.text.primary,
+            },
+            Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        let pixels = renderer.screenshot(
+            iced::Size::new(width, height),
+            1.0,
+            theme.colors.general.background,
+        );
+        let directory = directory.to_owned();
+        let scenario = scenario.to_owned();
+        let theme_name = theme_name.to_owned();
+        let sha = sha.map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            let name = format!("r11a-{scenario}-{theme_name}-{width}x{height}.png");
+            image::save_buffer(
+                Path::new(&directory).join(&name),
+                &pixels,
+                width,
+                height,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+            let hash = hex::encode(Sha256::digest(&pixels));
+            let image_hash = hex::encode(Sha256::digest(
+                fs::read(Path::new(&directory).join(&name)).unwrap(),
+            ));
+            let record = serde_json::json!({
+                "fixture": "r11a-actual-iced",
+                "source_sha": sha.expect("capture source SHA"),
+                "scenario": scenario,
+                "theme": theme_name,
+                "width": width,
+                "height": height,
+                "file": name,
+                "pixel_sha256": hash,
+                "image_sha256": image_hash,
+            });
+            let mut manifest = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&directory).join("manifest.jsonl"))
+                .unwrap();
+            writeln!(manifest, "{record}").unwrap();
+        })
+        .await
+        .expect("write Vault Settings capture files");
+    }
+    if scenario == "wallet_imported" {
+        assert!(fixture.cache.has_imported_bitcoin);
+        assert!(!fixture.cache.has_vault);
+        let context = fixture_nav_context(&fixture.cache);
+        let items = crate::app::view::nav::tertiary::items_for(&fixture.menu, &context)
+            .expect("imported wallet settings rail");
+        let pair = items
+            .iter()
+            .find(|item| item.label == "Mobile")
+            .expect("imported Pair nav item");
+        let reason = pair
+            .disabled_reason
+            .as_deref()
+            .expect("imported Pair must explain its denial");
+        assert!(
+            reason.contains("unavailable for imported wallets")
+                && reason.contains("no Mobile-eligible key"),
+            "imported Pair denial reason changed: {}",
+            reason
+        );
+    }
+    if scenario == "pair_idle" || scenario == "data_rows" {
+        let target = if scenario == "pair_idle" {
+            "Pair phone"
+        } else {
+            "Open Backup & protection"
+        };
+        let bounds = labels
+            .0
+            .iter()
+            .find(|(label, _)| label == target)
+            .unwrap_or_else(|| panic!("{}: missing {}", scenario, target))
+            .1;
+        let mut messages = Vec::new();
+        let viewport = iced::Rectangle::with_size(size);
+        for event in [
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                Layout::new(&node),
+                iced::mouse::Cursor::Available(bounds.center()),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &viewport,
+            );
+        }
+        if scenario == "pair_idle" {
+            // A Tenshu action may focus itself before its intent.
+            assert!(matches!(
+                messages.last(),
+                Some(Message::Settings(SettingsMessage::LocalSigning(
+                    LocalSigningMessage::StartPairing
+                )))
+            ));
+        } else {
+            assert!(matches!(
+                messages.last(),
+                Some(Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                    CubeSettingsOption::Recovery
+                ))))
+            ));
         }
     }
 }

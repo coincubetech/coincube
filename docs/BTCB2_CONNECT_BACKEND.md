@@ -50,7 +50,8 @@ Do not enable the runtime merely because the node is synchronized:
    for `prepare_inbound_tor` and a Bitcoin internal-directory helper). Keep
    Connect Esplora usable without any local node.
 3. Wire fresh P2WSH Cube creation and feature hiding through the runtime gate;
-   keep unsupported Taproot signing and Keychain LAN closed. Claim/Split
+   keep unsupported Taproot signing closed (Mobile LAN signing was closed too
+   until Desktop PR 8c; it now follows the v3 pairing rules). Claim/Split
    entry/state machinery is not present in `UserFlow` at the audited base.
    Claim/Split must use verified poison evidence, live expiry, confirmation
    depth and reorg rechecks per API tracker #276, never timestamp/absence

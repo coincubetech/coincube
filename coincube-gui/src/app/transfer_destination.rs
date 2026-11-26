@@ -13,6 +13,14 @@ use zeroize::Zeroizing;
 use super::{cache::AppGeneration, settings::WalletId};
 use crate::chain::ChainId;
 
+/// Chains on which a Vault can pay another local Cube's Vault. Both use
+/// Bitcoin mainnet address parameters, so source and destination must also
+/// be the *same* chain: a BTCB2 coin sent to a Bitcoin Cube's address would
+/// sit where that Cube never looks. Spark routes stay Bitcoin-only.
+pub(crate) fn vault_cross_cube_chain(chain: ChainId) -> bool {
+    matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Source {
     pub cube_id: String,
@@ -25,8 +33,7 @@ pub(crate) struct Source {
 pub(crate) enum WalletIdentity {
     Vault(WalletId),
     /// A backend identity, checked after its restricted loader has opened.
-    /// Cube metadata alone is insufficient to identify a Liquid/Spark wallet.
-    Liquid(String),
+    /// Cube metadata alone is insufficient to identify a Spark wallet.
     Spark(String),
 }
 
@@ -79,7 +86,9 @@ impl Refusal {
             Self::SameWallet => {
                 "The destination uses the same Vault wallet. Choose a different wallet."
             }
-            Self::UnsupportedChain => "Cross-Cube transfer is available only on Bitcoin mainnet.",
+            Self::UnsupportedChain => {
+                "Cross-Cube transfer needs both Cubes on the same supported network."
+            }
             Self::ChainChanged => "The destination Cube's network changed. Select it again.",
             Self::WalletChanged => "The destination wallet changed. Select it again.",
             Self::BackendUnavailable => "The destination wallet is not ready to receive.",
@@ -111,7 +120,7 @@ fn admit(
     if source.wallet == selected.wallet || source.wallet.shares_vault_descriptor(&selected.wallet) {
         return Err(Refusal::SameWallet);
     }
-    if source.chain != ChainId::Bitcoin || selected.chain != ChainId::Bitcoin {
+    if !vault_cross_cube_chain(source.chain) || selected.chain != source.chain {
         return Err(Refusal::UnsupportedChain);
     }
     if selected.cube_id != evidence.identity.cube_id || selected.chain != evidence.identity.chain {
@@ -367,6 +376,30 @@ mod tests {
         }
     }
 
+    /// Two Bitcoin Blake2b Cubes admit; a Blake2b source never pairs with a
+    /// Bitcoin destination, though their addresses encode alike.
+    #[test]
+    fn admission_needs_both_cubes_on_the_same_supported_chain() {
+        let (mut source, mut destination, mut evidence) = fixture();
+        source.chain = ChainId::BitcoinBlake2b;
+        assert_eq!(
+            admit(&source, &destination, &source, &evidence),
+            Err(Refusal::UnsupportedChain)
+        );
+        destination.chain = ChainId::BitcoinBlake2b;
+        evidence.identity = destination.clone();
+        assert_eq!(admit(&source, &destination, &source, &evidence), Ok(()));
+        for chain in [ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4] {
+            source.chain = chain;
+            destination.chain = chain;
+            evidence.identity = destination.clone();
+            assert_eq!(
+                admit(&source, &destination, &source, &evidence),
+                Err(Refusal::UnsupportedChain)
+            );
+        }
+    }
+
     #[test]
     fn admission_fails_closed_and_closes_owned_resource() {
         let source = fixture().0;
@@ -396,7 +429,7 @@ mod tests {
                 }
                 Refusal::BackendUnavailable => evidence.ready = false,
                 Refusal::UnsupportedWallet => {
-                    destination.wallet = WalletIdentity::Liquid("liquid-synthetic".into());
+                    destination.wallet = WalletIdentity::Spark("spark-synthetic".into());
                     evidence.identity = destination.clone();
                 }
                 Refusal::SourceChanged => current_source.app = AppGeneration::next(),

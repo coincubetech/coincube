@@ -7,7 +7,7 @@
 
 use coincube_gui::{
     app::{
-        features::{LiquidGate, MarketplaceServerFlags},
+        features::MarketplaceServerFlags,
         menu::{CubeSubMenu, Menu},
         view::{self, nav::shell, nav::split::ShellSplit, nav::NavContext},
         ConnectionStatus,
@@ -147,7 +147,7 @@ impl Fixture {
             network: ChainId::Bitcoin,
             p2p_test_coordinator: false,
             marketplace_flags: MarketplaceServerFlags::OFF,
-            liquid_gate: LiquidGate::HIDDEN,
+            ai_access: false,
             cube_name: "Synthetic QA Cube",
             spark_alias: Some("Daily spending"),
             vault_alias: Some("Family savings"),

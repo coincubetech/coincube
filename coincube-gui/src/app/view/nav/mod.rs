@@ -10,7 +10,6 @@ pub mod shell;
 pub mod split;
 
 pub mod cube;
-pub mod liquid;
 pub mod marketplace;
 pub mod spark;
 pub mod tertiary;
@@ -219,7 +218,7 @@ pub struct NavContext<'a> {
     pub has_imported_bitcoin: bool,
     pub has_p2p: bool,
     /// Active chain identity. Drives per-feature availability gating
-    /// (Spark/Liquid on the primary rail, Buy/Sell + P2P in Marketplace)
+    /// (Spark on the primary rail, Buy/Sell + P2P in Marketplace)
     /// via [`crate::app::features`].
     pub network: crate::chain::ChainId,
     /// Whether a non-mainnet Mostro coordinator is configured. Only
@@ -231,11 +230,9 @@ pub struct NavContext<'a> {
     /// [`MarketplaceServerFlags::OFF`](crate::app::features::MarketplaceServerFlags::OFF)
     /// until features load, hiding the section while the API stance is unknown.
     pub marketplace_flags: crate::app::features::MarketplaceServerFlags,
-    /// Whether the Liquid wallet is shown at all (sunset gate). When this is
-    /// hidden the Liquid top-level entry disappears from the primary rail —
-    /// hidden, not greyed, since "not on this account" isn't a per-network
-    /// state. See [`crate::app::features::LiquidGate`].
-    pub liquid_gate: crate::app::features::LiquidGate,
+    /// Whether AI access is available ([`crate::app::cache::Cache::ai_access_enabled`]).
+    /// Gates the AI access item in the Cube Settings rail.
+    pub ai_access: bool,
     pub cube_name: &'a str,
     /// The wallet names after "Spark" and "Vault" in the side panel. See
     /// [`crate::app::cache::WalletNames`].
@@ -294,7 +291,7 @@ impl<'a> NavContext<'a> {
             network: cache.chain(),
             p2p_test_coordinator: cache.p2p_test_coordinator,
             marketplace_flags: cache.marketplace_flags,
-            liquid_gate: cache.liquid_gate,
+            ai_access: cache.ai_access_enabled(),
             btcb2_server_enabled: cache.btcb2_server_enabled,
             btcb2_already_claimed: cache.btcb2_already_claimed,
             cube_name: "",
@@ -476,7 +473,7 @@ mod shell_tests {
                     &mut labels,
                 );
                 for required in [
-                    "COIN",
+                    "COINCUBE",
                     "Everyday",
                     "Overview",
                     "Activity",
@@ -503,7 +500,7 @@ mod shell_tests {
                 let brand = labels
                     .0
                     .iter()
-                    .find(|(label, _)| label == "COIN")
+                    .find(|(label, _)| label == "COINCUBE")
                     .unwrap()
                     .1;
                 let mut messages = Vec::new();
@@ -561,6 +558,24 @@ mod shell_tests {
         }
     }
 
+    fn assert_compact_switcher_labels(labels: &Labels, confirmation: bool) {
+        for required in ["All Cubes", "Settings", "Cancel"] {
+            if required == "Cancel" && !confirmation {
+                continue;
+            }
+            assert!(labels.0.iter().any(|(label, _)| label == required));
+        }
+        assert!(labels
+            .0
+            .iter()
+            .any(|(label, _)| label.starts_with("Family household") && label.ends_with('…')));
+        if confirmation {
+            assert!(labels.0.iter().any(|(label, _)| label == "Lock"));
+        } else {
+            assert!(labels.0.iter().any(|(label, _)| label == "Lock Cube"));
+        }
+    }
+
     #[tokio::test]
     async fn long_name_switcher_and_lock_review_fit_compact_shell() {
         load_fonts();
@@ -613,20 +628,7 @@ mod shell_tests {
                     &renderer,
                     &mut labels,
                 );
-                for required in ["All Cubes", "Settings", "Cancel"] {
-                    if required == "Cancel" && !confirmation {
-                        continue;
-                    }
-                    assert!(labels.0.iter().any(|(label, _)| label == required));
-                }
-                assert!(labels.0.iter().any(
-                    |(label, _)| label.starts_with("Family household") && label.ends_with('…')
-                ));
-                if confirmation {
-                    assert!(labels.0.iter().any(|(label, _)| label == "Lock"));
-                } else {
-                    assert!(labels.0.iter().any(|(label, _)| label == "Lock Cube"));
-                }
+                assert_compact_switcher_labels(&labels, confirmation);
                 if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
                     redraw(&mut element, &mut tree, &node, &renderer, size);
                     std::fs::create_dir_all(&directory).unwrap();

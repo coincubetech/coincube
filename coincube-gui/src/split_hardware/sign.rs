@@ -57,6 +57,7 @@ use coincube_core::miniscript::{
         bip32::{ChildNumber, DerivationPath, Fingerprint},
         ecdsa,
         hashes::Hash,
+        psbt::Input,
         sighash::EcdsaSighashType,
         NetworkKind, Psbt,
     },
@@ -558,16 +559,20 @@ impl SigningSession {
         self.handle
     }
 
-    /// Multisig: asks the device whether the policy is registered, and
-    /// registers it (the user approves on the device) when it is not. The
-    /// token the device returns, if any, is held only in this session.
+    /// Multisig: asks the device whether the policy is registered, under
+    /// any name, and registers it (the user approves on the device) when it
+    /// is not. The token the device returns, if any, is held only in this
+    /// session.
     pub async fn register(&mut self) -> Result<RegistrationOutcome, SignError> {
         if !self.policy.shape.is_multisig() {
             return Ok(RegistrationOutcome::NotNeeded);
         }
         let (name, policy) = (&self.policy.name, &self.policy.descriptor);
-        let registered = match self.device.is_wallet_registered(name, policy).await {
-            Ok(registered) => registered,
+        // Any registration of this policy counts, whatever app made it and
+        // whatever it is called: registering it again only adds a duplicate
+        // the user has to approve and later clean up.
+        let registered = match self.device.find_wallet_registration(name, policy).await {
+            Ok(found) => found.is_some(),
             Err(async_hwi::Error::UnimplementedMethod) => {
                 return Err(SignError::UnsupportedDevice(self.kind))
             }
@@ -589,11 +594,12 @@ impl SigningSession {
         // A token-returning device (Ledger) cannot, until a handle is bound
         // with the token; `sign` checks that bound handle instead.
         if hmac.is_none()
-            && !self
+            && self
                 .device
-                .is_wallet_registered(name, policy)
+                .find_wallet_registration(name, policy)
                 .await
                 .map_err(device_error)?
+                .is_none()
         {
             return Err(SignError::PolicyNotRegistered);
         }
@@ -609,11 +615,7 @@ impl SigningSession {
             return Err(SignError::PolicyNotRegistered);
         }
         for (i, input) in psbt.inputs.iter().enumerate() {
-            if let Some(sighash) = input.sighash_type {
-                if sighash.ecdsa_hash_ty() != Ok(EcdsaSighashType::All) {
-                    return Err(SignError::NonAllSighash { input: i });
-                }
-            }
+            validate_declared_sighash(input, i)?;
         }
 
         let device = match self.handle {
@@ -642,11 +644,14 @@ impl SigningSession {
                 bound
             }
         };
+        // Checked on the handle that signs: a Coldcard handle also remembers
+        // a registration found under another name and signs against it.
         if multisig
-            && !device
-                .is_wallet_registered(&self.policy.name, &self.policy.descriptor)
+            && device
+                .find_wallet_registration(&self.policy.name, &self.policy.descriptor)
                 .await
                 .map_err(device_error)?
+                .is_none()
         {
             return Err(SignError::PolicyNotRegistered);
         }
@@ -676,39 +681,63 @@ pub fn accept_device_signatures(
     let mut accepted = original.clone();
     let mut added = 0;
     for (i, (before, after)) in original.inputs.iter().zip(&device.inputs).enumerate() {
-        if let Some(sighash) = after.sighash_type {
-            if sighash.ecdsa_hash_ty() != Ok(EcdsaSighashType::All) {
-                return Err(SignError::NonAllSighash { input: i });
-            }
-        }
-        if after.tap_key_sig.is_some() || !after.tap_script_sigs.is_empty() {
-            return Err(SignError::UnexpectedSignature { input: i });
-        }
-        for (key, sig) in &after.partial_sigs {
-            if let Some(existing) = before.partial_sigs.get(key) {
-                if existing != sig {
-                    return Err(SignError::UnexpectedSignature { input: i });
-                }
-                continue;
-            }
-            let owned = before
-                .bip32_derivation
-                .get(&key.inner)
-                .is_some_and(|(fp, _)| *fp == fingerprint);
-            if !owned {
-                return Err(SignError::UnexpectedSignature { input: i });
-            }
-            if !is_all(sig) {
-                return Err(SignError::NonAllSighash { input: i });
-            }
-            accepted.inputs[i].partial_sigs.insert(*key, *sig);
-            added += 1;
-        }
+        accept_input_signatures(
+            before,
+            after,
+            &mut accepted.inputs[i],
+            i,
+            fingerprint,
+            &mut added,
+        )?;
     }
     if added == 0 {
         return Err(SignError::DeviceDidNotSign);
     }
     Ok(accepted)
+}
+
+fn validate_declared_sighash(input: &Input, i: usize) -> Result<(), SignError> {
+    if let Some(sighash) = input.sighash_type {
+        if sighash.ecdsa_hash_ty() != Ok(EcdsaSighashType::All) {
+            return Err(SignError::NonAllSighash { input: i });
+        }
+    }
+    Ok(())
+}
+
+fn accept_input_signatures(
+    before: &Input,
+    after: &Input,
+    accepted: &mut Input,
+    i: usize,
+    fingerprint: Fingerprint,
+    added: &mut i32,
+) -> Result<(), SignError> {
+    validate_declared_sighash(after, i)?;
+    if after.tap_key_sig.is_some() || !after.tap_script_sigs.is_empty() {
+        return Err(SignError::UnexpectedSignature { input: i });
+    }
+    for (key, sig) in &after.partial_sigs {
+        if let Some(existing) = before.partial_sigs.get(key) {
+            if existing != sig {
+                return Err(SignError::UnexpectedSignature { input: i });
+            }
+            continue;
+        }
+        let owned = before
+            .bip32_derivation
+            .get(&key.inner)
+            .is_some_and(|(fp, _)| *fp == fingerprint);
+        if !owned {
+            return Err(SignError::UnexpectedSignature { input: i });
+        }
+        if !is_all(sig) {
+            return Err(SignError::NonAllSighash { input: i });
+        }
+        accepted.partial_sigs.insert(*key, *sig);
+        *added += 1;
+    }
+    Ok(())
 }
 
 fn is_all(sig: &ecdsa::Signature) -> bool {

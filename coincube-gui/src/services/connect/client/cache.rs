@@ -3,7 +3,7 @@ use async_fd_lock::LockWrite;
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::SeekFrom;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
@@ -156,14 +156,41 @@ impl ConnectCache {
             .is_some_and(|account| account.email == email)
     }
 
+    /// [`Self::upsert_credential_from`] with the host the action implies.
+    #[cfg(test)]
     fn upsert_credential(
         &mut self,
         email: &str,
         tokens: AccessTokenResponse,
         action: CacheAccountAction,
     ) {
+        self.upsert_credential_from(email, tokens, action, Issuer::for_action(action))
+    }
+
+    fn upsert_credential_from(
+        &mut self,
+        email: &str,
+        tokens: AccessTokenResponse,
+        action: CacheAccountAction,
+        issuer: Issuer<'_>,
+    ) {
         if let Some(c) = self.accounts.iter_mut().find(|c| c.email == email) {
             c.tokens = tokens;
+            if let Issuer::Set(api) = issuer {
+                // The device id and the event cursor were issued by the
+                // previous session's host: another host knows neither, so
+                // they go with it.
+                if c.api_base_url.as_deref() != api {
+                    c.device_id = None;
+                    c.last_seen_event_seq = None;
+                    c.cube_event_seqs.clear();
+                    // A re-registration started for the previous host's
+                    // session is superseded, as by a new sign-in: its
+                    // completion must not install that host's id here.
+                    c.reregister_claim = None;
+                    c.api_base_url = api.map(str::to_string);
+                }
+            }
         } else {
             self.accounts.push(Account {
                 email: email.to_string(),
@@ -171,6 +198,11 @@ impl ConnectCache {
                 device_id: None,
                 last_seen_event_seq: None,
                 reregister_claim: None,
+                cube_event_seqs: BTreeMap::new(),
+                api_base_url: match issuer {
+                    Issuer::Set(api) => api.map(str::to_string),
+                    Issuer::Keep => None,
+                },
             })
         }
         if action != CacheAccountAction::PreserveSelection {
@@ -206,6 +238,37 @@ impl ConnectCache {
     }
 }
 
+/// Which Connect API issued the tokens a write stores
+/// ([`Account::api_base_url`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Issuer<'a> {
+    /// The same session as the entry's (a refresh): its host is unchanged.
+    Keep,
+    /// A session issued by this host: `None` is the configured Connect API,
+    /// `Some` another one, as [`issuing_api`] gives it.
+    Set(Option<&'a str>),
+}
+
+impl Issuer<'_> {
+    /// Every write but the served-session save stores a session of the
+    /// configured API: a sign-in, or the OS keyring's saved sign-in. A
+    /// refresh keeps the entry's host.
+    fn for_action(action: CacheAccountAction) -> Self {
+        match action {
+            CacheAccountAction::PreserveSelection => Issuer::Keep,
+            CacheAccountAction::Activate | CacheAccountAction::NewLogin => Issuer::Set(None),
+        }
+    }
+}
+
+/// How an entry records the API at `api_base_url`: `None` when it is the
+/// configured Connect API (`configured_api_base_url`), else the URL without
+/// a trailing slash.
+pub fn issuing_api(api_base_url: &str, configured_api_base_url: &str) -> Option<String> {
+    let api = api_base_url.trim_end_matches('/');
+    (api != configured_api_base_url.trim_end_matches('/')).then(|| api.to_string())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CacheAccountAction {
     PreserveSelection,
@@ -223,9 +286,48 @@ pub struct Account {
     pub last_seen_event_seq: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reregister_claim: Option<String>,
+    /// The Connect API that issued `tokens`, when it is not the configured
+    /// one ([`issuing_api`]). Only a Bitcoin Blake2b Cube's opening session
+    /// can come from another host; every other entry, and every entry
+    /// written before this field, is the configured API's. The device id and
+    /// the event cursor belong to this host too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base_url: Option<String>,
+    /// Each Cube's own event cursor, by Cube id. Several Cubes of one
+    /// account share this entry, and one must not resume past an event
+    /// another received and it did not: each resumes from its own cursor
+    /// ([`Self::event_seq_for`]). `last_seen_event_seq` is still written,
+    /// for an older build reading the file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cube_event_seqs: BTreeMap<String, i64>,
 }
 
 impl Account {
+    /// Whether this entry's session, device id and cursor were issued by the
+    /// API that [`issuing_api`] records as `api`. A token, a device id or a
+    /// cursor is only ever used with the host that issued it.
+    pub fn issued_by(&self, api: Option<&str>) -> bool {
+        self.api_base_url.as_deref() == api
+    }
+
+    /// Where the Cube `cube_id` resumes its event stream: its own cursor,
+    /// never another Cube's. A Cube with none yet starts from 0 (a full
+    /// replay of its events, as on a first launch), except while no Cube has
+    /// a cursor of its own here: the entry was last written by a build with
+    /// one cursor per account, and the Cube resumes from it, as it did then.
+    /// A Cube without an id reads the account's cursor, as before.
+    pub fn event_seq_for(&self, cube_id: Option<&str>) -> i64 {
+        let account = self.last_seen_event_seq.unwrap_or(0);
+        match cube_id.filter(|id| !id.is_empty()) {
+            Some(id) => match self.cube_event_seqs.get(id) {
+                Some(own) => *own,
+                None if self.cube_event_seqs.is_empty() => account,
+                None => 0,
+            },
+            None => account,
+        }
+    }
+
     /// A fresh account record for the opt-in Testnet4 provisioning runner.
     #[cfg(feature = "integration-tests")]
     pub fn new_for_integration(email: String, tokens: AccessTokenResponse) -> Self {
@@ -235,6 +337,8 @@ impl Account {
             device_id: None,
             last_seen_event_seq: None,
             reregister_claim: None,
+            api_base_url: None,
+            cube_event_seqs: BTreeMap::new(),
         }
     }
 
@@ -253,7 +357,15 @@ pub async fn update_connect_cache(
     email: &str,
     action: CacheAccountAction,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    update_connect_cache_inner(network_dir, current_tokens, email, action, None).await
+    update_connect_cache_inner(
+        network_dir,
+        current_tokens,
+        email,
+        action,
+        None,
+        Issuer::for_action(action),
+    )
+    .await
 }
 
 enum CacheUpdateGuard<'a> {
@@ -276,6 +388,7 @@ pub async fn persist_refreshed_tokens(
         email,
         CacheAccountAction::PreserveSelection,
         Some(CacheUpdateGuard::RefreshToken(previous_refresh_token)),
+        Issuer::Keep,
     )
     .await
 }
@@ -295,6 +408,29 @@ pub async fn persist_restored_tokens(
         email,
         CacheAccountAction::Activate,
         Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
+        Issuer::Set(None),
+    )
+    .await
+}
+
+/// Save a Bitcoin Blake2b Cube's opening session, issued by the API that
+/// [`issuing_api`] records as `issuer`, under the same guard as
+/// [`persist_restored_tokens`]. An entry for the account from another host
+/// loses its device id and event cursor, which that host issued.
+pub async fn persist_served_tokens(
+    network_dir: &NetworkDirectory,
+    email: &str,
+    tokens: &AccessTokenResponse,
+    started_from: &ConnectCache,
+    issuer: Option<&str>,
+) -> Result<AccessTokenResponse, ConnectCacheError> {
+    update_connect_cache_inner(
+        network_dir,
+        tokens,
+        email,
+        CacheAccountAction::Activate,
+        Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
+        Issuer::Set(issuer),
     )
     .await
 }
@@ -313,6 +449,7 @@ pub async fn update_connect_cache_for_login(
         email,
         CacheAccountAction::NewLogin,
         Some(CacheUpdateGuard::LoginSnapshot(started_from)),
+        Issuer::Set(None),
     )
     .await
 }
@@ -323,6 +460,7 @@ async fn update_connect_cache_inner(
     email: &str,
     action: CacheAccountAction,
     guard: Option<CacheUpdateGuard<'_>>,
+    issuer: Issuer<'_>,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -358,6 +496,55 @@ async fn update_connect_cache_inner(
     };
 
     let guarded = guard.is_some();
+    validate_cache_update_guard(&cache, email, guard)?;
+
+    let newer_cached_tokens = cache
+        .accounts
+        .iter()
+        .find(|cred| cred.email == *email)
+        .filter(|account| !guarded && current_tokens.expires_at < account.tokens.expires_at)
+        // Newer tokens from another host are not a newer copy of this session.
+        .filter(|account| match issuer {
+            Issuer::Keep => true,
+            Issuer::Set(api) => account.issued_by(api),
+        })
+        .map(|account| account.tokens.clone());
+
+    let tokens = if let Some(tokens) = newer_cached_tokens {
+        tracing::debug!("Connect authentication tokens are up to date");
+        tokens
+    } else {
+        current_tokens.clone()
+    };
+
+    cache.upsert_credential_from(email, tokens.clone(), action, issuer);
+
+    let content = serde_json::to_vec_pretty(&cache).map_err(|e| {
+        ConnectCacheError::WritingFile(format!("Failed to serialize settings: {}", e))
+    })?;
+
+    file.seek(SeekFrom::Start(0)).await.map_err(|e| {
+        ConnectCacheError::WritingFile(format!("Failed to seek to start of file: {}", e))
+    })?;
+
+    file.write_all(&content).await.map_err(|e| {
+        tracing::warn!("failed to write to file: {:?}", e);
+        ConnectCacheError::WritingFile(e.to_string())
+    })?;
+
+    file.inner_mut()
+        .set_len(content.len() as u64)
+        .await
+        .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to truncate file: {}", e)))?;
+
+    Ok(tokens)
+}
+
+fn validate_cache_update_guard(
+    cache: &ConnectCache,
+    email: &str,
+    guard: Option<CacheUpdateGuard<'_>>,
+) -> Result<(), ConnectCacheError> {
     match guard {
         Some(CacheUpdateGuard::LoginSnapshot(started_from)) => {
             let before = started_from.accounts.iter().find(|a| a.email == *email);
@@ -399,9 +586,9 @@ async fn update_connect_cache_inner(
             let active_now = cache.active_account().map(|a| a.email.as_str());
             if cache.active_email != started_from.active_email
                 || active_now != active_before
-                || account_tokens(&cache, email) != account_tokens(started_from, email)
+                || account_tokens(cache, email) != account_tokens(started_from, email)
                 || active_before.is_some_and(|active| {
-                    account_tokens(&cache, active) != account_tokens(started_from, active)
+                    account_tokens(cache, active) != account_tokens(started_from, active)
                 })
             {
                 return Err(ConnectCacheError::Unexpected(
@@ -421,42 +608,7 @@ async fn update_connect_cache_inner(
         }
         None => {}
     }
-
-    let newer_cached_tokens = cache
-        .accounts
-        .iter()
-        .find(|cred| cred.email == *email)
-        .filter(|account| !guarded && current_tokens.expires_at < account.tokens.expires_at)
-        .map(|account| account.tokens.clone());
-
-    let tokens = if let Some(tokens) = newer_cached_tokens {
-        tracing::debug!("Connect authentication tokens are up to date");
-        tokens
-    } else {
-        current_tokens.clone()
-    };
-
-    cache.upsert_credential(email, tokens.clone(), action);
-
-    let content = serde_json::to_vec_pretty(&cache).map_err(|e| {
-        ConnectCacheError::WritingFile(format!("Failed to serialize settings: {}", e))
-    })?;
-
-    file.seek(SeekFrom::Start(0)).await.map_err(|e| {
-        ConnectCacheError::WritingFile(format!("Failed to seek to start of file: {}", e))
-    })?;
-
-    file.write_all(&content).await.map_err(|e| {
-        tracing::warn!("failed to write to file: {:?}", e);
-        ConnectCacheError::WritingFile(e.to_string())
-    })?;
-
-    file.inner_mut()
-        .set_len(content.len() as u64)
-        .await
-        .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to truncate file: {}", e)))?;
-
-    Ok(tokens)
+    Ok(())
 }
 
 /// Persist (or clear) the gRPC-issued `device_id` for the account matching
@@ -467,6 +619,18 @@ async fn update_connect_cache_inner(
 /// Acquires a write lock on the cache file so the update is atomic against
 /// concurrent `update_connect_cache` calls. Returns false when the account
 /// is absent or an About re-registration owns the cache claim.
+///
+/// Clearing is how a device id that Connect has revoked is discarded: only
+/// the id goes, and the account's session and event sequence stay.
+///
+/// A `false` answer to a clear means nothing was cleared, and the caller
+/// must not assume the id is gone. With no account there is nothing stored.
+/// With a live re-registration claim the id is left to that re-registration:
+/// it stores the new id if it succeeds, but puts the **old** id back if it
+/// fails or rolls back, so a caller discarding a revoked id has to check
+/// again once the claim is released. A claim counts as live while its
+/// process holds the claim's lock, and also when that lock cannot be read.
+/// A claim abandoned by an exited process does not block a clear.
 pub async fn set_device_id_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
@@ -478,19 +642,88 @@ pub async fn set_device_id_for_email(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: None,
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
 }
 
+/// What [`discard_device_id_in_every_chain_folder`] did in one chain folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceIdDiscard {
+    /// The folder held an id for the account and it is gone.
+    Discarded,
+    /// The folder held an id and it is still there: a re-registration holds
+    /// the claim, or the file could not be updated. The id may be replayed.
+    Kept,
+}
+
+/// Discard the signer device id stored for `email` in every chain folder
+/// under `datadir`, for a computer that Connect says was removed from the
+/// account.
+///
+/// Removing a computer retires every signer device it registered, and each
+/// chain folder keeps its own. Nothing else clears them: a new sign-in keeps
+/// a stored id unless a re-registration was in progress, and registration
+/// short-circuits on a stored id. Left in place, a revoked id is replayed by
+/// the next Cube that opens on that chain, which is signed out again for it.
+///
+/// Returns what happened in each folder that held an id for the account;
+/// folders with no `connect.json`, no such account or no id are not listed.
+/// See [`set_device_id_for_email`] for when a clear is refused.
+pub async fn discard_device_id_in_every_chain_folder(
+    datadir: &crate::dir::CoincubeDirectory,
+    email: &str,
+) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
+    discard_device_id_in_chain_folders(datadir, email, crate::chain::ChainId::ALL).await
+}
+
+/// [`discard_device_id_in_every_chain_folder`] limited to `chains`. A
+/// Connect-served Bitcoin Blake2b Cube discards only its own chain's id: the
+/// same email in another folder may be an account on another Connect host,
+/// and the Cube never writes another chain's state (master invariant I3).
+pub async fn discard_device_id_in_chain_folders(
+    datadir: &crate::dir::CoincubeDirectory,
+    email: &str,
+    chains: impl IntoIterator<Item = crate::chain::ChainId>,
+) -> Vec<(crate::chain::ChainId, DeviceIdDiscard)> {
+    let mut outcomes = Vec::new();
+    for chain in chains {
+        let dir = datadir.network_directory(chain);
+        // Reading first also keeps the clear from creating an empty
+        // `connect.json` in a chain folder that never had one.
+        let held = Account::from_cache(&dir, email)
+            .ok()
+            .flatten()
+            .is_some_and(|account| account.device_id.is_some());
+        if !held {
+            continue;
+        }
+        let outcome = match set_device_id_for_email(&dir, email, None).await {
+            Ok(true) => DeviceIdDiscard::Discarded,
+            Ok(false) => DeviceIdDiscard::Kept,
+            Err(error) => {
+                tracing::warn!("Cannot discard the Connect device id for {chain}: {error}");
+                DeviceIdDiscard::Kept
+            }
+        };
+        outcomes.push((chain, outcome));
+    }
+    outcomes
+}
+
 /// Commit a plain registration only for the same active bearer that started
 /// its RPC. A later login cannot inherit an earlier RPC's device ID.
+///
+/// Both tokens are compared. A Bitcoin Blake2b Cube served by Connect saves
+/// its session with an empty refresh token when the saved sign-in is another
+/// session, so two opens of one account differ only in their access tokens.
+/// Elsewhere the two tokens always travel together.
 pub async fn set_device_id_for_email_if_token(
     network_dir: &NetworkDirectory,
     email: &str,
     device_id: &str,
-    expected_refresh_token: &str,
+    expected: &AccessTokenResponse,
 ) -> Result<bool, ConnectCacheError> {
     mutate_device_registration(
         network_dir,
@@ -498,7 +731,7 @@ pub async fn set_device_id_for_email_if_token(
         DeviceRegistrationUpdate::Set {
             device_id: Some(device_id),
             claim: None,
-            expected_refresh_token: Some(expected_refresh_token),
+            expected_tokens: Some(expected),
         },
     )
     .await
@@ -547,7 +780,7 @@ pub async fn finish_device_reregistration(
         DeviceRegistrationUpdate::Set {
             device_id,
             claim: Some(claim),
-            expected_refresh_token: None,
+            expected_tokens: None,
         },
     )
     .await
@@ -561,7 +794,7 @@ enum DeviceRegistrationUpdate<'a> {
     Set {
         device_id: Option<&'a str>,
         claim: Option<&'a str>,
-        expected_refresh_token: Option<&'a str>,
+        expected_tokens: Option<&'a AccessTokenResponse>,
     },
 }
 
@@ -602,61 +835,10 @@ async fn mutate_device_registration(
         }
     };
 
-    let is_active = cache.active_email_matches(email);
-    let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
-        return Ok(false);
+    let accepted = match apply_device_registration_update(network_dir, &mut cache, email, update) {
+        DeviceRegistrationMutation::Unchanged(accepted) => return Ok(accepted),
+        DeviceRegistrationMutation::Changed(accepted) => accepted,
     };
-    let mut accepted = true;
-    let changed = match update {
-        DeviceRegistrationUpdate::Begin { expected_id, claim } => {
-            if !is_active || account.device_id.as_deref() != Some(expected_id) {
-                return Ok(false);
-            }
-            account.reregister_claim = Some(claim.to_string());
-            true
-        }
-        DeviceRegistrationUpdate::Set {
-            device_id,
-            claim,
-            expected_refresh_token,
-        } => {
-            if let Some(claim) = claim {
-                if account.reregister_claim.as_deref() != Some(claim) {
-                    return Ok(false);
-                }
-                // The account lost selection while its RPC was in flight.
-                // Retire only this request's claim; keep its previous device
-                // id and never install the late RPC result.
-                if is_active {
-                    account.device_id = device_id.map(str::to_string);
-                } else {
-                    accepted = false;
-                }
-                account.reregister_claim = None;
-                true
-            } else {
-                if expected_refresh_token
-                    .is_some_and(|expected| !is_active || account.tokens.refresh_token != expected)
-                {
-                    return Ok(false);
-                }
-                if has_live_reregister_claim_for_account(network_dir, account) {
-                    return Ok(false);
-                }
-                if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
-                    return Ok(true);
-                }
-                account.device_id = device_id.map(str::to_string);
-                // An exited process's claim is abandoned. Its late completion
-                // still needs the exact claim to commit.
-                account.reregister_claim = None;
-                true
-            }
-        }
-    };
-    if !changed {
-        return Ok(false);
-    }
 
     let content = serde_json::to_vec_pretty(&cache)
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to serialize cache: {}", e)))?;
@@ -675,14 +857,104 @@ async fn mutate_device_registration(
     Ok(accepted)
 }
 
+enum DeviceRegistrationMutation {
+    Unchanged(bool),
+    Changed(bool),
+}
+
+fn apply_device_registration_update(
+    network_dir: &NetworkDirectory,
+    cache: &mut ConnectCache,
+    email: &str,
+    update: DeviceRegistrationUpdate<'_>,
+) -> DeviceRegistrationMutation {
+    let is_active = cache.active_email_matches(email);
+    let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
+        return DeviceRegistrationMutation::Unchanged(false);
+    };
+    let mut accepted = true;
+    match update {
+        DeviceRegistrationUpdate::Begin { expected_id, claim } => {
+            if !is_active || account.device_id.as_deref() != Some(expected_id) {
+                return DeviceRegistrationMutation::Unchanged(false);
+            }
+            account.reregister_claim = Some(claim.to_string());
+            DeviceRegistrationMutation::Changed(accepted)
+        }
+        DeviceRegistrationUpdate::Set {
+            device_id,
+            claim,
+            expected_tokens,
+        } => {
+            if let Some(claim) = claim {
+                if account.reregister_claim.as_deref() != Some(claim) {
+                    return DeviceRegistrationMutation::Unchanged(false);
+                }
+                // The account lost selection while its RPC was in flight.
+                // Retire only this request's claim; keep its previous device
+                // id and never install the late RPC result.
+                if is_active {
+                    account.device_id = device_id.map(str::to_string);
+                } else {
+                    accepted = false;
+                }
+                account.reregister_claim = None;
+                DeviceRegistrationMutation::Changed(accepted)
+            } else {
+                apply_unclaimed_device_registration(
+                    network_dir,
+                    account,
+                    is_active,
+                    device_id,
+                    expected_tokens,
+                )
+            }
+        }
+    }
+}
+
+fn apply_unclaimed_device_registration(
+    network_dir: &NetworkDirectory,
+    account: &mut Account,
+    is_active: bool,
+    device_id: Option<&str>,
+    expected_tokens: Option<&AccessTokenResponse>,
+) -> DeviceRegistrationMutation {
+    if expected_tokens.is_some_and(|expected| {
+        !is_active
+            || account.tokens.refresh_token != expected.refresh_token
+            || account.tokens.access_token != expected.access_token
+    }) {
+        return DeviceRegistrationMutation::Unchanged(false);
+    }
+    if has_live_reregister_claim_for_account(network_dir, account) {
+        return DeviceRegistrationMutation::Unchanged(false);
+    }
+    if account.device_id.as_deref() == device_id && account.reregister_claim.is_none() {
+        return DeviceRegistrationMutation::Unchanged(true);
+    }
+    account.device_id = device_id.map(str::to_string);
+    // An exited process's claim is abandoned. Its late completion
+    // still needs the exact claim to commit.
+    account.reregister_claim = None;
+    DeviceRegistrationMutation::Changed(true)
+}
+
 /// Persist the highest event_seq observed on the realtime stream for the
 /// account matching `email`. Idempotent — only writes when the new value is
 /// strictly greater, so concurrent stream writers can't move the cursor
 /// backwards.
+///
+/// `issuer` is the host of the stream the event came from
+/// ([`issuing_api`]): an entry another host issued keeps its own cursor.
+/// `cube_id` is the Cube whose stream received it: its own cursor moves
+/// ([`Account::cube_event_seqs`]), never another Cube's.
 pub async fn set_last_seen_event_seq_for_email(
     network_dir: &NetworkDirectory,
     email: &str,
     event_seq: i64,
+    issuer: Option<&str>,
+    cube_id: Option<&str>,
 ) -> Result<(), ConnectCacheError> {
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
@@ -716,13 +988,29 @@ pub async fn set_last_seen_event_seq_for_email(
         }
     };
 
-    let Some(account) = cache.accounts.iter_mut().find(|a| a.email == email) else {
+    let Some(account) = cache
+        .accounts
+        .iter_mut()
+        .find(|a| a.email == email && a.issued_by(issuer))
+    else {
         return Ok(());
     };
-    if account.last_seen_event_seq.unwrap_or(0) >= event_seq {
+    let mut moved = false;
+    if let Some(id) = cube_id.filter(|id| !id.is_empty()) {
+        let cursor = account.cube_event_seqs.entry(id.to_string()).or_insert(0);
+        if *cursor < event_seq {
+            *cursor = event_seq;
+            moved = true;
+        }
+    }
+    // The account's cursor, for an older build reading the file.
+    if account.last_seen_event_seq.unwrap_or(0) < event_seq {
+        account.last_seen_event_seq = Some(event_seq);
+        moved = true;
+    }
+    if !moved {
         return Ok(());
     }
-    account.last_seen_event_seq = Some(event_seq);
 
     let content = serde_json::to_vec_pretty(&cache)
         .map_err(|e| ConnectCacheError::WritingFile(format!("Failed to serialize cache: {}", e)))?;
@@ -824,10 +1112,11 @@ impl std::fmt::Display for ConnectCacheError {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_device_reregistration, finish_device_reregistration, persist_refreshed_tokens,
-        persist_restored_tokens, set_device_id_for_email, set_device_id_for_email_if_token,
-        update_connect_cache, update_connect_cache_for_login, AccessTokenResponse,
-        CacheAccountAction, ConnectCache, CONNECT_CACHE_FILENAME,
+        begin_device_reregistration, discard_device_id_in_every_chain_folder,
+        finish_device_reregistration, persist_refreshed_tokens, persist_restored_tokens,
+        set_device_id_for_email, set_device_id_for_email_if_token, update_connect_cache,
+        update_connect_cache_for_login, AccessTokenResponse, Account, CacheAccountAction,
+        ConnectCache, DeviceIdDiscard, CONNECT_CACHE_FILENAME,
     };
     use crate::dir::NetworkDirectory;
 
@@ -846,6 +1135,255 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         NetworkDirectory::new(path)
+    }
+
+    /// A session from another host replaces the entry's tokens and drops the
+    /// device id and event cursor the previous host issued; a session from
+    /// the same host keeps them, and a refresh keeps the entry's host.
+    #[tokio::test]
+    async fn an_entry_keeps_its_device_and_cursor_only_while_its_host_does() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let cube = super::issuing_api("https://cube.example/", "https://configured.example");
+        assert_eq!(cube.as_deref(), Some("https://cube.example"));
+        assert_eq!(
+            super::issuing_api("https://configured.example/", "https://configured.example"),
+            None
+        );
+        let seed = |api: Option<&str>| {
+            let mut cache = ConnectCache::default();
+            cache.upsert_credential(email, tokens("seed"), CacheAccountAction::NewLogin);
+            cache.accounts[0].device_id = Some("seed-device".into());
+            cache.accounts[0].last_seen_event_seq = Some(41);
+            cache.accounts[0].api_base_url = api.map(str::to_string);
+            std::fs::write(
+                dir.path().join(CONNECT_CACHE_FILENAME),
+                serde_json::to_vec(&cache).unwrap(),
+            )
+            .unwrap();
+            cache
+        };
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // The configured API's entry; the Cube's host saves its session.
+        let snapshot = seed(None);
+        super::persist_served_tokens(&dir, email, &tokens("cube"), &snapshot, cube.as_deref())
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.tokens.access_token, "cube-access");
+        assert_eq!(saved.api_base_url.as_deref(), Some("https://cube.example"));
+        assert!(saved.issued_by(cube.as_deref()) && !saved.issued_by(None));
+        assert_eq!((saved.device_id, saved.last_seen_event_seq), (None, None));
+
+        // The same host: the device id and cursor stay.
+        let snapshot = seed(cube.as_deref());
+        super::persist_served_tokens(&dir, email, &tokens("cube2"), &snapshot, cube.as_deref())
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.device_id.as_deref(), Some("seed-device"));
+        assert_eq!(saved.last_seen_event_seq, Some(41));
+
+        // A refresh of the Cube host's session keeps its host and device.
+        persist_refreshed_tokens(&dir, email, "cube2-refresh", &tokens("cube3"))
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.api_base_url.as_deref(), Some("https://cube.example"));
+        assert_eq!(saved.device_id.as_deref(), Some("seed-device"));
+
+        // A sign-in on the configured API takes the entry back from the
+        // Cube's host, without its device id or cursor.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        update_connect_cache_for_login(&dir, &tokens("login"), email, &snapshot)
+            .await
+            .unwrap();
+        let saved = entry();
+        assert_eq!(saved.api_base_url, None);
+        assert_eq!((saved.device_id, saved.last_seen_event_seq), (None, None));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A stream's event cursor is written only to an entry its host issued,
+    /// and a host change supersedes a re-registration started for the
+    /// previous host's session.
+    #[tokio::test]
+    async fn the_cursor_and_a_reregistration_stay_with_their_host() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("seed"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(3);
+        cache.accounts[0].reregister_claim = Some("about-claim".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Another host's stream leaves the configured API's cursor alone.
+        super::set_last_seen_event_seq_for_email(
+            &dir,
+            email,
+            50,
+            Some("https://cube.example"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(3));
+        super::set_last_seen_event_seq_for_email(&dir, email, 4, None, None)
+            .await
+            .unwrap();
+        assert_eq!(entry().last_seen_event_seq, Some(4));
+
+        // The Cube's host takes the entry over: the claim goes with the
+        // previous host's device id and cursor.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        let taken = entry();
+        assert_eq!(taken.reregister_claim, None);
+        assert_eq!(taken.last_seen_event_seq, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// Each Cube resumes from its own cursor: a sibling Cube of the account
+    /// that received later events does not move it, and a Cube with none
+    /// starts from 0 once any Cube has its own. Before that, the account's
+    /// cursor (all an older build wrote) is where every Cube resumes.
+    #[tokio::test]
+    async fn each_cube_resumes_from_its_own_cursor() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].last_seen_event_seq = Some(7);
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let entry = || Account::from_cache(&dir, email).unwrap().unwrap();
+
+        // Written by a build with one cursor per account: every Cube
+        // resumes from it, and a Cube without an id always does.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 7);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 7);
+        assert_eq!(entry().event_seq_for(None), 7);
+
+        // Cube A receives events up to 20.
+        super::set_last_seen_event_seq_for_email(&dir, email, 20, None, Some("cube-a"))
+            .await
+            .unwrap();
+        // B has not received them: it does not resume past them.
+        assert_eq!(entry().event_seq_for(Some("cube-a")), 20);
+        assert_eq!(entry().event_seq_for(Some("cube-b")), 0);
+        // B's own events move only B's cursor; an older event moves nothing.
+        super::set_last_seen_event_seq_for_email(&dir, email, 9, None, Some("cube-b"))
+            .await
+            .unwrap();
+        super::set_last_seen_event_seq_for_email(&dir, email, 5, None, Some("cube-a"))
+            .await
+            .unwrap();
+        let both = entry();
+        assert_eq!(both.event_seq_for(Some("cube-a")), 20);
+        assert_eq!(both.event_seq_for(Some("cube-b")), 9);
+        // The account's cursor is still written, for an older build.
+        assert_eq!(both.last_seen_event_seq, Some(20));
+
+        // A host change clears every Cube's cursor with the entry's.
+        let snapshot = ConnectCache::from_file(&dir).unwrap();
+        super::persist_served_tokens(
+            &dir,
+            email,
+            &tokens("cube"),
+            &snapshot,
+            Some("https://cube.example"),
+        )
+        .await
+        .unwrap();
+        assert!(entry().cube_event_seqs.is_empty());
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// An unguarded write keeps the file's tokens only when they are a newer
+    /// copy of the same host's session.
+    #[tokio::test]
+    async fn newer_tokens_from_another_host_are_not_adopted() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        let mut newer = tokens("cube");
+        newer.expires_at = 999;
+        cache.upsert_credential(email, newer, CacheAccountAction::NewLogin);
+        cache.accounts[0].api_base_url = Some("https://cube.example".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let stored = update_connect_cache(
+            &dir,
+            &tokens("configured"),
+            email,
+            CacheAccountAction::Activate,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.access_token, "configured-access");
+        let entry = Account::from_cache(&dir, email).unwrap().unwrap();
+        assert_eq!(entry.api_base_url, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// The registration shortcut reuses a cached device id only from an
+    /// entry the registering session's host issued; otherwise it registers
+    /// (here: reaches for the network and fails, never returning the id).
+    #[tokio::test]
+    async fn the_registration_shortcut_ignores_another_hosts_device_id() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("cube-device".into());
+        cache.accounts[0].api_base_url = Some("https://cube.example".into());
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let register = |issuer: Option<&'static str>| {
+            let dir = dir.clone();
+            async move {
+                crate::services::connect::grpc::bootstrap::ensure_device_registered(
+                    "invalid://must-not-reach-network",
+                    std::sync::Arc::new(tokio::sync::RwLock::new(tokens("a"))),
+                    &dir,
+                    email,
+                    "test desktop".into(),
+                    "test".into(),
+                    "test".into(),
+                    issuer,
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            register(Some("https://cube.example")).await.unwrap(),
+            "cube-device"
+        );
+        assert!(register(None).await.is_err());
+        std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
     #[tokio::test]
@@ -1132,6 +1670,56 @@ mod tests {
         std::fs::remove_dir_all(dir.path()).unwrap();
     }
 
+    /// A Connect-served Bitcoin Blake2b Cube saves its session with an empty
+    /// refresh token when the saved sign-in is another session. Two opens of
+    /// one account then share the refresh token (empty) and differ only in
+    /// their access tokens: the guard must still tell them apart.
+    #[tokio::test]
+    async fn two_opens_with_an_empty_refresh_token_are_told_apart() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let open = |access: &str| AccessTokenResponse {
+            access_token: access.into(),
+            refresh_token: String::new(),
+            expires_at: 123,
+        };
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, open("second-open"), CacheAccountAction::Activate);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "first-device",
+            &open("first-open")
+        )
+        .await
+        .unwrap());
+        assert!(super::Account::from_cache(&dir, email)
+            .unwrap()
+            .unwrap()
+            .device_id
+            .is_none());
+        assert!(set_device_id_for_email_if_token(
+            &dir,
+            email,
+            "second-device",
+            &open("second-open")
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            super::Account::from_cache(&dir, email)
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("second-device")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
     #[tokio::test]
     async fn late_plain_registration_cannot_write_into_new_login() {
         let dir = test_network_dir();
@@ -1146,7 +1734,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            !set_device_id_for_email_if_token(&dir, email, "late-device", "old-refresh")
+            !set_device_id_for_email_if_token(&dir, email, "late-device", &tokens("old"))
                 .await
                 .unwrap()
         );
@@ -1405,6 +1993,7 @@ mod tests {
             "test desktop".into(),
             "test".into(),
             "test".into(),
+            None,
         )
         .await;
         assert!(matches!(
@@ -1558,6 +2147,7 @@ mod tests {
             "test desktop".into(),
             "test".into(),
             "test".into(),
+            None,
         )
         .await;
         assert!(matches!(
@@ -1760,5 +2350,193 @@ mod tests {
             cache.active_account().map(|account| account.email.as_str()),
             Some("alice@example.com")
         );
+    }
+    /// Discarding a device id, as for one Connect has revoked: only the id
+    /// goes, and the next registration stores a new one.
+    #[tokio::test]
+    async fn clearing_a_device_id_keeps_the_session_and_lets_the_next_registration_store_one() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("revoked-device".into());
+        cache.accounts[0].last_seen_event_seq = Some(42);
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        let before = ConnectCache::from_file(&dir).unwrap();
+
+        assert!(set_device_id_for_email(&dir, email, None).await.unwrap());
+
+        let cleared = ConnectCache::from_file(&dir).unwrap();
+        assert_eq!(cleared.active_email, before.active_email);
+        let (account, was) = (
+            cleared.active_account().unwrap(),
+            before.active_account().unwrap(),
+        );
+        assert_eq!(account.device_id, None);
+        assert_eq!(account.email, was.email);
+        assert_eq!(account.tokens.access_token, was.tokens.access_token);
+        assert_eq!(account.tokens.refresh_token, was.tokens.refresh_token);
+        assert_eq!(account.last_seen_event_seq, Some(42));
+
+        assert!(
+            set_device_id_for_email_if_token(&dir, email, "fresh-device", &was.tokens)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            ConnectCache::from_file(&dir)
+                .unwrap()
+                .active_account()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("fresh-device")
+        );
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A clear is refused while a re-registration holds the claim, and for
+    /// an account that is not in the cache. Neither changes the file.
+    #[tokio::test]
+    async fn clearing_a_device_id_is_refused_under_a_live_claim_and_for_an_unknown_account() {
+        let dir = test_network_dir();
+        let path = dir.path().join(CONNECT_CACHE_FILENAME);
+        let email = "alice@example.com";
+        let mut cache = ConnectCache::default();
+        cache.upsert_credential(email, tokens("a"), CacheAccountAction::NewLogin);
+        cache.accounts[0].device_id = Some("device-a".into());
+        std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        assert!(!set_device_id_for_email(&dir, "nobody@example.com", None)
+            .await
+            .unwrap());
+
+        // The claim is live only while it is held: it owns a file lock.
+        let claim = begin_device_reregistration(&dir, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+        let claimed = std::fs::read(&path).unwrap();
+        assert!(!set_device_id_for_email(&dir, email, None).await.unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), claimed);
+
+        // Once its process has let go, the claim is abandoned and the clear
+        // goes through, taking the abandoned claim with it.
+        drop(claim);
+        assert!(set_device_id_for_email(&dir, email, None).await.unwrap());
+        let cleared = ConnectCache::from_file(&dir).unwrap();
+        let account = cleared.active_account().unwrap();
+        assert_eq!(account.device_id, None);
+        assert_eq!(account.reregister_claim, None);
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+    fn write_cache(dir: &NetworkDirectory, accounts: &[(&str, Option<&str>)]) {
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let mut cache = ConnectCache::default();
+        for (email, device_id) in accounts {
+            cache.upsert_credential(email, tokens(email), CacheAccountAction::NewLogin);
+            cache
+                .accounts
+                .iter_mut()
+                .find(|a| a.email == *email)
+                .unwrap()
+                .device_id = device_id.map(str::to_string);
+        }
+        std::fs::write(
+            dir.path().join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn device_id(dir: &NetworkDirectory, email: &str) -> Option<String> {
+        Account::from_cache(dir, email)
+            .unwrap()
+            .and_then(|account| account.device_id)
+    }
+
+    /// A removed computer loses every signer device it registered, one per
+    /// chain folder. All of the account's ids go; another account's stay;
+    /// and a chain folder with no cache is not given one.
+    #[tokio::test]
+    async fn a_removed_computer_discards_its_device_id_in_every_chain_folder() {
+        use crate::chain::ChainId;
+        use crate::dir::CoincubeDirectory;
+
+        let root = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(root.path().to_path_buf());
+        let (alice, bob) = ("alice@example.com", "bob@example.com");
+        let bitcoin = datadir.network_directory(ChainId::Bitcoin);
+        let fork = datadir.network_directory(ChainId::BitcoinBlake2b);
+        let testnet4 = datadir.network_directory(ChainId::Testnet4);
+        let signet = datadir.network_directory(ChainId::Signet);
+        write_cache(&bitcoin, &[(alice, Some("alice-bitcoin"))]);
+        write_cache(
+            &fork,
+            &[(bob, Some("bob-fork")), (alice, Some("alice-fork"))],
+        );
+        write_cache(&testnet4, &[(bob, Some("bob-testnet4")), (alice, None)]);
+        std::fs::create_dir_all(signet.path()).unwrap();
+
+        let outcomes = discard_device_id_in_every_chain_folder(&datadir, alice).await;
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (ChainId::Bitcoin, DeviceIdDiscard::Discarded),
+                (ChainId::BitcoinBlake2b, DeviceIdDiscard::Discarded),
+            ]
+        );
+        assert_eq!(device_id(&bitcoin, alice), None);
+        assert_eq!(device_id(&fork, alice), None);
+        assert_eq!(device_id(&fork, bob).as_deref(), Some("bob-fork"));
+        assert_eq!(device_id(&testnet4, bob).as_deref(), Some("bob-testnet4"));
+        // The session is kept: only the id went.
+        assert!(Account::from_cache(&bitcoin, alice).unwrap().is_some());
+        assert!(!signet.path().join(CONNECT_CACHE_FILENAME).exists());
+        assert!(!datadir.network_directory(ChainId::Regtest).path().exists());
+    }
+
+    /// Why the discard is needed even in the folder the next sign-in is
+    /// written to: a new sign-in keeps the stored id, so a revoked one would
+    /// be replayed.
+    #[tokio::test]
+    async fn a_new_sign_in_keeps_a_stored_device_id() {
+        let dir = test_network_dir();
+        let email = "alice@example.com";
+        write_cache(&dir, &[(email, Some("revoked-id"))]);
+
+        update_connect_cache(&dir, &tokens("new"), email, CacheAccountAction::NewLogin)
+            .await
+            .unwrap();
+
+        assert_eq!(device_id(&dir, email).as_deref(), Some("revoked-id"));
+        std::fs::remove_dir_all(dir.path()).unwrap();
+    }
+
+    /// A folder whose id is held by a live re-registration is reported as
+    /// kept, so the caller knows that id may be replayed.
+    #[tokio::test]
+    async fn a_device_id_under_a_live_claim_is_reported_as_kept() {
+        use crate::chain::ChainId;
+        use crate::dir::CoincubeDirectory;
+
+        let root = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(root.path().to_path_buf());
+        let email = "alice@example.com";
+        let bitcoin = datadir.network_directory(ChainId::Bitcoin);
+        write_cache(&bitcoin, &[(email, Some("device-a"))]);
+        let claim = begin_device_reregistration(&bitcoin, email, "device-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            discard_device_id_in_every_chain_folder(&datadir, email).await,
+            vec![(ChainId::Bitcoin, DeviceIdDiscard::Kept)]
+        );
+        assert_eq!(device_id(&bitcoin, email).as_deref(), Some("device-a"));
+        drop(claim);
     }
 }

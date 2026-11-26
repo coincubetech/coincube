@@ -2,7 +2,10 @@
 //!
 //! External interface to the Coincube daemon.
 
+mod broadcast_holds;
 mod utils;
+
+pub(crate) use broadcast_holds::BroadcastHolds;
 
 pub use crate::bitcoin::{HistorySync, PollFailure};
 // Real cache transitions are used by opt-in native integration guards/tests.
@@ -35,7 +38,7 @@ use std::{
     convert::TryInto,
     fmt,
     sync::{self, mpsc},
-    time::SystemTime,
+    time::{self, SystemTime},
 };
 
 /// Stable JSON-RPC server error code for [`CommandError::TxBroadcast`], a failure
@@ -394,6 +397,16 @@ fn validate_spend_for_chain(
     enforce_legacy_signature_policy(&unified, secp)
 }
 
+/// Whether a regular spend's side effects are kept once it is built.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpendRecord {
+    /// The spend may be signed: reserve its change index, advance the index
+    /// of a destination of ours and store an imported wallet's construction.
+    Keep,
+    /// A preview, read for its fee and inputs and thrown away.
+    Discard,
+}
+
 fn imported_construction(psbt: &Psbt) -> Psbt {
     let mut construction = psbt.clone();
     for input in &mut construction.inputs {
@@ -663,20 +676,17 @@ pub struct RescanTimeBounds {
     pub tip_timestamp: u32,
 }
 
+/// What a broadcast does about the wallet's state once the network has the
+/// transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterBroadcast {
+    /// Block until a poll has run.
+    WaitForPoll,
+    /// Request a poll and return.
+    PollInBackground,
+}
+
 impl DaemonControl {
-    /// Ordinary imported-wallet spends have no BTCB2 authorization path yet.
-    /// Refuse before reservations, PSBT mutation, database writes or broadcast.
-    fn require_ordinary_imported_spend_support(&self) -> Result<(), CommandError> {
-        if self.config.bitcoin_config.chain.is_blake2b()
-            && self.config.main_descriptor.as_imported().is_some()
-        {
-            return Err(CommandError::ImportedSpendValidation(
-                "Ordinary spending from an imported Bitcoin Blake2b wallet is not available yet"
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
     // Get the derived descriptor for this coin
     fn derived_desc(
         &self,
@@ -885,12 +895,41 @@ impl DaemonControl {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("time measured now cannot be before unix epoch");
-        // A backend we cannot reach degrades like a stale tip does: no
-        // anti-fee-sniping locktime, rather than a panic mid-spend (#589).
-        let (tip_height, tip_time) = match self.bitcoin.chain_tip_result() {
+        // The poller's published tip: reading it through the backend would wait
+        // for the poller's mutex, held across a whole wallet sync.
+        let (tip_height, tip_time) = match self.tip_time_cache.load() {
+            Some(latest) => (
+                latest
+                    .tip
+                    .height
+                    .try_into()
+                    .expect("block height must fit in u32"),
+                Some(latest.time),
+            ),
+            None => self.uncached_tip_for_locktime(),
+        };
+        spend::anti_fee_sniping_locktime(now, tip_height, tip_time)
+    }
+
+    /// The tip and its time from the backend, before the poller has published
+    /// them. A poll already holding the backend, or a backend we cannot reach,
+    /// degrades like a stale tip does: no anti-fee-sniping locktime, rather than
+    /// waiting out the poll or panicking mid-spend (#589).
+    fn uncached_tip_for_locktime(&self) -> (u32, Option<u32>) {
+        let backend = match self.bitcoin.try_lock() {
+            Ok(backend) => backend,
+            Err(sync::TryLockError::WouldBlock) => {
+                log::debug!(
+                    "The backend is busy polling, not setting an anti-fee-sniping locktime"
+                );
+                return (0, None);
+            }
+            Err(sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        };
+        match backend.chain_tip_result() {
             Ok(tip) => (
                 tip.height.try_into().expect("block height must fit in u32"),
-                self.bitcoin.tip_time(),
+                backend.tip_time(),
             ),
             Err(e) => {
                 log::warn!(
@@ -899,8 +938,7 @@ impl DaemonControl {
                 );
                 (0, None)
             }
-        };
-        spend::anti_fee_sniping_locktime(now, tip_height, tip_time)
+        }
     }
 
     /// Ancestor size and fees of an unconfirmed coin's transaction, for coin
@@ -1624,7 +1662,54 @@ impl DaemonControl {
         change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
         max_fee_sats: Option<u64>,
     ) -> Result<CreateSpendResult, CommandError> {
-        self.require_ordinary_imported_spend_support()?;
+        self.build_regular_spend(
+            destinations,
+            coins_outpoints,
+            feerate_vb,
+            change_address,
+            max_fee_sats,
+            SpendRecord::Keep,
+        )
+    }
+
+    /// Build the spend [`Self::create_spend`] would, only to read its fee and
+    /// coin selection: nothing about it is recorded.
+    ///
+    /// A caller pricing a form as the user types builds one PSBT per edit and
+    /// throws each away. `create_spend` is wrong for that: it advances the
+    /// derivation index of a destination of ours, and for an imported wallet
+    /// it stores the construction, which `listspendtxs` then reports as an
+    /// unsigned draft that nobody saved. The change address is required for
+    /// the same reason: a fresh one would be reserved.
+    ///
+    /// The PSBT must not be signed. An imported wallet refuses it in
+    /// [`Self::update_spend`], having no construction to hold it to.
+    pub fn preview_spend(
+        &self,
+        destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
+        coins_outpoints: &[bitcoin::OutPoint],
+        feerate_vb: u64,
+        change_address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
+    ) -> Result<CreateSpendResult, CommandError> {
+        self.build_regular_spend(
+            destinations,
+            coins_outpoints,
+            feerate_vb,
+            Some(change_address),
+            None,
+            SpendRecord::Discard,
+        )
+    }
+
+    fn build_regular_spend(
+        &self,
+        destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
+        coins_outpoints: &[bitcoin::OutPoint],
+        feerate_vb: u64,
+        change_address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
+        max_fee_sats: Option<u64>,
+        record: SpendRecord,
+    ) -> Result<CreateSpendResult, CommandError> {
         let is_self_send = destinations.is_empty();
         // For self-send, the coins must be specified.
         if is_self_send && coins_outpoints.is_empty() {
@@ -1711,6 +1796,12 @@ impl DaemonControl {
                 }
             };
             self.validate_regular_fee_limits(&psbt, max_fee_sats, feerate_vb)?;
+            if record == SpendRecord::Discard {
+                return Ok(CreateSpendResult::Success {
+                    psbt,
+                    warnings: warnings.iter().map(|w| w.to_string()).collect(),
+                });
+            }
             if let Some(next_change_address) = self.next_change_on_commit_conflict(
                 &mut db_conn,
                 &change_info,
@@ -1735,7 +1826,6 @@ impl DaemonControl {
     }
 
     pub fn update_spend(&self, mut psbt: Psbt) -> Result<(), CommandError> {
-        self.require_ordinary_imported_spend_support()?;
         if let Some(imported) = self.config.main_descriptor.as_imported() {
             return self.update_imported_spend(imported, &mut psbt);
         }
@@ -1831,9 +1921,61 @@ impl DaemonControl {
         db_conn.delete_spend(txid);
     }
 
-    /// Finalize and broadcast this stored Spend transaction.
+    /// Finalize and broadcast this stored Spend transaction, then wait for a
+    /// poll so the caller reads the wallet's new state as soon as this returns.
+    ///
+    /// That wait is a whole wallet sync. A caller that shows the broadcast to a
+    /// user wants [`Self::broadcast_spend_without_waiting`] instead.
     pub fn broadcast_spend(&self, txid: &bitcoin::Txid) -> Result<(), CommandError> {
-        self.require_ordinary_imported_spend_support()?;
+        self.broadcast_spend_then(txid, AfterBroadcast::WaitForPoll)
+    }
+
+    /// Finalize and broadcast this stored Spend transaction, returning as soon
+    /// as the network has accepted it.
+    ///
+    /// The wallet's state is refreshed by a poll requested in the background,
+    /// so right after this returns the daemon may still report the spent coins
+    /// as unspent. Every check and every error is the same as
+    /// [`Self::broadcast_spend`]'s.
+    pub fn broadcast_spend_without_waiting(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<(), CommandError> {
+        self.broadcast_spend_then(txid, AfterBroadcast::PollInBackground)
+    }
+
+    /// Hand a finalized transaction to the network, without the backend mutex
+    /// when the backend gave us a handle for that.
+    fn send_to_network(&self, tx: &bitcoin::Transaction) -> Result<(), String> {
+        match &self.detached_broadcaster {
+            Some(broadcast) => broadcast(tx),
+            None => self.bitcoin.broadcast_tx(tx),
+        }
+    }
+
+    /// Update our state with the changes from a transaction we just broadcast.
+    fn poll_after_broadcast(&self, after: AfterBroadcast) {
+        match after {
+            AfterBroadcast::WaitForPoll => {
+                let (tx, rx) = mpsc::sync_channel(0);
+                if let Err(e) = self.poller_sender.send(PollerMessage::PollNow(tx)) {
+                    log::error!("Error requesting update from poller: {}", e);
+                }
+                if let Err(e) = rx.recv() {
+                    log::error!("Error receiving completion signal from poller: {}", e);
+                }
+            }
+            // An eager request, so a backend that skips the wallet walk while
+            // the tip is unchanged still looks for the transaction we just sent.
+            AfterBroadcast::PollInBackground => self.request_sync(),
+        }
+    }
+
+    fn broadcast_spend_then(
+        &self,
+        txid: &bitcoin::Txid,
+        after: AfterBroadcast,
+    ) -> Result<(), CommandError> {
         let mut db_conn = self.db.connection();
 
         // First, try to finalize the spending transaction with the elements contained
@@ -1887,9 +2029,17 @@ impl DaemonControl {
                 ));
             }
         }
-        self.bitcoin
-            .broadcast_tx(&final_tx)
+        // Read before the transaction is sent: a record of it the database
+        // has by now is left from an earlier broadcast, and says nothing of
+        // this one.
+        let recorded_before = BroadcastHolds::recorded_inputs_of(&final_tx, &mut db_conn);
+        self.send_to_network(&final_tx)
             .map_err(CommandError::TxBroadcast)?;
+        // The database does not show these inputs as spent by this broadcast
+        // until a poll records it. Keep automatic coin selection off them
+        // until then.
+        self.broadcast_holds
+            .hold_broadcast(&final_tx, &recorded_before, time::Instant::now());
         if self.config.main_descriptor.as_imported().is_some() {
             db_conn.record_broadcast_txid(txid, &final_tx.compute_txid()).map_err(|error|
                 CommandError::ImportedSpendValidation(format!(
@@ -1898,13 +2048,7 @@ impl DaemonControl {
         }
 
         // Finally, update our state with the changes from this transaction.
-        let (tx, rx) = mpsc::sync_channel(0);
-        if let Err(e) = self.poller_sender.send(PollerMessage::PollNow(tx)) {
-            log::error!("Error requesting update from poller: {}", e);
-        }
-        if let Err(e) = rx.recv() {
-            log::error!("Error receiving completion signal from poller: {}", e);
-        }
+        self.poll_after_broadcast(after);
 
         Ok(())
     }
@@ -1937,7 +2081,6 @@ impl DaemonControl {
         is_cancel: bool,
         feerate_vb: Option<u64>,
     ) -> Result<CreateSpendResult, CommandError> {
-        self.require_ordinary_imported_spend_support()?;
         let mut db_conn = self.db.connection();
         let mut tx_getter = DbTxGetter::new(&self.db);
 
@@ -2036,6 +2179,12 @@ impl DaemonControl {
     /// the given date and the current tip.
     /// The date must be after the genesis block time and before the current tip blocktime.
     pub fn start_rescan(&mut self, timestamp: u32) -> Result<(), CommandError> {
+        // Imported wallets have no recovery capability (I5). Refuse before any
+        // backend call, so an unavailable backend never turns this into a
+        // "retry later" error.
+        if self.config.main_descriptor.as_vault().is_none() {
+            return Err(CommandError::RecoveryNotAvailable);
+        }
         let mut db_conn = self.db.connection();
         let genesis_timestamp = self
             .bitcoin
@@ -2068,13 +2217,7 @@ impl DaemonControl {
         // rescanning. This could make us crash with the bitcoind backend if someone triggered a
         // rescan of the wallet just after we checked above and did now.
         self.bitcoin
-            .start_rescan(
-                self.config
-                    .main_descriptor
-                    .as_vault()
-                    .ok_or(CommandError::RecoveryNotAvailable)?,
-                timestamp,
-            )
+            .start_rescan(&self.config.main_descriptor, timestamp)
             .map_err(CommandError::RescanTrigger)?;
         db_conn.set_rescan(timestamp);
 
@@ -2172,7 +2315,10 @@ impl DaemonControl {
         let timelock = timelock.unwrap_or_else(|| vault.first_timelock_value());
         let height_delta: i32 = timelock.into();
         let coins = if coins_outpoints.is_empty() {
-            db_conn.coins(&[CoinStatus::Confirmed], &[])
+            let held = self.coins_held_by_a_broadcast();
+            let mut coins = db_conn.coins(&[CoinStatus::Confirmed], &[]);
+            coins.retain(|op, _| !held.contains(op));
+            coins
         } else {
             // We could have used the same DB call for both cases by specifying the status and outpoints,
             // but in order to give more helpful errors, we filter the DB call here only for outpoints
@@ -2636,15 +2782,48 @@ impl DaemonControl {
         Ok(change_address)
     }
 
+    /// How long a coin spent by a broadcast stays out of automatic coin
+    /// selection when the poller never records the spend.
+    ///
+    /// Counted in polls because a poll is what records it. Esplora walks the
+    /// wallet on an unchanged tip only every sixth poll, so twelve leave room
+    /// for one such walk to finish after the broadcast whenever it fell in the
+    /// cycle. That is 2 hours at the Esplora default interval. It errs long on
+    /// purpose: ending a hold early can build a spend that replaces a payment
+    /// just made, while keeping one late only leaves a coin out of automatic
+    /// selection, and the coin can still be named by outpoint.
+    fn broadcast_hold_max_age(&self) -> time::Duration {
+        const POLLS: u32 = 12;
+        const FLOOR: time::Duration = time::Duration::from_secs(120);
+        self.config
+            .bitcoin_config
+            .poll_interval_secs
+            .saturating_mul(POLLS)
+            .max(FLOOR)
+    }
+
+    /// The coins spent by a transaction we broadcast that the poller has not
+    /// recorded yet. See [`BroadcastHolds`].
+    ///
+    /// Call it before reading the coins from the database. The poller ends a
+    /// hold after it has marked the coin as spent, so read in this order a
+    /// coin is never seen both free of its hold and unspent.
+    fn coins_held_by_a_broadcast(&self) -> HashSet<bitcoin::OutPoint> {
+        self.broadcast_holds
+            .held(time::Instant::now(), self.broadcast_hold_max_age())
+    }
+
     fn optional_regular_candidates(
         &self,
         db: &mut Box<dyn DatabaseConnection>,
     ) -> Result<Vec<CandidateCoin>, CommandError> {
+        let held = self.coins_held_by_a_broadcast();
         // From our unconfirmed coins, we only include those that are from self
         // since unconfirmed external deposits are more at risk of being dropped
         // unexpectedly from the mempool as they are beyond the user's control.
         db.coins(&[CoinStatus::Unconfirmed, CoinStatus::Confirmed], &[])
             .into_iter()
+            .filter(|(op, _)| !held.contains(op))
             .filter_map(|(op, c)| {
                 if c.block_info.is_some() {
                     Some(Ok((c, None))) // confirmed coins have no ancestor info
@@ -2919,13 +3098,16 @@ impl DaemonControl {
                 )
             })
             .collect();
+        // The replaced transaction's own inputs are candidates above whether or
+        // not a broadcast holds them. A hold only keeps out the other coins.
+        let held = self.coins_held_by_a_broadcast();
         let confirmed_cands: Vec<CandidateCoin> = db
             .coins(&[CoinStatus::Confirmed], &[])
             .into_values()
             .filter_map(|c| {
                 // Make sure we don't have duplicate candidates in case any of the coins are not
                 // currently set as spending in the DB (and are therefore still confirmed).
-                if !previous.contains_key(&c.outpoint) {
+                if !previous.contains_key(&c.outpoint) && !held.contains(&c.outpoint) {
                     Some(coin_to_candidate(
                         &c, /*must_select=*/ false, /*sequence=*/ None,
                         /*ancestor_info=*/ None,
@@ -3142,7 +3324,7 @@ mod tests {
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
     };
     use spend::{InsufficientFunds, DUST_OUTPUT_SATS};
-    use std::{collections::BTreeMap, str::FromStr};
+    use std::{collections::BTreeMap, convert::TryFrom, str::FromStr};
 
     const DUST: u64 = DUST_OUTPUT_SATS;
 
@@ -3390,6 +3572,33 @@ mod tests {
         control.start_rescan(1231006506).unwrap();
         assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
         assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
+    }
+
+    #[test]
+    fn imported_wallet_rescan_is_refused_before_any_backend_call() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        control.config.main_descriptor = crate::testutils::imported_wallet_descriptor();
+
+        // A healthy backend that would accept the rescan for a Vault.
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RecoveryNotAvailable)
+        ));
+        // An unavailable backend: still the capability error, not "retry later".
+        backend.lock().unwrap().genesis_error = Some(crate::connect::AdmissionError::Unavailable);
+        backend.lock().unwrap().tip_timestamp = None;
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RecoveryNotAvailable)
+        ));
+        assert!(control.db.connection().rescan_timestamp().is_none());
+        assert!(backend.lock().unwrap().rescan_requests.is_empty());
     }
 
     #[test]
@@ -3883,6 +4092,11 @@ mod tests {
     /// A real funding transaction paying the given coins at the given vouts, so
     /// spend creation can authenticate each selected input against it (P2-A).
     /// Unused vouts are filled with unrelated outputs.
+    ///
+    /// It spends an ordinary (made-up) outpoint, so it is not a coinbase: these
+    /// tests store it next to an unconfirmed coin in a daemon whose poller is
+    /// running, and a poll would return an unconfirmed coinbase deposit to the
+    /// immature state, failing whichever spend the test creates next.
     fn funding_tx(
         control: &DaemonControl,
         coins: &[(
@@ -3916,13 +4130,48 @@ mod tests {
             version: TxVersion::TWO,
             lock_time: absolute::LockTime::Blocks(absolute::Height::ZERO),
             input: vec![bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint::null(),
+                previous_output: bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_str(
+                        "617eab1fc0b03ee7f82ba70166725291783461f1a0e7975eaf8b5f8f674234f3",
+                    )
+                    .unwrap(),
+                    0,
+                ),
                 script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
                 sequence: bitcoin::Sequence::MAX,
                 witness: bitcoin::Witness::default(),
             }],
             output,
         }
+    }
+
+    /// The poller holds back coinbase deposits. A funding fixture that is one
+    /// makes every test storing it depend on whether a poll ran first.
+    #[test]
+    fn funding_tx_is_not_a_coinbase() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let op = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        assert!(!funding.is_coinbase());
+
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint: op,
+            is_immature: false,
+            block_info: None,
+            amount: bitcoin::Amount::from_sat(100_000),
+            derivation_index: bip32::ChildNumber::from(13),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        // What the running poller reads to decide which coins to hold back.
+        assert!(db_conn.coinbase_txids().is_empty());
+
+        ms.shutdown();
     }
 
     fn funded_conflict_control(
@@ -3933,9 +4182,21 @@ mod tests {
         bitcoin::OutPoint,
         bitcoin::Address<address::NetworkUnchecked>,
     ) {
+        funded_spend(DummyBitcoind::new(), conflicts)
+    }
+
+    fn funded_spend(
+        bitcoind: DummyBitcoind,
+        conflicts: usize,
+    ) -> (
+        DummyCoincube,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        bitcoin::OutPoint,
+        bitcoin::Address<address::NetworkUnchecked>,
+    ) {
         const COIN_VALUE: u64 = 100_000;
         let (database, conflict_count) = ConflictDatabase::new(conflicts);
-        let daemon = DummyCoincube::new(DummyBitcoind::new(), database);
+        let daemon = DummyCoincube::new(bitcoind, database);
         let control = daemon.control();
         let funding = funding_tx(control, &[(0, COIN_VALUE, 13, false)]);
         let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
@@ -3955,6 +4216,233 @@ mod tests {
         let destination =
             bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
         (daemon, conflict_count, outpoint, destination)
+    }
+
+    /// Over Esplora the poller holds the backend lock for a whole wallet sync. A
+    /// spend used to read the tip for its anti-fee-sniping locktime through that
+    /// lock, which held the Send form at "Calculating…" until the sync ended. It
+    /// now takes the tip the poller published.
+    #[test]
+    fn create_spend_does_not_wait_for_a_poll_holding_the_backend() {
+        let (daemon, _, outpoint, destination) = funded_conflict_control(0);
+        let control = daemon.control().clone();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        let tip = crate::bitcoin::BlockChainTip {
+            hash: bitcoin::BlockHash::from_str(
+                "000000000000000000014ab9b6db3e3d0f5e6e0a4c8b0b4b0d5c0e1f2a3b4c5d",
+            )
+            .unwrap(),
+            height: 900_000,
+        };
+        control
+            .tip_time_cache
+            .store(crate::bitcoin::TipWithTime { tip, time: now });
+
+        // The poller, mid-sync.
+        let _polling = control.bitcoin.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spender = control.clone();
+        std::thread::spawn(move || {
+            tx.send(spender.create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            ))
+            .unwrap()
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("create_spend must not wait for the backend lock")
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = result else {
+            panic!("expected a successful spend, got {:?}", result);
+        };
+        let height = match psbt.unsigned_tx.lock_time {
+            absolute::LockTime::Blocks(height) => height.to_consensus_u32(),
+            other => panic!("expected a height locktime, got {:?}", other),
+        };
+        assert!(
+            (899_900..=900_000).contains(&height),
+            "locktime {} is not from the published tip",
+            height
+        );
+    }
+
+    /// Before the poller has published a tip, a spend must not take the backend
+    /// lock a poll is holding. It finishes with no anti-fee-sniping locktime.
+    #[test]
+    fn create_spend_does_not_wait_when_no_tip_is_published_and_the_backend_is_busy() {
+        let (daemon, _, outpoint, destination) = funded_spend(fresh_tip_backend(250_000), 0);
+        let control = daemon.control().clone();
+        let polling = control.bitcoin.lock().unwrap();
+        // A publish that already read the tip can still store it. Wait that out,
+        // then clear, while this guard keeps every later read blocked.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        control.tip_time_cache.clear();
+        assert!(
+            control.tip_time_cache.load().is_none(),
+            "the poller must not publish a tip while this test holds the backend"
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spender = control.clone();
+        std::thread::spawn(move || {
+            tx.send(spender.create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            ))
+            .unwrap()
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("create_spend must not wait for the backend lock before a tip is published")
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = result else {
+            panic!("expected a successful spend, got {:?}", result);
+        };
+        assert_eq!(
+            psbt.unsigned_tx.lock_time,
+            absolute::LockTime::Blocks(absolute::Height::ZERO),
+            "a busy backend before the first published tip sets no anti-fee-sniping locktime"
+        );
+        drop(polling);
+        daemon.shutdown();
+    }
+
+    /// With no published tip and a free backend, the spend still takes that
+    /// backend's tip so the locktime is not silently omitted.
+    #[test]
+    fn create_spend_uses_the_live_tip_before_the_poller_publishes_one() {
+        let (daemon, _, outpoint, destination) = funded_spend(fresh_tip_backend(250_000), 0);
+        let (control, tmp_dir) = stop_poller(daemon);
+        control.tip_time_cache.clear();
+        assert!(control.tip_time_cache.load().is_none());
+
+        let height = spend_locktime_height(&control, destination, outpoint);
+        assert!(
+            (249_900..=250_000).contains(&height),
+            "locktime {} did not come from the backend tip",
+            height
+        );
+        std::fs::remove_dir_all(tmp_dir).unwrap();
+    }
+
+    /// An unreachable tip is the same degradation as a stale one: no locktime,
+    /// and no panic, even when the backend would have had a usable header time.
+    #[test]
+    fn create_spend_omits_locktime_when_the_backend_tip_cannot_be_read() {
+        let mut bitcoind = fresh_tip_backend(250_000);
+        bitcoind.chain_tip_error = Some("backend down");
+        let (daemon, _, outpoint, destination) = funded_spend(bitcoind, 0);
+        let (control, tmp_dir) = stop_poller(daemon);
+        control.tip_time_cache.clear();
+
+        let result = control
+            .create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            )
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = result else {
+            panic!("expected a successful spend, got {:?}", result);
+        };
+        assert_eq!(
+            psbt.unsigned_tx.lock_time,
+            absolute::LockTime::Blocks(absolute::Height::ZERO)
+        );
+        std::fs::remove_dir_all(tmp_dir).unwrap();
+    }
+
+    fn fresh_tip_backend(height: i32) -> DummyBitcoind {
+        let mut bitcoind = DummyBitcoind::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("now is after the unix epoch")
+            .as_secs();
+        bitcoind.tip.height = height;
+        bitcoind.tip_timestamp =
+            Some(u32::try_from(now).expect("a current unix time fits the header timestamp"));
+        bitcoind
+    }
+
+    /// Stop the poller and return the still-usable control plus its datadir.
+    fn stop_poller(daemon: DummyCoincube) -> (DaemonControl, std::path::PathBuf) {
+        let control = daemon.control().clone();
+        let DummyCoincube { handle, tmp_dir } = daemon;
+        match handle {
+            crate::DaemonHandle::Controller {
+                poller_sender,
+                poller_handle,
+                scan_abort,
+                ..
+            } => {
+                scan_abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                poller_sender
+                    .send(crate::bitcoin::poller::PollerMessage::Shutdown)
+                    .expect("the poller is still listening");
+                poller_handle.join().expect("the poller thread joins");
+            }
+            crate::DaemonHandle::Server { .. } => {
+                unreachable!("this unit daemon has no RPC server")
+            }
+        }
+        (control, tmp_dir)
+    }
+
+    fn spend_locktime_height(
+        control: &DaemonControl,
+        destination: bitcoin::Address<address::NetworkUnchecked>,
+        outpoint: bitcoin::OutPoint,
+    ) -> u32 {
+        let result = control
+            .create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            )
+            .unwrap();
+        let CreateSpendResult::Success { psbt, .. } = result else {
+            panic!("expected a successful spend, got {:?}", result);
+        };
+        match psbt.unsigned_tx.lock_time {
+            absolute::LockTime::Blocks(height) => height.to_consensus_u32(),
+            other => panic!("expected a height locktime, got {:?}", other),
+        }
+    }
+
+    /// The poller publishes the backend's tip and its time, so a spend made
+    /// during the first sync already has a locktime to use.
+    #[test]
+    fn the_poller_publishes_the_tip_and_its_time() {
+        let mut bitcoind = DummyBitcoind::new();
+        bitcoind.tip_timestamp = Some(1_700_000_000);
+        let tip = bitcoind.tip;
+        let daemon = DummyCoincube::new(bitcoind, DummyDatabase::new());
+        let cache = daemon.control().tip_time_cache.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while cache.load().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the poller never published a tip"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            cache.load(),
+            Some(crate::bitcoin::TipWithTime {
+                tip,
+                time: 1_700_000_000
+            })
+        );
     }
 
     #[test]
@@ -4150,6 +4638,58 @@ mod tests {
 
         let swept = control.create_spend(&HashMap::new(), &[dummy_op], 1, Some(external));
         assert!(matches!(swept, Ok(CreateSpendResult::Success { .. })));
+    }
+
+    /// A started daemon's poller ends the holds its control takes. A control
+    /// left with holds of its own would keep every coin out of automatic
+    /// selection for the maximum age after each broadcast.
+    #[test]
+    fn a_started_daemon_shares_its_broadcast_holds_with_its_poller() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = ms.control();
+        let funding = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        let spend = bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: outpoint,
+                ..Default::default()
+            }],
+            output: Vec::new(),
+        };
+        {
+            let mut db_conn = control.db().lock().unwrap().connection();
+            db_conn.new_txs(&[funding, spend.clone()]);
+            db_conn.new_unspent_coins(&[Coin {
+                outpoint,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(100_000),
+                derivation_index: bip32::ChildNumber::from(13),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }]);
+            db_conn.spend_coins(&[(outpoint, spend.compute_txid())]);
+        }
+        // As a broadcast of `spend` does, once the network accepts it.
+        control
+            .broadcast_holds
+            .hold_inputs_of(&spend, time::Instant::now());
+        assert!(control.coins_held_by_a_broadcast().contains(&outpoint));
+
+        let (done, completed) = mpsc::sync_channel(0);
+        control
+            .poller_sender
+            .send(PollerMessage::PollNow(done))
+            .unwrap();
+        completed
+            .recv_timeout(time::Duration::from_secs(30))
+            .unwrap();
+        assert!(control.coins_held_by_a_broadcast().is_empty());
+        ms.shutdown();
     }
 
     #[test]
@@ -5008,6 +5548,138 @@ mod tests {
             control.update_spend(psbt_a),
             Err(CommandError::UnknownOutpoint(external_op))
         );
+
+        ms.shutdown();
+    }
+
+    /// Which inconsistent Vault PSBTs `updatespend` stores. "Inconsistent" is
+    /// what `CoincubeDescriptor::partial_spend_info` refuses: inputs with
+    /// different `nSequence`, or with different per-input signature sets.
+    #[test]
+    fn update_spend_inconsistent_vault_psbt() {
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let vault = control.config.main_descriptor.as_vault().unwrap().clone();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let tx_a = funding_tx(control, &[(0, 100_000, 13, false)]);
+        let tx_b = funding_tx(control, &[(1, 115_680, 34, false)]);
+        let op_a = bitcoin::OutPoint::new(tx_a.compute_txid(), 0);
+        let op_b = bitcoin::OutPoint::new(tx_b.compute_txid(), 1);
+        db_conn.new_txs(&[tx_a, tx_b]);
+        db_conn.new_unspent_coins(&[
+            Coin {
+                outpoint: op_a,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(100_000),
+                derivation_index: bip32::ChildNumber::from(13),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            },
+            Coin {
+                outpoint: op_b,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(115_680),
+                derivation_index: bip32::ChildNumber::from(34),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            },
+        ]);
+        let dest: HashMap<bitcoin::Address<address::NetworkUnchecked>, u64> = [(
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap(),
+            50_000,
+        )]
+        .iter()
+        .cloned()
+        .collect();
+        let new_spend = |feerate| match control
+            .create_spend(&dest, &[op_a, op_b], feerate, None)
+            .unwrap()
+        {
+            CreateSpendResult::Success { psbt, .. } => psbt,
+            _ => panic!("expect successful spend creation"),
+        };
+        // A primary-path key's signature on input 0 only. The signature bytes
+        // are not checked on Bitcoin; the key must carry a derivation in the
+        // input to be counted.
+        let sig = bitcoin::ecdsa::Signature::from_str("304402204004fcdbb9c0d0cbf585f58cee34dccb012efbd8fc2b0d5e97760045ae35803802201a0bd7ec2383e0b93748abc9946c8e17a8312e314dab85982aeba650e738cbf401").unwrap();
+        let sign_first_input_only = |mut psbt: Psbt| {
+            let key = psbt.inputs[0]
+                .bip32_derivation
+                .keys()
+                .copied()
+                .find(|key| {
+                    let mut candidate = psbt.clone();
+                    candidate.inputs[0]
+                        .partial_sigs
+                        .insert(bitcoin::PublicKey::new(*key), sig);
+                    vault.partial_spend_info(&candidate).is_err()
+                })
+                .expect("a primary-path key derivation on input 0");
+            psbt.inputs[0]
+                .partial_sigs
+                .insert(bitcoin::PublicKey::new(key), sig);
+            psbt
+        };
+
+        // A PSBT the wallet created reads fine.
+        let created = new_spend(2);
+        assert!(vault.partial_spend_info(&created).is_ok());
+
+        // 1. First insert, inputs with different nSequence.
+        let mut sequences = new_spend(3);
+        sequences.unsigned_tx.input[0].sequence = bitcoin::Sequence::from_height(10);
+        assert!(matches!(
+            vault.partial_spend_info(&sequences),
+            Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+        ));
+        let first_sequences = control.update_spend(sequences.clone());
+
+        // 2. First insert, signed on one input only.
+        let one_sig = sign_first_input_only(new_spend(4));
+        assert!(matches!(
+            vault.partial_spend_info(&one_sig),
+            Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+        ));
+        let first_one_sig = control.update_spend(one_sig.clone());
+
+        // 3. A consistent stored spend, then a signer's PSBT signed on one
+        //    input only, merged onto it.
+        let stored = new_spend(5);
+        control.update_spend(stored.clone()).unwrap();
+        let merge_one_sig = control.update_spend(sign_first_input_only(stored.clone()));
+        let merged = db_conn
+            .spend_tx(&stored.unsigned_tx.compute_txid())
+            .unwrap();
+
+        // All three are stored, and the stored row is one the analysis
+        // refuses: the GUI lists it with each input's least progress
+        // (`coincube-gui/src/daemon/model.rs`, `stored_spend_info`).
+        // `updatespend` keeps accepting them: a signer may legitimately sign
+        // only the inputs it knows, and rows already stored by older or
+        // external daemons would not go away anyway.
+        assert_eq!(first_sequences, Ok(()));
+        assert_eq!(first_one_sig, Ok(()));
+        assert_eq!(merge_one_sig, Ok(()));
+        for row in [
+            db_conn
+                .spend_tx(&sequences.unsigned_tx.compute_txid())
+                .unwrap(),
+            db_conn
+                .spend_tx(&one_sig.unsigned_tx.compute_txid())
+                .unwrap(),
+            merged,
+        ] {
+            assert!(matches!(
+                vault.partial_spend_info(&row),
+                Err(coincube_core::descriptors::CoincubeDescError::InconsistentPsbt)
+            ));
+        }
 
         ms.shutdown();
     }
@@ -6123,6 +6795,7 @@ mod tests {
             Default::default(),
             Default::default(),
             history,
+            Default::default(),
         );
 
         // The poller, mid-scan.
@@ -6157,6 +6830,7 @@ mod tests {
             Default::default(),
             Default::default(),
             history.clone(),
+            Default::default(),
         );
 
         let _scanning = backend.lock().unwrap();
@@ -6173,6 +6847,154 @@ mod tests {
             receiver.try_recv(),
             Ok(PollerMessage::PollNowNoAck)
         ));
+    }
+
+    /// A control over `backend`, with a poller queue of one and its receiver.
+    fn control_with_backend(
+        backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>>,
+    ) -> (
+        DaemonControl,
+        std::sync::Arc<crate::bitcoin::HistorySyncCache>,
+        std::sync::mpsc::Receiver<PollerMessage>,
+    ) {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let history = std::sync::Arc::new(crate::bitcoin::HistorySyncCache::default());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let control = DaemonControl::new(
+            dummy.control().config.clone(),
+            backend,
+            sender,
+            std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
+            bitcoin::secp256k1::Secp256k1::verification_only(),
+            Default::default(),
+            Default::default(),
+            history.clone(),
+            Default::default(),
+        );
+        (control, history, receiver)
+    }
+
+    fn any_transaction() -> bitcoin::Transaction {
+        bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        }
+    }
+
+    /// The poller holds the backend mutex for a whole wallet sync; a broadcast
+    /// with a detached handle must not queue behind it.
+    #[test]
+    fn broadcast_with_a_detached_handle_does_not_wait_for_the_backend_lock() {
+        let backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>> =
+            std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let (control, _history, _receiver) = control_with_backend(backend.clone());
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broadcaster: crate::bitcoin::DetachedBroadcaster = {
+            let sent = sent.clone();
+            std::sync::Arc::new(move |tx: &bitcoin::Transaction| {
+                sent.lock().unwrap().push(tx.compute_txid());
+                Ok(())
+            })
+        };
+        let control = control.with_detached_broadcaster(Some(broadcaster));
+        let tx = any_transaction();
+        let txid = tx.compute_txid();
+
+        let _syncing = backend.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done_tx.send(control.send_to_network(&tx)).unwrap());
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("broadcast must not wait for the sync's backend mutex");
+        assert_eq!(result, Ok(()));
+        assert_eq!(*sent.lock().unwrap(), vec![txid]);
+    }
+
+    /// `DaemonHandle::start` is what gives the control its backend's handle.
+    #[test]
+    fn a_started_daemon_broadcasts_through_its_backends_detached_handle() {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = DummyBitcoind::new();
+        backend.detached_broadcasts = Some(sent.clone());
+        let ms = DummyCoincube::new(backend, DummyDatabase::new());
+        let tx = any_transaction();
+        assert_eq!(ms.control().send_to_network(&tx), Ok(()));
+        assert_eq!(*sent.lock().unwrap(), vec![tx.compute_txid()]);
+    }
+
+    /// A backend without a detached handle still broadcasts, through its lock,
+    /// and its refusal is still the caller's error.
+    #[test]
+    fn broadcast_without_a_detached_handle_goes_through_the_backend() {
+        let (control, _history, _receiver) = control_with_backend(std::sync::Arc::new(
+            std::sync::Mutex::new(DummyBitcoind::new()),
+        ));
+        let tx = any_transaction();
+        assert_eq!(control.send_to_network(&tx), Ok(()));
+
+        let mut refusing = DummyBitcoind::new();
+        refusing.broadcast_error = Some("refused".into());
+        let (control, _history, _receiver) =
+            control_with_backend(std::sync::Arc::new(std::sync::Mutex::new(refusing)));
+        assert_eq!(control.send_to_network(&tx), Err("refused".to_string()));
+    }
+
+    /// The non-waiting broadcast asks for an eager poll and returns, whether the
+    /// poller is free, mid-sync, or already has a wake-up queued.
+    #[test]
+    fn background_poll_after_broadcast_never_waits_for_the_poller() {
+        let backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>> =
+            std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let (control, history, receiver) = control_with_backend(backend.clone());
+
+        // Nobody reads the queue and the backend is locked, as during a sync.
+        let _syncing = backend.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Twice: the second finds the queue full.
+            control.poll_after_broadcast(AfterBroadcast::PollInBackground);
+            control.poll_after_broadcast(AfterBroadcast::PollInBackground);
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("a background poll request must return at once");
+        assert!(history.take_eager_sync_request());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(PollerMessage::PollNowNoAck)
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    /// The waiting broadcast, which the RPC keeps, returns only once the poller
+    /// has acknowledged a poll.
+    #[test]
+    fn waiting_poll_after_broadcast_returns_only_once_the_poller_acknowledges() {
+        let (control, _history, receiver) = control_with_backend(std::sync::Arc::new(
+            std::sync::Mutex::new(DummyBitcoind::new()),
+        ));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            control.poll_after_broadcast(AfterBroadcast::WaitForPoll);
+            done_tx.send(()).unwrap();
+        });
+        let ack = match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiting broadcast requests a poll")
+        {
+            PollerMessage::PollNow(ack) => ack,
+            other => panic!("expected an acknowledged poll request, got {:?}", other),
+        };
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+        ack.send(()).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the acknowledged poll releases the caller");
     }
 
     /// The daemon must hand its backend the very record `get_info` reports from:
@@ -6283,6 +7105,13 @@ mod tests {
         /// while it is dormant, but the control's own chain-keyed paths are
         /// what these tests are about.
         fn blake2b_control(descriptor: CoincubeDescriptor) -> DaemonControl {
+            blake2b_control_over(descriptor, DummyDatabase::new())
+        }
+
+        fn blake2b_control_over(
+            descriptor: CoincubeDescriptor,
+            database: DummyDatabase,
+        ) -> DaemonControl {
             let tmp = tmp_dir();
             std::fs::create_dir_all(&tmp).unwrap();
             let config = crate::config::Config::new(
@@ -6300,8 +7129,9 @@ mod tests {
                 config,
                 std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
                 poller_sender,
-                std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
+                std::sync::Arc::new(std::sync::Mutex::new(database)),
                 secp256k1::Secp256k1::verification_only(),
+                Default::default(),
                 Default::default(),
                 Default::default(),
                 Default::default(),
@@ -6366,8 +7196,12 @@ mod tests {
             (signers, descriptor, psbt)
         }
 
+        /// An imported Bitcoin Blake2b wallet's spend commands reach the
+        /// ordinary wallet checks like a Bitcoin import's: none refuses with
+        /// the old "not available yet" gate (Robert, 2026-11-17). Replay is
+        /// the spend screen's warning, not a daemon refusal.
         #[test]
-        fn imported_blake2b_ordinary_spend_commands_refuse_before_side_effects() {
+        fn imported_blake2b_spend_commands_reach_the_wallet_checks() {
             let (signers, descriptor, psbt) = vault_fixture();
             let secp = secp256k1::Secp256k1::new();
             let key = descriptor_key(&signers[0], 0, &secp);
@@ -6381,44 +7215,722 @@ mod tests {
             .unwrap();
             let mut control = blake2b_control(descriptor);
             control.config.main_descriptor = WalletDescriptor::Imported(imported);
-            let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
-            control.bitcoin = backend.clone();
+            control.bitcoin = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
             let txid = psbt.unsigned_tx.compute_txid();
-            let refused = |result: Result<(), CommandError>| {
-                assert!(
-                    matches!(result, Err(CommandError::ImportedSpendValidation(message)) if message.contains("not available yet"))
+            let gated = |result: &Result<(), CommandError>| matches!(result, Err(CommandError::ImportedSpendValidation(message)) if message.contains("not available yet"));
+            let create = control
+                .create_spend(&HashMap::new(), &[], 1, None)
+                .map(|_| ());
+            assert!(!gated(&create), "{:?}", create);
+            let update = control.update_spend(psbt.clone());
+            assert!(!gated(&update), "{:?}", update);
+            let broadcast = control.broadcast_spend(&txid);
+            assert!(!gated(&broadcast), "{:?}", broadcast);
+            assert!(matches!(broadcast, Err(CommandError::UnknownSpend(_))));
+            let rbf = control.rbf_psbt(&txid, false, Some(1)).map(|_| ());
+            assert!(!gated(&rbf), "{:?}", rbf);
+        }
+
+        /// An imported wallet stores every construction `create_spend` builds
+        /// and lists it as a draft: that is what lets it check a signature
+        /// that comes back from another signer. A spend built only to price a
+        /// form must therefore go through `preview_spend`, or every amount the
+        /// user settles on is left behind as an unsigned draft that was never
+        /// saved and outlives the transaction that was really sent.
+        #[test]
+        fn imported_preview_spend_is_not_stored_as_a_draft() {
+            const COIN_VALUE: u64 = 100_000;
+            let (signers, descriptor, _) = vault_fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let key = descriptor_key(&signers[0], 0, &secp);
+            let imported = coincube_core::wallet_descriptor::ImportedWalletDescriptor::parse(
+                &format!("wpkh({key})"),
+                None,
+                ChainId::Bitcoin,
+            )
+            .unwrap()
+            .paired_blake2b()
+            .unwrap();
+            let database = DummyDatabase::new();
+            let known = database.clone();
+            let mut control = blake2b_control_over(descriptor, database);
+            control.config.main_descriptor = WalletDescriptor::Imported(imported);
+            let mut db_conn = control.db().lock().unwrap().connection();
+            let funding = funding_tx(&control, &[(0, COIN_VALUE, 3, false)]);
+            let coin = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+            db_conn.new_txs(std::slice::from_ref(&funding));
+            db_conn.new_unspent_coins(&[Coin {
+                outpoint: coin,
+                is_immature: false,
+                block_info: None,
+                amount: bitcoin::Amount::from_sat(COIN_VALUE),
+                derivation_index: bip32::ChildNumber::from(3),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }]);
+            let own_address =
+                |descriptor: coincube_core::wallet_descriptor::PublicBranchRef<'_>, index: u32| {
+                    descriptor
+                        .derive(index)
+                        .unwrap()
+                        .address(control.config.bitcoin_config.network)
+                        .unwrap()
+                        .as_unchecked()
+                        .clone()
+                };
+            let sizing = own_address(control.config.main_descriptor.change_descriptor(), 0);
+            // A destination of the wallet's own, past the last revealed index:
+            // keeping the spend reveals it, pricing it must not.
+            let destination = own_address(control.config.main_descriptor.receive_descriptor(), 9);
+            known.insert_address(sizing.clone().assume_checked(), 0, true);
+            known.insert_address(destination.clone().assume_checked(), 9, false);
+            let destinations: HashMap<_, _> = std::iter::once((destination, 10_000)).collect();
+            let receive_before = db_conn.receive_index();
+            let change_before = db_conn.change_index();
+
+            // The form prices the spend again on every edit.
+            let mut preview = None;
+            for feerate in 1..=3 {
+                match control
+                    .preview_spend(&destinations, &[coin], feerate, sizing.clone())
+                    .unwrap()
+                {
+                    CreateSpendResult::Success { psbt, .. } => preview = Some(psbt),
+                    other => panic!("expected a preview, got {:?}", other),
+                }
+            }
+            assert!(control.list_spend(None).unwrap().spend_txs.is_empty());
+            assert_eq!(db_conn.receive_index(), receive_before);
+            assert_eq!(db_conn.change_index(), change_before);
+            // Nothing was kept to hold a signature to, so a preview can't be
+            // signed into a spend either.
+            let refused = control.update_spend(preview.clone().unwrap());
+            assert!(
+                matches!(&refused, Err(CommandError::ImportedSpendValidation(message))
+                    if message.contains("not created and saved")),
+                "{:?}",
+                refused
+            );
+            assert!(control.list_spend(None).unwrap().spend_txs.is_empty());
+
+            // The spend the user goes on to sign is kept, as before. Built with
+            // the same arguments, it is the very transaction the preview priced.
+            let kept = match control
+                .create_spend(&destinations, &[coin], 3, Some(sizing))
+                .unwrap()
+            {
+                CreateSpendResult::Success { psbt, .. } => psbt,
+                other => panic!("expected a spend, got {:?}", other),
+            };
+            assert_eq!(Some(&kept), preview.as_ref());
+            let listed = control.list_spend(None).unwrap().spend_txs;
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].psbt, kept);
+            assert!(db_conn.receive_index() > receive_before);
+        }
+
+        /// End to end on a stored, signed spend: with the backend locked as
+        /// during a sync and nothing reading the poller queue, the non-waiting
+        /// broadcast still sends and returns, leaving an eager poll requested.
+        #[test]
+        fn broadcast_without_waiting_sends_a_stored_spend_while_the_poller_is_busy() {
+            let (signers, descriptor, psbt) = vault_fixture();
+            let signed = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+            let txid = signed.unsigned_tx.compute_txid();
+            let tmp = tmp_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let config = crate::config::Config::new(
+                crate::config::BitcoinConfig::new(
+                    ChainId::Bitcoin,
+                    std::time::Duration::from_secs(2),
+                ),
+                None,
+                log::LevelFilter::Debug,
+                descriptor,
+                crate::datadir::DataDirectory::new(tmp.join("d")),
+            );
+            let backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>> =
+                std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+            let db = DummyDatabase::new();
+            db.connection().store_spend(&signed);
+            let history = std::sync::Arc::new(crate::bitcoin::HistorySyncCache::default());
+            let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let broadcaster: crate::bitcoin::DetachedBroadcaster = {
+                let sent = sent.clone();
+                std::sync::Arc::new(move |tx: &Transaction| {
+                    sent.lock().unwrap().push(tx.compute_txid());
+                    Ok(())
+                })
+            };
+            let (poller_sender, poller_receiver) = std::sync::mpsc::sync_channel(1);
+            let control = DaemonControl::new(
+                config,
+                backend.clone(),
+                poller_sender,
+                std::sync::Arc::new(std::sync::Mutex::new(db)),
+                secp256k1::Secp256k1::verification_only(),
+                Default::default(),
+                Default::default(),
+                history.clone(),
+                Default::default(),
+            )
+            .with_detached_broadcaster(Some(broadcaster));
+
+            let _syncing = backend.lock().unwrap();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                done_tx
+                    .send(control.broadcast_spend_without_waiting(&txid))
+                    .unwrap()
+            });
+            let result = done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the non-waiting broadcast must not wait for the sync or a poll");
+            assert!(result.is_ok(), "{:?}", result);
+            assert_eq!(*sent.lock().unwrap(), vec![txid]);
+            assert!(history.take_eager_sync_request());
+            assert!(matches!(
+                poller_receiver.try_recv(),
+                Ok(PollerMessage::PollNowNoAck)
+            ));
+        }
+
+        /// A Bitcoin wallet over the dummy backend and database that holds the
+        /// fixture's coin, confirmed, and its signed spend. Nothing reads the
+        /// poller queue, so the database only changes when a test changes it.
+        struct BroadcastWallet {
+            control: DaemonControl,
+            descriptor: CoincubeDescriptor,
+            /// The fixture's coin, the signed spend's only input.
+            coin: OutPoint,
+            /// The stored spend's transaction, as the poller would store it.
+            spend: Transaction,
+            spend_txid: btc::Txid,
+            sent: std::sync::Arc<std::sync::Mutex<Vec<btc::Txid>>>,
+            poller_receiver: std::sync::mpsc::Receiver<PollerMessage>,
+        }
+
+        fn confirmed_coin(outpoint: OutPoint, sats: u64, index: u32) -> Coin {
+            Coin {
+                outpoint,
+                is_immature: false,
+                // Deep enough under the dummy backend's tip (height 100) for
+                // the fixture's 46-block recovery path.
+                block_info: Some(BlockInfo {
+                    height: 10,
+                    time: 1_700_000_000,
+                }),
+                amount: Amount::from_sat(sats),
+                derivation_index: index.into(),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            }
+        }
+
+        impl BroadcastWallet {
+            fn new() -> Self {
+                let (signers, descriptor, psbt) = vault_fixture();
+                let signed = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+                let spend_txid = signed.unsigned_tx.compute_txid();
+                let coin = signed.unsigned_tx.input[0].previous_output;
+                let tmp = tmp_dir();
+                std::fs::create_dir_all(&tmp).unwrap();
+                let config = crate::config::Config::new(
+                    crate::config::BitcoinConfig::new(
+                        ChainId::Bitcoin,
+                        std::time::Duration::from_secs(2),
+                    ),
+                    None,
+                    log::LevelFilter::Debug,
+                    descriptor.clone(),
+                    crate::datadir::DataDirectory::new(tmp.join("d")),
+                );
+                let db = DummyDatabase::new();
+                {
+                    let mut conn = db.connection();
+                    conn.new_txs(&[psbt.inputs[0].non_witness_utxo.clone().unwrap()]);
+                    conn.new_unspent_coins(&[confirmed_coin(coin, 50_000, 3)]);
+                    conn.store_spend(&signed);
+                }
+                let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let broadcaster: crate::bitcoin::DetachedBroadcaster = {
+                    let sent = sent.clone();
+                    std::sync::Arc::new(move |tx: &Transaction| {
+                        sent.lock().unwrap().push(tx.compute_txid());
+                        Ok(())
+                    })
+                };
+                let (poller_sender, poller_receiver) = std::sync::mpsc::sync_channel(1);
+                let control = DaemonControl::new(
+                    config,
+                    std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
+                    poller_sender,
+                    std::sync::Arc::new(std::sync::Mutex::new(db)),
+                    secp256k1::Secp256k1::verification_only(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                )
+                .with_detached_broadcaster(Some(broadcaster));
+                Self {
+                    control,
+                    descriptor,
+                    coin,
+                    spend: signed.unsigned_tx.clone(),
+                    spend_txid,
+                    sent,
+                    poller_receiver,
+                }
+            }
+
+            fn db(&self) -> Box<dyn DatabaseConnection> {
+                self.control.db().lock().unwrap().connection()
+            }
+
+            /// What a poll does when the backend shows `tx` spending the
+            /// fixture's coin: it stores the transaction, marks the coin as
+            /// spent by it, then ends the holds the database now accounts for.
+            fn poller_records(&self, tx: &Transaction) {
+                let mut conn = self.db();
+                conn.new_txs(std::slice::from_ref(tx));
+                conn.spend_coins(&[(self.coin, tx.compute_txid())]);
+                self.poll_ends();
+            }
+
+            /// The end of any poll, whatever it wrote.
+            fn poll_ends(&self) {
+                self.control.broadcast_holds.end_recorded_in(|| self.db());
+            }
+
+            /// Receive another confirmed coin of `sats` at receive `index`.
+            fn fund(&self, sats: u64, index: u32) -> OutPoint {
+                let secp = secp256k1::Secp256k1::new();
+                let derived = self
+                    .descriptor
+                    .receive_descriptor()
+                    .derive(index.into(), &secp);
+                let funding = Transaction {
+                    version: transaction::Version::TWO,
+                    lock_time: absolute::LockTime::ZERO,
+                    input: vec![TxIn {
+                        previous_output: OutPoint::null(),
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence(index),
+                        witness: btc::Witness::new(),
+                    }],
+                    output: vec![TxOut {
+                        value: Amount::from_sat(sats),
+                        script_pubkey: derived.script_pubkey(),
+                    }],
+                };
+                let outpoint = OutPoint {
+                    txid: funding.compute_txid(),
+                    vout: 0,
+                };
+                let mut conn = self.db();
+                conn.new_txs(&[funding]);
+                conn.new_unspent_coins(&[confirmed_coin(outpoint, sats, index)]);
+                outpoint
+            }
+
+            /// The inputs automatic coin selection picks to pay 20,000 sats,
+            /// or `None` when it finds the wallet short of funds.
+            fn auto_selected(&self) -> Option<Vec<OutPoint>> {
+                let destinations = std::iter::once((Self::address(), 20_000)).collect();
+                Self::inputs(
+                    self.control
+                        .create_spend(&destinations, &[], 1, None)
+                        .unwrap(),
+                )
+            }
+
+            fn address() -> btc::Address<btc::address::NetworkUnchecked> {
+                btc::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap()
+            }
+
+            fn inputs(result: CreateSpendResult) -> Option<Vec<OutPoint>> {
+                match result {
+                    CreateSpendResult::Success { psbt, .. } => Some(Self::inputs_of(&psbt)),
+                    CreateSpendResult::InsufficientFunds { .. } => None,
+                }
+            }
+
+            fn inputs_of(psbt: &Psbt) -> Vec<OutPoint> {
+                let mut inputs: Vec<OutPoint> = psbt
+                    .unsigned_tx
+                    .input
+                    .iter()
+                    .map(|txin| txin.previous_output)
+                    .collect();
+                inputs.sort();
+                inputs
+            }
+        }
+
+        /// A broadcast that returns before the poll leaves the database
+        /// showing its input as unspent. Automatic coin selection must not
+        /// build a second spend of that coin in the meantime.
+        #[test]
+        fn coin_selection_skips_a_coin_spent_by_a_broadcast_not_yet_polled() {
+            let wallet = BroadcastWallet::new();
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(*wallet.sent.lock().unwrap(), vec![wallet.spend_txid]);
+            // No poll has run: the database still reports the coin as unspent.
+            assert!(!wallet.db().coins(&[], &[wallet.coin])[&wallet.coin].is_spent());
+
+            assert_eq!(wallet.auto_selected(), None);
+            let other = wallet.fund(60_000, 4);
+            assert_eq!(wallet.auto_selected(), Some(vec![other]));
+        }
+
+        /// The waiting broadcast holds its inputs too: its poll can come back
+        /// without the spend, as on Esplora while the server has yet to show
+        /// the transaction.
+        #[test]
+        fn coin_selection_skips_a_coin_whose_broadcast_a_poll_did_not_record() {
+            let wallet = BroadcastWallet::new();
+            let BroadcastWallet {
+                control,
+                spend_txid,
+                poller_receiver,
+                ..
+            } = &wallet;
+            std::thread::scope(|scope| {
+                let broadcast = scope.spawn(move || control.broadcast_spend(spend_txid));
+                // A poll that completes and changes nothing.
+                match poller_receiver.recv().unwrap() {
+                    PollerMessage::PollNow(done) => done.send(()).unwrap(),
+                    _ => panic!("the waiting broadcast asks for an acknowledged poll"),
+                }
+                broadcast.join().unwrap().unwrap();
+            });
+            assert_eq!(*wallet.sent.lock().unwrap(), vec![wallet.spend_txid]);
+            assert_eq!(wallet.auto_selected(), None);
+        }
+
+        /// Once a poll records the spend, the coin's state is the database's
+        /// alone. A later poll that frees the coin (the spend was dropped from
+        /// the mempool) makes it selectable again.
+        #[test]
+        fn a_coin_the_poller_frees_after_recording_its_spend_is_selectable_again() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+
+            wallet.poller_records(&wallet.spend);
+            assert_eq!(wallet.auto_selected(), None);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// The same when nothing asked for a coin selection in between: the
+        /// hold is not left behind on a coin the poller has since freed.
+        #[test]
+        fn a_coin_recorded_and_freed_between_two_selections_is_selectable() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(wallet.auto_selected(), None);
+
+            wallet.poller_records(&wallet.spend);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// A coin the database marks as spent by another transaction, then
+        /// frees, stays held: the poller has yet to record ours. This is a
+        /// replacement whose predecessor the backend stops showing first.
+        #[test]
+        fn a_coin_freed_from_another_spend_stays_held_for_ours() {
+            let wallet = BroadcastWallet::new();
+            let mut earlier = wallet.spend.clone();
+            earlier.lock_time = absolute::LockTime::from_consensus(1);
+            wallet.poller_records(&earlier);
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+        }
+
+        /// The wallet keeps a transaction it stored after the poller frees
+        /// the coin (the spend left the mempool). Broadcasting that
+        /// transaction again holds the coin again, until a poll records the
+        /// spend again.
+        #[test]
+        fn a_spend_broadcast_again_after_it_was_dropped_holds_its_coin() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            wallet.poller_records(&wallet.spend);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(wallet.sent.lock().unwrap().len(), 2);
+            // A poll in which the backend does not show the spend yet.
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+
+            wallet.poller_records(&wallet.spend);
+            assert!(wallet.db().coins(&[], &[wallet.coin])[&wallet.coin].is_spent());
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// The spend left the mempool and is broadcast again before a poll
+        /// frees the coin, so the database still has the coin as spent by it.
+        /// A poll that writes no coin (it failed) must not end the new hold on
+        /// that record. The next poll, whose backend does not show the spend
+        /// yet, frees the coin, and the hold is all that keeps it from being
+        /// selected again.
+        #[test]
+        fn a_spend_broadcast_again_before_the_poller_freed_its_coin_holds_it() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            wallet.poller_records(&wallet.spend);
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(wallet.sent.lock().unwrap().len(), 2);
+            // A poll that fails writes nothing.
+            wallet.poll_ends();
+            wallet.db().unspend_coins(&[wallet.coin]);
+            wallet.poll_ends();
+            assert_eq!(wallet.auto_selected(), None);
+
+            wallet.poller_records(&wallet.spend);
+            wallet.db().unspend_coins(&[wallet.coin]);
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        /// The poller stores a transaction a few writes before it marks the
+        /// coin as spent. A coin selection that falls between the two still
+        /// leaves the coin alone.
+        #[test]
+        fn a_coin_is_held_between_the_poller_storing_its_spend_and_marking_it() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+
+            wallet.db().new_txs(std::slice::from_ref(&wallet.spend));
+            assert!(wallet.db().list_saved_txids().contains(&wallet.spend_txid));
+            assert_eq!(wallet.auto_selected(), None);
+        }
+
+        /// The poller itself ends a hold, and only once the database has the
+        /// coin as spent by the broadcast transaction.
+        #[test]
+        fn a_poll_ends_the_hold_of_a_spend_the_database_records() {
+            let mut wallet = BroadcastWallet::new();
+            let mut poller = crate::bitcoin::poller::Poller::new(
+                std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
+                wallet.control.db(),
+                wallet.control.config.main_descriptor.clone(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap();
+            wallet.control = wallet
+                .control
+                .with_broadcast_holds(poller.broadcast_holds());
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let polling = std::thread::spawn(move || {
+                poller.poll_forever(std::time::Duration::from_secs(3_600), receiver)
+            });
+            let poll = || {
+                let (done, completed) = std::sync::mpsc::sync_channel(0);
+                sender.send(PollerMessage::PollNow(done)).unwrap();
+                completed
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap();
+            };
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            let held = || wallet.control.coins_held_by_a_broadcast();
+            // A poll that finds nothing new leaves the coin held.
+            poll();
+            assert_eq!(held(), std::iter::once(wallet.coin).collect());
+
+            // The transaction stored, the coin not yet marked: still held.
+            wallet.db().new_txs(std::slice::from_ref(&wallet.spend));
+            poll();
+            assert_eq!(held(), std::iter::once(wallet.coin).collect());
+
+            wallet.db().spend_coins(&[(wallet.coin, wallet.spend_txid)]);
+            poll();
+            assert!(held().is_empty());
+
+            sender.send(PollerMessage::Shutdown).unwrap();
+            polling.join().unwrap();
+        }
+
+        /// A transaction the network refuses holds nothing.
+        #[test]
+        fn a_refused_broadcast_holds_no_coin() {
+            let mut wallet = BroadcastWallet::new();
+            let refuse: crate::bitcoin::DetachedBroadcaster =
+                std::sync::Arc::new(|_: &Transaction| Err("refused".to_string()));
+            wallet.control = wallet.control.with_detached_broadcaster(Some(refuse));
+            assert!(matches!(
+                wallet
+                    .control
+                    .broadcast_spend_without_waiting(&wallet.spend_txid),
+                Err(CommandError::TxBroadcast(_))
+            ));
+            assert_eq!(wallet.auto_selected(), Some(vec![wallet.coin]));
+        }
+
+        #[test]
+        fn the_longest_hold_is_twelve_polls_and_never_under_two_minutes() {
+            let mut wallet = BroadcastWallet::new();
+            let mut max_age_at = |secs: u64| {
+                wallet.control.config.bitcoin_config.poll_interval_secs =
+                    std::time::Duration::from_secs(secs);
+                wallet.control.broadcast_hold_max_age().as_secs()
+            };
+            assert_eq!(max_age_at(1), 120);
+            assert_eq!(
+                max_age_at(crate::config::LOCAL_BACKEND_POLL_INTERVAL_SECS),
+                120
+            );
+            assert_eq!(max_age_at(crate::config::ESPLORA_POLL_INTERVAL_SECS), 7_200);
+            assert_eq!(max_age_at(u64::MAX), u64::MAX);
+        }
+
+        /// Naming the coin is the caller's decision and stays possible: that
+        /// is how a spend is deliberately replaced.
+        #[test]
+        fn a_coin_spent_by_a_broadcast_can_still_be_chosen_by_outpoint() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            let destinations = std::iter::once((BroadcastWallet::address(), 20_000)).collect();
+            let chosen = wallet
+                .control
+                .create_spend(&destinations, &[wallet.coin], 1, None)
+                .unwrap();
+            assert_eq!(BroadcastWallet::inputs(chosen), Some(vec![wallet.coin]));
+        }
+
+        /// A recovery that sweeps every coin past the timelock leaves out one
+        /// a broadcast is spending.
+        #[test]
+        fn a_recovery_sweep_skips_a_coin_spent_by_a_broadcast_not_yet_polled() {
+            let wallet = BroadcastWallet::new();
+            let other = wallet.fund(60_000, 4);
+            let swept = || {
+                let recovery = wallet
+                    .control
+                    .create_recovery(BroadcastWallet::address(), &[], 1, None)
+                    .unwrap();
+                BroadcastWallet::inputs_of(&recovery.psbt)
+            };
+            let mut both = vec![wallet.coin, other];
+            both.sort();
+            assert_eq!(swept(), both);
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(swept(), vec![other]);
+        }
+
+        /// Bumping the fee of another spend may add confirmed coins to pay
+        /// for it. One a broadcast is spending is not among them.
+        #[test]
+        fn a_fee_bump_does_not_add_a_coin_spent_by_a_broadcast_not_yet_polled() {
+            let wallet = BroadcastWallet::new();
+            let other = wallet.fund(30_000, 4);
+            // A second, stored spend of the other coin alone.
+            let destinations = std::iter::once((BroadcastWallet::address(), 20_000)).collect();
+            let second = match wallet
+                .control
+                .create_spend(&destinations, &[other], 1, None)
+                .unwrap()
+            {
+                CreateSpendResult::Success { psbt, .. } => psbt,
+                CreateSpendResult::InsufficientFunds { .. } => panic!("30,000 sats pay 20,000"),
+            };
+            let second_txid = second.unsigned_tx.compute_txid();
+            wallet.control.update_spend(second).unwrap();
+            // At this rate the other coin cannot pay the fee on its own.
+            const BUMP_FEERATE: u64 = 100;
+            let bump = || {
+                BroadcastWallet::inputs(
+                    wallet
+                        .control
+                        .rbf_psbt(&second_txid, false, Some(BUMP_FEERATE))
+                        .unwrap(),
                 )
             };
-            // No coins, no stored spend and an unsigned PSBT still reach the
-            // policy refusal first, before ordinary wallet state is consulted.
-            assert!(matches!(
-                control.create_spend(&HashMap::new(), &[], 1, None),
-                Err(CommandError::ImportedSpendValidation(_))
-            ));
-            refused(control.update_spend(psbt.clone()));
-            refused(control.broadcast_spend(&txid));
-            assert!(matches!(
-                control.rbf_psbt(&txid, false, Some(1)),
-                Err(CommandError::ImportedSpendValidation(_))
-            ));
-            assert!(control
-                .db()
-                .lock()
-                .unwrap()
-                .connection()
-                .spend_tx(&txid)
-                .is_none());
-            assert!(backend
-                .lock()
-                .unwrap()
-                .broadcasted
-                .lock()
-                .unwrap()
-                .is_empty());
-            assert!(psbt
-                .inputs
-                .iter()
-                .all(|input| input.partial_sigs.is_empty()));
+            let mut both = vec![wallet.coin, other];
+            both.sort();
+            assert_eq!(bump(), Some(both));
+
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            assert_eq!(bump(), None);
+        }
+
+        /// Replacing the broadcast spend itself still uses its own inputs.
+        #[test]
+        fn a_broadcast_spend_can_be_replaced_before_a_poll_records_it() {
+            let wallet = BroadcastWallet::new();
+            wallet
+                .control
+                .broadcast_spend_without_waiting(&wallet.spend_txid)
+                .unwrap();
+            let replacement = wallet
+                .control
+                .rbf_psbt(&wallet.spend_txid, true, None)
+                .unwrap();
+            assert_eq!(
+                BroadcastWallet::inputs(replacement),
+                Some(vec![wallet.coin])
+            );
         }
 
         fn unified(psbt: &Psbt, signer: &MasterSigner) -> Psbt {

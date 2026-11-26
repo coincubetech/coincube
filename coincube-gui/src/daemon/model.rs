@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::miniscript::bitcoin::TxOut;
+use coincube_core::wallet_descriptor::SpendAnalysis;
 pub use coincube_core::{
     descriptors::{CoincubePolicy, PartialSpendInfo, PathSpendInfo},
     miniscript::bitcoin::{
@@ -69,15 +70,182 @@ pub enum SpendStatus {
     Deprecated,
 }
 
+fn spend_coins_and_status(
+    coins: Vec<Coin>,
+    unsigned_txid: Txid,
+    broadcast_txid: Option<Txid>,
+) -> (HashMap<OutPoint, Coin>, SpendStatus) {
+    let mut status = SpendStatus::Pending;
+    let mut coins_map = HashMap::<OutPoint, Coin>::with_capacity(coins.len());
+    for coin in coins {
+        if let Some(info) = coin.spend_info {
+            if info.txid == unsigned_txid || Some(info.txid) == broadcast_txid {
+                if info.height.is_some() {
+                    status = SpendStatus::Spent
+                } else {
+                    status = SpendStatus::Broadcast
+                }
+            // The txid will be different if this PSBT is to replace another transaction
+            // that is currently spending the coin.
+            // The PSBT status should remain as Pending so that it can be signed and broadcast.
+            // Once the replacement transaction has been confirmed, the PSBT for the
+            // transaction currently spending this coin will be shown as Deprecated.
+            } else if info.height.is_some() {
+                status = SpendStatus::Deprecated
+            }
+        }
+        coins_map.insert(coin.outpoint, coin);
+    }
+    (coins_map, status)
+}
+
+fn spend_inputs_amount(psbt: &Psbt, coins_map: &HashMap<OutPoint, Coin>) -> Option<Amount> {
+    let mut inputs_amount = Amount::from_sat(0);
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        if let Some(utxo) = &input.witness_utxo {
+            inputs_amount += utxo.value;
+        // we try to have it from the coin
+        } else if let Some(coin) = psbt
+            .unsigned_tx
+            .input
+            .get(i)
+            .and_then(|inpt| coins_map.get(&inpt.previous_output))
+        {
+            inputs_amount += coin.amount;
+        // Information is missing, it is better to set inputs_amount to None.
+        } else {
+            inputs_amount = Amount::from_sat(0);
+            break;
+        }
+    }
+    if inputs_amount.to_sat() == 0 {
+        None
+    } else {
+        Some(inputs_amount)
+    }
+}
+
+/// [`SpendAnalysis::spend_info`] for a spend the daemon has stored. Never
+/// fails, so listing never ends the process.
+///
+/// The daemon stores PSBTs the analysis refuses: `updatespend` checks neither
+/// that inputs share one `nSequence` nor that they carry the same signers, and
+/// merges signatures input by input; an older or external daemon, or a backup
+/// restore, may have stored a row the current checks would refuse. Such a
+/// spend is listed with the progress of its least signed input: each input is
+/// analysed on its own and only what all of them reached counts
+/// ([`PartialSpendInfo::least_signed`]). That never shows the spend as more
+/// signed than it is; the finalizer still decides what can be broadcast.
+fn stored_spend_info(desc: &impl SpendAnalysis, psbt: &Psbt) -> PartialSpendInfo {
+    let error = match desc.spend_info(psbt) {
+        Ok(info) => return info,
+        Err(error) => error,
+    };
+    tracing::warn!(
+        "Stored spend {} is not readable as a whole ({}): counting its least signed input",
+        psbt.unsigned_tx.compute_txid(),
+        error
+    );
+    // Every input of the transaction counts. One without a PSBT input map
+    // reads as unsigned, and a transaction with no input as one blank input.
+    // (A deserialized PSBT always has one map per input and output; this is
+    // defensive.)
+    let inputs = psbt.unsigned_tx.input.len().max(1);
+    let per_input: Option<Vec<_>> = (0..inputs)
+        .map(|i| desc.spend_info(&single_input(psbt, i)).ok())
+        .collect();
+    per_input
+        .and_then(PartialSpendInfo::least_signed)
+        .unwrap_or_else(|| {
+            // An input that can't be analysed on its own makes the whole spend
+            // read as not signed rather than skipping it. Only an imported wallet
+            // whose own policy can't be read gets here, and then nothing else
+            // about it can be shown either.
+            tracing::error!(
+                "Stored spend {}: an input could not be analysed",
+                psbt.unsigned_tx.compute_txid()
+            );
+            PartialSpendInfo::primary_only(PathSpendInfo {
+                threshold: 1,
+                sigs_count: 0,
+                signed_pubkeys: HashMap::new(),
+            })
+        })
+}
+
+/// Input `index` of `psbt` as a PSBT of its own, with one placeholder output:
+/// the signature analysis reads inputs only.
+fn single_input(psbt: &Psbt, index: usize) -> Psbt {
+    let mut unsigned_tx = psbt.unsigned_tx.clone();
+    unsigned_tx.input = vec![psbt
+        .unsigned_tx
+        .input
+        .get(index)
+        .cloned()
+        .unwrap_or_default()];
+    unsigned_tx.output = vec![TxOut::NULL];
+    Psbt {
+        unsigned_tx,
+        version: psbt.version,
+        xpub: psbt.xpub.clone(),
+        proprietary: Default::default(),
+        unknown: Default::default(),
+        inputs: vec![psbt.inputs.get(index).cloned().unwrap_or_default()],
+        outputs: vec![Default::default()],
+    }
+}
+
 impl SpendTx {
     pub fn new(
         updated_at: Option<u32>,
         psbt: Psbt,
         coins: Vec<Coin>,
-        desc: &CoincubeDescriptor,
+        desc: &impl SpendAnalysis,
         secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
         network: Network,
     ) -> Self {
+        Self::new_recorded(updated_at, psbt, None, coins, desc, secp, network)
+    }
+
+    /// [`Self::new`] for a stored spend, with the transaction ID the daemon
+    /// recorded when it broadcast it. Finalizing a `pkh` or `sh(wpkh)` input
+    /// adds a `scriptSig`, so the broadcast ID differs from the unsigned
+    /// PSBT's; coins spent by either count as spent by this transaction.
+    pub fn new_recorded(
+        updated_at: Option<u32>,
+        psbt: Psbt,
+        broadcast_txid: Option<Txid>,
+        coins: Vec<Coin>,
+        desc: &impl SpendAnalysis,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+        network: Network,
+    ) -> Self {
+        Self::from_list_entry(
+            ListSpendEntry {
+                psbt,
+                updated_at,
+                broadcast_txid,
+            },
+            coins,
+            desc,
+            secp,
+            network,
+        )
+    }
+
+    /// A stored spend as the daemon lists it. See [`Self::new_recorded`].
+    pub(super) fn from_list_entry(
+        entry: ListSpendEntry,
+        coins: Vec<Coin>,
+        desc: &impl SpendAnalysis,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+        network: Network,
+    ) -> Self {
+        let ListSpendEntry {
+            psbt,
+            updated_at,
+            broadcast_txid,
+        } = entry;
         // Use primary path if no inputs are using a relative locktime.
         let use_primary_path = !psbt
             .unsigned_tx
@@ -85,12 +253,8 @@ impl SpendTx {
             .iter()
             .map(|txin| txin.sequence)
             .any(|seq| seq.is_relative_lock_time());
-        let max_vbytes = desc.unsigned_tx_max_vbytes(&psbt.unsigned_tx, use_primary_path);
-        let change_indexes: Vec<usize> = desc
-            .change_indexes(&psbt, secp)
-            .into_iter()
-            .map(|c| c.index())
-            .collect();
+        let max_vbytes = desc.spend_max_vbytes(&psbt.unsigned_tx, use_primary_path);
+        let change_indexes: Vec<usize> = desc.spend_change_indexes(&psbt, secp);
         let (change_amount, spend_amount) = psbt.unsigned_tx.output.iter().enumerate().fold(
             (Amount::from_sat(0), Amount::from_sat(0)),
             |(change, spend), (i, output)| {
@@ -102,62 +266,16 @@ impl SpendTx {
             },
         );
 
-        let mut status = SpendStatus::Pending;
-        let mut coins_map = HashMap::<OutPoint, Coin>::with_capacity(coins.len());
-        for coin in coins {
-            if let Some(info) = coin.spend_info {
-                if info.txid == psbt.unsigned_tx.compute_txid() {
-                    if info.height.is_some() {
-                        status = SpendStatus::Spent
-                    } else {
-                        status = SpendStatus::Broadcast
-                    }
-                // The txid will be different if this PSBT is to replace another transaction
-                // that is currently spending the coin.
-                // The PSBT status should remain as Pending so that it can be signed and broadcast.
-                // Once the replacement transaction has been confirmed, the PSBT for the
-                // transaction currently spending this coin will be shown as Deprecated.
-                } else if info.height.is_some() {
-                    status = SpendStatus::Deprecated
-                }
-            }
-            coins_map.insert(coin.outpoint, coin);
-        }
-
-        let inputs_amount = {
-            let mut inputs_amount = Amount::from_sat(0);
-            for (i, input) in psbt.inputs.iter().enumerate() {
-                if let Some(utxo) = &input.witness_utxo {
-                    inputs_amount += utxo.value;
-                // we try to have it from the coin
-                } else if let Some(coin) = psbt
-                    .unsigned_tx
-                    .input
-                    .get(i)
-                    .and_then(|inpt| coins_map.get(&inpt.previous_output))
-                {
-                    inputs_amount += coin.amount;
-                // Information is missing, it is better to set inputs_amount to None.
-                } else {
-                    inputs_amount = Amount::from_sat(0);
-                    break;
-                }
-            }
-            if inputs_amount.to_sat() == 0 {
-                None
-            } else {
-                Some(inputs_amount)
-            }
-        };
+        let unsigned_txid = psbt.unsigned_tx.compute_txid();
+        let (coins_map, mut status) = spend_coins_and_status(coins, unsigned_txid, broadcast_txid);
+        let inputs_amount = spend_inputs_amount(&psbt, &coins_map);
 
         // One input coin is missing, the psbt is deprecated for now.
         if coins_map.len() != psbt.inputs.len() {
             status = SpendStatus::Deprecated
         }
 
-        let sigs = desc
-            .partial_spend_info(&psbt)
-            .expect("PSBT must be generated by Coincube");
+        let sigs = stored_spend_info(desc, &psbt);
 
         Self {
             labels: HashMap::new(),
@@ -172,7 +290,7 @@ impl SpendTx {
                     .filter_map(|(i, _)| {
                         if !change_indexes.contains(&i) {
                             Some(OutPoint {
-                                txid: psbt.unsigned_tx.compute_txid(),
+                                txid: unsigned_txid,
                                 vout: i as u32,
                             })
                         } else {
@@ -302,6 +420,55 @@ pub struct HistoryTransaction {
     pub kind: TransactionKind,
 }
 
+fn history_transaction_kind(
+    tx: &Transaction,
+    is_external: bool,
+    change_indexes: &[usize],
+    outgoing_amount: Amount,
+) -> TransactionKind {
+    if is_external {
+        if change_indexes.len() == 1 {
+            TransactionKind::IncomingSinglePayment(OutPoint {
+                txid: tx.compute_txid(),
+                vout: change_indexes[0] as u32,
+            })
+        } else {
+            TransactionKind::IncomingPaymentBatch(
+                change_indexes
+                    .iter()
+                    .map(|i| OutPoint {
+                        txid: tx.compute_txid(),
+                        vout: *i as u32,
+                    })
+                    .collect(),
+            )
+        }
+    } else if outgoing_amount == Amount::from_sat(0) {
+        TransactionKind::SendToSelf
+    } else {
+        let outpoints: Vec<OutPoint> = tx
+            .output
+            .iter()
+            .enumerate()
+            .filter_map(|(i, _)| {
+                if !change_indexes.contains(&i) {
+                    Some(OutPoint {
+                        txid: tx.compute_txid(),
+                        vout: i as u32,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if outpoints.len() == 1 {
+            TransactionKind::OutgoingSinglePayment(outpoints[0])
+        } else {
+            TransactionKind::OutgoingPaymentBatch(outpoints)
+        }
+    }
+}
+
 impl HistoryTransaction {
     pub fn new(
         tx: Transaction,
@@ -322,47 +489,8 @@ impl HistoryTransaction {
             },
         );
 
-        let kind = if coins.is_empty() {
-            if change_indexes.len() == 1 {
-                TransactionKind::IncomingSinglePayment(OutPoint {
-                    txid: tx.compute_txid(),
-                    vout: change_indexes[0] as u32,
-                })
-            } else {
-                TransactionKind::IncomingPaymentBatch(
-                    change_indexes
-                        .iter()
-                        .map(|i| OutPoint {
-                            txid: tx.compute_txid(),
-                            vout: *i as u32,
-                        })
-                        .collect(),
-                )
-            }
-        } else if outgoing_amount == Amount::from_sat(0) {
-            TransactionKind::SendToSelf
-        } else {
-            let outpoints: Vec<OutPoint> = tx
-                .output
-                .iter()
-                .enumerate()
-                .filter_map(|(i, _)| {
-                    if !change_indexes.contains(&i) {
-                        Some(OutPoint {
-                            txid: tx.compute_txid(),
-                            vout: i as u32,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if outpoints.len() == 1 {
-                TransactionKind::OutgoingSinglePayment(outpoints[0])
-            } else {
-                TransactionKind::OutgoingPaymentBatch(outpoints)
-            }
-        };
+        let kind =
+            history_transaction_kind(&tx, coins.is_empty(), &change_indexes, outgoing_amount);
 
         let mut inputs_amount = Amount::from_sat(0);
         let mut coins_map = HashMap::<OutPoint, Coin>::with_capacity(coins.len());
@@ -599,5 +727,210 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::split_test_wallets::{imported_vault, Shape};
+    use coincube_core::miniscript::bitcoin::{absolute, transaction, ScriptBuf, TxIn, TxOut};
+    use coincubed::commands::LCSpendInfo;
+
+    #[test]
+    fn imported_psbt_status_follows_the_final_broadcast_txid() {
+        let wallet = imported_vault(Shape::ShWpkh);
+        let address = wallet.preview_change_address().assume_checked();
+        let outpoint = OutPoint::null();
+        let unsigned = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                ..TxIn::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(19_000),
+                script_pubkey: address.script_pubkey(),
+            }],
+        };
+        let unsigned_txid = unsigned.compute_txid();
+        let mut signed = unsigned.clone();
+        signed.input[0].script_sig = ScriptBuf::from_bytes(vec![1, 1]);
+        let txid = signed.compute_txid();
+        assert_ne!(unsigned_txid, txid);
+
+        let entry = ListSpendEntry {
+            updated_at: None,
+            broadcast_txid: Some(txid),
+            psbt: Psbt::from_unsigned_tx(unsigned).unwrap(),
+        };
+        for (height, status) in [
+            (None, SpendStatus::Broadcast),
+            (Some(101), SpendStatus::Spent),
+        ] {
+            let coin = Coin {
+                amount: Amount::from_sat(20_000),
+                outpoint,
+                address: address.clone(),
+                block_height: Some(100),
+                derivation_index: 0.into(),
+                spend_info: Some(LCSpendInfo { txid, height }),
+                is_immature: false,
+                is_change: false,
+                is_from_self: false,
+            };
+            let spend = SpendTx::from_list_entry(
+                entry.clone(),
+                vec![coin],
+                &wallet.main_descriptor,
+                &secp256k1::Secp256k1::verification_only(),
+                Network::Bitcoin,
+            );
+            assert_eq!(spend.status, status);
+            assert_eq!(spend.psbt.unsigned_tx.compute_txid(), unsigned_txid);
+        }
+    }
+
+    fn listed(psbt: Psbt) -> SpendTx {
+        let wallet = crate::app::state::vault::psbts::tests::spend_wallet();
+        SpendTx::from_list_entry(
+            ListSpendEntry {
+                psbt,
+                updated_at: None,
+                broadcast_txid: None,
+            },
+            vec![],
+            &wallet.main_descriptor,
+            &secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        )
+    }
+
+    /// The fixture's one-input spend with a second input added. Same script,
+    /// so both inputs carry the same key origins.
+    fn two_inputs() -> Psbt {
+        let mut psbt = crate::app::state::vault::psbts::tests::spend_tx().psbt;
+        let mut txin = psbt.unsigned_tx.input[0].clone();
+        txin.previous_output.vout += 1;
+        psbt.unsigned_tx.input.push(txin);
+        psbt.inputs.push(psbt.inputs[0].clone());
+        psbt
+    }
+
+    /// A signature on input `index` only, by a key of the 2-of-2 primary path.
+    fn signed_on_input(mut psbt: Psbt, index: usize, fingerprint: &str) -> Psbt {
+        use std::str::FromStr;
+        let fingerprint = Fingerprint::from_str(fingerprint).unwrap();
+        let key = *psbt.inputs[index]
+            .bip32_derivation
+            .iter()
+            .find(|(_, (fg, path))| {
+                *fg == fingerprint
+                    && path.into_iter().nth(4)
+                        == Some(&coincube_core::miniscript::bitcoin::bip32::ChildNumber::from(0))
+            })
+            .unwrap()
+            .0;
+        let sig = coincube_core::miniscript::bitcoin::ecdsa::Signature::from_str("304402204004fcdbb9c0d0cbf585f58cee34dccb012efbd8fc2b0d5e97760045ae35803802201a0bd7ec2383e0b93748abc9946c8e17a8312e314dab85982aeba650e738cbf401").unwrap();
+        psbt.inputs[index]
+            .partial_sigs
+            .insert(coincube_core::miniscript::bitcoin::PublicKey::new(key), sig);
+        psbt
+    }
+
+    /// A stored Vault spend the descriptor analysis refuses is still listed:
+    /// listing used to `expect` the analysis and end the process.
+    #[test]
+    fn a_stored_spend_the_analysis_refuses_is_listed() {
+        let wallet = crate::app::state::vault::psbts::tests::spend_wallet();
+        let well_formed = two_inputs();
+        assert!(wallet.main_descriptor.spend_info(&well_formed).is_ok());
+
+        let mut sequences = two_inputs();
+        sequences.unsigned_tx.input[1].sequence =
+            coincube_core::miniscript::bitcoin::Sequence::from_height(65535);
+        let one_input_signed = signed_on_input(two_inputs(), 0, "f714c228");
+        let mut outputs_short = two_inputs();
+        outputs_short.outputs.pop();
+        // Input 0 has both primary signatures; input 1 has no input map.
+        let mut inputs_short =
+            signed_on_input(signed_on_input(two_inputs(), 0, "f714c228"), 0, "2522f23c");
+        inputs_short.inputs.pop();
+        for (psbt, error) in [
+            (&sequences, "inconsistent"),
+            (&one_input_signed, "inconsistent"),
+            (&outputs_short, "malformed"),
+            (&inputs_short, "malformed"),
+        ] {
+            let refused = wallet.main_descriptor.spend_info(psbt).unwrap_err();
+            assert!(refused.to_string().contains(error), "{}", refused);
+
+            let spend = listed(psbt.clone());
+            assert_eq!(spend.psbt, *psbt);
+            assert_eq!(spend.sigs.primary_path().threshold, 2);
+            assert_eq!(spend.sigs.primary_path().sigs_count, 0);
+            assert!(spend.path_ready().is_none());
+        }
+
+        // Each input signed by a different key of the 2-of-2: one signature on
+        // every input, but no key that signed them all.
+        let crossed = signed_on_input(signed_on_input(two_inputs(), 0, "f714c228"), 1, "2522f23c");
+        assert!(wallet.main_descriptor.spend_info(&crossed).is_err());
+        let spend = listed(crossed);
+        assert_eq!(spend.sigs.primary_path().sigs_count, 1);
+        assert!(spend.sigs.primary_path().signed_pubkeys.is_empty());
+        assert!(spend.path_ready().is_none());
+
+        // A row that reads fine is listed exactly as before.
+        let signed = signed_on_input(signed_on_input(two_inputs(), 0, "f714c228"), 1, "f714c228");
+        let expected = wallet.main_descriptor.spend_info(&signed).unwrap();
+        assert_eq!(expected.primary_path().sigs_count, 1);
+        assert_eq!(listed(signed).sigs, expected);
+    }
+
+    /// The same for an imported wallet, whose analysis refuses only a PSBT
+    /// whose inputs or outputs do not match its transaction.
+    #[test]
+    fn a_stored_imported_spend_the_analysis_refuses_is_listed() {
+        // A k-of-n wallet: its threshold tells the analysed result from the
+        // placeholder, which has a threshold of 1.
+        let wallet = imported_vault(Shape::WshSortedMulti);
+        let address = wallet.preview_change_address().assume_checked();
+        let unsigned = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(19_000),
+                    script_pubkey: address.script_pubkey(),
+                };
+                2
+            ],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        psbt.outputs.pop();
+        assert!(wallet.main_descriptor.spend_info(&psbt).is_err());
+        let spend = SpendTx::from_list_entry(
+            ListSpendEntry {
+                psbt: psbt.clone(),
+                updated_at: None,
+                broadcast_txid: None,
+            },
+            vec![],
+            &wallet.main_descriptor,
+            &secp256k1::Secp256k1::verification_only(),
+            Network::Bitcoin,
+        );
+        assert_eq!(spend.psbt, psbt);
+        // The per-input analysis ran: the wallet's own threshold, not the
+        // "no input could be analysed" placeholder.
+        let mut whole = psbt.clone();
+        whole.outputs.push(Default::default());
+        let expected = wallet.main_descriptor.spend_info(&whole).unwrap();
+        assert!(expected.primary_path().threshold > 1);
+        assert_eq!(spend.sigs, expected);
+        assert!(spend.path_ready().is_none());
     }
 }

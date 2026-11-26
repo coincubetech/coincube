@@ -238,6 +238,330 @@ impl DefineDescriptor {
         out
     }
 
+    fn apply_existing_key(&mut self, coordinates: Vec<(usize, usize)>, fingerprint: Fingerprint) {
+        if let Some(existing_key) = self.keys.get(&fingerprint) {
+            if !self.keys.contains_key(&fingerprint) {
+                tracing::error!("Key {fingerprint} does not exists");
+                return;
+            }
+            for coordinate in coordinates {
+                if !self.paths[coordinate.0]
+                    .keys
+                    .contains(&Some(existing_key.clone()))
+                {
+                    self.paths[coordinate.0].keys[coordinate.1] = Some(existing_key.clone());
+                } else {
+                    tracing::error!("Key {fingerprint} already in path {}", coordinate.0);
+                }
+            }
+            self.check_setup();
+        } else {
+            tracing::error!("Key with fingerprint {fingerprint} does not exists");
+        }
+        self.modal = None;
+    }
+
+    fn apply_selected_key(
+        &mut self,
+        hws: &mut HardwareWallets,
+        coordinates: Vec<(usize, usize)>,
+        key: key::SelectedKey,
+    ) {
+        match key {
+            key::SelectedKey::Existing(fingerprint) => {
+                self.apply_existing_key(coordinates, fingerprint);
+            }
+            key::SelectedKey::New(key) => {
+                if let Some(acc) = key.account {
+                    self.accounts.insert(key.fingerprint, acc);
+                }
+                if self.keys.contains_key(&key.fingerprint) {
+                    tracing::error!("Key {} already exists", key.fingerprint);
+                }
+                self.keys.insert(key.fingerprint, *key.clone());
+                hws.aliases.insert(key.fingerprint, key.name.clone());
+                for coordinate in coordinates {
+                    if !self.paths[coordinate.0].keys.contains(&Some(*key.clone())) {
+                        self.paths[coordinate.0].keys[coordinate.1] = Some(*key.clone());
+                    } else {
+                        tracing::error!("Key {} already in path {}", key.fingerprint, coordinate.0);
+                    }
+                }
+                self.check_setup();
+                self.modal = None;
+            }
+            key::SelectedKey::None => {
+                self.modal = None;
+            }
+        }
+    }
+
+    fn apply_key_alias(&mut self, hws: &mut HardwareWallets, fg: Fingerprint, alias: String) {
+        if let Some(key) = self.keys.get_mut(&fg) {
+            key.name = alias.clone();
+        }
+        hws.aliases.insert(fg, alias.clone());
+        // FIXME: this is a bad hack, we should not store duplicates of keys in paths,
+        // source of truth should be self.keys
+        for p in &mut self.paths {
+            #[allow(clippy::manual_flatten)]
+            for k in &mut p.keys {
+                if let Some(key) = k {
+                    if key.fingerprint == fg {
+                        key.name = alias.clone();
+                    }
+                }
+            }
+        }
+        self.modal = None;
+    }
+
+    fn update_path(&mut self, i: usize, msg: message::DefinePath) -> Task<Message> {
+        match msg {
+            message::DefinePath::SequenceEdited(seq) => {
+                self.modal = None;
+                if let Some(Path {
+                    sequence: PathSequence::Recovery(s),
+                    ..
+                }) = self.paths.get_mut(i)
+                {
+                    *s = seq;
+                }
+                self.check_for_warning();
+            }
+            message::DefinePath::ThresholdEdited(t) => {
+                self.modal = None;
+                if let Some(path) = self.paths.get_mut(i) {
+                    path.threshold = t;
+                }
+            }
+            message::DefinePath::EditSequence => {
+                if let Some(path) = self.paths.get(i) {
+                    self.modal = Some(Box::new(EditSequenceModal::new(i, path.sequence)));
+                }
+            }
+            message::DefinePath::EditThreshold => {
+                if let Some(path) = self.paths.get(i) {
+                    self.modal = Some(Box::new(EditThresholdModal::new(
+                        i,
+                        (path.threshold, path.keys.len()),
+                    )));
+                }
+            }
+
+            message::DefinePath::AddKey => {
+                if let Some(path) = self.paths.get_mut(i) {
+                    path.keys.push(None);
+                    path.threshold += 1;
+                    self.check_for_warning();
+                }
+            }
+            message::DefinePath::Key(j, msg) => {
+                return self.update_path_key(i, j, msg);
+            }
+        }
+        Task::none()
+    }
+
+    fn update_path_key(&mut self, i: usize, j: usize, msg: message::DefineKey) -> Task<Message> {
+        match msg {
+            message::DefineKey::Clipboard(key) => {
+                return Task::perform(async move { key }, Message::Clipboard);
+            }
+
+            message::DefineKey::EditAlias => {
+                let coordinates = vec![(i, j)];
+                let path_kind = self.paths[i].sequence.into();
+                if let Some(path) = self.paths.get(i) {
+                    if let Some(Some(key)) = path.keys.get(j) {
+                        let fg = key.fingerprint;
+                        let alias = key.name.clone();
+                        let modal =
+                            EditKeyAlias::new(self.keys(), fg, alias, path_kind, coordinates);
+                        self.modal = Some(Box::new(modal));
+                        return Task::none();
+                    }
+                }
+                log::error!("DefineDescriptor.update(): DefineKey::EditAlias => key is None.");
+                return Task::none();
+            }
+            message::DefineKey::Edit => {
+                let coordinates = vec![(i, j)];
+                let modal = self.edit_key_modal(coordinates);
+                self.modal = Some(Box::new(modal));
+            }
+            message::DefineKey::Delete => {
+                if let Some(path) = self.paths.get_mut(i) {
+                    path.keys.remove(j);
+                    if path.threshold > path.keys.len() {
+                        path.threshold -= 1;
+                    }
+                }
+                // Only delete non-primary paths.
+                if i > 0 // we could alternatively check `path_kind != PathKind::Primary`
+                && self
+                    .paths
+                    .get(i)
+                    .map(|path| path.keys.is_empty())
+                    .unwrap_or(false)
+                {
+                    self.paths.remove(i);
+                }
+                self.check_setup();
+            }
+        }
+        Task::none()
+    }
+
+    fn collect_path_keys(
+        &self,
+        path: &Path,
+        ctx: &mut Context,
+        hw_is_used: &mut bool,
+        key_derivation_index: &mut HashMap<Fingerprint, usize>,
+    ) -> Vec<DescriptorPublicKey> {
+        let mut keys: Vec<DescriptorPublicKey> = Vec::new();
+        for path_key in path.keys.iter().clone() {
+            let fingerprint = path_key
+                .as_ref()
+                .expect("Must be present at this step")
+                .fingerprint;
+            let key = self
+                .keys
+                .get(&fingerprint)
+                .expect("Must be present at this step");
+            if let DescriptorPublicKey::XPub(xpub) = &key.key {
+                if let Some((master_fingerprint, _)) = xpub.origin {
+                    ctx.keys.insert(
+                        master_fingerprint,
+                        KeySetting {
+                            master_fingerprint,
+                            name: key.name.clone(),
+                            provider_key: None,
+                            is_border_wallet: matches!(
+                                key.source,
+                                crate::installer::descriptor::KeySource::BorderWallet { .. }
+                            ),
+                            grid_seed_source: key.source.grid_seed_source(),
+                            replay_protected: None,
+                            keychain_key_id: key.source.keychain_key_id(),
+                        },
+                    );
+                    if key.source.device_kind().is_some() {
+                        *hw_is_used = true;
+                    }
+                }
+                let derivation_index = key_derivation_index.get(&fingerprint).unwrap_or(&0);
+                keys.push(DescriptorPublicKey::MultiXPub(new_multixkey_from_xpub(
+                    xpub.clone(),
+                    *derivation_index,
+                )));
+                key_derivation_index.insert(fingerprint, derivation_index + 1);
+            }
+        }
+        keys
+    }
+
+    fn collect_recovery_paths(
+        &self,
+        ctx: &mut Context,
+        hw_is_used: &mut bool,
+        key_derivation_index: &mut HashMap<Fingerprint, usize>,
+    ) -> BTreeMap<u16, PathInfo> {
+        let mut recovery_paths = BTreeMap::new();
+
+        for path in &self.paths[1..] {
+            let recovery_keys = self.collect_path_keys(path, ctx, hw_is_used, key_derivation_index);
+
+            let recovery_keys = if recovery_keys.len() == 1 {
+                PathInfo::Single(recovery_keys[0].clone())
+            } else {
+                PathInfo::Multi(path.threshold, recovery_keys)
+            };
+
+            recovery_paths.insert(path.sequence.as_u16(), recovery_keys);
+        }
+        recovery_paths
+    }
+
+    fn collect_connect_vault_metadata(&self, ctx: &mut Context) {
+        // Harvest keychain-sourced keys across all paths into backend-vault
+        // member payloads. Dedup by fingerprint — a key reused across
+        // paths still only produces one `ConnectVaultMember` row. We rely
+        // on the first occurrence's path_kind (primary > recovery) as a
+        // tiebreaker for the logged role hint.
+        use crate::installer::context::ConnectVaultMemberPayload;
+        use crate::installer::descriptor::{KeySource, KeychainKeyOwner, PathKind};
+        let mut seen_fingerprints: std::collections::HashSet<Fingerprint> =
+            std::collections::HashSet::new();
+        for path in self.paths.iter() {
+            let path_kind = path.sequence.path_kind();
+            for maybe_key in path.keys.iter() {
+                let Some(editor_key_ref) = maybe_key.as_ref() else {
+                    continue;
+                };
+                let fingerprint = editor_key_ref.fingerprint;
+                if !seen_fingerprints.insert(fingerprint) {
+                    continue;
+                }
+                let Some(key) = self.keys.get(&fingerprint) else {
+                    continue;
+                };
+                let KeySource::KeychainKey { owner, key_id, .. } = &key.source else {
+                    // HW, xpub, master-signer, token, and border-wallet
+                    // keys have no backend row — they stay local-only per
+                    // the 2026-04-18 plan direction. Logged at `debug!`:
+                    // this is an informational "skipped as expected"
+                    // message, not actionable, and we'd rather keep
+                    // per-wallet identifiers out of info-level telemetry.
+                    tracing::debug!(
+                        "Skipping non-keychain key {} for backend vault (source kind = {:?}); \
+                         backend ConnectVault will be local-key-free for this signer",
+                        fingerprint,
+                        key.source.kind()
+                    );
+                    continue;
+                };
+                let contact_id = match owner {
+                    KeychainKeyOwner::SelfUser { .. } => None,
+                    KeychainKeyOwner::Contact { contact_id, .. } => Some(*contact_id),
+                };
+                ctx.connect_vault_members.push(ConnectVaultMemberPayload {
+                    fingerprint,
+                    key_id: *key_id,
+                    contact_id,
+                    path_kind,
+                });
+            }
+        }
+
+        // Approximate timelock from the longest Recovery path's sequence
+        // (blocks). Skip SafetyNet (u16::MAX) — it's not a real timelock.
+        let longest_recovery_blocks = self
+            .paths
+            .iter()
+            .filter(|p| p.sequence.path_kind() == PathKind::Recovery)
+            .map(|p| p.sequence.as_u16() as u32)
+            .max();
+        ctx.connect_vault_timelock_days = longest_recovery_blocks.map(|blocks| {
+            // Bitcoin averages ~144 blocks/day. Round up so the server
+            // timelock never expires before the on-chain timelock.
+            let days = blocks.div_ceil(144);
+            days.max(1) as i32
+        });
+    }
+
+    fn reopen_key_modal(&mut self, coordinates: Vec<(usize, usize)>) {
+        // Every coordinate in the Vec belongs to the same path,
+        // by construction of the picker call sites.
+        if let Some((path_idx, _)) = coordinates.first() {
+            if self.paths.get(*path_idx).is_some() {
+                let modal = self.edit_key_modal(coordinates);
+                self.modal = Some(Box::new(modal));
+            }
+        }
+    }
+
     fn edit_key_modal(&self, coordinates: Vec<(usize, usize)>) -> SelectKeySource {
         let keys = self.path_keys(coordinates.iter().map(|c| c.0).collect());
         let actual_path = PathData { coordinates, keys };
@@ -337,93 +661,17 @@ impl Step for DefineDescriptor {
                 self.modal = Some(Box::new(modal));
             }
             Message::DefineDescriptor(message::DefineDescriptor::KeysEdited(coordinates, key)) => {
-                match key {
-                    key::SelectedKey::Existing(fingerprint) => {
-                        if let Some(existing_key) = self.keys.get(&fingerprint) {
-                            if !self.keys.contains_key(&fingerprint) {
-                                tracing::error!("Key {fingerprint} does not exists");
-                                return Task::none();
-                            }
-                            for coordinate in coordinates {
-                                if !self.paths[coordinate.0]
-                                    .keys
-                                    .contains(&Some(existing_key.clone()))
-                                {
-                                    self.paths[coordinate.0].keys[coordinate.1] =
-                                        Some(existing_key.clone());
-                                } else {
-                                    tracing::error!(
-                                        "Key {fingerprint} already in path {}",
-                                        coordinate.0
-                                    );
-                                }
-                            }
-                            self.check_setup();
-                        } else {
-                            tracing::error!("Key with fingerprint {fingerprint} does not exists");
-                        }
-                        self.modal = None;
-                    }
-                    key::SelectedKey::New(key) => {
-                        if let Some(acc) = key.account {
-                            self.accounts.insert(key.fingerprint, acc);
-                        }
-                        if self.keys.contains_key(&key.fingerprint) {
-                            tracing::error!("Key {} already exists", key.fingerprint);
-                        }
-                        self.keys.insert(key.fingerprint, *key.clone());
-                        hws.aliases.insert(key.fingerprint, key.name.clone());
-                        for coordinate in coordinates {
-                            if !self.paths[coordinate.0].keys.contains(&Some(*key.clone())) {
-                                self.paths[coordinate.0].keys[coordinate.1] = Some(*key.clone());
-                            } else {
-                                tracing::error!(
-                                    "Key {} already in path {}",
-                                    key.fingerprint,
-                                    coordinate.0
-                                );
-                            }
-                        }
-                        self.check_setup();
-                        self.modal = None;
-                    }
-                    key::SelectedKey::None => {
-                        self.modal = None;
-                    }
-                }
+                self.apply_selected_key(hws, coordinates, key);
             }
             Message::DefineDescriptor(message::DefineDescriptor::KeysEdit(_, coordinates)) => {
                 let modal = self.edit_key_modal(coordinates);
                 self.modal = Some(Box::new(modal));
             }
             Message::DefineDescriptor(message::DefineDescriptor::ReopenKeyModal(coordinates)) => {
-                // Every coordinate in the Vec belongs to the same path,
-                // by construction of the picker call sites.
-                if let Some((path_idx, _)) = coordinates.first() {
-                    if self.paths.get(*path_idx).is_some() {
-                        let modal = self.edit_key_modal(coordinates);
-                        self.modal = Some(Box::new(modal));
-                    }
-                }
+                self.reopen_key_modal(coordinates);
             }
             Message::DefineDescriptor(message::DefineDescriptor::AliasEdited(fg, alias)) => {
-                if let Some(key) = self.keys.get_mut(&fg) {
-                    key.name = alias.clone();
-                }
-                hws.aliases.insert(fg, alias.clone());
-                // FIXME: this is a bad hack, we should not store duplicates of keys in paths,
-                // source of truth should be self.keys
-                for p in &mut self.paths {
-                    #[allow(clippy::manual_flatten)]
-                    for k in &mut p.keys {
-                        if let Some(key) = k {
-                            if key.fingerprint == fg {
-                                key.name = alias.clone();
-                            }
-                        }
-                    }
-                }
-                self.modal = None;
+                self.apply_key_alias(hws, fg, alias);
             }
             Message::DefineDescriptor(message::DefineDescriptor::Reset) => {
                 hws.aliases.clear();
@@ -433,99 +681,7 @@ impl Step for DefineDescriptor {
                 self.modal = None;
             }
             Message::DefineDescriptor(message::DefineDescriptor::Path(i, msg)) => {
-                match msg {
-                    message::DefinePath::SequenceEdited(seq) => {
-                        self.modal = None;
-                        if let Some(Path {
-                            sequence: PathSequence::Recovery(s),
-                            ..
-                        }) = self.paths.get_mut(i)
-                        {
-                            *s = seq;
-                        }
-                        self.check_for_warning();
-                    }
-                    message::DefinePath::ThresholdEdited(t) => {
-                        self.modal = None;
-                        if let Some(path) = self.paths.get_mut(i) {
-                            path.threshold = t;
-                        }
-                    }
-                    message::DefinePath::EditSequence => {
-                        if let Some(path) = self.paths.get(i) {
-                            self.modal = Some(Box::new(EditSequenceModal::new(i, path.sequence)));
-                        }
-                    }
-                    message::DefinePath::EditThreshold => {
-                        if let Some(path) = self.paths.get(i) {
-                            self.modal = Some(Box::new(EditThresholdModal::new(
-                                i,
-                                (path.threshold, path.keys.len()),
-                            )));
-                        }
-                    }
-
-                    message::DefinePath::AddKey => {
-                        if let Some(path) = self.paths.get_mut(i) {
-                            path.keys.push(None);
-                            path.threshold += 1;
-                            self.check_for_warning();
-                        }
-                    }
-                    message::DefinePath::Key(j, msg) => {
-                        match msg {
-                            message::DefineKey::Clipboard(key) => {
-                                return Task::perform(async move { key }, Message::Clipboard);
-                            }
-
-                            message::DefineKey::EditAlias => {
-                                let coordinates = vec![(i, j)];
-                                let path_kind = self.paths[i].sequence.into();
-                                if let Some(path) = self.paths.get(i) {
-                                    if let Some(Some(key)) = path.keys.get(j) {
-                                        let fg = key.fingerprint;
-                                        let alias = key.name.clone();
-                                        let modal = EditKeyAlias::new(
-                                            self.keys(),
-                                            fg,
-                                            alias,
-                                            path_kind,
-                                            coordinates,
-                                        );
-                                        self.modal = Some(Box::new(modal));
-                                        return Task::none();
-                                    }
-                                }
-                                log::error!("DefineDescriptor.update(): DefineKey::EditAlias => key is None.");
-                                return Task::none();
-                            }
-                            message::DefineKey::Edit => {
-                                let coordinates = vec![(i, j)];
-                                let modal = self.edit_key_modal(coordinates);
-                                self.modal = Some(Box::new(modal));
-                            }
-                            message::DefineKey::Delete => {
-                                if let Some(path) = self.paths.get_mut(i) {
-                                    path.keys.remove(j);
-                                    if path.threshold > path.keys.len() {
-                                        path.threshold -= 1;
-                                    }
-                                }
-                                // Only delete non-primary paths.
-                                if i > 0 // we could alternatively check `path_kind != PathKind::Primary`
-                                && self
-                                    .paths
-                                    .get(i)
-                                    .map(|path| path.keys.is_empty())
-                                    .unwrap_or(false)
-                                {
-                                    self.paths.remove(i);
-                                }
-                                self.check_setup();
-                            }
-                        }
-                    }
-                }
+                return self.update_path(i, msg);
             }
             Message::EditKeyAlias(msg) => match msg.clone() {
                 key::EditKeyAliasMessage::Alias(_)
@@ -593,168 +749,22 @@ impl Step for DefineDescriptor {
         ctx.connect_vault_members = Vec::new();
         ctx.connect_vault_timelock_days = None;
         let mut hw_is_used = false;
-        let mut spending_keys: Vec<DescriptorPublicKey> = Vec::new();
         let mut key_derivation_index = HashMap::<Fingerprint, usize>::new();
-        for spending_key in self.paths[0].keys.iter().clone() {
-            let fingerprint = spending_key
-                .as_ref()
-                .expect("Must be present at this step")
-                .fingerprint;
-            let key = self
-                .keys
-                .get(&fingerprint)
-                .expect("Must be present at this step");
-            if let DescriptorPublicKey::XPub(xpub) = &key.key {
-                if let Some((master_fingerprint, _)) = xpub.origin {
-                    ctx.keys.insert(
-                        master_fingerprint,
-                        KeySetting {
-                            master_fingerprint,
-                            name: key.name.clone(),
-                            provider_key: None,
-                            is_border_wallet: matches!(
-                                key.source,
-                                crate::installer::descriptor::KeySource::BorderWallet { .. }
-                            ),
-                            grid_seed_source: key.source.grid_seed_source(),
-                            replay_protected: None,
-                            keychain_key_id: key.source.keychain_key_id(),
-                        },
-                    );
-                    if key.source.device_kind().is_some() {
-                        hw_is_used = true;
-                    }
-                }
-                let derivation_index = key_derivation_index.get(&fingerprint).unwrap_or(&0);
-                spending_keys.push(DescriptorPublicKey::MultiXPub(new_multixkey_from_xpub(
-                    xpub.clone(),
-                    *derivation_index,
-                )));
-                key_derivation_index.insert(fingerprint, derivation_index + 1);
-            }
-        }
+        let spending_keys = self.collect_path_keys(
+            &self.paths[0],
+            ctx,
+            &mut hw_is_used,
+            &mut key_derivation_index,
+        );
 
-        let mut recovery_paths = BTreeMap::new();
-
-        for path in &self.paths[1..] {
-            let mut recovery_keys: Vec<DescriptorPublicKey> = Vec::new();
-            for recovery_key in path.keys.iter().clone() {
-                let fingerprint = recovery_key
-                    .as_ref()
-                    .expect("Must be present at this step")
-                    .fingerprint;
-                let key = self
-                    .keys
-                    .get(&fingerprint)
-                    .expect("Must be present at this step");
-                if let DescriptorPublicKey::XPub(xpub) = &key.key {
-                    if let Some((master_fingerprint, _)) = xpub.origin {
-                        ctx.keys.insert(
-                            master_fingerprint,
-                            KeySetting {
-                                master_fingerprint,
-                                name: key.name.clone(),
-                                provider_key: None,
-                                is_border_wallet: matches!(
-                                    key.source,
-                                    crate::installer::descriptor::KeySource::BorderWallet { .. }
-                                ),
-                                grid_seed_source: key.source.grid_seed_source(),
-                                replay_protected: None,
-                                keychain_key_id: key.source.keychain_key_id(),
-                            },
-                        );
-                        if key.source.device_kind().is_some() {
-                            hw_is_used = true;
-                        }
-                    }
-
-                    let derivation_index = key_derivation_index.get(&fingerprint).unwrap_or(&0);
-                    recovery_keys.push(DescriptorPublicKey::MultiXPub(new_multixkey_from_xpub(
-                        xpub.clone(),
-                        *derivation_index,
-                    )));
-                    key_derivation_index.insert(fingerprint, derivation_index + 1);
-                }
-            }
-
-            let recovery_keys = if recovery_keys.len() == 1 {
-                PathInfo::Single(recovery_keys[0].clone())
-            } else {
-                PathInfo::Multi(path.threshold, recovery_keys)
-            };
-
-            recovery_paths.insert(path.sequence.as_u16(), recovery_keys);
-        }
+        let recovery_paths =
+            self.collect_recovery_paths(ctx, &mut hw_is_used, &mut key_derivation_index);
 
         if spending_keys.is_empty() {
             return false;
         }
 
-        // Harvest keychain-sourced keys across all paths into backend-vault
-        // member payloads. Dedup by fingerprint — a key reused across
-        // paths still only produces one `ConnectVaultMember` row. We rely
-        // on the first occurrence's path_kind (primary > recovery) as a
-        // tiebreaker for the logged role hint.
-        use crate::installer::context::ConnectVaultMemberPayload;
-        use crate::installer::descriptor::{KeySource, KeychainKeyOwner, PathKind};
-        let mut seen_fingerprints: std::collections::HashSet<Fingerprint> =
-            std::collections::HashSet::new();
-        for path in self.paths.iter() {
-            let path_kind = path.sequence.path_kind();
-            for maybe_key in path.keys.iter() {
-                let Some(editor_key_ref) = maybe_key.as_ref() else {
-                    continue;
-                };
-                let fingerprint = editor_key_ref.fingerprint;
-                if !seen_fingerprints.insert(fingerprint) {
-                    continue;
-                }
-                let Some(key) = self.keys.get(&fingerprint) else {
-                    continue;
-                };
-                let KeySource::KeychainKey { owner, key_id, .. } = &key.source else {
-                    // HW, xpub, master-signer, token, and border-wallet
-                    // keys have no backend row — they stay local-only per
-                    // the 2026-04-18 plan direction. Logged at `debug!`:
-                    // this is an informational "skipped as expected"
-                    // message, not actionable, and we'd rather keep
-                    // per-wallet identifiers out of info-level telemetry.
-                    tracing::debug!(
-                        "Skipping non-keychain key {} for backend vault (source kind = {:?}); \
-                         backend ConnectVault will be local-key-free for this signer",
-                        fingerprint,
-                        key.source.kind()
-                    );
-                    continue;
-                };
-                let contact_id = match owner {
-                    KeychainKeyOwner::SelfUser { .. } => None,
-                    KeychainKeyOwner::Contact { contact_id, .. } => Some(*contact_id),
-                };
-                ctx.connect_vault_members.push(ConnectVaultMemberPayload {
-                    fingerprint,
-                    key_id: *key_id,
-                    contact_id,
-                    path_kind,
-                });
-            }
-        }
-
-        // Approximate timelock from the longest Recovery path's sequence
-        // (blocks). Skip SafetyNet (u16::MAX) — it's not a real timelock.
-        let longest_recovery_blocks = self
-            .paths
-            .iter()
-            .filter(|p| p.sequence.path_kind() == PathKind::Recovery)
-            .map(|p| p.sequence.as_u16() as u32)
-            .max();
-        ctx.connect_vault_timelock_days = longest_recovery_blocks.map(|blocks| {
-            // Bitcoin averages ~144 blocks/day. Round up so the server
-            // timelock never expires before the on-chain timelock.
-            let days = blocks.div_ceil(144);
-            days.max(1) as i32
-        });
+        self.collect_connect_vault_metadata(ctx);
 
         let spending_keys = if spending_keys.len() == 1 {
             PathInfo::Single(spending_keys[0].clone())
@@ -1122,6 +1132,10 @@ mod tests {
         );
     }
 
+    /// Taproot stays refused on Bitcoin Blake2b, whether asked for by message
+    /// or left over in the editor's state. Every key source this enum knows is
+    /// now allowed there (see `creation_gate_on_bitcoin_blake2b_allows_every_key_source`),
+    /// so no source is left to refuse from stale state.
     #[test]
     fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
         for chain in [
@@ -1155,29 +1169,11 @@ mod tests {
             step.modal = None;
             step.use_taproot = true;
             assert!(!step.apply(&mut ctx));
-            assert!(ctx.descriptor.is_none());
-            step.use_taproot = false;
-            let xpub = step.signer.lock().unwrap().get_extended_pubkey(
-                &coincube_core::miniscript::bitcoin::bip32::DerivationPath::master(),
+            assert_eq!(
+                step.error.as_deref(),
+                Some("Descriptor chain or type is unsupported")
             );
-            step.paths[0].keys = vec![Some(Key {
-                source: KeySource::KeychainKey {
-                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
-                        primary_owner_id: 1,
-                    },
-                    key_id: 1,
-                    name: "phone".to_string(),
-                },
-                name: "phone".to_string(),
-                fingerprint: step.signer.lock().unwrap().fingerprint(),
-                key: DescriptorPublicKey::from_str(&xpub.to_string()).unwrap(),
-                account: None,
-            })];
-            assert!(!step.apply(&mut ctx));
-            assert!(step.error.as_ref().unwrap().contains("key source"));
             assert!(ctx.descriptor.is_none());
-            assert!(KeySource::Manual.available_for_creation(chain));
-            assert!(KeySource::MasterSigner.available_for_creation(chain));
         }
     }
 
@@ -1195,6 +1191,7 @@ mod tests {
                 },
                 key_id: 1,
                 name: "phone".to_string(),
+                btcb2_signing: Some(crate::services::coincube::Btcb2Signing::CanSign),
             },
             KeySource::BorderWallet {
                 grid_seed_source: GridSeedSource::Independent,
@@ -1202,32 +1199,17 @@ mod tests {
         ]
     }
 
-    /// HW-1 and its Amendment A (Robert, 2026-10-06): on both Bitcoin
-    /// Blake2b chains the Cube key, xpubs, hardware devices and Border
-    /// Wallet keys may build a Vault; Keychain keys may not. Every source
-    /// stays available on every Bitcoin-family chain.
+    /// HW-1 and its Amendment A (Robert, 2026-10-06) opened hardware devices
+    /// and Border Wallet keys on both Bitcoin Blake2b chains; Keychain keys
+    /// attached to the Cube follow when their phone can sign (see
+    /// `creation_gate_admits_a_mobile_key_on_bitcoin_blake2b_only_when_it_can_sign`).
+    /// Every source is available on every chain.
     #[test]
-    fn creation_gate_on_bitcoin_blake2b_refuses_only_keychain_sources() {
+    fn creation_gate_on_bitcoin_blake2b_allows_every_key_source() {
         use crate::chain::ChainId;
-        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-            for source in every_key_source() {
-                let expected = matches!(
-                    source,
-                    KeySource::MasterSigner
-                        | KeySource::Manual
-                        | KeySource::Device(..)
-                        | KeySource::BorderWallet { .. }
-                );
-                assert_eq!(
-                    source.available_for_creation(chain),
-                    expected,
-                    "{:?} {:?}",
-                    chain,
-                    source
-                );
-            }
-        }
         for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
             ChainId::Bitcoin,
             ChainId::Testnet,
             ChainId::Testnet4,
@@ -1247,10 +1229,10 @@ mod tests {
 
     /// HW-1: a Bitcoin Blake2b descriptor with a hardware device key on its
     /// primary path applies, and records that a device is used so the
-    /// registration step runs. The same descriptor with a Keychain key in
-    /// the device's place is still refused.
+    /// registration step runs. The same descriptor with a Keychain key or a
+    /// Border Wallet key in the device's place applies too.
     #[test]
-    fn fork_descriptor_applies_with_a_device_key_and_refuses_a_keychain_key() {
+    fn fork_descriptor_applies_with_device_keychain_and_border_wallet_keys() {
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
@@ -1305,7 +1287,9 @@ mod tests {
             );
             assert_eq!(ctx.bitcoin_config.chain, chain);
 
-            // A Keychain key in the device's place is still refused.
+            // A Keychain key attached to the Cube in the device's place
+            // applies too, and becomes a Connect Vault member so Keychain
+            // can find the Vault it signs for.
             let mut ctx =
                 Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut phone = device.clone();
@@ -1315,15 +1299,65 @@ mod tests {
                 },
                 key_id: 1,
                 name: "phone".to_string(),
+                btcb2_signing: Some(crate::services::coincube::Btcb2Signing::CanSign),
             };
             step.keys.insert(phone.fingerprint, phone.clone());
             step.paths[0].keys = vec![Some(phone)];
-            assert!(!step.apply(&mut ctx), "{:?}", chain);
+            assert!(step.apply(&mut ctx), "{chain:?}: {:?}", step.error);
+            assert!(ctx.descriptor.is_some());
+            assert_eq!(ctx.bitcoin_config.chain, chain);
             assert_eq!(
-                step.error.as_deref(),
-                Some("This key source is not available for Bitcoin Blake2b yet")
+                ctx.keys[&device_signer.fingerprint()].keychain_key_id,
+                Some(1)
             );
-            assert!(ctx.descriptor.is_none());
+            assert_eq!(
+                ctx.connect_vault_members
+                    .iter()
+                    .map(|member| (member.fingerprint, member.key_id, member.contact_id))
+                    .collect::<Vec<_>>(),
+                vec![(device_signer.fingerprint(), 1, None)]
+            );
+            assert!(!ctx.hw_is_used);
+
+            // Master decision 12: a Mobile key whose phone Connect did not
+            // resolve as `can_sign` is refused at apply too, whatever got it
+            // into the editor's state.
+            use crate::services::coincube::Btcb2Signing;
+            for refused in [
+                Some(Btcb2Signing::CannotSign),
+                Some(Btcb2Signing::Unavailable),
+                Some(Btcb2Signing::Unknown),
+                Some(Btcb2Signing::Unrecognised("future".to_string())),
+                None,
+            ] {
+                let mut ctx = Context::new_for_chain(
+                    chain,
+                    CoincubeDirectory::new(PathBuf::new()),
+                    None,
+                    None,
+                );
+                let mut phone = device.clone();
+                phone.source = KeySource::KeychainKey {
+                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                        primary_owner_id: 1,
+                    },
+                    key_id: 1,
+                    name: "phone".to_string(),
+                    btcb2_signing: refused.clone(),
+                };
+                step.error = None;
+                step.keys.insert(phone.fingerprint, phone.clone());
+                step.paths[0].keys = vec![Some(phone)];
+                assert!(!step.apply(&mut ctx), "{:?} {:?}", chain, refused);
+                assert_eq!(
+                    step.error.as_deref(),
+                    Some("This key source is not available for Bitcoin Blake2b yet"),
+                    "{chain:?} {refused:?}"
+                );
+                assert!(ctx.descriptor.is_none(), "{:?} {:?}", chain, refused);
+                assert!(ctx.connect_vault_members.is_empty());
+            }
+            step.error = None;
 
             // Amendment A: a Border Wallet key in the device's place applies.
             let mut ctx =
@@ -1373,6 +1407,7 @@ mod tests {
                 },
                 key_id: 42,
                 name: "My iPhone".to_string(),
+                btcb2_signing: None,
             },
             "My iPhone",
         );
@@ -1821,6 +1856,40 @@ mod tests {
             step.paths[0].keys = vec![Some(border)];
             step.check_for_warning();
             assert_eq!(step.paths[0].warning, None);
+
+            // A Mobile key counts for the advice only when Connect resolved
+            // its phone as `can_sign` (master I5: never replay evidence, only
+            // path selection). Any other answer, or none, keeps the notice.
+            use crate::services::coincube::Btcb2Signing;
+            let phone = |btcb2_signing: Option<Btcb2Signing>| Key {
+                source: KeySource::KeychainKey {
+                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                        primary_owner_id: 1,
+                    },
+                    key_id: 1,
+                    name: "phone".to_string(),
+                    btcb2_signing,
+                },
+                ..device.clone()
+            };
+            step.paths[0].keys = vec![Some(phone(Some(Btcb2Signing::CanSign)))];
+            step.check_for_warning();
+            assert_eq!(step.paths[0].warning, None);
+            for not_resolved in [
+                Some(Btcb2Signing::CannotSign),
+                Some(Btcb2Signing::Unavailable),
+                Some(Btcb2Signing::Unknown),
+                Some(Btcb2Signing::Unrecognised("future".to_string())),
+                None,
+            ] {
+                step.paths[0].keys = vec![Some(phone(not_resolved.clone()))];
+                step.check_for_warning();
+                assert_eq!(
+                    step.paths[0].warning,
+                    Some(PathWarning::NoReplayCapableSigner),
+                    "{not_resolved:?}"
+                );
+            }
             step.paths[0].keys = vec![Some(hot.clone()), Some(device.clone())];
             step.check_for_warning();
 
@@ -1855,13 +1924,58 @@ mod tests {
         .replay_capable());
         assert!(!KeySource::Device(async_hwi::DeviceKind::Specter, None).replay_capable());
         assert!(!KeySource::Manual.replay_capable());
-        assert!(!KeySource::KeychainKey {
+        use crate::services::coincube::Btcb2Signing;
+        let phone = |btcb2_signing: Option<Btcb2Signing>| KeySource::KeychainKey {
             owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
                 primary_owner_id: 1,
             },
             key_id: 1,
             name: "phone".to_string(),
+            btcb2_signing,
+        };
+        // A Mobile key counts only through Connect's resolved answer.
+        assert!(phone(Some(Btcb2Signing::CanSign)).replay_capable());
+        for other in [
+            Some(Btcb2Signing::CannotSign),
+            Some(Btcb2Signing::Unavailable),
+            Some(Btcb2Signing::Unknown),
+            Some(Btcb2Signing::Unrecognised("can-sign".to_string())),
+            None,
+        ] {
+            assert!(!phone(other.clone()).replay_capable(), "{:?}", other);
         }
-        .replay_capable());
+    }
+
+    /// Master decision 12: on Bitcoin Blake2b the creation gate admits a
+    /// Mobile key only when Connect resolved its phone as `can_sign`; on the
+    /// Bitcoin family it admits every Mobile key, as before, whatever the
+    /// recorded value.
+    #[test]
+    fn creation_gate_admits_a_mobile_key_on_bitcoin_blake2b_only_when_it_can_sign() {
+        use crate::chain::ChainId;
+        use crate::services::coincube::Btcb2Signing;
+        let phone = |btcb2_signing: Option<Btcb2Signing>| KeySource::KeychainKey {
+            owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                primary_owner_id: 1,
+            },
+            key_id: 1,
+            name: "phone".to_string(),
+            btcb2_signing,
+        };
+        let values = [
+            Some(Btcb2Signing::CanSign),
+            Some(Btcb2Signing::CannotSign),
+            Some(Btcb2Signing::Unavailable),
+            Some(Btcb2Signing::Unknown),
+            Some(Btcb2Signing::Unrecognised("future".to_string())),
+            None,
+        ];
+        for chain in ChainId::ALL {
+            for value in &values {
+                let admitted = phone(value.clone()).available_for_creation(chain);
+                let expected = !chain.is_blake2b() || *value == Some(Btcb2Signing::CanSign);
+                assert_eq!(admitted, expected, "{chain:?} {value:?}");
+            }
+        }
     }
 }

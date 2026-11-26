@@ -239,6 +239,7 @@ mod tests {
             id: 7,
             email: "owner@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         home
     }

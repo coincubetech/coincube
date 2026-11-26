@@ -100,14 +100,14 @@ pub struct ProposalSupport {
     pub max_recovery_keys: u8,
     /// Relative positive delay in blocks, not a guaranteed calendar duration.
     pub max_relative_delay_blocks: u16,
-    /// Whether every proposal requires manual public-key entry in Tenshu.
+    /// Whether every proposal requires manual public-key entry in COINCUBE Desktop.
     /// False when separately consented public-key assembly is supported.
     pub native_key_selection_required: bool,
     /// A separately paired setup client can supply public account-key assignments.
     pub public_key_assembly: bool,
     /// Compilation never verifies physical devices, custody or backup possession.
     pub manual_key_verification_required: bool,
-    /// Actual descriptor review and creation approval happen only inside Tenshu.
+    /// Actual descriptor review and creation approval happen only inside COINCUBE Desktop.
     pub native_creation_authorization_required: bool,
     /// No automated assertion of key ownership or a successful backup rehearsal.
     pub key_or_backup_verification: String,
@@ -128,7 +128,7 @@ pub struct TransactionSupport {
     pub max_recipients: usize,
     /// Caller must supply a total-fee ceiling.
     pub explicit_fee_limit_required: bool,
-    /// Complete unsigned PSBT stays in Tenshu.
+    /// Complete unsigned PSBT stays in COINCUBE Desktop.
     pub psbt_export_via_mcp: bool,
     /// Native review and user signing are required.
     pub native_signing_required: bool,

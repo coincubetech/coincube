@@ -156,6 +156,31 @@ pub trait Daemon: Debug {
         feerate_vb: u64,
         change_address: Option<Address<address::NetworkUnchecked>>,
     ) -> Result<model::CreateSpendResult, DaemonError>;
+    /// The spend [`Self::create_spend_tx`] would build, for reading its fee and
+    /// coin selection only: the daemon records nothing about it.
+    ///
+    /// Use it for every PSBT that is priced and thrown away. `create_spend_tx`
+    /// makes an imported wallet store the construction, and the daemon then
+    /// lists it as an unsigned draft that nobody saved. `change_address` is
+    /// usually [`crate::app::wallet::Wallet::preview_change_address`].
+    ///
+    /// The default is for test doubles, which record nothing either way; the
+    /// two real backends override it.
+    async fn preview_spend_tx(
+        &self,
+        coins_outpoints: &[OutPoint],
+        destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+        feerate_vb: u64,
+        change_address: Address<address::NetworkUnchecked>,
+    ) -> Result<model::CreateSpendResult, DaemonError> {
+        self.create_spend_tx(
+            coins_outpoints,
+            destinations,
+            feerate_vb,
+            Some(change_address),
+        )
+        .await
+    }
     /// Same construction as [`Self::create_spend_tx`], rejecting an over-ceiling
     /// fee or measured rate before the daemon commits a change index.
     /// Backends without this check fail closed.
@@ -213,11 +238,8 @@ pub trait Daemon: Debug {
         txids: Option<&[Txid]>,
     ) -> Result<Vec<model::SpendTx>, DaemonError> {
         let info = self.get_info().await?;
-        let descriptor = info.descriptors.main.as_vault().ok_or_else(|| {
-            DaemonError::Unexpected(
-                "Vault transaction views are unavailable for an imported Bitcoin wallet.".into(),
-            )
-        })?;
+        // A Vault or an imported wallet: both answer the same spend analysis.
+        let descriptor = &info.descriptors.main;
         let mut spend_txs = Vec::new();
         let curve = secp256k1::Secp256k1::verification_only();
         // TODO: Use filters in `list_spend_txs` command.
@@ -250,9 +272,8 @@ pub trait Daemon: Debug {
                 .cloned()
                 .collect();
 
-            spend_txs.push(model::SpendTx::new(
-                tx.updated_at,
-                tx.psbt,
+            spend_txs.push(model::SpendTx::from_list_entry(
+                tx,
                 coins,
                 descriptor,
                 &curve,
@@ -356,18 +377,7 @@ pub trait Daemon: Debug {
             .list_coins(&[CoinStatus::Unconfirmed, CoinStatus::Spending], &[])
             .await?
             .coins;
-        let mut txids: Vec<Txid> = Vec::new();
-        for coin in &coins {
-            if coin.block_height.is_none() && !txids.contains(&coin.outpoint.txid) {
-                txids.push(coin.outpoint.txid);
-            }
-
-            if let Some(spend) = coin.spend_info {
-                if !txids.contains(&spend.txid) {
-                    txids.push(spend.txid);
-                }
-            }
-        }
+        let txids = pending_transaction_ids(&coins);
 
         if txids.is_empty() {
             return Ok(Vec::new());
@@ -435,6 +445,22 @@ pub trait Daemon: Debug {
 
         Ok(events)
     }
+}
+
+fn pending_transaction_ids(coins: &[model::Coin]) -> Vec<Txid> {
+    let mut txids: Vec<Txid> = Vec::new();
+    for coin in coins {
+        if coin.block_height.is_none() && !txids.contains(&coin.outpoint.txid) {
+            txids.push(coin.outpoint.txid);
+        }
+
+        if let Some(spend) = coin.spend_info {
+            if !txids.contains(&spend.txid) {
+                txids.push(spend.txid);
+            }
+        }
+    }
+    txids
 }
 
 async fn load_labels<T: model::Labelled + model::LabelsLoader, D: Daemon + ?Sized>(

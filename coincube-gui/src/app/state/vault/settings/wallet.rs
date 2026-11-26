@@ -143,9 +143,10 @@ impl WalletSettingsState {
     /// Whether Settings offers "Register on hardware device". It does on
     /// every chain, Bitcoin Blake2b included (HW-1 Amendment B): devices may
     /// build a BTCB2 Vault, and the signing picker sends an unregistered
-    /// device here.
+    /// device here. An imported Vault offers it when its devices need a
+    /// registration, which is for multisig only.
     fn hardware_registration_allowed(&self) -> bool {
-        self.wallet.supports_inheritance()
+        self.wallet.supports_inheritance() || imported_needs_registration(&self.wallet)
     }
 }
 
@@ -206,48 +207,29 @@ impl State for WalletSettingsState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        // A registration or save result, and closing the dialog, need no
+        // daemon. The daemon can be down when they land (a wider scan
+        // restarts it); dropping them would leave Register processing, or
+        // open with no way to close it.
+        match message {
+            Message::DeviceRegistered { .. } => {
+                return match &mut self.modal {
+                    Modal::RegisterWallet(modal) => modal.update(daemon, cache, message),
+                    _ => Task::none(),
+                };
+            }
+            Message::WalletUpdated(res) => return self.apply_wallet_update(daemon, cache, res),
+            Message::View(view::Message::Close) => {
+                self.modal = Modal::None;
+                return Task::none();
+            }
+            _ => {}
+        }
         let Some(daemon) = daemon else {
             tracing::warn!("WalletSettingsState::update called without daemon");
             return Task::none();
         };
         match message {
-            Message::WalletUpdated(res) => {
-                self.processing = false;
-                // Before the modal check: a Register opened while the save
-                // ran takes the result, and the field must not stay Saving.
-                if self.name_save == NameSave::Saving {
-                    self.name_save = if res.is_ok() {
-                        NameSave::Saved
-                    } else {
-                        NameSave::Failed
-                    };
-                }
-                if let Modal::RegisterWallet(modal) = &mut self.modal {
-                    // The modal takes the result, but this panel's wallet
-                    // must follow it too (as the Vault settings wrapper's
-                    // does): a name save that lands while Register is open
-                    // would otherwise still read as "Not saved yet" once it
-                    // closes. Signer fields keep what was typed.
-                    if let Ok(wallet) = &res {
-                        self.wallet = wallet.clone();
-                    }
-                    modal.update(Some(daemon.clone()), cache, Message::WalletUpdated(res))
-                } else {
-                    match res {
-                        Ok(wallet) => {
-                            self.keys_aliases = Self::keys_aliases(&wallet);
-                            self.wallet = wallet;
-                            self.updated = true;
-                            Task::none()
-                        }
-                        Err(e) => {
-                            let err_msg = crate::user_error::report(&e);
-                            self.warning = Some(e);
-                            Task::done(Message::View(view::Message::ShowError(err_msg)))
-                        }
-                    }
-                }
-            }
             Message::View(view::Message::Settings(view::SettingsMessage::WalletAliasEdited(
                 alias,
             ))) => {
@@ -270,27 +252,7 @@ impl State for WalletSettingsState {
                 Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::Save)) => {
-                self.modal = Modal::None;
-                self.processing = true;
-                self.updated = false;
-                let alias = self.changed_alias();
-                if alias.is_some() {
-                    self.name_save = NameSave::Saving;
-                } else {
-                    self.settle_failed_name();
-                }
-                Task::perform(
-                    update_aliases(
-                        self.data_dir.clone(),
-                        self.wallet.clone(),
-                        alias,
-                        self.keys_aliases
-                            .iter()
-                            .map(|(fg, name)| (*fg, name.value.to_owned()))
-                            .collect(),
-                    ),
-                    Message::WalletUpdated,
-                )
+                self.save_wallet_aliases()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ToggleWalletExpert)) => {
                 self.expert_open = !self.expert_open;
@@ -309,25 +271,7 @@ impl State for WalletSettingsState {
             }
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ConfirmDescriptorCopy,
-            )) => {
-                if !self.descriptor_copy_review || !self.expert_open {
-                    return Task::none();
-                }
-                self.descriptor_copy_review = false;
-                let descriptor_text = match &self.descriptor {
-                    WalletDescriptor::Vault(vault) => vault.to_string(),
-                    WalletDescriptor::Imported(_) => format!(
-                        "Receive: {}\nChange: {}",
-                        self.descriptor.receive_descriptor(),
-                        self.descriptor.change_descriptor()
-                    ),
-                };
-                Task::done(Message::View(view::Message::Clipboard(descriptor_text)))
-            }
-            Message::View(view::Message::Close) => {
-                self.modal = Modal::None;
-                Task::none()
-            }
+            )) => self.copy_reviewed_descriptor(),
             Message::View(view::Message::Settings(view::SettingsMessage::RegisterWallet)) => {
                 // Every chain, Bitcoin Blake2b included (HW-1): a device
                 // registers the same descriptor string it did at creation.
@@ -360,37 +304,13 @@ impl State for WalletSettingsState {
                 }
                 Task::none()
             }
-            Message::View(view::Message::ImportExport(m)) => {
-                if let Modal::ImportExport(modal) = &mut self.modal {
-                    modal.update(m)
-                } else {
-                    Task::none()
-                }
-            }
-            Message::View(view::Message::Settings(view::SettingsMessage::ImportExport(m))) => {
-                if let Modal::ImportExport(modal) = &mut self.modal {
-                    modal.update(m)
-                } else {
-                    Task::none()
-                }
+            Message::View(view::Message::ImportExport(m))
+            | Message::View(view::Message::Settings(view::SettingsMessage::ImportExport(m))) => {
+                self.update_import_export_modal(m)
             }
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportEncryptedDescriptor,
-            )) => {
-                if self.modal.is_none() {
-                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
-                        return Task::none();
-                    };
-                    let modal = VaultExportModal::new(
-                        Some(daemon),
-                        ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
-                    );
-                    let launch = modal.launch(true);
-                    self.modal = Modal::ImportExport(modal);
-                    return launch;
-                }
-                Task::none()
-            }
+            )) => self.launch_encrypted_descriptor_export(daemon),
             _ => match &mut self.modal {
                 Modal::RegisterWallet(m) => m.update(Some(daemon.clone()), cache, message),
                 _ => Task::none(),
@@ -423,6 +343,118 @@ impl State for WalletSettingsState {
     }
 }
 
+impl WalletSettingsState {
+    fn update_import_export_modal(&mut self, message: ImportExportMessage) -> Task<Message> {
+        if let Modal::ImportExport(modal) = &mut self.modal {
+            modal.update(message)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn apply_wallet_update(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        res: Result<Arc<Wallet>, Error>,
+    ) -> Task<Message> {
+        self.processing = false;
+        // Before the modal check: a Register opened while the save
+        // ran takes the result, and the field must not stay Saving.
+        if self.name_save == NameSave::Saving {
+            self.name_save = if res.is_ok() {
+                NameSave::Saved
+            } else {
+                NameSave::Failed
+            };
+        }
+        if let Modal::RegisterWallet(modal) = &mut self.modal {
+            // The modal takes the result, but this panel's wallet
+            // must follow it too (as the Vault settings wrapper's
+            // does): a name save that lands while Register is open
+            // would otherwise still read as "Not saved yet" once it
+            // closes. Signer fields keep what was typed.
+            if let Ok(wallet) = &res {
+                self.wallet = wallet.clone();
+            }
+            modal.update(daemon, cache, Message::WalletUpdated(res))
+        } else {
+            match res {
+                Ok(wallet) => {
+                    self.keys_aliases = Self::keys_aliases(&wallet);
+                    self.wallet = wallet;
+                    self.updated = true;
+                    Task::none()
+                }
+                Err(e) => {
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    Task::done(Message::View(view::Message::ShowError(err_msg)))
+                }
+            }
+        }
+    }
+
+    fn save_wallet_aliases(&mut self) -> Task<Message> {
+        self.modal = Modal::None;
+        self.processing = true;
+        self.updated = false;
+        let alias = self.changed_alias();
+        if alias.is_some() {
+            self.name_save = NameSave::Saving;
+        } else {
+            self.settle_failed_name();
+        }
+        Task::perform(
+            update_aliases(
+                self.data_dir.clone(),
+                self.wallet.clone(),
+                alias,
+                self.keys_aliases
+                    .iter()
+                    .map(|(fg, name)| (*fg, name.value.to_owned()))
+                    .collect(),
+            ),
+            Message::WalletUpdated,
+        )
+    }
+
+    fn copy_reviewed_descriptor(&mut self) -> Task<Message> {
+        if !self.descriptor_copy_review || !self.expert_open {
+            return Task::none();
+        }
+        self.descriptor_copy_review = false;
+        let descriptor_text = match &self.descriptor {
+            WalletDescriptor::Vault(vault) => vault.to_string(),
+            WalletDescriptor::Imported(_) => format!(
+                "Receive: {}\nChange: {}",
+                self.descriptor.receive_descriptor(),
+                self.descriptor.change_descriptor()
+            ),
+        };
+        Task::done(Message::View(view::Message::Clipboard(descriptor_text)))
+    }
+
+    fn launch_encrypted_descriptor_export(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+    ) -> Task<Message> {
+        if self.modal.is_none() {
+            let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                return Task::none();
+            };
+            let modal = VaultExportModal::new(
+                Some(daemon),
+                ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
+            );
+            let launch = modal.launch(true);
+            self.modal = Modal::ImportExport(modal);
+            return launch;
+        }
+        Task::none()
+    }
+}
+
 impl From<WalletSettingsState> for Box<dyn State> {
     fn from(s: WalletSettingsState) -> Box<dyn State> {
         Box::new(s)
@@ -437,6 +469,7 @@ pub struct RegisterWalletModal {
     hws: HardwareWallets,
     registered: HashSet<Fingerprint>,
     processing: bool,
+    registration_attempt: Option<uuid::Uuid>,
 }
 
 impl RegisterWalletModal {
@@ -454,6 +487,7 @@ impl RegisterWalletModal {
             wallet,
             processing: false,
             registered,
+            registration_attempt: None,
         }
     }
 }
@@ -478,6 +512,19 @@ impl RegisterWalletModal {
         _cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        // A registration result needs no daemon. It can land while the
+        // daemon is down (a wider scan restarts it), and dropping it would
+        // leave the dialog processing (an imported Vault's attempt still
+        // claimed).
+        match message {
+            Message::DeviceRegistered {
+                attempt,
+                fingerprint,
+                result,
+            } => return self.apply_device_registration_result(attempt, fingerprint, result),
+            Message::WalletUpdated(res) => return self.apply_registration_wallet_update(res),
+            _ => {}
+        }
         if daemon.is_none() {
             tracing::warn!("RegisterWalletModal::update called without daemon");
             return Task::none();
@@ -497,52 +544,161 @@ impl RegisterWalletModal {
                     Task::done(Message::View(view::Message::ShowError(err_msg)))
                 }
             },
-            Message::WalletUpdated(res) => {
-                self.processing = false;
-                self.chosen_hw = None;
-                match res {
-                    Ok(wallet) => {
-                        self.registered = HashSet::new();
-                        for hw in &wallet.hardware_wallets {
-                            self.registered.insert(hw.fingerprint);
-                        }
-                        self.wallet = wallet;
-                    }
-                    Err(e) => {
-                        if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
-                            let err_msg = crate::user_error::report(&e);
-                            self.warning = Some(e);
-                            return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                        }
-                    }
-                }
-                Task::none()
-            }
-            Message::View(view::Message::SelectHardwareWallet(i)) => {
-                if let Some(HardwareWallet::Supported {
-                    fingerprint,
-                    device,
-                    ..
-                }) = self.hws.list.get(i)
-                {
-                    self.chosen_hw = Some(i);
-                    self.processing = true;
-                    Task::perform(
-                        register_wallet(
-                            self.data_dir.clone(),
-                            device.clone(),
-                            *fingerprint,
-                            self.wallet.clone(),
-                        ),
-                        Message::WalletUpdated,
-                    )
-                } else {
-                    Task::none()
-                }
-            }
+            Message::View(view::Message::SelectHardwareWallet(i)) => self.select_hardware_wallet(i),
             _ => Task::none(),
         }
     }
+}
+
+impl RegisterWalletModal {
+    fn apply_registration_wallet_update(
+        &mut self,
+        res: Result<Arc<Wallet>, Error>,
+    ) -> Task<Message> {
+        self.processing = false;
+        self.chosen_hw = None;
+        match res {
+            Ok(wallet) => {
+                self.registered = HashSet::new();
+                for hw in &wallet.hardware_wallets {
+                    self.registered.insert(hw.fingerprint);
+                }
+                self.wallet = wallet;
+            }
+            Err(e) => {
+                if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn apply_device_registration_result(
+        &mut self,
+        attempt: uuid::Uuid,
+        fingerprint: Fingerprint,
+        result: Result<(), Error>,
+    ) -> Task<Message> {
+        if self.registration_attempt != Some(attempt) {
+            return Task::none();
+        }
+        self.registration_attempt = None;
+        self.processing = false;
+        self.chosen_hw = None;
+        match result {
+            Ok(()) => {
+                self.registered.insert(fingerprint);
+                Task::none()
+            }
+            Err(Error::HardwareWallet(async_hwi::Error::UserRefused)) => Task::none(),
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                Task::done(Message::View(view::Message::ShowError(err_msg)))
+            }
+        }
+    }
+
+    fn select_hardware_wallet(&mut self, i: usize) -> Task<Message> {
+        if self.wallet.is_imported() {
+            return self.register_imported(i);
+        }
+        if let Some(HardwareWallet::Supported {
+            fingerprint,
+            device,
+            ..
+        }) = self.hws.list.get(i)
+        {
+            self.chosen_hw = Some(i);
+            self.processing = true;
+            Task::perform(
+                register_wallet(
+                    self.data_dir.clone(),
+                    device.clone(),
+                    *fingerprint,
+                    self.wallet.clone(),
+                ),
+                Message::WalletUpdated,
+            )
+        } else {
+            Task::none()
+        }
+    }
+
+    /// An imported Vault registers the device policy its signing session
+    /// uses (`split_hardware`), so a device registered here signs without
+    /// asking again. Jade, Coldcard and BitBox02 keep the registration;
+    /// Ledger's token is not stored (P6), so Ledger asks again when it signs.
+    fn register_imported(&mut self, i: usize) -> Task<Message> {
+        use crate::split_hardware::{bind::ProductionBinder, policy::imported_policy};
+        if self.registration_attempt.is_some() {
+            return Task::none();
+        }
+        let Some(imported) = self.wallet.main_descriptor.as_imported() else {
+            return Task::none();
+        };
+        let Some((device, fingerprint)) = self
+            .hws
+            .list
+            .get(i)
+            .filter(|hw| hw.is_supported() && !hw.is_lan_phone())
+            .and_then(|hw| Some((hw.clone(), hw.fingerprint()?)))
+        else {
+            return Task::none();
+        };
+        let policy = match imported_policy(imported) {
+            Ok(policy) => policy,
+            Err(error) => {
+                let err = Error::Unexpected(error.to_string());
+                let err_msg = crate::user_error::report(&err);
+                self.warning = Some(err);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+        };
+        let binder = Arc::new(ProductionBinder::from_listing(&self.hws));
+        let attempt = uuid::Uuid::new_v4();
+        self.registration_attempt = Some(attempt);
+        self.chosen_hw = Some(i);
+        self.processing = true;
+        Task::perform(
+            register_imported_policy(device, policy, binder),
+            move |result| Message::DeviceRegistered {
+                attempt,
+                fingerprint,
+                result,
+            },
+        )
+    }
+}
+
+/// Whether an imported Vault's devices must register its policy before they
+/// sign: multisig only. Singlesig imports sign their standard account paths.
+fn imported_needs_registration(wallet: &Wallet) -> bool {
+    wallet
+        .main_descriptor
+        .as_imported()
+        .and_then(|imported| crate::split_hardware::policy::imported_policy(imported).ok())
+        .is_some_and(|policy| policy.shape().is_multisig())
+}
+
+async fn register_imported_policy(
+    device: HardwareWallet,
+    policy: crate::split_hardware::sign::DevicePolicy,
+    binder: Arc<dyn crate::split_hardware::sign::PolicyBinder>,
+) -> Result<(), Error> {
+    use crate::split_hardware::sign::{SignError, SigningSession};
+    let failed = |error: SignError| match error {
+        SignError::RegistrationRefused => Error::HardwareWallet(async_hwi::Error::UserRefused),
+        error => Error::Unexpected(error.to_string()),
+    };
+    let mut session = SigningSession::from_listed(&device, policy, binder)
+        .await
+        .map_err(failed)?;
+    session.register().await.map_err(failed)?;
+    Ok(())
 }
 
 async fn register_wallet(
@@ -812,6 +968,77 @@ mod chain_tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
+    /// An ordinary Vault's registration finishes with `WalletUpdated`. A
+    /// result that lands after the daemon stopped (a wider scan restarts it)
+    /// still settles the dialog, and the dialog still closes, both on the
+    /// Wallet settings panel and through the Vault settings wrapper.
+    #[tokio::test]
+    async fn an_ordinary_registration_finishes_and_closes_without_a_daemon() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor).with_chain(ChainId::Bitcoin));
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("coincube-reg-no-daemon-{}", uuid::Uuid::new_v4())),
+        );
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let cache = Cache::default();
+        // Opens Register and marks a registration in flight on device 0, as
+        // `select_hardware_wallet` does before the device answers.
+        let in_flight = || {
+            let mut state =
+                WalletSettingsState::new(dir.clone(), wallet.clone(), Arc::new(Config::new(false)));
+            drop(state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::RegisterWallet,
+                )),
+            ));
+            let Modal::RegisterWallet(modal) = &mut state.modal else {
+                panic!("registration dialog did not open");
+            };
+            modal.processing = true;
+            modal.chosen_hw = Some(0);
+            state
+        };
+
+        let mut state = in_flight();
+        drop(state.update(None, &cache, Message::WalletUpdated(Ok(wallet.clone()))));
+        let Modal::RegisterWallet(modal) = &state.modal else {
+            panic!("registration dialog closed");
+        };
+        assert!(!modal.processing);
+        assert_eq!(modal.chosen_hw, None);
+        drop(state.update(None, &cache, Message::View(view::Message::Close)));
+        assert!(state.modal.is_none());
+
+        // Through the Vault settings wrapper, a failed registration is
+        // reported rather than dropped.
+        let mut settings = super::super::SettingsState::new(
+            dir.clone(),
+            wallet.clone(),
+            false,
+            Arc::new(Config::new(false)),
+        );
+        settings.setting = Some(in_flight().into());
+        let task = settings.update(
+            None,
+            &cache,
+            Message::WalletUpdated(Err(Error::HardwareWallet(
+                async_hwi::Error::UnimplementedMethod,
+            ))),
+        );
+        let mut stream = iced_runtime::task::into_stream(task).expect("an error report");
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::View(
+                view::Message::ShowError(_)
+            )))
+        ));
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
     #[tokio::test]
     async fn descriptor_copy_requires_expert_review_and_emits_once() {
         let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
@@ -1063,6 +1290,323 @@ mod chain_tests {
             );
             assert!(state.hardware_registration_allowed(), "{:?}", chain);
         }
+    }
+
+    /// An imported Vault offers "Register on device" only when its devices
+    /// need a registration: multisig. Singlesig imports sign their standard
+    /// account paths without one.
+    #[test]
+    fn an_imported_vault_offers_registration_for_multisig_only() {
+        use crate::services::split_test_wallets::{imported_vault, Shape, SHAPES};
+        for shape in SHAPES {
+            let state = WalletSettingsState::new(
+                CoincubeDirectory::new(std::path::PathBuf::new()),
+                Arc::new(imported_vault(shape)),
+                Arc::new(Config::new(false)),
+            );
+            assert_eq!(
+                state.hardware_registration_allowed(),
+                matches!(shape, Shape::WshMulti | Shape::WshSortedMulti),
+                "{:?}",
+                shape
+            );
+        }
+    }
+
+    /// A Jade-like device that keeps registrations itself.
+    #[derive(Debug)]
+    struct StoringDevice {
+        fingerprint: Fingerprint,
+        stored: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl async_hwi::HWI for StoringDevice {
+        fn device_kind(&self) -> async_hwi::DeviceKind {
+            async_hwi::DeviceKind::Jade
+        }
+        async fn get_version(&self) -> Result<async_hwi::Version, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn get_master_fingerprint(&self) -> Result<Fingerprint, async_hwi::Error> {
+            Ok(self.fingerprint)
+        }
+        async fn get_extended_pubkey(
+            &self,
+            _path: &coincube_core::miniscript::bitcoin::bip32::DerivationPath,
+        ) -> Result<coincube_core::miniscript::bitcoin::bip32::Xpub, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn register_wallet(
+            &self,
+            name: &str,
+            policy: &str,
+        ) -> Result<Option<[u8; 32]>, async_hwi::Error> {
+            self.stored
+                .lock()
+                .unwrap()
+                .push((name.to_string(), policy.to_string()));
+            Ok(None)
+        }
+        async fn is_wallet_registered(
+            &self,
+            name: &str,
+            policy: &str,
+        ) -> Result<bool, async_hwi::Error> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .contains(&(name.to_string(), policy.to_string())))
+        }
+        async fn display_address(
+            &self,
+            _script: &async_hwi::AddressScript,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn sign_tx(
+            &self,
+            _psbt: &mut coincube_core::miniscript::bitcoin::Psbt,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_imported_registration_does_not_finish_the_reopened_dialog() {
+        use crate::services::split_test_wallets::{imported_vault, master, Shape};
+
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let wallet = Arc::new(imported_vault(Shape::WshSortedMulti));
+        let mut state = WalletSettingsState::new(
+            CoincubeDirectory::new(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string())),
+            wallet,
+            Arc::new(Config::new(false)),
+        );
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let cache = Cache::default();
+        let send = |state: &mut WalletSettingsState, message| {
+            state.update(Some(daemon.clone()), &cache, message)
+        };
+        let start = |state: &mut WalletSettingsState, fingerprint: Fingerprint| {
+            drop(send(
+                state,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::RegisterWallet,
+                )),
+            ));
+            let Modal::RegisterWallet(modal) = &mut state.modal else {
+                panic!("registration dialog did not open");
+            };
+            modal.hws.list = vec![HardwareWallet::Supported {
+                id: fingerprint.to_string(),
+                device: Arc::new(StoringDevice {
+                    fingerprint,
+                    stored: Default::default(),
+                }),
+                kind: async_hwi::DeviceKind::Jade,
+                fingerprint,
+                version: None,
+                registered: None,
+                alias: None,
+            }];
+            send(state, Message::View(view::Message::SelectHardwareWallet(0)))
+        };
+        let completion = async |task| {
+            let mut stream = iced_runtime::task::into_stream(task).expect("registration task");
+            let Some(iced_runtime::Action::Output(message)) = stream.next().await else {
+                panic!("expected registration completion");
+            };
+            message
+        };
+
+        let old = start(&mut state, master(1).fingerprint(&secp));
+        drop(send(&mut state, Message::View(view::Message::Close)));
+        let fingerprint = master(2).fingerprint(&secp);
+        let current = start(&mut state, fingerprint);
+
+        drop(send(&mut state, completion(old).await));
+        let Modal::RegisterWallet(modal) = &state.modal else {
+            panic!("reopened registration dialog closed");
+        };
+        assert!(modal.processing);
+        assert_eq!(modal.chosen_hw, Some(0));
+        assert!(modal.registered.is_empty());
+
+        drop(send(&mut state, completion(current).await));
+        let Modal::RegisterWallet(modal) = &state.modal else {
+            panic!("current registration dialog closed");
+        };
+        assert!(!modal.processing);
+        assert_eq!(modal.chosen_hw, None);
+        assert_eq!(modal.registered, HashSet::from([fingerprint]));
+    }
+
+    /// A registration result that lands after the daemon stopped (a wider
+    /// scan restarts it) still closes out the dialog, both on the Wallet
+    /// settings panel and through the Vault settings wrapper the app routes
+    /// it to. Dropping it left the dialog processing until it was reopened.
+    #[tokio::test]
+    async fn an_imported_registration_finishes_without_a_daemon() {
+        use crate::services::split_test_wallets::{imported_vault, master, Shape};
+
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let wallet = Arc::new(imported_vault(Shape::WshSortedMulti));
+        let dir =
+            CoincubeDirectory::new(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let cache = Cache::default();
+        // Opens Register on a fresh panel and starts a registration on a
+        // device with `fingerprint`, returning the panel and its result.
+        let start = async |fingerprint: Fingerprint| {
+            let mut state =
+                WalletSettingsState::new(dir.clone(), wallet.clone(), Arc::new(Config::new(false)));
+            drop(state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::RegisterWallet,
+                )),
+            ));
+            let Modal::RegisterWallet(modal) = &mut state.modal else {
+                panic!("registration dialog did not open");
+            };
+            modal.hws.list = vec![HardwareWallet::Supported {
+                id: fingerprint.to_string(),
+                device: Arc::new(StoringDevice {
+                    fingerprint,
+                    stored: Default::default(),
+                }),
+                kind: async_hwi::DeviceKind::Jade,
+                fingerprint,
+                version: None,
+                registered: None,
+                alias: None,
+            }];
+            let task = state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::SelectHardwareWallet(0)),
+            );
+            let mut stream = iced_runtime::task::into_stream(task).expect("registration task");
+            let Some(iced_runtime::Action::Output(message)) = stream.next().await else {
+                panic!("expected registration completion");
+            };
+            (state, message)
+        };
+
+        let fingerprint = master(1).fingerprint(&secp);
+        let (mut state, completion) = start(fingerprint).await;
+        drop(state.update(None, &cache, completion));
+        let Modal::RegisterWallet(modal) = &state.modal else {
+            panic!("registration dialog closed");
+        };
+        assert!(!modal.processing);
+        assert_eq!(modal.registration_attempt, None);
+        assert_eq!(modal.registered, HashSet::from([fingerprint]));
+
+        // Through the Vault settings wrapper, a failed registration is
+        // reported rather than dropped.
+        let (state, completion) = start(master(2).fingerprint(&secp)).await;
+        let Message::DeviceRegistered {
+            attempt,
+            fingerprint,
+            ..
+        } = completion
+        else {
+            panic!("expected a registration result");
+        };
+        let mut settings = super::super::SettingsState::new(
+            dir.clone(),
+            wallet.clone(),
+            false,
+            Arc::new(Config::new(false)),
+        );
+        settings.setting = Some(state.into());
+        let task = settings.update(
+            None,
+            &cache,
+            Message::DeviceRegistered {
+                attempt,
+                fingerprint,
+                result: Err(Error::HardwareWallet(async_hwi::Error::UnimplementedMethod)),
+            },
+        );
+        let mut stream = iced_runtime::task::into_stream(task).expect("an error report");
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::View(
+                view::Message::ShowError(_)
+            )))
+        ));
+    }
+
+    /// Registering an imported multisig Vault from Settings sends the device
+    /// the same policy its signing session uses, marks the device registered
+    /// in the modal and writes nothing to the Cube's settings.
+    #[tokio::test]
+    async fn an_imported_vault_registers_its_signing_policy_on_a_device() {
+        use crate::services::split_test_wallets::{imported_vault, master, Shape};
+        use crate::split_hardware::{bind::ProductionBinder, policy::imported_policy};
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let fingerprint = master(1).fingerprint(&secp);
+        let wallet = Arc::new(imported_vault(Shape::WshSortedMulti));
+        let root = std::env::temp_dir().join(format!(
+            "coincube-imported-register-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir = CoincubeDirectory::new(root.clone());
+        let device = Arc::new(StoringDevice {
+            fingerprint,
+            stored: Default::default(),
+        });
+        let mut modal = RegisterWalletModal::new(dir.clone(), wallet.clone());
+        modal.hws.list = vec![HardwareWallet::Supported {
+            id: "jade".into(),
+            device: device.clone(),
+            kind: async_hwi::DeviceKind::Jade,
+            fingerprint,
+            version: None,
+            registered: None,
+            alias: None,
+        }];
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let _task = modal.update(
+            Some(daemon.clone()),
+            &Cache::default(),
+            Message::View(view::Message::SelectHardwareWallet(0)),
+        );
+        assert!(modal.processing);
+        assert_eq!(modal.chosen_hw, Some(0));
+
+        let policy = imported_policy(wallet.main_descriptor.as_imported().unwrap()).unwrap();
+        let (name, descriptor) = (policy.name().to_owned(), policy.descriptor().to_owned());
+        let binder = Arc::new(ProductionBinder::from_listing(&modal.hws));
+        let result = register_imported_policy(modal.hws.list[0].clone(), policy, binder).await;
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(*device.stored.lock().unwrap(), vec![(name, descriptor)]);
+
+        let attempt = modal.registration_attempt.unwrap();
+        let _ = modal.update(
+            Some(daemon),
+            &Cache::default(),
+            Message::DeviceRegistered {
+                attempt,
+                fingerprint,
+                result,
+            },
+        );
+        assert!(!modal.processing);
+        assert!(modal.registered.contains(&fingerprint));
+        assert!(modal.wallet.hardware_wallets.is_empty());
+        assert!(!root.exists(), "registration wrote to the datadir");
     }
 
     /// A device that records each registration request and answers with an

@@ -17,7 +17,7 @@ fn fixture_context() -> NavContext<'static> {
         network: ChainId::Bitcoin,
         p2p_test_coordinator: false,
         marketplace_flags: features::MarketplaceServerFlags::OFF,
-        liquid_gate: features::LiquidGate::HIDDEN,
+        ai_access: false,
         cube_name: "Synthetic QA Cube",
         // Wallet names in the labels; the row IDs stay `…nav.Spark` and
         // `…nav.Vault`.
@@ -116,10 +116,6 @@ fn activity_is_cube_scoped_even_without_a_wallet_backend() {
     let mut ctx = fixture_context();
     ctx.has_vault = false;
     ctx.network = ChainId::Testnet;
-    ctx.liquid_gate = features::LiquidGate {
-        server_enabled: true,
-        local_state_exists: false,
-    };
     assert_eq!(
         activity_route(&ctx),
         Some(Menu::Cube(CubeSubMenu::Activity))
@@ -1418,11 +1414,7 @@ fn sidebar_targets(ctx: &NavContext<'_>, menu: &Menu) -> usize {
 fn wallets_have_no_sidebar_sub_menus() {
     // The canvas sidebar lists each wallet once; Send, Receive and history
     // live on the wallet's own page. Only Marketplace keeps children.
-    let mut ctx = fixture_context();
-    ctx.liquid_gate = features::LiquidGate {
-        server_enabled: true,
-        local_state_exists: true,
-    };
+    let ctx = fixture_context();
     let baseline = sidebar_targets(&ctx, &Menu::Cube(CubeSubMenu::Overview));
     // No Vault Tools group either: those tools are links on the Vault page.
     let all_ids = {
@@ -1458,9 +1450,6 @@ fn wallets_have_no_sidebar_sub_menus() {
         Menu::Vault(VaultSubMenu::Send),
         Menu::Vault(VaultSubMenu::Receive),
         Menu::Vault(VaultSubMenu::Transactions(None)),
-        Menu::Liquid(LiquidSubMenu::Overview),
-        Menu::Liquid(LiquidSubMenu::Send),
-        Menu::Liquid(LiquidSubMenu::Transactions(None)),
     ] {
         assert_eq!(
             sidebar_targets(&ctx, &menu),
@@ -1703,6 +1692,83 @@ fn connect_panel_says_what_the_state_table_says() {
             for label in case.never {
                 assert!(!panel.contains(label), "{}: {}", case.name, label);
             }
+        }
+    }
+}
+
+/// A signed-in Bitcoin Blake2b Cube runs live updates as a Bitcoin Cube does,
+/// so its Connect control and panel show the account and the live-updates
+/// row, as a Bitcoin Cube's do.
+#[test]
+fn a_blake2b_connect_panel_shows_the_account_and_live_updates() {
+    use crate::app::view::shared::landing::capture;
+    use crate::app::{VaultAlert, VaultStall};
+    let offline_vault = VaultAlert {
+        stall: VaultStall::Offline,
+        via_connect: true,
+        needs_sign_in: false,
+        last_synced: Some("14:02".into()),
+        block: 974_600,
+    };
+    // A Bitcoin Blake2b Cube runs the signer pipeline as a Bitcoin Cube does,
+    // so its Connect panel reads the same.
+    for (name, chain, vault, says) in [
+        (
+            "blake2b",
+            ChainId::BitcoinBlake2bTestnet4,
+            None,
+            &[
+                "Signed in to COINCUBE | Connect",
+                "alex@example.test",
+                "Connect account",
+                "Connections settings",
+                "Live updates on this computer",
+            ][..],
+        ),
+        (
+            "blake2b-vault-offline",
+            ChainId::BitcoinBlake2bTestnet4,
+            Some(&offline_vault),
+            &[
+                "alex@example.test",
+                "Family savings",
+                "The balance shown is from 14:02.",
+            ][..],
+        ),
+        (
+            "bitcoin",
+            ChainId::Bitcoin,
+            None,
+            &[
+                "alex@example.test",
+                "Live updates on this computer",
+                "Connecting…",
+            ][..],
+        ),
+    ] {
+        let mut ctx = fixture_context();
+        ctx.network = chain;
+        ctx.connect_authenticated = true;
+        ctx.connect_email = Some("alex@example.test");
+        ctx.connect.vault_alert = vault;
+        let bar = capture::inspect_filled(
+            &format!("connect-control-{}", name),
+            top_bar_with_privacy(&ctx, None),
+            (1024, 65),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 65),
+        );
+        assert!(bar.contains("alex@example.test"), "{}", name);
+        let panel = capture::inspect_full_window(
+            &format!("connect-panel-{}", name),
+            container(connect_panel(&ctx)).padding(16).into(),
+            (392, 460),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for label in says {
+            assert!(panel.contains(label), "{}: {}", name, label);
         }
     }
 }

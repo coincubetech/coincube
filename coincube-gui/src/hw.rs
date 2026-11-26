@@ -194,6 +194,30 @@ impl SplitPolicyBinding {
     }
 }
 
+/// The device policy binding for an imported wallet: `None` for a Vault, or
+/// when the imported descriptor has no device policy (its signing session
+/// then refuses with the reason).
+fn imported_wallet_binding(wallet: &Wallet) -> Option<SplitPolicyBinding> {
+    let imported = wallet.main_descriptor.as_imported()?;
+    let policy = crate::split_hardware::policy::imported_policy(imported).ok()?;
+    Some(SplitPolicyBinding {
+        name: policy.name().to_owned(),
+        descriptor: policy.descriptor().to_owned(),
+    })
+}
+
+/// The registration a listed device reports. An imported wallet's signing
+/// session (`split_hardware`) checks its device policy and registers it when
+/// needed, so the listing doesn't know and must not report `Some(false)`,
+/// which the signer picker treats as blocked. Jade reports the same.
+fn listed_registration(wallet: Option<&Wallet>, registered: bool) -> Option<bool> {
+    if wallet.is_some_and(|wallet| wallet.main_descriptor.as_imported().is_some()) {
+        None
+    } else {
+        Some(registered)
+    }
+}
+
 /// No descriptor (xpubs) in logs or message traces.
 impl std::fmt::Debug for SplitPolicyBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -213,7 +237,8 @@ pub struct HardwareWallets {
     /// then stays in memory and nothing is written under `datadir_path`.
     persist_pairing: bool,
     /// The Split policy bound into Coldcard and BitBox02 handles at listing
-    /// (#568 B4b-2); used only when no wallet is loaded.
+    /// (#568 B4b-2), or a loaded imported wallet's device policy; never used
+    /// for a loaded Vault, which binds its own descriptor.
     split_policy: Option<SplitPolicyBinding>,
     /// Devices whose unlock failed, shared with the refresh stream. The
     /// stream counts such a device as still connected and would never list
@@ -317,8 +342,13 @@ impl HardwareWallets {
         self.persist_pairing
     }
 
+    /// Loads the wallet whose devices this listing shows. An imported wallet
+    /// has no Vault descriptor to bind, so its device policy (the one its
+    /// signing session registers) is bound into Coldcard and BitBox02
+    /// handles instead, as for a Split listing. Pairing still persists.
     pub fn with_wallet(mut self, wallet: Arc<Wallet>) -> Self {
         self.aliases.clone_from(&wallet.keys_aliases);
+        self.split_policy = imported_wallet_binding(&wallet).or(self.split_policy);
         self.wallet = Some(wallet);
         self
     }
@@ -360,108 +390,106 @@ impl HardwareWallets {
     ) -> Result<Task<HardwareWalletMessage>, async_hwi::Error> {
         match message {
             HardwareWalletMessage::Error(e) => Err(async_hwi::Error::Device(e)),
-            HardwareWalletMessage::List(ConnectedList { still, mut new }) => {
-                // remove disconnected
-                self.list.retain(|hw| still.contains(hw.id()));
-                self.list.append(&mut new);
-                let mut cmds = Vec::new();
-                for hw in &mut self.list {
-                    match hw {
-                        HardwareWallet::Supported {
-                            fingerprint, alias, ..
-                        } => {
-                            *alias = self.aliases.get(fingerprint).cloned();
-                        }
-                        HardwareWallet::Locked { device, id, .. } => {
-                            match device.lock().unwrap().take() {
-                                None => {}
-                                Some(LockedDevice::BitBox02(bb)) => {
-                                    let id = id.to_string();
-                                    let network = self.network;
-                                    let wallet = self.wallet.clone();
-                                    let split_policy = self.split_policy.clone();
-                                    cmds.push(Task::perform(
-                                        async move {
-                                            (
-                                                id.clone(),
-                                                unlock_bitbox(
-                                                    id,
-                                                    network,
-                                                    bb,
-                                                    wallet,
-                                                    split_policy,
-                                                )
-                                                .await,
-                                            )
-                                        },
-                                        |(id, res)| HardwareWalletMessage::Unlocked(id, res),
-                                    ));
-                                }
-                                Some(LockedDevice::Jade(device)) => {
-                                    let id = id.clone();
-                                    let id_cloned = id.clone();
-                                    let network = self.network;
-                                    let wallet = self.wallet.clone();
-                                    cmds.push(Task::perform(
-                                        async move {
-                                            if let Err(e) = device.auth().await {
-                                                return (id_cloned, Err(e.into()));
-                                            }
-                                            let res = handle_jade_device(
-                                                id,
-                                                network,
-                                                device,
-                                                wallet.as_ref().map(|w| w.as_ref()),
-                                                None,
-                                            )
-                                            .await;
-                                            (id_cloned, res)
-                                        },
-                                        |(id_cloned, res)| {
-                                            HardwareWalletMessage::Unlocked(id_cloned, res)
-                                        },
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if cmds.is_empty() {
-                    Ok(Task::none())
-                } else {
-                    Ok(Task::batch(cmds))
-                }
-            }
+            HardwareWalletMessage::List(list) => Ok(self.update_connected_list(list)),
             HardwareWalletMessage::Unlocked(id, res) => {
-                match res {
-                    Err(e) => {
-                        warn!("Pairing failed with an external device {}", e);
-                        self.list.retain(|hw| hw.id() != &id);
-                        // E.g. a BitBox02 found while locked: once unlocked,
-                        // the scan pairs it again after a backoff.
-                        self.unlock_retry.failed(&id, std::time::Instant::now());
+                self.apply_unlock_result(id, res);
+                Ok(Task::none())
+            }
+        }
+    }
+
+    fn update_connected_list(
+        &mut self,
+        ConnectedList { still, mut new }: ConnectedList,
+    ) -> Task<HardwareWalletMessage> {
+        // remove disconnected
+        self.list.retain(|hw| still.contains(hw.id()));
+        self.list.append(&mut new);
+        let mut cmds = Vec::new();
+        for hw in &mut self.list {
+            match hw {
+                HardwareWallet::Supported {
+                    fingerprint, alias, ..
+                } => {
+                    *alias = self.aliases.get(fingerprint).cloned();
+                }
+                HardwareWallet::Locked { device, id, .. } => match device.lock().unwrap().take() {
+                    None => {}
+                    Some(LockedDevice::BitBox02(bb)) => {
+                        let id = id.to_string();
+                        let network = self.network;
+                        let wallet = self.wallet.clone();
+                        let split_policy = self.split_policy.clone();
+                        cmds.push(Task::perform(
+                            async move {
+                                (
+                                    id.clone(),
+                                    unlock_bitbox(id, network, bb, wallet, split_policy).await,
+                                )
+                            },
+                            |(id, res)| HardwareWalletMessage::Unlocked(id, res),
+                        ));
                     }
-                    Ok(hw) => {
-                        self.unlock_retry.unlocked(hw.id());
-                        if let Some(h) = self.list.iter_mut().find(|hw1| {
-                            if let HardwareWallet::Locked { id, .. } = hw1 {
-                                id == hw.id()
-                            } else {
-                                false
-                            }
-                        }) {
-                            *h = hw;
-                            if let HardwareWallet::Supported {
-                                fingerprint, alias, ..
-                            } = h
-                            {
-                                *alias = self.aliases.get(fingerprint).cloned();
-                            }
-                        }
+                    Some(LockedDevice::Jade(device)) => {
+                        let id = id.clone();
+                        let id_cloned = id.clone();
+                        let network = self.network;
+                        let wallet = self.wallet.clone();
+                        cmds.push(Task::perform(
+                            async move {
+                                if let Err(e) = device.auth().await {
+                                    return (id_cloned, Err(e.into()));
+                                }
+                                let res = handle_jade_device(
+                                    id,
+                                    network,
+                                    device,
+                                    wallet.as_ref().map(|w| w.as_ref()),
+                                    None,
+                                )
+                                .await;
+                                (id_cloned, res)
+                            },
+                            |(id_cloned, res)| HardwareWalletMessage::Unlocked(id_cloned, res),
+                        ));
+                    }
+                },
+                _ => {}
+            }
+        }
+        if cmds.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(cmds)
+        }
+    }
+
+    fn apply_unlock_result(&mut self, id: String, res: Result<HardwareWallet, async_hwi::Error>) {
+        match res {
+            Err(e) => {
+                warn!("Pairing failed with an external device {}", e);
+                self.list.retain(|hw| hw.id() != &id);
+                // E.g. a BitBox02 found while locked: once unlocked,
+                // the scan pairs it again after a backoff.
+                self.unlock_retry.failed(&id, std::time::Instant::now());
+            }
+            Ok(hw) => {
+                self.unlock_retry.unlocked(hw.id());
+                if let Some(h) = self.list.iter_mut().find(|hw1| {
+                    if let HardwareWallet::Locked { id, .. } = hw1 {
+                        id == hw.id()
+                    } else {
+                        false
+                    }
+                }) {
+                    *h = hw;
+                    if let HardwareWallet::Supported {
+                        fingerprint, alias, ..
+                    } = h
+                    {
+                        *alias = self.aliases.get(fingerprint).cloned();
                     }
                 }
-                Ok(Task::none())
             }
         }
     }
@@ -534,7 +562,7 @@ async fn unlock_bitbox(
             fingerprint,
             device: bitbox2.into(),
             version,
-            registered: Some(registered),
+            registered: listed_registration(wallet.as_deref(), registered),
             alias: None,
         })
     }
@@ -645,14 +673,448 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
 
         let mut hws: Vec<HardwareWallet> = Vec::new();
         let mut still: Vec<String> = Vec::new();
+        let physical = PhysicalDiscovery {
+            network: state.network,
+            keys_aliases: &state.keys_aliases,
+            wallet: &state.wallet,
+            connected_supported_hws: &state.connected_supported_hws,
+            datadir_path: &state.datadir_path,
+            persist_pairing: state.persist_pairing,
+            split_policy: &state.split_policy,
+        };
+        physical.scan_specter_simulator(&mut hws, &mut still).await;
+        physical.scan_specter_ports(&mut hws, &mut still).await;
+        physical.scan_jade_ports(&mut hws, &mut still).await;
+        physical.scan_ledger_simulator(&mut hws, &mut still).await;
+        physical.scan_hid_devices(api, &mut hws, &mut still).await;
+        physical.scan_ledger_hid(api, &mut hws, &mut still).await;
+
+        scan_lan_phones(&mut state, &mut hws, &mut still).await;
+
+        finish_hardware_refresh(&mut state, &still, &mut hws);
+        let _ = output
+            .send(HardwareWalletMessage::List(ConnectedList {
+                new: hws,
+                still,
+            }))
+            .await;
+    })
+}
+
+async fn scan_lan_phones(
+    state: &mut State,
+    hws: &mut Vec<HardwareWallet>,
+    still: &mut Vec<String>,
+) {
+    // LAN-paired phones via the local-signer protocol. We browse
+    // mDNS for `_coincube-signer._tcp.local.`, match the TXT
+    // `fp=` against persisted `pairing_store` entries, and dial
+    // each match over TLS. On a successful pinned-cert handshake
+    // we surface a `PhoneSigner` as `Supported`; phones that are
+    // paired but currently unreachable (mDNS silent or dial
+    // failed) surface as `Unsupported(AppIsNotOpen)` so the user
+    // sees "phone offline" rather than silence.
+    // Which rows may be dialled for the loaded Vault, chain included, is
+    // decided per phone below by the shared pairing predicate.
+    match crate::phone_signer::pairing_store::load(&state.datadir_path) {
+        Ok(store) if !store.phones.is_empty() || !store.pending_unpairs.is_empty() => {
+            let discovered = crate::phone_signer::mdns::browse();
+            let identity = match crate::phone_signer::identity::load_or_create(&state.datadir_path)
+            {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!("local-signer identity unavailable: {}", e);
+                    None
+                }
+            };
+            if let Some(identity) = identity {
+                scan_lan_phone_store(state, hws, still, store, discovered, identity).await;
+            }
+        }
+        Ok(_) => {}
+        Err(e) => debug!("local-signer pairing store: {}", e),
+    }
+}
+
+/// The folder the Wi-Fi rail's transport key lives in: the loaded wallet's
+/// chain folder, the one the Connect rail uses for the same Cube. With no
+/// wallet nothing is dialled, and the launch network's folder is kept.
+fn lan_transport_key_directory(state: &State) -> crate::dir::NetworkDirectory {
+    match state.wallet.as_ref() {
+        Some(wallet) => state.datadir_path.network_directory(wallet.chain),
+        None => state.datadir_path.network_directory(state.network),
+    }
+}
+
+async fn scan_lan_phone_store(
+    state: &mut State,
+    hws: &mut Vec<HardwareWallet>,
+    still: &mut Vec<String>,
+    store: crate::phone_signer::pairing_store::PairingStoreFile,
+    discovered: Vec<crate::phone_signer::mdns::DiscoveredPhone>,
+    identity: crate::phone_signer::identity::DesktopIdentity,
+) {
+    // Sharing the identity across N concurrent dials —
+    // `PairedTransport::connect` only borrows for the
+    // duration of the rustls config build, so an Arc
+    // clone per future is cheap.
+    let identity = Arc::new(identity);
+    let now = std::time::Instant::now();
+    let mut dials = Vec::new();
+    // The transport descriptor is distinct from an imported
+    // wallet's persisted, chain-bound storage identity.
+    let lan_policy = state
+        .wallet
+        .as_ref()
+        .and_then(|wallet| crate::phone_signer::policy::PhonePolicy::from_wallet(wallet).ok());
+    let active_transport_id = lan_policy.as_ref().map(|policy| policy.transport_id());
+    // What every LAN session gets sealed with. Loaded once per
+    // tick rather than per phone: `load_or_create` touches the
+    // sidecar, and a tick can dial several phones.
+    //
+    // The descriptor comes from the same `Wallet` that scopes
+    // the dial below, and `PhoneSigner::new` derives the
+    // session's `descriptor_id` from it, so the LAN rail and
+    // the Cubes list are the same digest of the same string by
+    // construction, not by coincidence.
+    // A phone can still be listed and dialled without this —
+    // it just can't be sent a session. `sign_tx` turns the
+    // absence into an actionable error rather than a silent
+    // plaintext downgrade.
+    //
+    // From the Cube's chain folder, as the Connect rail loads it (master
+    // decision 14): one transport key per Cube. `state.network` is the lossy
+    // Bitcoin projection and would name `bitcoin/` for a Bitcoin Blake2b Cube.
+    let lan_transport_key =
+        match crate::services::connect::crypto::DeviceTransportKey::load_or_create(
+            &lan_transport_key_directory(state),
+        ) {
+            Ok(k) => Some(Arc::new(k)),
+            Err(e) => {
+                warn!(
+                    "local-signer transport key unavailable, \
+                     LAN signing will refuse to seal: {}",
+                    e
+                );
+                None
+            }
+        };
+    for paired in &store.phones {
+        // Skip phones paired for a different transport policy
+        // (or all phones when no wallet is loaded). Exact
+        // imported account, origin, chain and storage identity
+        // checks follow below; this short display ID never
+        // grants signing authority on its own.
+        if active_transport_id != Some(paired.vault_fingerprint) {
+            continue;
+        }
+        let Some(policy) = lan_policy.as_ref() else {
+            continue;
+        };
+        if let Err(error) = store.unique_signer_for(paired, policy) {
+            debug!("{}: {}", paired.name, error);
+            continue;
+        }
+        let fp8 = crate::phone_signer::identity::pin_hex8(&paired.cert_pin);
+        let id = format!("{}{}", LAN_PHONE_ID_PREFIX, fp8);
+        if remove_peer_unpaired_phone(state, paired, &fp8, &id) {
+            continue;
+        }
+        // Resolve a target address: prefer the
+        // mDNS-discovered one; fall back to the
+        // user-entered `fallback_addr` when mDNS is
+        // blocked or the phone isn't broadcasting.
+        let target = resolve_phone_target(&fp8, paired, &discovered);
+        if phone_already_connected(state, &store, policy, &id, target) {
+            still.push(id);
+            continue;
+        }
+        let Some((id, target)) = prepare_lan_phone_dial(state, hws, &fp8, id, target, now) else {
+            continue;
+        };
+        let identity = identity.clone();
+        let phone_pin = paired.cert_pin;
+        let paired = paired.clone();
+        dials.push(async move {
+            let res = crate::phone_signer::transport::PairedTransport::connect(
+                target, &identity, phone_pin,
+            )
+            .await;
+            (fp8, id, paired, res)
+        });
+    }
+    // Run the dials concurrently so one slow / offline
+    // phone can't stall the whole refresh tick.
+    let results = iced::futures::future::join_all(dials).await;
+    for (fp8, id, paired, res) in results {
+        match res {
+            Ok(t) => accept_lan_phone(
+                state,
+                hws,
+                &store,
+                lan_policy.as_ref(),
+                &lan_transport_key,
+                (fp8, id, paired, t),
+            ),
+            Err(e) => {
+                debug!("phone {} dial failed: {}", paired.name, e);
+                state
+                    .phone_cooldowns
+                    .entry(fp8)
+                    .or_default()
+                    .record_failure(std::time::Instant::now());
+                hws.push(HardwareWallet::Unsupported {
+                    id,
+                    kind: DeviceKind::Specter,
+                    version: None,
+                    reason: UnsupportedReason::AppIsNotOpen,
+                });
+            }
+        }
+    }
+    // Tell phones the user removed here, once reachable.
+    if state.persist_pairing {
+        crate::phone_signer::unpair_sync::deliver_pending(
+            &state.datadir_path,
+            &identity,
+            &store,
+            &discovered,
+        )
+        .await;
+    }
+}
+
+fn remove_peer_unpaired_phone(
+    state: &mut State,
+    paired: &crate::phone_signer::pairing_store::PairedPhone,
+    fp8: &str,
+    id: &str,
+) -> bool {
+    // The phone said it removed this desktop. Drop the
+    // pairing it was dialled for (not a newer re-pair
+    // of the same phone) instead of redialling a phone
+    // that would only say so again.
+    if let Some(signer) = state
+        .phone_signers
+        .get(id)
+        .filter(|s| s.peer_unpaired())
+        .cloned()
+    {
+        state.phone_signers.remove(id);
+        state.phone_cooldowns.remove(fp8);
+        if state.persist_pairing {
+            if let Err(e) = crate::phone_signer::pairing_store::remove_unpaired_by_peer(
+                &state.datadir_path,
+                &signer.paired_phone.cert_pin,
+                signer.paired_phone.paired_at_unix,
+                signer.paired_phone.imported_pairing_revision(),
+            ) {
+                warn!("could not remove {} after it unpaired: {}", paired.name, e);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn phone_already_connected(
+    state: &State,
+    store: &crate::phone_signer::pairing_store::PairingStoreFile,
+    policy: &crate::phone_signer::policy::PhonePolicy,
+    id: &str,
+    target: Option<std::net::SocketAddr>,
+) -> bool {
+    // "Already connected" short-circuit. Unlike
+    // USB devices — which the HID-API path
+    // re-enumerates each tick — the
+    // paired-phone store is persistent, so an
+    // entry in `connected_supported_hws` alone
+    // isn't proof the phone is still up. We
+    // re-gate the short-circuit on:
+    //   (a) current mDNS / fallback reachability
+    //       (`target.is_some()`) — catches a
+    //       phone whose Wi-Fi dropped.
+    //   (b) the previously-issued `PhoneSigner`
+    //       still being alive — catches a phone
+    //       whose TLS session died while mDNS
+    //       keeps advertising (e.g. signer app
+    //       suspended, TCP reset). Without this
+    //       the consumer would keep a stale
+    //       handle and every sign attempt would
+    //       hit `Disconnected`.
+    //   (c) for imported wallets, its captured policy and
+    //       exact pairing revision still matching the
+    //       current store. A live socket to a re-paired
+    //       phone is not a current signing handle.
+    let prior_alive = state.phone_signers.get(id).is_some_and(|s| {
+        s.is_alive()
+            && (matches!(
+                policy.kind(),
+                crate::phone_signer::policy::PhonePolicyKind::Vault(_)
+            ) || store.cached_imported_matches(&s.paired_phone, &s.policy, policy))
+    });
+    state
+        .connected_supported_hws
+        .iter()
+        .any(|known| known == id)
+        && target.is_some()
+        && prior_alive
+}
+
+fn prepare_lan_phone_dial(
+    state: &mut State,
+    hws: &mut Vec<HardwareWallet>,
+    fp8: &str,
+    id: String,
+    target: Option<std::net::SocketAddr>,
+    now: std::time::Instant,
+) -> Option<(String, std::net::SocketAddr)> {
+    // We're about to re-dial, so the prior
+    // handle (if any) is being replaced — drop
+    // it now so its TLS session can close as
+    // soon as no in-flight signing op still
+    // holds a clone.
+    state.phone_signers.remove(&id);
+    let Some(target) = target else {
+        // Paired but not visible. Surface offline
+        // without touching the cooldown — no dial
+        // attempt happened.
+        hws.push(HardwareWallet::Unsupported {
+            id,
+            kind: DeviceKind::Specter,
+            version: None,
+            reason: UnsupportedReason::AppIsNotOpen,
+        });
+        return None;
+    };
+    // Cooldown gate: a phone that just failed
+    // shouldn't pay another full `CONNECT_TIMEOUT`
+    // this tick. Surface as offline; the window
+    // expires on a later tick.
+    if state
+        .phone_cooldowns
+        .get(fp8)
+        .is_some_and(|cd| cd.is_cooling(now))
+    {
+        hws.push(HardwareWallet::Unsupported {
+            id,
+            kind: DeviceKind::Specter,
+            version: None,
+            reason: UnsupportedReason::AppIsNotOpen,
+        });
+        return None;
+    }
+    Some((id, target))
+}
+
+fn accept_lan_phone(
+    state: &mut State,
+    hws: &mut Vec<HardwareWallet>,
+    store: &crate::phone_signer::pairing_store::PairingStoreFile,
+    lan_policy: Option<&crate::phone_signer::policy::PhonePolicy>,
+    lan_transport_key: &Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
+    (fp8, id, paired, t): (
+        String,
+        String,
+        crate::phone_signer::pairing_store::PairedPhone,
+        crate::phone_signer::transport::PairedTransport,
+    ),
+) {
+    state.phone_cooldowns.remove(&fp8);
+    let Some(policy) = lan_policy else {
+        return;
+    };
+    let Ok(binding) = store.unique_signer_for(&paired, policy) else {
+        return;
+    };
+    let fingerprint = binding.fingerprint;
+    let signer = Arc::new(crate::phone_signer::PhoneSigner::new(
+        t,
+        fingerprint,
+        None,
+        paired.clone(),
+        policy.clone(),
+        state.datadir_path.clone(),
+        (*lan_transport_key).clone(),
+    ));
+    // Stash a clone so the next refresh
+    // tick can probe `is_alive()` before
+    // deciding whether to re-dial.
+    state.phone_signers.insert(id.clone(), signer.clone());
+    let device: Arc<dyn HWI + Send + Sync> = signer;
+    hws.push(HardwareWallet::Supported {
+        id,
+        device,
+        kind: DeviceKind::Specter,
+        fingerprint,
+        version: None,
+        registered: Some(true),
+        alias: Some(paired.name.clone()),
+    });
+}
+
+fn finish_hardware_refresh(state: &mut State, still: &[String], hws: &mut [HardwareWallet]) {
+    if let Some(wallet) = &state.wallet {
+        let wallet_keys = wallet.descriptor_keys();
+        for hw in &mut *hws {
+            if let HardwareWallet::Supported {
+                fingerprint,
+                id,
+                kind,
+                version,
+                ..
+            } = &hw
+            {
+                if !wallet_keys.contains(fingerprint) {
+                    *hw = HardwareWallet::Unsupported {
+                        id: id.clone(),
+                        kind: *kind,
+                        version: version.clone(),
+                        reason: UnsupportedReason::NotPartOfWallet(*fingerprint),
+                    };
+                }
+            }
+        }
+    }
+
+    state.connected_supported_hws = still
+        .iter()
+        .chain(hws.iter().filter_map(|hw| match hw {
+            HardwareWallet::Locked { id, .. } => Some(id),
+            HardwareWallet::Supported { id, .. } => Some(id),
+            HardwareWallet::Unsupported { .. } => None,
+        }))
+        .cloned()
+        .collect();
+    // Drop phone handles whose ids didn't survive into the
+    // rebuilt list (offline, wallet-fp mismatch, removed from
+    // store). Without this we'd keep dead `Arc<PhoneSigner>`
+    // entries growing forever across reconnects.
+    let surviving_ids = state.connected_supported_hws.clone();
+    state
+        .phone_signers
+        .retain(|id, _| surviving_ids.contains(id));
+}
+
+struct PhysicalDiscovery<'a> {
+    network: Network,
+    keys_aliases: &'a HashMap<Fingerprint, String>,
+    wallet: &'a Option<Arc<Wallet>>,
+    connected_supported_hws: &'a [String],
+    datadir_path: &'a CoincubeDirectory,
+    persist_pairing: bool,
+    split_policy: &'a Option<SplitPolicyBinding>,
+}
+
+impl PhysicalDiscovery<'_> {
+    async fn scan_specter_simulator(&self, hws: &mut Vec<HardwareWallet>, still: &mut Vec<String>) {
         match specter::SpecterSimulator::try_connect().await {
             Ok(device) => {
                 let id = "specter-simulator".to_string();
-                if state.connected_supported_hws.contains(&id) {
+                if self.connected_supported_hws.contains(&id) {
                     still.push(id);
                 } else {
-                    match HardwareWallet::new(id, Arc::new(device), Some(&state.keys_aliases)).await
-                    {
+                    match HardwareWallet::new(id, Arc::new(device), Some(self.keys_aliases)).await {
                         Ok(hw) => hws.push(hw),
                         Err(e) => {
                             debug!("{}", e);
@@ -665,94 +1127,105 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 debug!("{}", e);
             }
         }
+    }
 
+    async fn scan_specter_ports(&self, hws: &mut Vec<HardwareWallet>, still: &mut Vec<String>) {
         match specter::SerialTransport::enumerate_potential_ports() {
             Ok(ports) => {
                 for port in ports {
                     let id = format!("specter-{}", port);
-                    if state.connected_supported_hws.contains(&id) {
+                    if self.connected_supported_hws.contains(&id) {
                         still.push(id);
                     } else {
-                        match specter::Specter::<specter::SerialTransport>::new(port.clone()) {
-                            Err(e) => {
-                                warn!("{}", e);
-                            }
-                            Ok(device) => {
-                                if tokio::time::timeout(
-                                    std::time::Duration::from_millis(500),
-                                    device.fingerprint(),
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    match HardwareWallet::new(
-                                        id,
-                                        Arc::new(device),
-                                        Some(&state.keys_aliases),
-                                    )
-                                    .await
-                                    {
-                                        Ok(hw) => hws.push(hw),
-                                        Err(e) => {
-                                            debug!("{}", e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.discover_specter_port(id, port, hws).await;
                     }
                 }
             }
             Err(e) => warn!("Error while listing specter wallets: {}", e),
         }
+    }
 
+    async fn discover_specter_port(&self, id: String, port: String, hws: &mut Vec<HardwareWallet>) {
+        match specter::Specter::<specter::SerialTransport>::new(port.clone()) {
+            Err(e) => {
+                warn!("{}", e);
+            }
+            Ok(device) => {
+                if tokio::time::timeout(std::time::Duration::from_millis(500), device.fingerprint())
+                    .await
+                    .is_ok()
+                {
+                    match within_serial_discovery(HardwareWallet::new(
+                        id,
+                        Arc::new(device),
+                        Some(self.keys_aliases),
+                    ))
+                    .await
+                    {
+                        Ok(hw) => hws.push(hw),
+                        Err(e) => {
+                            debug!("{}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn scan_jade_ports(&self, hws: &mut Vec<HardwareWallet>, still: &mut Vec<String>) {
         match jade::SerialTransport::enumerate_potential_ports() {
             Ok(ports) => {
                 for port in ports {
                     let id = format!("jade-{}", port);
-                    if state.connected_supported_hws.contains(&id) {
+                    if self.connected_supported_hws.contains(&id) {
                         still.push(id);
                     } else {
-                        match jade::SerialTransport::new(port) {
-                            Err(e) => {
-                                warn!("{:?}", e);
-                            }
-                            Ok(device) => {
-                                match handle_jade_device(
-                                    id,
-                                    state.network,
-                                    Jade::new(device).with_network(state.network),
-                                    state.wallet.as_ref().map(|w| w.as_ref()),
-                                    Some(&state.keys_aliases),
-                                )
-                                .await
-                                {
-                                    Ok(hw) => {
-                                        hws.push(hw);
-                                    }
-                                    Err(e) => {
-                                        warn!("{:?}", e);
-                                    }
-                                }
-                            }
-                        }
+                        self.discover_jade_port(id, port, hws).await;
                     }
                 }
             }
             Err(e) => warn!("Error while listing jade devices: {}", e),
         }
+    }
 
+    async fn discover_jade_port(&self, id: String, port: String, hws: &mut Vec<HardwareWallet>) {
+        match jade::SerialTransport::new(port) {
+            Err(e) => {
+                warn!("{:?}", e);
+            }
+            Ok(device) => {
+                match within_serial_discovery(handle_jade_device(
+                    id,
+                    self.network,
+                    Jade::new(device).with_network(self.network),
+                    self.wallet.as_ref().map(|w| w.as_ref()),
+                    Some(self.keys_aliases),
+                ))
+                .await
+                {
+                    Ok(hw) => {
+                        hws.push(hw);
+                    }
+                    Err(e) => {
+                        warn!("{:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn scan_ledger_simulator(&self, hws: &mut Vec<HardwareWallet>, still: &mut Vec<String>) {
         match ledger::LedgerSimulator::try_connect().await {
             Ok(device) => {
                 let id = "ledger-simulator".to_string();
-                if state.connected_supported_hws.contains(&id) {
+                if self.connected_supported_hws.contains(&id) {
                     still.push(id);
                 } else {
                     match handle_ledger_device(
                         id,
                         device,
-                        state.wallet.as_ref().map(|w| w.as_ref()),
-                        &state.keys_aliases,
+                        self.wallet.as_ref().map(|w| w.as_ref()),
+                        self.keys_aliases,
                     )
                     .await
                     {
@@ -770,7 +1243,14 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 debug!("{}", e);
             }
         }
+    }
 
+    async fn scan_hid_devices(
+        &self,
+        api: &ledger::HidApi,
+        hws: &mut Vec<HardwareWallet>,
+        still: &mut Vec<String>,
+    ) {
         for device_info in api.device_list() {
             if async_hwi::bitbox::is_bitbox02(device_info) {
                 let id = format!(
@@ -779,30 +1259,11 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     device_info.vendor_id(),
                     device_info.product_id()
                 );
-                if state.connected_supported_hws.contains(&id) {
+                if self.connected_supported_hws.contains(&id) {
                     still.push(id);
                     continue;
                 }
-                if let Ok(device) = device_info.open_device(api) {
-                    let noise: Option<Box<dyn async_hwi::bitbox::NoiseConfig>> =
-                        if state.persist_pairing {
-                            Some(Box::new(settings::global::PersistedBitboxNoiseConfig::new(
-                                &state.datadir_path,
-                            )))
-                        } else {
-                            None
-                        };
-                    if let Ok(device) = PairingBitbox02::connect(device, noise).await {
-                        hws.push(HardwareWallet::Locked {
-                            id,
-                            kind: DeviceKind::BitBox02,
-                            pairing_code: device.pairing_code().map(|s| s.replace('\n', " ")),
-                            device: Arc::new(Mutex::new(Some(LockedDevice::BitBox02(Box::new(
-                                device,
-                            ))))),
-                        });
-                    }
-                }
+                self.discover_bitbox(id, device_info, api, hws).await;
             }
             if device_info.vendor_id() == coldcard::api::COINKITE_VID
                 && device_info.product_id() == coldcard::api::CKCC_PID
@@ -813,74 +1274,132 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     device_info.vendor_id(),
                     device_info.product_id()
                 );
-                if state.connected_supported_hws.contains(&id) {
+                if self.connected_supported_hws.contains(&id) {
                     still.push(id);
                     continue;
                 }
-                if let Some(sn) = device_info.serial_number() {
-                    if let Ok((cc, _)) =
-                        coldcard::api::Coldcard::open(AsRefWrap { inner: api }, sn, None)
-                    {
-                        let device: Arc<dyn HWI + Send + Sync> = if let Some(wallet) = &state.wallet
-                        {
-                            coldcard::Coldcard::from(cc)
-                                .with_wallet_name(wallet.name.clone())
-                                .into()
-                        } else if let Some((name, _)) = state
-                            .split_policy
-                            .as_ref()
-                            .and_then(SplitPolicyBinding::bound)
-                        {
-                            // Split (#568 B4b-2): the named policy's handle.
-                            coldcard::Coldcard::from(cc)
-                                .with_wallet_name(name.to_string())
-                                .into()
-                        } else {
-                            coldcard::Coldcard::from(cc).into()
-                        };
-                        match (
-                            device.get_master_fingerprint().await,
-                            device.get_version().await,
-                        ) {
-                            (Ok(fingerprint), Ok(version)) => {
-                                if version
-                                    >= (Version {
-                                        major: 6,
-                                        minor: 2,
-                                        patch: 1,
-                                        prerelease: None,
-                                    })
-                                {
-                                    hws.push(HardwareWallet::Supported {
-                                        id,
-                                        device,
-                                        kind: DeviceKind::Coldcard,
-                                        fingerprint,
-                                        version: Some(version),
-                                        registered: None,
-                                        alias: state.keys_aliases.get(&fingerprint).cloned(),
-                                    });
-                                } else {
-                                    hws.push(HardwareWallet::Unsupported {
-                                        id,
-                                        kind: device.device_kind(),
-                                        version: Some(version),
-                                        reason: UnsupportedReason::Version {
-                                            minimal_supported_version: "Edge firmware v6.2.1",
-                                            note: Some(
-                                                "This is the experimental Edge branch, Mk4/Q \
-                                                 only — not available on the Mk3.",
-                                            ),
-                                        },
-                                    });
-                                }
-                            }
-                            _ => tracing::error!("Failed to connect to coldcard"),
-                        }
-                    }
-                }
+                self.discover_coldcard(id, device_info, api, hws).await;
             }
         }
+    }
+
+    async fn discover_bitbox(
+        &self,
+        id: String,
+        device_info: &ledger::DeviceInfo,
+        api: &ledger::HidApi,
+        hws: &mut Vec<HardwareWallet>,
+    ) {
+        if let Ok(device) = device_info.open_device(api) {
+            let noise: Option<Box<dyn async_hwi::bitbox::NoiseConfig>> = if self.persist_pairing {
+                Some(Box::new(settings::global::PersistedBitboxNoiseConfig::new(
+                    self.datadir_path,
+                )))
+            } else {
+                None
+            };
+            if let Ok(device) = PairingBitbox02::connect(device, noise).await {
+                hws.push(HardwareWallet::Locked {
+                    id,
+                    kind: DeviceKind::BitBox02,
+                    pairing_code: device.pairing_code().map(|s| s.replace('\n', " ")),
+                    device: Arc::new(Mutex::new(Some(LockedDevice::BitBox02(Box::new(device))))),
+                });
+            }
+        }
+    }
+
+    async fn discover_coldcard(
+        &self,
+        id: String,
+        device_info: &ledger::DeviceInfo,
+        api: &ledger::HidApi,
+        hws: &mut Vec<HardwareWallet>,
+    ) {
+        if let Some(sn) = device_info.serial_number() {
+            if let Ok((cc, _)) = coldcard::api::Coldcard::open(AsRefWrap { inner: api }, sn, None) {
+                let device = self.bind_coldcard(cc);
+                self.inspect_coldcard(id, device, hws).await;
+            }
+        }
+    }
+
+    fn bind_coldcard(&self, cc: coldcard::api::Coldcard) -> Arc<dyn HWI + Send + Sync> {
+        if let Some(wallet) = self
+            .wallet
+            .as_ref()
+            .filter(|wallet| wallet.inheritance_descriptor().is_some())
+        {
+            coldcard::Coldcard::from(cc)
+                .with_wallet_name(wallet.name.clone())
+                .into()
+        } else if let Some((name, _)) = self
+            .split_policy
+            .as_ref()
+            .and_then(SplitPolicyBinding::bound)
+        {
+            // Split (#568 B4b-2): the named policy's handle.
+            coldcard::Coldcard::from(cc)
+                .with_wallet_name(name.to_string())
+                .into()
+        } else {
+            coldcard::Coldcard::from(cc).into()
+        }
+    }
+
+    async fn inspect_coldcard(
+        &self,
+        id: String,
+        device: Arc<dyn HWI + Send + Sync>,
+        hws: &mut Vec<HardwareWallet>,
+    ) {
+        match (
+            device.get_master_fingerprint().await,
+            device.get_version().await,
+        ) {
+            (Ok(fingerprint), Ok(version)) => {
+                if version
+                    >= (Version {
+                        major: 6,
+                        minor: 2,
+                        patch: 1,
+                        prerelease: None,
+                    })
+                {
+                    hws.push(HardwareWallet::Supported {
+                        id,
+                        device,
+                        kind: DeviceKind::Coldcard,
+                        fingerprint,
+                        version: Some(version),
+                        registered: None,
+                        alias: self.keys_aliases.get(&fingerprint).cloned(),
+                    });
+                } else {
+                    hws.push(HardwareWallet::Unsupported {
+                        id,
+                        kind: device.device_kind(),
+                        version: Some(version),
+                        reason: UnsupportedReason::Version {
+                            minimal_supported_version: "Edge firmware v6.2.1",
+                            note: Some(
+                                "This is the experimental Edge branch, Mk4/Q \
+                                 only — not available on the Mk3.",
+                            ),
+                        },
+                    });
+                }
+            }
+            _ => tracing::error!("Failed to connect to coldcard"),
+        }
+    }
+
+    async fn scan_ledger_hid(
+        &self,
+        api: &ledger::HidApi,
+        hws: &mut Vec<HardwareWallet>,
+        still: &mut Vec<String>,
+    ) {
         for detected in ledger::Ledger::<ledger::TransportHID>::enumerate(api) {
             let id = format!(
                 "ledger-{:?}-{}-{}",
@@ -888,7 +1407,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 detected.vendor_id(),
                 detected.product_id()
             );
-            if state.connected_supported_hws.contains(&id) {
+            if self.connected_supported_hws.contains(&id) {
                 still.push(id);
                 continue;
             }
@@ -897,8 +1416,8 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 Ok(device) => match handle_ledger_device(
                     id,
                     device,
-                    state.wallet.as_ref().map(|w| w.as_ref()),
-                    &state.keys_aliases,
+                    self.wallet.as_ref().map(|w| w.as_ref()),
+                    self.keys_aliases,
                 )
                 .await
                 {
@@ -915,335 +1434,12 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 }
             }
         }
-
-        // LAN-paired phones via the local-signer protocol. We browse
-        // mDNS for `_coincube-signer._tcp.local.`, match the TXT
-        // `fp=` against persisted `pairing_store` entries, and dial
-        // each match over TLS. On a successful pinned-cert handshake
-        // we surface a `PhoneSigner` as `Supported`; phones that are
-        // paired but currently unreachable (mDNS silent or dial
-        // failed) surface as `Unsupported(AppIsNotOpen)` so the user
-        // sees "phone offline" rather than silence.
-        let lan_chain = state.wallet.as_ref().map(|w| w.chain);
-        let phone_store = if lan_chain.is_some_and(crate::phone_signer::lan_signing_allowed) {
-            crate::phone_signer::pairing_store::load(&state.datadir_path)
-        } else {
-            // No discovery, identity creation or dial for an unsupported chain.
-            Ok(Default::default())
-        };
-        match phone_store {
-            Ok(store) if !store.phones.is_empty() || !store.pending_unpairs.is_empty() => {
-                let discovered = crate::phone_signer::mdns::browse();
-                let identity =
-                    match crate::phone_signer::identity::load_or_create(&state.datadir_path) {
-                        Ok(id) => Some(id),
-                        Err(e) => {
-                            warn!("local-signer identity unavailable: {}", e);
-                            None
-                        }
-                    };
-                if let Some(identity) = identity {
-                    // Sharing the identity across N concurrent dials —
-                    // `PairedTransport::connect` only borrows for the
-                    // duration of the rustls config build, so an Arc
-                    // clone per future is cheap.
-                    let identity = Arc::new(identity);
-                    let now = std::time::Instant::now();
-                    let mut dials = Vec::new();
-                    // The transport descriptor is distinct from an imported
-                    // wallet's persisted, chain-bound storage identity.
-                    let lan_policy = state.wallet.as_ref().and_then(|wallet| {
-                        crate::phone_signer::policy::PhonePolicy::from_wallet(wallet).ok()
-                    });
-                    let active_transport_id =
-                        lan_policy.as_ref().map(|policy| policy.transport_id());
-                    // What every LAN session gets sealed with. Loaded once per
-                    // tick rather than per phone: `load_or_create` touches the
-                    // sidecar, and a tick can dial several phones.
-                    //
-                    // The descriptor comes from the same `Wallet` that scopes
-                    // the dial below, and `PhoneSigner::new` derives the
-                    // session's `descriptor_id` from it, so the LAN rail and
-                    // the Cubes list are the same digest of the same string by
-                    // construction, not by coincidence.
-                    // A phone can still be listed and dialled without this —
-                    // it just can't be sent a session. `sign_tx` turns the
-                    // absence into an actionable error rather than a silent
-                    // plaintext downgrade.
-                    let lan_transport_key =
-                        match crate::services::connect::crypto::DeviceTransportKey::load_or_create(
-                            &state.datadir_path.network_directory(state.network),
-                        ) {
-                            Ok(k) => Some(Arc::new(k)),
-                            Err(e) => {
-                                warn!(
-                                    "local-signer transport key unavailable, \
-                                     LAN signing will refuse to seal: {}",
-                                    e
-                                );
-                                None
-                            }
-                        };
-                    for paired in &store.phones {
-                        // Skip phones paired for a different transport policy
-                        // (or all phones when no wallet is loaded). Exact
-                        // imported account, origin, chain and storage identity
-                        // checks follow below; this short display ID never
-                        // grants signing authority on its own.
-                        if active_transport_id != Some(paired.vault_fingerprint) {
-                            continue;
-                        }
-                        let Some(policy) = lan_policy.as_ref() else {
-                            continue;
-                        };
-                        if let Err(error) = store.unique_signer_for(paired, policy) {
-                            debug!("{}: {}", paired.name, error);
-                            continue;
-                        }
-                        let fp8 = crate::phone_signer::identity::pin_hex8(&paired.cert_pin);
-                        let id = format!("{}{}", LAN_PHONE_ID_PREFIX, fp8);
-                        // The phone said it removed this desktop. Drop the
-                        // pairing it was dialled for (not a newer re-pair
-                        // of the same phone) instead of redialling a phone
-                        // that would only say so again.
-                        if let Some(signer) = state
-                            .phone_signers
-                            .get(&id)
-                            .filter(|s| s.peer_unpaired())
-                            .cloned()
-                        {
-                            state.phone_signers.remove(&id);
-                            state.phone_cooldowns.remove(&fp8);
-                            if state.persist_pairing {
-                                if let Err(e) =
-                                    crate::phone_signer::pairing_store::remove_unpaired_by_peer(
-                                        &state.datadir_path,
-                                        &signer.paired_phone.cert_pin,
-                                        signer.paired_phone.paired_at_unix,
-                                        signer.paired_phone.imported_pairing_revision(),
-                                    )
-                                {
-                                    warn!(
-                                        "could not remove {} after it unpaired: {}",
-                                        paired.name, e
-                                    );
-                                }
-                            }
-                            continue;
-                        }
-                        // Resolve a target address: prefer the
-                        // mDNS-discovered one; fall back to the
-                        // user-entered `fallback_addr` when mDNS is
-                        // blocked or the phone isn't broadcasting.
-                        let target = resolve_phone_target(&fp8, paired, &discovered);
-                        // "Already connected" short-circuit. Unlike
-                        // USB devices — which the HID-API path
-                        // re-enumerates each tick — the
-                        // paired-phone store is persistent, so an
-                        // entry in `connected_supported_hws` alone
-                        // isn't proof the phone is still up. We
-                        // re-gate the short-circuit on:
-                        //   (a) current mDNS / fallback reachability
-                        //       (`target.is_some()`) — catches a
-                        //       phone whose Wi-Fi dropped.
-                        //   (b) the previously-issued `PhoneSigner`
-                        //       still being alive — catches a phone
-                        //       whose TLS session died while mDNS
-                        //       keeps advertising (e.g. signer app
-                        //       suspended, TCP reset). Without this
-                        //       the consumer would keep a stale
-                        //       handle and every sign attempt would
-                        //       hit `Disconnected`.
-                        //   (c) for imported wallets, its captured policy and
-                        //       exact pairing revision still matching the
-                        //       current store. A live socket to a re-paired
-                        //       phone is not a current signing handle.
-                        let prior_alive = state.phone_signers.get(&id).is_some_and(|s| {
-                            s.is_alive()
-                                && (matches!(
-                                    policy.kind(),
-                                    crate::phone_signer::policy::PhonePolicyKind::Vault(_)
-                                ) || store.cached_imported_matches(
-                                    &s.paired_phone,
-                                    &s.policy,
-                                    policy,
-                                ))
-                        });
-                        if state.connected_supported_hws.contains(&id)
-                            && target.is_some()
-                            && prior_alive
-                        {
-                            still.push(id);
-                            continue;
-                        }
-                        // We're about to re-dial, so the prior
-                        // handle (if any) is being replaced — drop
-                        // it now so its TLS session can close as
-                        // soon as no in-flight signing op still
-                        // holds a clone.
-                        state.phone_signers.remove(&id);
-                        let Some(target) = target else {
-                            // Paired but not visible. Surface offline
-                            // without touching the cooldown — no dial
-                            // attempt happened.
-                            hws.push(HardwareWallet::Unsupported {
-                                id,
-                                kind: DeviceKind::Specter,
-                                version: None,
-                                reason: UnsupportedReason::AppIsNotOpen,
-                            });
-                            continue;
-                        };
-                        // Cooldown gate: a phone that just failed
-                        // shouldn't pay another full `CONNECT_TIMEOUT`
-                        // this tick. Surface as offline; the window
-                        // expires on a later tick.
-                        if state
-                            .phone_cooldowns
-                            .get(&fp8)
-                            .is_some_and(|cd| cd.is_cooling(now))
-                        {
-                            hws.push(HardwareWallet::Unsupported {
-                                id,
-                                kind: DeviceKind::Specter,
-                                version: None,
-                                reason: UnsupportedReason::AppIsNotOpen,
-                            });
-                            continue;
-                        }
-                        let identity = identity.clone();
-                        let phone_pin = paired.cert_pin;
-                        let paired = paired.clone();
-                        dials.push(async move {
-                            let res = crate::phone_signer::transport::PairedTransport::connect(
-                                target, &identity, phone_pin,
-                            )
-                            .await;
-                            (fp8, id, paired, res)
-                        });
-                    }
-                    // Run the dials concurrently so one slow / offline
-                    // phone can't stall the whole refresh tick.
-                    let results = iced::futures::future::join_all(dials).await;
-                    for (fp8, id, paired, res) in results {
-                        match res {
-                            Ok(t) => {
-                                state.phone_cooldowns.remove(&fp8);
-                                let Some(policy) = lan_policy.as_ref() else {
-                                    continue;
-                                };
-                                let Ok(binding) = store.unique_signer_for(&paired, policy) else {
-                                    continue;
-                                };
-                                let fingerprint = binding.fingerprint;
-                                let signer = Arc::new(crate::phone_signer::PhoneSigner::new(
-                                    t,
-                                    fingerprint,
-                                    None,
-                                    paired.clone(),
-                                    policy.clone(),
-                                    state.datadir_path.clone(),
-                                    lan_transport_key.clone(),
-                                ));
-                                // Stash a clone so the next refresh
-                                // tick can probe `is_alive()` before
-                                // deciding whether to re-dial.
-                                state.phone_signers.insert(id.clone(), signer.clone());
-                                let device: Arc<dyn HWI + Send + Sync> = signer;
-                                hws.push(HardwareWallet::Supported {
-                                    id,
-                                    device,
-                                    kind: DeviceKind::Specter,
-                                    fingerprint,
-                                    version: None,
-                                    registered: Some(true),
-                                    alias: Some(paired.name.clone()),
-                                });
-                            }
-                            Err(e) => {
-                                debug!("phone {} dial failed: {}", paired.name, e);
-                                state
-                                    .phone_cooldowns
-                                    .entry(fp8)
-                                    .or_default()
-                                    .record_failure(std::time::Instant::now());
-                                hws.push(HardwareWallet::Unsupported {
-                                    id,
-                                    kind: DeviceKind::Specter,
-                                    version: None,
-                                    reason: UnsupportedReason::AppIsNotOpen,
-                                });
-                            }
-                        }
-                    }
-                    // Tell phones the user removed here, once reachable.
-                    if state.persist_pairing {
-                        crate::phone_signer::unpair_sync::deliver_pending(
-                            &state.datadir_path,
-                            &identity,
-                            &store,
-                            &discovered,
-                        )
-                        .await;
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(e) => debug!("local-signer pairing store: {}", e),
-        }
-
-        if let Some(wallet) = &state.wallet {
-            let wallet_keys = wallet.descriptor_keys();
-            for hw in &mut hws {
-                if let HardwareWallet::Supported {
-                    fingerprint,
-                    id,
-                    kind,
-                    version,
-                    ..
-                } = &hw
-                {
-                    if !wallet_keys.contains(fingerprint) {
-                        *hw = HardwareWallet::Unsupported {
-                            id: id.clone(),
-                            kind: *kind,
-                            version: version.clone(),
-                            reason: UnsupportedReason::NotPartOfWallet(*fingerprint),
-                        };
-                    }
-                }
-            }
-        }
-
-        state.connected_supported_hws = still
-            .iter()
-            .chain(hws.iter().filter_map(|hw| match hw {
-                HardwareWallet::Locked { id, .. } => Some(id),
-                HardwareWallet::Supported { id, .. } => Some(id),
-                HardwareWallet::Unsupported { .. } => None,
-            }))
-            .cloned()
-            .collect();
-        // Drop phone handles whose ids didn't survive into the
-        // rebuilt list (offline, wallet-fp mismatch, removed from
-        // store). Without this we'd keep dead `Arc<PhoneSigner>`
-        // entries growing forever across reconnects.
-        let surviving_ids = state.connected_supported_hws.clone();
-        state
-            .phone_signers
-            .retain(|id, _| surviving_ids.contains(id));
-        let _ = output
-            .send(HardwareWalletMessage::List(ConnectedList {
-                new: hws,
-                still,
-            }))
-            .await;
-    })
+    }
 }
 
 async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send + 'static>(
     id: String,
-    mut device: ledger::Ledger<T>,
+    device: ledger::Ledger<T>,
     wallet: Option<&'a Wallet>,
     keys_aliases: &'a HashMap<Fingerprint, String>,
 ) -> Result<HardwareWallet, HWIError> {
@@ -1253,28 +1449,14 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
     ) {
         (Ok(fingerprint), Ok(version)) => {
             if ledger_version_supported(&version) {
-                let mut registered = false;
-                if let Some(w) = &wallet {
-                    if let Some(cfg) = w
-                        .hardware_wallets
-                        .iter()
-                        .find(|cfg| cfg.fingerprint == fingerprint)
-                    {
-                        if let Some(descriptor) = w.inheritance_descriptor() {
-                            device = device
-                                .with_wallet(&w.name, &descriptor.to_string(), Some(cfg.token()))
-                                .expect("Configuration must be correct");
-                            registered = true;
-                        }
-                    }
-                }
+                let (device, registered) = bind_ledger_wallet(device, wallet, fingerprint);
                 Ok(HardwareWallet::Supported {
                     id,
                     kind: device.device_kind(),
                     fingerprint,
                     device: Arc::new(device),
                     version: Some(version),
-                    registered: Some(registered),
+                    registered: listed_registration(wallet, registered),
                     alias: keys_aliases.get(&fingerprint).cloned(),
                 })
             } else {
@@ -1296,6 +1478,47 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
             reason: UnsupportedReason::AppIsNotOpen,
         }),
     }
+}
+
+fn bind_ledger_wallet<T: async_hwi::ledger::Transport + Sync + Send + 'static>(
+    mut device: ledger::Ledger<T>,
+    wallet: Option<&Wallet>,
+    fingerprint: Fingerprint,
+) -> (ledger::Ledger<T>, bool) {
+    let mut registered = false;
+    if let Some(w) = &wallet {
+        if let Some(cfg) = w
+            .hardware_wallets
+            .iter()
+            .find(|cfg| cfg.fingerprint == fingerprint)
+        {
+            if let Some(descriptor) = w.inheritance_descriptor() {
+                device = device
+                    .with_wallet(&w.name, &descriptor.to_string(), Some(cfg.token()))
+                    .expect("Configuration must be correct");
+                registered = true;
+            }
+        }
+    }
+    (device, registered)
+}
+
+/// How long a serial device (Jade, Specter) gets to answer the scan.
+const SERIAL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a serial device's discovery, giving up after
+/// [`SERIAL_DISCOVERY_TIMEOUT`]. A device that was just plugged in lists its
+/// serial port while it is still booting and never answers a request sent
+/// then; the serial reads have no timeout of their own, so waiting on one
+/// would stall the scan of every device until the stream is dropped. Giving
+/// up leaves the device unlisted, and the next scan asks again on a fresh
+/// port.
+async fn within_serial_discovery<T>(
+    discovery: impl std::future::Future<Output = Result<T, HWIError>>,
+) -> Result<T, HWIError> {
+    tokio::time::timeout(SERIAL_DISCOVERY_TIMEOUT, discovery)
+        .await
+        .map_err(|_| HWIError::Device("The device did not answer".to_string()))?
 }
 
 async fn handle_jade_device(
@@ -1331,66 +1554,81 @@ async fn handle_jade_device(
                 device: Arc::new(Mutex::new(Some(LockedDevice::Jade(device)))),
             }),
             jade::api::JadeState::Ready => {
-                let kind = device.device_kind();
-                let version = device.get_version().await.ok();
-                let fingerprint = match device.get_master_fingerprint().await {
-                    Err(HWIError::NetworkMismatch) => {
-                        return Ok(HardwareWallet::Unsupported {
-                            id: id.clone(),
-                            kind,
-                            version,
-                            reason: UnsupportedReason::WrongNetwork,
-                        });
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                    Ok(fingerprint) => fingerprint,
-                };
-                let alias = keys_aliases.and_then(|aliases| aliases.get(&fingerprint).cloned());
-                if let Some(wallet) = &wallet {
-                    if wallet.descriptor_keys().contains(&fingerprint) {
-                        let Some(descriptor) = wallet.inheritance_descriptor() else {
-                            return Ok(HardwareWallet::Unsupported {
-                                id: id.clone(),
-                                kind,
-                                version,
-                                reason: UnsupportedReason::NotPartOfWallet(fingerprint),
-                            });
-                        };
-                        let desc = descriptor.to_string();
-                        let device = device.with_wallet(wallet.name.clone());
-                        let registered = device.is_wallet_registered(&wallet.name, &desc).await?;
-                        Ok(HardwareWallet::Supported {
-                            id: id.clone(),
-                            kind,
-                            fingerprint,
-                            device: Arc::new(device),
-                            version,
-                            registered: Some(registered),
-                            alias,
-                        })
-                    } else {
-                        Ok(HardwareWallet::Unsupported {
-                            id: id.clone(),
-                            kind,
-                            version,
-                            reason: UnsupportedReason::NotPartOfWallet(fingerprint),
-                        })
-                    }
-                } else {
-                    Ok(HardwareWallet::Supported {
-                        id: id.clone(),
-                        kind,
-                        fingerprint,
-                        device: Arc::new(device),
-                        version,
-                        registered: Some(false),
-                        alias,
-                    })
-                }
+                handle_ready_jade(id, device, wallet, keys_aliases).await
             }
         }
+    }
+}
+
+async fn handle_ready_jade(
+    id: String,
+    device: Jade<async_hwi::jade::SerialTransport>,
+    wallet: Option<&Wallet>,
+    keys_aliases: Option<&HashMap<Fingerprint, String>>,
+) -> Result<HardwareWallet, HWIError> {
+    let kind = device.device_kind();
+    let version = device.get_version().await.ok();
+    let fingerprint = match device.get_master_fingerprint().await {
+        Err(HWIError::NetworkMismatch) => {
+            return Ok(HardwareWallet::Unsupported {
+                id: id.clone(),
+                kind,
+                version,
+                reason: UnsupportedReason::WrongNetwork,
+            });
+        }
+        Err(e) => {
+            return Err(e);
+        }
+        Ok(fingerprint) => fingerprint,
+    };
+    let alias = keys_aliases.and_then(|aliases| aliases.get(&fingerprint).cloned());
+    if let Some(wallet) = &wallet {
+        if wallet.descriptor_keys().contains(&fingerprint) {
+            let Some(descriptor) = wallet.inheritance_descriptor() else {
+                // An imported wallet registers its own device
+                // policy when it signs (`split_hardware`), so
+                // whether it is registered is not known here.
+                return Ok(HardwareWallet::Supported {
+                    id: id.clone(),
+                    kind,
+                    fingerprint,
+                    device: Arc::new(device),
+                    version,
+                    registered: None,
+                    alias,
+                });
+            };
+            let desc = descriptor.to_string();
+            let device = device.with_wallet(wallet.name.clone());
+            let registered = device.is_wallet_registered(&wallet.name, &desc).await?;
+            Ok(HardwareWallet::Supported {
+                id: id.clone(),
+                kind,
+                fingerprint,
+                device: Arc::new(device),
+                version,
+                registered: Some(registered),
+                alias,
+            })
+        } else {
+            Ok(HardwareWallet::Unsupported {
+                id: id.clone(),
+                kind,
+                version,
+                reason: UnsupportedReason::NotPartOfWallet(fingerprint),
+            })
+        }
+    } else {
+        Ok(HardwareWallet::Supported {
+            id: id.clone(),
+            kind,
+            fingerprint,
+            device: Arc::new(device),
+            version,
+            registered: Some(false),
+            alias,
+        })
     }
 }
 
@@ -1575,6 +1813,97 @@ mod tests {
 
     const DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
 
+    /// An imported wallet's devices are never listed as unregistered: its
+    /// signing session registers the policy, and the picker would otherwise
+    /// disable them. A Vault and a wallet-less listing keep the device's
+    /// answer.
+    #[test]
+    fn an_imported_wallets_devices_are_not_listed_as_unregistered() {
+        let imported = crate::services::split_test_wallets::imported_vault(
+            crate::services::split_test_wallets::Shape::WshSortedMulti,
+        );
+        assert_eq!(listed_registration(Some(&imported), false), None);
+        assert_eq!(listed_registration(Some(&imported), true), None);
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use std::str::FromStr;
+        let vault = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
+        assert_eq!(listed_registration(Some(&vault), false), Some(false));
+        assert_eq!(listed_registration(Some(&vault), true), Some(true));
+        assert_eq!(listed_registration(None, false), Some(false));
+    }
+
+    /// Master decision 14: the Wi-Fi rail seals with the transport key in the
+    /// Cube's own chain folder, never the lossy network's. A Bitcoin Blake2b
+    /// Vault uses `bitcoin-blake2b-testnet4/`, not `testnet4/`; a Bitcoin
+    /// Vault keeps its folder; no wallet keeps the launch network's.
+    #[test]
+    fn the_lan_transport_key_comes_from_the_cubes_chain_folder() {
+        use crate::chain::ChainId;
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use std::str::FromStr;
+        let root = std::env::temp_dir().join(format!("coincube-lan-key-{}", uuid::Uuid::new_v4()));
+        let state = |wallet: Option<Arc<Wallet>>| State {
+            network: Network::Testnet4,
+            keys_aliases: HashMap::new(),
+            wallet,
+            connected_supported_hws: Vec::new(),
+            api: None,
+            datadir_path: CoincubeDirectory::new(root.clone()),
+            persist_pairing: false,
+            split_policy: None,
+            unlock_retry: UnlockRetry::default(),
+            phone_cooldowns: HashMap::new(),
+            phone_signers: HashMap::new(),
+        };
+        let vault = |chain: ChainId| {
+            Some(Arc::new(
+                Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()).with_chain(chain),
+            ))
+        };
+        for (wallet, folder) in [
+            (
+                vault(ChainId::BitcoinBlake2bTestnet4),
+                "bitcoin-blake2b-testnet4",
+            ),
+            (vault(ChainId::Testnet4), "testnet4"),
+            (None, "testnet4"),
+        ] {
+            assert_eq!(
+                lan_transport_key_directory(&state(wallet)).path(),
+                root.join(folder)
+            );
+        }
+        // Resolving the folder writes nothing.
+        assert!(!root.exists());
+    }
+
+    /// A Jade that never answers, as one probed while it boots.
+    #[derive(Debug)]
+    struct SilentJade;
+
+    #[async_trait::async_trait]
+    impl jade::Transport for SilentJade {
+        async fn request<
+            S: serde::Serialize + Send + Unpin,
+            D: serde::de::DeserializeOwned + Unpin + Send,
+        >(
+            &self,
+            _method: &str,
+            _params: Option<S>,
+        ) -> Result<jade::api::Response<D>, jade::JadeError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_jade_that_never_answers_does_not_stall_the_scan() {
+        let started = tokio::time::Instant::now();
+        let jade = Jade::new(SilentJade);
+        let res = within_serial_discovery(jade.get_info()).await;
+        assert!(matches!(res, Err(HWIError::Device(_))));
+        assert_eq!(started.elapsed(), SERIAL_DISCOVERY_TIMEOUT);
+    }
+
     fn refresh_hash(wallet: Option<Arc<Wallet>>, root: &str) -> u64 {
         refresh_hash_with(wallet, root, None)
     }
@@ -1708,6 +2037,43 @@ mod tests {
         assert!(!format!("{binding:?}").contains("tpub"));
     }
 
+    /// An imported Vault's device list binds the device policy its signing
+    /// session registers, so Coldcard and BitBox02 multisig handles can sign
+    /// it; singlesig binds nothing; pairing still persists; a Vault binds
+    /// its own descriptor, not a Split policy.
+    #[test]
+    fn an_imported_vaults_device_list_binds_its_device_policy() {
+        use crate::services::split_test_wallets::{imported_vault, Shape, SHAPES};
+        let root = || CoincubeDirectory::new("/synthetic/imported".into());
+        for shape in SHAPES {
+            let wallet = Arc::new(imported_vault(shape));
+            let policy = crate::split_hardware::policy::imported_policy(
+                wallet.main_descriptor.as_imported().unwrap(),
+            )
+            .unwrap();
+            let listing = HardwareWallets::new(root(), Network::Bitcoin).with_wallet(wallet);
+            assert!(listing.persists_pairing(), "{:?}", shape);
+            let binding = listing.split_policy_binding().unwrap();
+            assert_eq!(binding.descriptor(), policy.descriptor(), "{:?}", shape);
+            if matches!(shape, Shape::WshMulti | Shape::WshSortedMulti) {
+                assert_eq!(
+                    binding.bound(),
+                    Some((policy.name(), policy.descriptor())),
+                    "{:?}",
+                    shape
+                );
+            } else {
+                assert_eq!(binding.bound(), None, "{:?}", shape);
+            }
+        }
+
+        let vault = Arc::new(Wallet::new(
+            crate::app::state::vault::test_support::unified::fixture().descriptor,
+        ));
+        let listing = HardwareWallets::new(root(), Network::Bitcoin).with_wallet(vault);
+        assert!(listing.split_policy_binding().is_none());
+    }
+
     #[test]
     fn refresh_subscription_restarts_for_chain_descriptor_and_storage_changes() {
         use coincube_core::{chain::ChainId, descriptors::CoincubeDescriptor};
@@ -1747,6 +2113,8 @@ mod tests {
             vault_fingerprint: Default::default(),
             transport_pubkey: Vec::new(),
             fallback_addr: fallback.map(|s| s.to_string()),
+            network: Some("mainnet".into()),
+            capabilities: Vec::new(),
         }
     }
 

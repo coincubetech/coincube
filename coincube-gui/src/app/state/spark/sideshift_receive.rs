@@ -1,10 +1,9 @@
 //! "Receive from another network" — deposit any supported asset, receive
 //! **Bitcoin** in the Spark wallet.
 //!
-//! Deliberately a close copy of [`crate::app::state::liquid::sideshift_receive`]:
-//! same phases, same affiliate → shift → poll sequence, same 10s poll cadence.
-//! Three things differ, and each of them is the reason this isn't just a
-//! parameter on the Liquid flow:
+//! It began as a copy of the since-removed Liquid wallet's SideShift receive
+//! flow (same phases, same affiliate → shift → poll sequence, same 10s poll
+//! cadence) and differs from it in three ways:
 //!
 //! 1. **The settle leg is on-chain Bitcoin.** SideShift has no Lightning rail,
 //!    so shifts settle to the Spark wallet's *static* on-chain deposit address
@@ -64,8 +63,8 @@ pub enum RestoredSettle {
     Unknown,
 }
 
-/// Where the flow is. Mirrors the Liquid flow's `ReceivePhase`, minus the
-/// fixed-rate quote step: a BTC settle is always variable-rate here, because
+/// Where the flow is. No fixed-rate quote step: a BTC settle is always
+/// variable-rate here, because
 /// the user is depositing an arbitrary amount of some other asset and we can't
 /// meaningfully pre-commit a rate to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,176 +589,17 @@ impl SparkSideshiftReceiveFlow {
                 self.fetch_affiliate_id()
             }
 
-            Msg::AffiliateFetched(result) => {
-                if self.phase != SparkShiftPhase::FetchingAffiliate {
-                    return Task::none();
-                }
-                match result {
-                    Ok(id) => {
-                        self.affiliate_id = Some(id.clone());
-                        self.phase = SparkShiftPhase::CreatingShift;
-                        self.create_shift(id)
-                    }
-                    Err(e) => {
-                        self.loading = false;
-                        self.phase = SparkShiftPhase::Failed;
-                        // This step talks to the *Coincube* API, not SideShift
-                        // (see `fetch_affiliate_id`). Naming SideShift here
-                        // would send whoever debugs it to the wrong service —
-                        // and reassure the user that a third party is at fault
-                        // when it's ours. No deposit address exists yet, so
-                        // nothing is at risk.
-                        self.error = Some(nothing_sent_yet(&coincube_ui::localized_format!(
-                            "Couldn't load swap settings from Coincube: {e}",
-                            "No se pudo cargar la configuración de intercambio desde COINCUBE: {e}"
-                        )));
-                        Task::none()
-                    }
-                }
-            }
+            Msg::AffiliateFetched(result) => self.affiliate_fetched(result),
 
-            Msg::ShiftCreated(result) => {
-                if self.phase != SparkShiftPhase::CreatingShift {
-                    return Task::none();
-                }
-                self.loading = false;
-                match result {
-                    Ok(shift) => {
-                        self.qr_data = qr_code::Data::new(&shift.deposit_address).ok();
-                        self.shift = Some(shift.clone());
-                        self.shift_status = Some(ShiftStatusKind::Waiting);
-                        self.phase = SparkShiftPhase::Active;
-                        // From here the user may leave, lock or quit; keep the
-                        // shift so its page can come back.
-                        return store_record(self.record());
-                    }
-                    Err(e) => {
-                        self.phase = SparkShiftPhase::Failed;
-                        // `create_shift` spans two services — the Spark bridge
-                        // (deposit address) and SideShift (the shift itself) —
-                        // and each already names itself in its error. Wrapping
-                        // them in a single "SideShift failed" prefix would
-                        // misattribute half of them, so pass the attributed
-                        // error through as-is.
-                        self.error = Some(nothing_sent_yet(e));
-                    }
-                }
-                Task::none()
-            }
+            Msg::ShiftCreated(result) => self.shift_created(result),
 
             Msg::PollStatus => self.poll_shift_status(),
 
-            Msg::StatusUpdated(result) => {
-                // An answer for another shift (one polled before "Get a new
-                // address" or "Start over" and answered after) must not touch
-                // this one: an old `expired` would mark the new shift expired
-                // and clear its stored record.
-                let current = self.shift.as_ref().map(|shift| shift.id.as_str());
-                if let Some(status) = result
-                    .as_ref()
-                    .ok()
-                    .filter(|s| Some(s.id.as_str()) == current)
-                {
-                    let kind = ShiftStatusKind::from(status.status.as_str());
-                    let settled = kind == ShiftStatusKind::Settled
-                        && self.shift_status.as_ref() != Some(&ShiftStatusKind::Settled);
-                    let first_after_restore = std::mem::take(&mut self.restored);
-                    // A restored shift may already show as expired by the
-                    // clock; SideShift confirming it is what clears the record.
-                    let expired = kind == ShiftStatusKind::Expired
-                        && (first_after_restore
-                            || self.shift_status.as_ref() != Some(&ShiftStatusKind::Expired));
-                    self.shift_status = Some(kind);
-                    // SideShift reports the settle output (BTC, as a decimal
-                    // string) once a deposit is detected. Keep the latest so the
-                    // view can show how much bitcoin is arriving. Parse it exactly
-                    // (BTC → sats) rather than via f64, which rounds.
-                    let settle_sat = parse_btc_settle_amount_sats(status.settle_amount.as_deref());
-                    if settle_sat.is_some() {
-                        self.settle_amount_sat = settle_sat;
-                    }
-                    if let Some(amount) = status
-                        .deposit_amount
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|a| !a.is_empty())
-                    {
-                        self.deposit_amount = Some(amount.to_string());
-                    }
-                    if let Some(hash) = status
-                        .settle_hash
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|h| !h.is_empty())
-                    {
-                        self.settle_hash = Some(hash.to_string());
-                    }
-                    if expired {
-                        // Nothing was deposited and nothing ever will be: this
-                        // page stays up for now, but a restart needn't bring
-                        // it back.
-                        return store_record(None);
-                    }
-                    if settled {
-                        // The bitcoin has landed at Spark's on-chain deposit
-                        // address, which means it shows up as an *unclaimed
-                        // deposit* — not as a payment in history. Two things
-                        // happen on settle:
-                        //   1. Kick the panel's deposit list so the pending
-                        //      deposit is loaded when the user returns to it.
-                        //   2. Register the arrival with the always-resident Home
-                        //      state, which auto-claims the deposit once it matures
-                        //      — wherever the user has since navigated — and fires
-                        //      the "bitcoin received" celebration when it lands.
-                        //
-                        // A shift put back after a restart may have settled long
-                        // ago, its deposit already claimed. Registering that would
-                        // leave Home waiting for a deposit that never comes, so
-                        // find where the bitcoin is first, and keep looking until
-                        // the wallet shows it (it may not have synced yet).
-                        if first_after_restore {
-                            self.arrival_unconfirmed = true;
-                        } else if !self.arrival_unconfirmed {
-                            self.awaiting_claim = true;
-                            return self.settled_tasks(false);
-                        }
-                    }
-                    if self.arrival_unconfirmed {
-                        // Waiting to learn where the bitcoin is: look as soon
-                        // as the settle hash is known. Without it, the recheck
-                        // timer polls again (never straight from here, which
-                        // would loop poll → answer → poll).
-                        if let Some(hash) = self.settle_hash.clone() {
-                            return self.check_restored_arrival(hash);
-                        }
-                    }
-                }
-                Task::none()
-            }
+            Msg::StatusUpdated(result) => self.status_updated(result),
 
             Msg::RecheckRestoredArrival => self.recheck_restored_arrival(),
 
-            Msg::RestoredSettleChecked(found) => {
-                if self.phase != SparkShiftPhase::Active || !self.arrival_unconfirmed {
-                    return Task::none();
-                }
-                match found {
-                    RestoredSettle::Claimed(amount_sat) => {
-                        self.arrival_unconfirmed = false;
-                        self.awaiting_claim = false;
-                        self.arrived_amount_sat = Some(*amount_sat);
-                        self.phase = SparkShiftPhase::Arrived;
-                        store_record(None)
-                    }
-                    RestoredSettle::StillPending => {
-                        self.arrival_unconfirmed = false;
-                        self.awaiting_claim = true;
-                        self.settled_tasks(true)
-                    }
-                    // The recheck subscription tries again.
-                    RestoredSettle::Unknown => Task::none(),
-                }
-            }
+            Msg::RestoredSettleChecked(found) => self.restored_settle_checked(found),
 
             Msg::CheckSettleClaim => self.check_settle_claim(),
 
@@ -857,6 +697,181 @@ impl SparkSideshiftReceiveFlow {
             Msg::Restore(_) => Task::none(),
 
             Msg::Back | Msg::Reset => self.reset(),
+        }
+    }
+
+    fn affiliate_fetched(&mut self, result: &Result<String, String>) -> Task<Message> {
+        if self.phase != SparkShiftPhase::FetchingAffiliate {
+            return Task::none();
+        }
+        match result {
+            Ok(id) => {
+                self.affiliate_id = Some(id.clone());
+                self.phase = SparkShiftPhase::CreatingShift;
+                self.create_shift(id)
+            }
+            Err(e) => {
+                self.loading = false;
+                self.phase = SparkShiftPhase::Failed;
+                // This step talks to the *Coincube* API, not SideShift
+                // (see `fetch_affiliate_id`). Naming SideShift here
+                // would send whoever debugs it to the wrong service —
+                // and reassure the user that a third party is at fault
+                // when it's ours. No deposit address exists yet, so
+                // nothing is at risk.
+                self.error = Some(nothing_sent_yet(&coincube_ui::localized_format!(
+                    "Couldn't load swap settings from Coincube: {e}",
+                    "No se pudo cargar la configuración de intercambio desde COINCUBE: {e}"
+                )));
+                Task::none()
+            }
+        }
+    }
+
+    fn shift_created(&mut self, result: &Result<ShiftResponse, String>) -> Task<Message> {
+        if self.phase != SparkShiftPhase::CreatingShift {
+            return Task::none();
+        }
+        self.loading = false;
+        match result {
+            Ok(shift) => {
+                self.qr_data = qr_code::Data::new(&shift.deposit_address).ok();
+                self.shift = Some(shift.clone());
+                self.shift_status = Some(ShiftStatusKind::Waiting);
+                self.phase = SparkShiftPhase::Active;
+                // From here the user may leave, lock or quit; keep the
+                // shift so its page can come back.
+                return store_record(self.record());
+            }
+            Err(e) => {
+                self.phase = SparkShiftPhase::Failed;
+                // `create_shift` spans two services — the Spark bridge
+                // (deposit address) and SideShift (the shift itself) —
+                // and each already names itself in its error. Wrapping
+                // them in a single "SideShift failed" prefix would
+                // misattribute half of them, so pass the attributed
+                // error through as-is.
+                self.error = Some(nothing_sent_yet(e));
+            }
+        }
+        Task::none()
+    }
+
+    fn status_updated(
+        &mut self,
+        result: &Result<crate::services::sideshift::ShiftStatus, String>,
+    ) -> Task<Message> {
+        // An answer for another shift (one polled before "Get a new
+        // address" or "Start over" and answered after) must not touch
+        // this one: an old `expired` would mark the new shift expired
+        // and clear its stored record.
+        let current = self.shift.as_ref().map(|shift| shift.id.as_str());
+        let Some(status) = result
+            .as_ref()
+            .ok()
+            .filter(|s| Some(s.id.as_str()) == current)
+        else {
+            return Task::none();
+        };
+        let kind = ShiftStatusKind::from(status.status.as_str());
+        let settled = kind == ShiftStatusKind::Settled
+            && self.shift_status.as_ref() != Some(&ShiftStatusKind::Settled);
+        let first_after_restore = std::mem::take(&mut self.restored);
+        // A restored shift may already show as expired by the
+        // clock; SideShift confirming it is what clears the record.
+        let expired = kind == ShiftStatusKind::Expired
+            && (first_after_restore
+                || self.shift_status.as_ref() != Some(&ShiftStatusKind::Expired));
+        self.shift_status = Some(kind);
+        self.update_status_amounts(status);
+        if expired {
+            // Nothing was deposited and nothing ever will be: this
+            // page stays up for now, but a restart needn't bring
+            // it back.
+            return store_record(None);
+        }
+        if settled {
+            // The bitcoin has landed at Spark's on-chain deposit
+            // address, which means it shows up as an *unclaimed
+            // deposit* — not as a payment in history. Two things
+            // happen on settle:
+            //   1. Kick the panel's deposit list so the pending
+            //      deposit is loaded when the user returns to it.
+            //   2. Register the arrival with the always-resident Home
+            //      state, which auto-claims the deposit once it matures
+            //      — wherever the user has since navigated — and fires
+            //      the "bitcoin received" celebration when it lands.
+            //
+            // A shift put back after a restart may have settled long
+            // ago, its deposit already claimed. Registering that would
+            // leave Home waiting for a deposit that never comes, so
+            // find where the bitcoin is first, and keep looking until
+            // the wallet shows it (it may not have synced yet).
+            if first_after_restore {
+                self.arrival_unconfirmed = true;
+            } else if !self.arrival_unconfirmed {
+                self.awaiting_claim = true;
+                return self.settled_tasks(false);
+            }
+        }
+        if self.arrival_unconfirmed {
+            // Waiting to learn where the bitcoin is: look as soon
+            // as the settle hash is known. Without it, the recheck
+            // timer polls again (never straight from here, which
+            // would loop poll → answer → poll).
+            if let Some(hash) = self.settle_hash.clone() {
+                return self.check_restored_arrival(hash);
+            }
+        }
+        Task::none()
+    }
+
+    fn update_status_amounts(&mut self, status: &crate::services::sideshift::ShiftStatus) {
+        // SideShift reports the settle output (BTC, as a decimal
+        // string) once a deposit is detected. Keep the latest so the
+        // view can show how much bitcoin is arriving. Parse it exactly
+        // (BTC → sats) rather than via f64, which rounds.
+        let settle_sat = parse_btc_settle_amount_sats(status.settle_amount.as_deref());
+        if settle_sat.is_some() {
+            self.settle_amount_sat = settle_sat;
+        }
+        if let Some(amount) = status
+            .deposit_amount
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            self.deposit_amount = Some(amount.to_string());
+        }
+        if let Some(hash) = status
+            .settle_hash
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            self.settle_hash = Some(hash.to_string());
+        }
+    }
+
+    fn restored_settle_checked(&mut self, found: &RestoredSettle) -> Task<Message> {
+        if self.phase != SparkShiftPhase::Active || !self.arrival_unconfirmed {
+            return Task::none();
+        }
+        match found {
+            RestoredSettle::Claimed(amount_sat) => {
+                self.arrival_unconfirmed = false;
+                self.awaiting_claim = false;
+                self.arrived_amount_sat = Some(*amount_sat);
+                self.phase = SparkShiftPhase::Arrived;
+                store_record(None)
+            }
+            RestoredSettle::StillPending => {
+                self.arrival_unconfirmed = false;
+                self.awaiting_claim = true;
+                self.settled_tasks(true)
+            }
+            // The recheck subscription tries again.
+            RestoredSettle::Unknown => Task::none(),
         }
     }
 
@@ -1601,5 +1616,192 @@ mod tests {
         )));
         assert_eq!(live.shift_status(), Some(&ShiftStatusKind::Waiting));
         assert!(live.restored);
+    }
+
+    // ── USDt on Liquid: a deposit network into Spark ────────────────────
+    //
+    // The Liquid *wallet* is gone from SideShift (no shift settles to
+    // Liquid), but USDt on Liquid held anywhere else is still a deposit that
+    // SideShift converts to bitcoin for Spark. These walk that option through
+    // the whole lifecycle.
+
+    const LIQUID_REFUND: &str = "lq1qqwsq50k0h9y4rmwjr8t6dhtxcuyj8kn9h9lyqfaj2ple62rk3rgc46t6ck7mpstf7z6htg8p8vnac9c6k5xhntw5r0z3s7q8";
+    const SPARK_DEPOSIT_ADDRESS: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    fn liquid_usdt() -> DepositOption {
+        deposit_option_by_key("usdt:liquid").expect("USDt on Liquid is offered")
+    }
+
+    /// A shift as SideShift creates it for a USDt-on-Liquid deposit: Liquid
+    /// in, bitcoin out to the Spark wallet's deposit address.
+    fn liquid_usdt_shift() -> ShiftResponse {
+        ShiftResponse {
+            id: "d97d3994cd95e54364b6".to_string(),
+            deposit_address: "lq1qqdepositaddress".to_string(),
+            deposit_coin: Some("USDT".to_string()),
+            deposit_network: Some("liquid".to_string()),
+            settle_address: Some(SPARK_DEPOSIT_ADDRESS.to_string()),
+            settle_coin: Some("BTC".to_string()),
+            settle_network: Some("bitcoin".to_string()),
+            deposit_min: Some("10".to_string()),
+            deposit_max: Some("20000".to_string()),
+            deposit_amount: None,
+            settle_amount: None,
+            rate: None,
+            expires_at: None,
+            created_at: Some("2026-11-13T00:00:00.000Z".to_string()),
+            status: Some("waiting".to_string()),
+            affiliate_fee_percent: None,
+            network_fee_usd: None,
+        }
+    }
+
+    /// A fresh USDt-on-Liquid flow taken through refund address → affiliate →
+    /// shift created, so it sits `Active` and `Waiting` like a real one.
+    fn created_liquid_usdt_flow() -> SparkSideshiftReceiveFlow {
+        let mut flow = SparkSideshiftReceiveFlow::new_preselected(backend(), liquid_usdt());
+        let _ = flow.update(&Msg::RefundAddressEdited(LIQUID_REFUND.to_string()));
+        assert_eq!(flow.refund_error(), None, "a Liquid refund address fits");
+        assert!(flow.can_generate());
+
+        let _ = flow.update(&Msg::Generate);
+        assert_eq!(flow.phase(), &SparkShiftPhase::FetchingAffiliate);
+        let _ = flow.update(&Msg::AffiliateFetched(Ok("affiliate".to_string())));
+        assert_eq!(flow.phase(), &SparkShiftPhase::CreatingShift);
+        let _ = flow.update(&Msg::ShiftCreated(Ok(liquid_usdt_shift())));
+        flow
+    }
+
+    fn polling(flow: &SparkSideshiftReceiveFlow) -> bool {
+        polls_status(
+            flow.phase(),
+            flow.shift_status()
+                .is_some_and(ShiftStatusKind::is_terminal),
+            flow.restored,
+        )
+    }
+
+    /// Created: the shift is live, waiting for the deposit, polled, and
+    /// stored as `usdt:liquid` with the Liquid refund address, settling as
+    /// bitcoin to the Spark deposit address.
+    #[test]
+    fn a_usdt_on_liquid_shift_is_created_live_and_stored() {
+        let flow = created_liquid_usdt_flow();
+        assert_eq!(flow.phase(), &SparkShiftPhase::Active);
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Waiting));
+        assert!(flow.qr_data().is_some());
+        assert!(polling(&flow));
+
+        let record = flow.record().expect("a live shift is stored");
+        assert_eq!(record.deposit_option, "usdt:liquid");
+        assert_eq!(record.refund_address, LIQUID_REFUND);
+        assert_eq!(
+            record.shift.settle_address.as_deref(),
+            Some(SPARK_DEPOSIT_ADDRESS)
+        );
+        assert_eq!(record.shift.settle_network.as_deref(), Some("bitcoin"));
+    }
+
+    /// Deposited → settled: the deposit is seen, the poller keeps going
+    /// until the bitcoin is sent, then stops and watches for the claim.
+    #[test]
+    fn a_usdt_on_liquid_shift_settles_as_bitcoin() {
+        let mut flow = created_liquid_usdt_flow();
+
+        let _ = flow.update(&status("pending", None));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Pending));
+        assert_eq!(flow.deposit_amount(), Some("20"));
+        assert!(polling(&flow), "a deposited shift is still moving");
+
+        let _ = flow.update(&status("settling", None));
+        assert!(polling(&flow));
+
+        let _ = flow.update(&status("settled", Some("abc")));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Settled));
+        assert_eq!(flow.settle_hash(), Some("abc"));
+        assert_eq!(flow.settle_amount_sat(), Some(27_961));
+        assert!(!polling(&flow), "settled is terminal for the poller");
+        assert!(flow.awaiting_claim, "the arrival is watched for its claim");
+        assert!(!flow.arrival_unconfirmed);
+    }
+
+    /// Deposited → refunded: the deposit goes back to the Liquid refund
+    /// address, and the poller stops once it has.
+    #[test]
+    fn a_usdt_on_liquid_shift_can_be_refunded() {
+        let mut flow = created_liquid_usdt_flow();
+        let _ = flow.update(&status("pending", None));
+        let _ = flow.update(&status("refunding", None));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Refunding));
+        assert!(polling(&flow), "a refund in flight is still moving");
+
+        let _ = flow.update(&status("refunded", None));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Refunded));
+        assert!(!polling(&flow));
+        assert!(!flow.awaiting_claim, "no bitcoin is coming");
+        assert_eq!(flow.refund_address(), LIQUID_REFUND);
+    }
+
+    /// Deposited → flagged: a held shift stops the poller and asks the user
+    /// to act, rather than spinning.
+    #[test]
+    fn a_flagged_usdt_on_liquid_shift_stops_and_asks_the_user_to_act() {
+        let mut flow = created_liquid_usdt_flow();
+        let _ = flow.update(&status("pending", None));
+        let _ = flow.update(&status("review", None));
+        let kind = flow.shift_status().expect("a status");
+        assert_eq!(kind, &ShiftStatusKind::Review);
+        assert!(kind.needs_user_action());
+        assert!(!polling(&flow));
+        assert!(!flow.awaiting_claim);
+    }
+
+    /// A `usdt:liquid` shift stored before the Liquid wallet was removed (in
+    /// the stored format, written out here rather than produced by today's
+    /// code) still loads and comes back live, polling SideShift.
+    #[test]
+    fn a_stored_usdt_on_liquid_shift_still_resumes() {
+        let stored = format!(
+            r#"{{
+                "shift": {{
+                    "id": "d97d3994cd95e54364b6",
+                    "depositAddress": "lq1qqdepositaddress",
+                    "depositCoin": "USDT",
+                    "depositNetwork": "liquid",
+                    "settleAddress": "{SPARK_DEPOSIT_ADDRESS}",
+                    "settleCoin": "BTC",
+                    "settleNetwork": "bitcoin",
+                    "depositMin": "10",
+                    "depositMax": "20000",
+                    "depositAmount": null,
+                    "settleAmount": null,
+                    "rate": null,
+                    "expiresAt": null,
+                    "createdAt": "2026-11-13T00:00:00.000Z",
+                    "status": "waiting",
+                    "affiliateFeePercent": null,
+                    "networkFeeUsd": null
+                }},
+                "deposit_option": "usdt:liquid",
+                "refund_address": "{LIQUID_REFUND}"
+            }}"#
+        );
+        let record: PendingSparkShift = serde_json::from_str(&stored).unwrap();
+        assert_eq!(record.shift, liquid_usdt_shift());
+
+        let mut flow = SparkSideshiftReceiveFlow::restored(backend(), &record)
+            .expect("USDt on Liquid is still offered, so its shift resumes");
+        assert_eq!(flow.selected(), liquid_usdt());
+        assert_eq!(flow.selected().network, SideshiftNetwork::Liquid);
+        assert_eq!(flow.phase(), &SparkShiftPhase::Active);
+        assert_eq!(flow.refund_address(), LIQUID_REFUND);
+        assert!(polling(&flow), "a resumed shift asks SideShift where it is");
+        assert_eq!(flow.record(), Some(record));
+
+        // And it carries on from there.
+        let _ = flow.update(&status("pending", None));
+        assert_eq!(flow.shift_status(), Some(&ShiftStatusKind::Pending));
+        assert!(!flow.restored);
+        assert!(polling(&flow));
     }
 }

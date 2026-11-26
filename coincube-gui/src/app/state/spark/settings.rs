@@ -81,6 +81,62 @@ impl SparkSettings {
         }
     }
 
+    fn settle_auto_convert_read(
+        &mut self,
+        state: Option<coincube_spark_protocol::AutoConvertState>,
+    ) {
+        if let Some(state) = state {
+            // The bridge's answer is the switch's truth, unless a
+            // save is out (its own answer settles it).
+            if !self.stable_balance_saving {
+                self.stable_balance_active = Some(state.enabled);
+            }
+            self.auto_convert = Some(state);
+        }
+    }
+
+    fn request_stable_balance_toggle(&mut self, enabled: bool) -> Task<Message> {
+        self.confirm_off = false;
+        let Some(backend) = self.backend.clone() else {
+            return Task::none();
+        };
+        // Optimistic update — snap the toggle immediately so
+        // the UI feels responsive. StableBalanceSaved
+        // reconciles if the RPC fails.
+        self.stable_balance_active = Some(enabled);
+        self.stable_balance_saving = true;
+        Task::perform(
+            async move { backend.set_stable_balance(enabled).await },
+            move |result| match result {
+                Ok(()) => Message::View(crate::app::view::Message::SparkSettings(
+                    crate::app::view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
+                )),
+                Err(e) => Message::View(crate::app::view::Message::SparkSettings(
+                    crate::app::view::SparkSettingsMessage::StableBalanceSaved(Err(e.to_string())),
+                )),
+            },
+        )
+    }
+
+    fn settle_stable_balance_save(&mut self, result: Result<bool, String>) -> Task<Message> {
+        self.stable_balance_saving = false;
+        match result {
+            Ok(enabled) => {
+                self.stable_balance_active = Some(enabled);
+            }
+            Err(err) => {
+                tracing::warn!("set_stable_balance failed: {}", err);
+                if let Some(current) = self.stable_balance_active {
+                    self.stable_balance_active = Some(!current);
+                }
+                self.status = SparkSettingsStatus::Error(err);
+            }
+        }
+        // A lost answer leaves the switch unknown, and turning it
+        // on resets the breaker: read the bridge's state either way.
+        self.fetch_auto_convert()
+    }
+
     fn fetch_auto_convert(&self) -> Task<Message> {
         let Some(backend) = self.backend.clone() else {
             return Task::none();
@@ -263,14 +319,7 @@ impl State for SparkSettings {
                     self.stable_balance_active = Some(settings.stable_balance_active);
                 }
                 crate::app::view::SparkSettingsMessage::AutoConvertLoaded(state) => {
-                    if let Some(state) = state {
-                        // The bridge's answer is the switch's truth, unless a
-                        // save is out (its own answer settles it).
-                        if !self.stable_balance_saving {
-                            self.stable_balance_active = Some(state.enabled);
-                        }
-                        self.auto_convert = Some(state);
-                    }
+                    self.settle_auto_convert_read(state)
                 }
                 crate::app::view::SparkSettingsMessage::AutoConvertOffRequested => {
                     if self.stable_balance_active == Some(true) && !self.stable_balance_saving {
@@ -281,48 +330,10 @@ impl State for SparkSettings {
                     self.confirm_off = false;
                 }
                 crate::app::view::SparkSettingsMessage::StableBalanceToggled(enabled) => {
-                    self.confirm_off = false;
-                    let Some(backend) = self.backend.clone() else {
-                        return Task::none();
-                    };
-                    // Optimistic update — snap the toggle immediately so
-                    // the UI feels responsive. StableBalanceSaved
-                    // reconciles if the RPC fails.
-                    self.stable_balance_active = Some(enabled);
-                    self.stable_balance_saving = true;
-                    return Task::perform(
-                        async move { backend.set_stable_balance(enabled).await },
-                        move |result| match result {
-                            Ok(()) => Message::View(crate::app::view::Message::SparkSettings(
-                                crate::app::view::SparkSettingsMessage::StableBalanceSaved(Ok(
-                                    enabled,
-                                )),
-                            )),
-                            Err(e) => Message::View(crate::app::view::Message::SparkSettings(
-                                crate::app::view::SparkSettingsMessage::StableBalanceSaved(Err(
-                                    e.to_string()
-                                )),
-                            )),
-                        },
-                    );
+                    return self.request_stable_balance_toggle(enabled)
                 }
                 crate::app::view::SparkSettingsMessage::StableBalanceSaved(result) => {
-                    self.stable_balance_saving = false;
-                    match result {
-                        Ok(enabled) => {
-                            self.stable_balance_active = Some(enabled);
-                        }
-                        Err(err) => {
-                            tracing::warn!("set_stable_balance failed: {}", err);
-                            if let Some(current) = self.stable_balance_active {
-                                self.stable_balance_active = Some(!current);
-                            }
-                            self.status = SparkSettingsStatus::Error(err);
-                        }
-                    }
-                    // A lost answer leaves the switch unknown, and turning it
-                    // on resets the breaker: read the bridge's state either way.
-                    return self.fetch_auto_convert();
+                    return self.settle_stable_balance_save(result)
                 }
                 crate::app::view::SparkSettingsMessage::ToggleTechnicalDetails => {
                     self.technical_details_open = !self.technical_details_open;
@@ -348,9 +359,34 @@ impl State for SparkSettings {
     }
 }
 
+/// Toast for a failed "Auto-convert received bitcoin" save. The bridge's
+/// error is technical (a `SparkClientError` rendering), so it goes to the
+/// log under the reference and the toast says what happened in plain words.
+/// The switch has already been rolled back when this shows.
+pub fn stable_balance_failure_toast(detail: &str) -> String {
+    crate::user_error::UserError::logged(
+        "Couldn't change auto-convert",
+        "Your setting is unchanged. Check your connection and try again.",
+        crate::user_error::CC_SPK,
+        true,
+        detail,
+    )
+    .toast()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_balance_failure_toast_hides_the_bridge_error() {
+        let detail = "SparkClientError: Rpc { code: -32000, message: \"sdk rejected toggle\" }";
+        let toast = stable_balance_failure_toast(detail);
+        assert!(!toast.contains("SparkClientError"));
+        assert!(!toast.contains("sdk rejected toggle"));
+        assert!(toast.starts_with("Couldn't change auto-convert"));
+        assert!(toast.contains(crate::user_error::CC_SPK));
+    }
 
     /// The off question opens only for a switch that is on and idle, and
     /// Keep or the turn-off itself closes it.

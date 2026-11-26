@@ -19,6 +19,11 @@
 mod lan_binding;
 #[path = "common/pairing_completion.rs"]
 mod pairing_completion;
+// The Bitcoin Blake2b Vault fixture the unit tests sign with, included as the
+// same source file rather than copied.
+#[path = "../src/app/state/vault/test_support_unified.rs"]
+#[allow(dead_code)]
+mod unified;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -145,6 +150,32 @@ fn fake_phone_server_config(
         .expect("single cert")
 }
 
+/// How the fake phone signs a request it decoded.
+type PhoneSign = Box<dyn FnOnce(&Psbt) -> Psbt + Send>;
+
+/// What the fake phone is paired as, and how it signs.
+struct PhoneCase {
+    /// The binding it reports at pairing, network included.
+    binding: local_v1::SignerBinding,
+    capabilities: Vec<String>,
+    /// Whether the Vault signs unified, which selects the wire codec.
+    unified: bool,
+    /// Signs the request it decoded; `None` echoes the request unchanged.
+    sign: Option<PhoneSign>,
+}
+
+impl PhoneCase {
+    /// The one-key transport fixture, paired for Bitcoin, echoing.
+    fn echo(descriptor: &str) -> Self {
+        Self {
+            binding: lan_binding::proto(descriptor),
+            capabilities: vec!["sign-psbt".into()],
+            unified: false,
+            sign: None,
+        }
+    }
+}
+
 /// Fake phone harness that accepts the pairing connection first and
 /// then a second steady-state connection on the same listener. Both
 /// accepts use the same `ServerConfig`, so a wrong `trust_desktop_pin`
@@ -156,7 +187,9 @@ async fn fake_phone_pair_then_sign(
     phone_cert_fp_hex: String,
     trust_desktop_pin: CertFingerprint,
     pairing_proof: String,
+    case: PhoneCase,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let expected_network = case.binding.network.clone();
     let cfg = fake_phone_server_config(phone_cert, phone_key, trust_desktop_pin);
     let acceptor = TlsAcceptor::from(Arc::new(cfg));
     // The phone's ECIES key: advertised at pairing, used below to open what
@@ -172,11 +205,11 @@ async fn fake_phone_pair_then_sign(
             payload: Some(local_v1::local_envelope::Payload::PairingComplete(
                 local_v1::PairingComplete {
                     completion_protocol: 1,
-                    signer_binding: Some(lan_binding::proto(DESC)),
+                    signer_binding: Some(case.binding.clone()),
                     phone_cert_fp: phone_cert_fp_hex.clone(),
                     device_name: "TestPhone".into(),
                     app_version: "test-1.0".into(),
-                    capabilities: vec!["sign-psbt".into()],
+                    capabilities: case.capabilities.clone(),
                     pairing_proof,
                     transport_pubkey: phone_transport.public_key().to_vec(),
                 },
@@ -264,6 +297,10 @@ async fn fake_phone_pair_then_sign(
                     "the sealed descriptor must carry its checksum",
                 );
 
+                assert_eq!(
+                    s.network, expected_network,
+                    "the session names the Vault's chain"
+                );
                 (
                     s.session_id,
                     s.request_id,
@@ -274,12 +311,24 @@ async fn fake_phone_pair_then_sign(
             other => panic!("expected PresentSession, got {:?}", other),
         };
 
+        // Sign as the real phone does: decode the request with the Vault's
+        // codec, sign, and encode the result the same way.
+        let psbt_bytes = match case.sign {
+            None => psbt_bytes,
+            Some(sign) => {
+                let request =
+                    coincube_gui::mobile_signing::returned_wire_psbt(case.unified, &psbt_bytes)?;
+                coincube_gui::mobile_signing::signing_wire_psbt(case.unified, sign(&request))?
+            }
+        };
         // Seal the signature back to the desktop, same AAD binding.
         let sealed = seal_to_device(&creator_pub, &request_id, &psbt_bytes)
             .expect("seal the signature back to the desktop");
         let reply = LocalEnvelope {
             payload: Some(local_v1::local_envelope::Payload::Partial(
                 local_v1::PartialSignature {
+                    // The network this phone signed for: the session's.
+                    network: expected_network.clone(),
                     session_id,
                     // Empty under ECIES_V1.
                     signed_psbt: Vec::new(),
@@ -327,6 +376,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
             signer_xpub: lan_binding::binding(DESC).xpub,
             descriptor_sha256: hex::encode(lan_binding::binding(DESC).descriptor_sha256),
         },
+        coincube_gui::chain::ChainId::Bitcoin,
     );
     let encoded = encode_offer(&g.offer).expect("encode offer");
     let decoded = decode_offer(&encoded).expect("decode offer");
@@ -337,8 +387,13 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     // Proof-of-QR-scan over the round-tripped offer's psk — the phone
     // computes this after scanning, and the desktop verifies it before
     // pinning.
-    let proof =
-        pairing_proof(&decoded.psk_b64, &decoded.cert_fp, &phone_cert_fp_hex).expect("proof");
+    let proof = pairing_proof(
+        &decoded.psk_b64,
+        &decoded.cert_fp,
+        &phone_cert_fp_hex,
+        &decoded.network,
+    )
+    .expect("proof");
     let phone_cert_for_server = phone_cert.clone();
     let phone_handle = tokio::spawn(fake_phone_pair_then_sign(
         listener,
@@ -347,6 +402,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         phone_cert_fp_hex.clone(),
         trust_desktop_pin,
         proof,
+        PhoneCase::echo(DESC),
     ));
 
     // ── Phase 1: pair. Use the decoded offer to prove the wire
@@ -367,6 +423,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         vec![lan_binding::binding(DESC).fingerprint],
         lan_binding::binding(DESC).fingerprint,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -394,6 +451,8 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         vault_fingerprint: paired.vault_fingerprint,
         transport_pubkey: paired.transport_pubkey.clone(),
         fallback_addr: paired.fallback_addr.clone(),
+        network: paired.network.clone(),
+        capabilities: paired.capabilities.clone(),
     };
     // A real descriptor, so the fake phone's fingerprint check is meaningful.
 
@@ -406,9 +465,12 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         wallet_fp,
         None,
         paired_clone,
+        // The chain it was paired for: a pairing for another chain is never
+        // dialled (contract R2.7), so a mismatch here would refuse before the
+        // phone saw the session.
         coincube_gui::phone_signer::policy::PhonePolicy::vault(
             DESC,
-            coincube_core::chain::ChainId::Regtest,
+            coincube_gui::chain::ChainId::Bitcoin,
         )
         .expect("vault policy"),
         durable_pairing_test_dir(),
@@ -427,7 +489,11 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     );
 
     drop(signer);
-    let _ = phone_handle.await;
+    // The phone read the session and answered: the pairing was dialled.
+    phone_handle
+        .await
+        .expect("join")
+        .expect("the phone received and answered the session");
 }
 
 #[tokio::test]
@@ -465,6 +531,7 @@ async fn handshake_fails_when_phone_pins_a_different_cert() {
         phone_cert_fp_hex.clone(),
         wrong_pin,
         String::new(),
+        PhoneCase::echo(DESC),
     ));
 
     let phone_discovered = DiscoveredPhone {
@@ -481,6 +548,7 @@ async fn handshake_fails_when_phone_pins_a_different_cert() {
             signer_xpub: lan_binding::binding(DESC).xpub,
             descriptor_sha256: hex::encode(lan_binding::binding(DESC).descriptor_sha256),
         },
+        coincube_gui::chain::ChainId::Bitcoin,
     );
     // Shorten the offer TTL: `run_pairing` now retries failed dials
     // until the offer expires (so a user has time to scan the QR
@@ -501,6 +569,7 @@ async fn handshake_fails_when_phone_pins_a_different_cert() {
         wallet_fp,
         vec![lan_binding::binding(DESC).fingerprint],
         lan_binding::binding(DESC).fingerprint,
+        coincube_gui::chain::ChainId::Bitcoin,
         &durable_pairing_test_dir(),
         &Default::default(),
     )
@@ -525,4 +594,159 @@ fn durable_pairing_test_dir() -> coincube_gui::dir::CoincubeDirectory {
     let p = std::env::temp_dir().join(format!("pairing-protocol-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&p).unwrap();
     coincube_gui::dir::CoincubeDirectory::new(p)
+}
+
+/// Pair over v3 for `chain`, then sign the fixture Vault's spend with the
+/// paired key, from one body for every chain: the phone's signature must
+/// come back for the session's network and merge. A Bitcoin Vault takes an
+/// ordinary signature, a Bitcoin Blake2b Vault a unified one.
+async fn pair_then_sign_on(chain: coincube_gui::chain::ChainId) {
+    use coincube_core::miniscript::bitcoin::{
+        bip32::{ChildNumber, DerivationPath},
+        secp256k1::Secp256k1,
+    };
+    use coincube_gui::mobile_signing::{BTCB2_UNIFIED_CAPABILITY, CHAIN_IDENTITY_CAPABILITY};
+
+    let f = unified::fixture();
+    let descriptor = f.descriptor.to_string();
+    let secp = Secp256k1::new();
+    // The fixture's first signer, rebuilt so the phone can own it.
+    let key = unified::signer(21);
+    assert_eq!(key.fingerprint(&secp), f.signers[0].fingerprint(&secp));
+    let origin = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(48).unwrap(),
+        ChildNumber::from_hardened_idx(0).unwrap(),
+    ]);
+    let key_fp = key.fingerprint(&secp);
+    let binding = local_v1::SignerBinding {
+        key_id: "10".into(),
+        xpub: key.xpub_at(&origin, &secp).to_string(),
+        fingerprint: key_fp.to_string(),
+        descriptor_sha256: Sha256::digest(descriptor.as_bytes()).to_vec(),
+        network: chain.api_str().into(),
+    };
+    let unified_signatures = chain.is_blake2b();
+    let case = PhoneCase {
+        binding: binding.clone(),
+        capabilities: vec![
+            CHAIN_IDENTITY_CAPABILITY.into(),
+            BTCB2_UNIFIED_CAPABILITY.into(),
+        ],
+        unified: unified_signatures,
+        sign: Some(Box::new(move |request: &Psbt| {
+            if unified_signatures {
+                unified::unified(request, &key)
+            } else {
+                unified::legacy(request, &key)
+            }
+        })),
+    };
+
+    let identity = fresh_desktop_identity();
+    let (phone_cert, phone_key) = mint_ed25519_cert("Coincube Phone (test)");
+    let phone_pin = tls::fingerprint_of(&phone_cert);
+    let phone_cert_fp_hex: String = phone_pin.iter().map(|b| format!("{:02x}", b)).collect();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let wallet_fp = lan_binding::vault(&descriptor);
+    let offer = generate_offer(
+        wallet_fp,
+        &identity,
+        "keychain-test".into(),
+        OfferedKey {
+            signer_xpub: binding.xpub.clone(),
+            descriptor_sha256: hex::encode(&binding.descriptor_sha256),
+        },
+        chain,
+    )
+    .offer;
+    let decoded = decode_offer(&encode_offer(&offer).expect("encode")).expect("decode");
+    assert_eq!(decoded.network, chain.api_str());
+    let proof = pairing_proof(
+        &decoded.psk_b64,
+        &decoded.cert_fp,
+        &phone_cert_fp_hex,
+        &decoded.network,
+    )
+    .expect("proof");
+    let phone_handle = tokio::spawn(fake_phone_pair_then_sign(
+        listener,
+        phone_cert,
+        phone_key,
+        phone_cert_fp_hex.clone(),
+        extract_trusted_desktop_pin(&decoded),
+        proof,
+        case,
+    ));
+
+    let dir = durable_pairing_test_dir();
+    let paired = pairing_listener::run_pairing(
+        DesktopIdentity {
+            cert_der: identity.cert_der.clone(),
+            key_der: identity.clone_key(),
+        },
+        decoded,
+        DiscoveredPhone {
+            cert_fp8: phone_cert_fp_hex[..8].to_string(),
+            addr,
+            instance_name: "keychain-test".into(),
+        },
+        wallet_fp,
+        vec![key_fp],
+        key_fp,
+        chain,
+        &dir,
+        &Default::default(),
+    )
+    .await
+    .expect("pairing ok");
+    assert_eq!(paired.network.as_deref(), Some(chain.api_str()));
+
+    let transport = PairedTransport::connect(addr, &identity, phone_pin)
+        .await
+        .expect("steady-state dial");
+    let signer = PhoneSigner::new(
+        transport,
+        wallet_fp,
+        None,
+        paired,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(&descriptor, chain)
+            .expect("vault policy"),
+        dir,
+        Some(Arc::new(fresh_transport_key("desktop"))),
+    );
+    let mut psbt = f.psbt.clone();
+    async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        .await
+        .unwrap_or_else(|e| panic!("{}: {}", chain, e));
+    let input = &psbt.inputs[0];
+    if unified_signatures {
+        assert!(input.partial_sigs.is_empty(), "{}", chain);
+        assert!(
+            !input.proprietary.is_empty(),
+            "{}: unified record merged",
+            chain
+        );
+    } else {
+        assert_eq!(input.partial_sigs.len(), 1, "{}", chain);
+        assert!(input.proprietary.is_empty(), "{}", chain);
+    }
+    assert_eq!(psbt.unsigned_tx, f.psbt.unsigned_tx);
+    drop(signer);
+    phone_handle
+        .await
+        .expect("join")
+        .expect("the phone signed and answered");
+}
+
+#[tokio::test]
+async fn pair_then_sign_merges_the_phones_signature_on_bitcoin() {
+    pair_then_sign_on(coincube_gui::chain::ChainId::Bitcoin).await;
+}
+
+#[tokio::test]
+async fn pair_then_sign_merges_a_unified_signature_on_bitcoin_blake2b() {
+    pair_then_sign_on(coincube_gui::chain::ChainId::BitcoinBlake2b).await;
 }

@@ -661,6 +661,32 @@ impl Client {
         self.try_in_order(|client| client.get_block_hash(0))
     }
 
+    /// Availability only: every provider supplying a tip must first prove its
+    /// genesis. Keep all reads in one fallback operation, including tip status.
+    pub fn public_backend_ready(
+        &self,
+        expected_genesis: &bitcoin::BlockHash,
+    ) -> Result<bool, Error> {
+        let tip = self.try_in_order(|client| {
+            if client.get_block_hash(0)? != *expected_genesis {
+                return Ok(None);
+            }
+            let hash = client.get_tip_hash()?;
+            Ok(Some(client.get_block_status(&hash)?))
+        })?;
+        let Some(status) = tip else {
+            return Ok(false);
+        };
+        let height = status.height.ok_or_else(|| {
+            Error::Client(Box::new(esplora_client::Error::HttpResponse {
+                status: 404,
+                message: "tip block is not in best chain".into(),
+            }))
+        })?;
+        i32::try_from(height).map_err(|_| Error::HeightOutOfRange(height.into()))?;
+        Ok(true)
+    }
+
     /// Get the current chain tip (height + hash).
     ///
     /// Fetches the tip hash first, then resolves its height via `get_block_status` so both
@@ -1835,58 +1861,14 @@ mod tests {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let _ = stream.set_write_timeout(Some(MOCK_READ_SLICE));
-                // One absolute deadline per connection, spanning the head read
-                // and — if it is refused — the drain before close.
-                let deadline = Instant::now() + MOCK_REQUEST_DEADLINE;
-                let Some(head) = read_request_head(&mut stream, &stopping, deadline) else {
-                    refuse_and_close(&mut stream, &stopping, deadline);
-                    continue;
-                };
-                let path = head
-                    .lines()
-                    .next()
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("")
-                    .to_string();
-                seen_heads.lock().unwrap().push(head);
-                seen.lock().unwrap().push(path.clone());
-                let paced_out = if path.starts_with("/scripthash/") {
-                    pacing.as_ref().is_some_and(|(minimum, times)| {
-                        let now = Instant::now();
-                        let mut times = times.lock().unwrap();
-                        let too_fast = times
-                            .last()
-                            .is_some_and(|last| now.duration_since(*last) < *minimum);
-                        times.push(now);
-                        too_fast
-                    })
-                } else {
-                    false
-                };
-                let (mut status, mut body) = routes
-                    .get(path.as_str())
-                    .cloned()
-                    .unwrap_or((404, "not found".to_string()));
-                if paced_out {
-                    status = 429;
-                    body = "unit rate limit".into();
-                }
-                let reason = match status {
-                    200 => "OK",
-                    429 => "Too Many Requests",
-                    500 => "Internal Server Error",
-                    _ => "Not Found",
-                };
-                let response = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status,
-                    reason,
-                    body.len(),
-                    body
+                serve_mock_esplora_connection(
+                    &mut stream,
+                    &stopping,
+                    &routes,
+                    &pacing,
+                    &seen,
+                    &seen_heads,
                 );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
             }
         });
         MockEsplora {
@@ -1897,6 +1879,68 @@ mod tests {
             stop,
             thread: Some(thread),
         }
+    }
+
+    fn serve_mock_esplora_connection(
+        stream: &mut std::net::TcpStream,
+        stopping: &AtomicBool,
+        routes: &StdHashMap<&'static str, (u16, String)>,
+        pacing: &Option<MockPacing>,
+        seen: &Mutex<Vec<String>>,
+        seen_heads: &Mutex<Vec<String>>,
+    ) {
+        let _ = stream.set_write_timeout(Some(MOCK_READ_SLICE));
+        // One absolute deadline per connection, spanning the head read
+        // and — if it is refused — the drain before close.
+        let deadline = Instant::now() + MOCK_REQUEST_DEADLINE;
+        let Some(head) = read_request_head(stream, stopping, deadline) else {
+            refuse_and_close(stream, stopping, deadline);
+            return;
+        };
+        let path = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("")
+            .to_string();
+        seen_heads.lock().unwrap().push(head);
+        seen.lock().unwrap().push(path.clone());
+        let paced_out = if path.starts_with("/scripthash/") {
+            pacing.as_ref().is_some_and(|(minimum, times)| {
+                let now = Instant::now();
+                let mut times = times.lock().unwrap();
+                let too_fast = times
+                    .last()
+                    .is_some_and(|last| now.duration_since(*last) < *minimum);
+                times.push(now);
+                too_fast
+            })
+        } else {
+            false
+        };
+        let (mut status, mut body) = routes
+            .get(path.as_str())
+            .cloned()
+            .unwrap_or((404, "not found".to_string()));
+        if paced_out {
+            status = 429;
+            body = "unit rate limit".into();
+        }
+        let reason = match status {
+            200 => "OK",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "Not Found",
+        };
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status,
+            reason,
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     }
 
     impl MockEsplora {
@@ -1929,6 +1973,48 @@ mod tests {
     }
 
     const H0: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn public_readiness_checks_the_actual_tip_provider_genesis() {
+        for (fallback_genesis, expected) in [(H1, false), (H0, true)] {
+            let status = r#"{"in_best_chain":true,"height":2,"next_best":null}"#.to_string();
+            let primary = mock_esplora(StdHashMap::from([
+                ("/blocks/tip/height", (200, "2".into())),
+                ("/block-height/0", (200, H0.into())),
+                ("/blocks/tip/hash", (503, "unavailable".into())),
+                ("/block/2222222222222222222222222222222222222222222222222222222222222222/status", (200, status.clone())),
+            ]));
+            let fallback = mock_esplora(StdHashMap::from([
+                ("/blocks/tip/height", (200, "2".into())),
+                ("/block-height/0", (200, fallback_genesis.into())),
+                ("/blocks/tip/hash", (200, H2.into())),
+                ("/block/2222222222222222222222222222222222222222222222222222222222222222/status", (200, status)),
+            ]));
+            let config = crate::config::EsploraConfig {
+                addr: primary.base.clone(),
+                token: None,
+                fallback_addr: Some(fallback.base.clone()),
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            };
+            assert_eq!(
+                super::super::Esplora::public_backend_ready(&config, &H0.parse().unwrap()).unwrap(),
+                expected
+            );
+            assert!(fallback
+                .requests()
+                .iter()
+                .any(|path| path == "/block-height/0"));
+            assert_eq!(
+                fallback
+                    .requests()
+                    .iter()
+                    .any(|path| path == "/blocks/tip/hash"),
+                expected
+            );
+        }
+    }
     const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const H2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const MERKLE: &str = "3333333333333333333333333333333333333333333333333333333333333333";

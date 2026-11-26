@@ -22,6 +22,19 @@ Precedence when sources disagree: on a screen the v175 delta touches, the v175
 plan and Robert's decisions on it come first (see "v175 delta" below); then
 review doc > artboard source > brief.
 
+## Desktop V3 Phase 1 delta (2026-11-25)
+
+On 2026-11-25 Robert reviewed Desktop against the COINCUBE Mobile V3 design and
+changed the prototype on the live canvas: no artwork on any screen, Bitcoin
+Worldview as wording only (no Artwork row, no accent colours), boxes without
+outlines, quieter dividing lines between regions, Receive and Send buttons as
+on Mobile, and a one-colour wordmark. The plan is in the company brain under
+`plans/desktop-v3-phase1/`. Where it touches a screen it supersedes the v175
+plan and the steps below.
+
+The exported sources in `canvas/` and the renders in `screens/` are from canvas
+v175 and predate this change. The live canvas wins until they are re-exported.
+
 ## v175 delta (2026-10-29)
 
 On 2026-10-29 Robert reviewed a page-header study and had it folded into the

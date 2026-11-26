@@ -144,11 +144,12 @@ def offline_protocol(config, tmp_path, monkeypatch, crash_retirement=False):
     def worker(executable,request,directory,access_token=None):
         action=request['action'];cfg=request['config'];calls.append((cfg['chain'],action))
         case=Path(cfg['case_root']);state_path=case/'state.json'
-        pid={'refresh_auth':12,'admit_create':9,'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
+        pid={'admit_backends':8,'refresh_auth':12,'admit_create':9,'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
         record={'pid':pid,'start_id':str(pid),'exited':True,'returncode':0}
-        if action in ('admit_create','refresh_auth','preflight','bind_auth'):return record
+        if action in ('admit_backends','admit_create','refresh_auth','preflight','bind_auth'):return record
         if action=='create_export':
-            case.mkdir(mode=0o700);(case/'original').mkdir(mode=0o700)
+            case.mkdir(mode=0o700, exist_ok=request.get('retry_create', False))
+            (case/'original').mkdir(mode=0o700)
             psbt,identity=fixture(cfg['chain'])
             state={'config':cfg,'pending':None,'stage':'exported','creator':{'pid':100,'start_id':'100'},'restorer':None,
                    'identity':identity,'original_factor':'old','restored_factor':None,'proof_sha256':None}
@@ -181,7 +182,7 @@ def test_offline_orchestration_orders_both_chains_and_retirement_without_gui_cla
         assert list(result['chains'])==list(public.CHAINS)
         assert result['gui'] is result['funded'] is result['broadcast'] is False
         assert all(result['chains'][c]['verified_key_count']==2 for c in public.CHAINS)
-        assert calls==[(c,a) for c in public.CHAINS for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
+        assert calls==[(public.CHAINS[0],'admit_backends')]+[(c,a) for c in public.CHAINS for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
         before=list(calls);suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
         assert calls==before  # Same consumer resumes retained proof, not a new run.
     finally:suite.close()
@@ -255,6 +256,101 @@ def test_completed_resume_revalidates_signer_identity_instead_of_returning_cache
     finally:suite.close()
 
 
+def test_both_chain_backend_refusal_precedes_all_fixture_actions(config, tmp_path, monkeypatch):
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    def refused(executable, request, directory, access_token=None):
+        calls.append((request['config']['chain'], request['action']))
+        assert request['action'] == 'admit_backends'  # No preflight Keychain probe or create/register.
+        raise native.NativeActionBlocked('native_b2_backend_syncing')
+    monkeypatch.setattr(native, 'process', refused)
+    suite = native.NativeRecovery(config, tmp_path/'run', {'consumer':'backend-refusal'})
+    try:
+        with pytest.raises(native.NativeActionBlocked, match='native_b2_backend_syncing'):
+            suite.execute({'tokens':{'access_token':'unit-not-a-credential'}}, 1)
+        assert calls == [(public.CHAINS[0], 'admit_backends')]
+        assert not any(chain in suite.journal.data['artifacts'] for chain in public.CHAINS)
+        assert 'pending_native_action' not in suite.journal.data['artifacts']
+        assert not any(p.is_dir() for p in suite.directory.iterdir())
+    finally:
+        suite.close()
+
+
+@pytest.mark.parametrize('chain', public.CHAINS)
+def test_late_backend_refusal_retries_exact_pending_create(chain, config, tmp_path, monkeypatch):
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    original = native.process
+    account = {'tokens': {'access_token': 'unit-not-a-credential'}}
+    consumer = {'consumer': 'create-retry'}
+    attempts = []
+
+    def worker(executable, request, directory, access_token=None):
+        cfg = request['config']
+        if request['action'] == 'create_export' and cfg['chain'] == chain:
+            case = Path(cfg['case_root'])
+            attempts.append(request)
+            if len(attempts) <= 2:
+                case.mkdir(mode=0o700, exist_ok=len(attempts) == 2)
+                native.atomic_write(case/'state.json', json.dumps(
+                    {'config': cfg, 'stage': 'create_backend_refused', 'pending': 'create_export'}
+                ).encode())
+                raise native.NativeActionBlocked('native_backend_test_refusal')
+        return original(executable, request, directory, access_token=access_token)
+
+    monkeypatch.setattr(native, 'process', worker)
+    for _ in range(2):
+        suite = native.NativeRecovery(config, tmp_path/'run', consumer)
+        try:
+            with pytest.raises(native.NativeActionBlocked, match='native_backend_test_refusal'):
+                suite.execute(account, 1)
+            assert set(suite.journal.data['artifacts'][chain]) == {'preflight', 'bind_auth'}
+        finally:
+            suite.close()
+
+    suite = native.NativeRecovery(config, tmp_path/'run', consumer)
+    try:
+        assert list(suite.execute(account, 1)['chains']) == list(public.CHAINS)
+        assert attempts == [attempts[0], dict(attempts[0], retry_create=True), dict(attempts[0], retry_create=True)]
+        assert calls.count((chain, 'bind_auth')) == calls.count((chain, 'create_export')) == 1
+        assert 'pending_native_action' not in suite.journal.data['artifacts']
+    finally:
+        suite.close()
+
+
+@pytest.mark.parametrize('state_kind', ['missing', 'uncertain', 'wrong_config'])
+def test_unknown_creation_outcome_stays_blocked(state_kind, config, tmp_path, monkeypatch):
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    original = native.process
+
+    def worker(executable, request, directory, access_token=None):
+        if request['action'] == 'create_export':
+            cfg = request['config']
+            case = Path(cfg['case_root'])
+            if state_kind != 'missing':
+                case.mkdir(mode=0o700)
+                native.atomic_write(case/'state.json', json.dumps({
+                    'config': cfg if state_kind == 'uncertain' else dict(cfg, owner_id=2),
+                    'stage': 'new' if state_kind == 'uncertain' else 'create_backend_refused',
+                    'pending': 'create_export',
+                }).encode())
+            raise native.NativeActionBlocked('native_backend_test_refusal')
+        return original(executable, request, directory, access_token=access_token)
+
+    monkeypatch.setattr(native, 'process', worker)
+    suite = native.NativeRecovery(config, tmp_path/'run', {'consumer': 'uncertain-create'})
+    account = {'tokens': {'access_token': 'unit-not-a-credential'}}
+    try:
+        with pytest.raises(native.NativeActionBlocked):
+            suite.execute(account, 1)
+        pending = deepcopy(suite.journal.data['artifacts']['pending_native_action'])
+        before = list(calls)
+        with pytest.raises(Failed, match='UNCERTAIN_RETIREMENT'):
+            suite.execute(account, 1)
+        assert calls[len(before):] == [(public.CHAINS[0], 'admit_backends')]
+        assert suite.journal.data['artifacts']['pending_native_action'] == pending
+    finally:
+        suite.close()
+
+
 def test_capacity_refusal_precedes_every_secret_producing_action(config, tmp_path, monkeypatch):
     calls = offline_protocol(config, tmp_path, monkeypatch)
     original = native.process
@@ -268,7 +364,7 @@ def test_capacity_refusal_precedes_every_secret_producing_action(config, tmp_pat
     try:
         with pytest.raises(native.NativeActionBlocked):
             suite.execute({'tokens': {'access_token': 'unit-not-a-credential'}}, 1)
-        assert calls == [(public.CHAINS[0], 'admit_create')]
+        assert calls == [(public.CHAINS[0], 'admit_backends'), (public.CHAINS[0], 'admit_create')]
         assert 'pending_native_action' not in suite.journal.data['artifacts']
         assert not any(p.is_dir() for p in suite.directory.iterdir())
     finally:
@@ -454,7 +550,7 @@ def test_available_blake2b_creation_needs_no_ordinary_testnet4_cleanup_context(c
             pytest.fail('B2 available capacity must not construct ordinary-T4 cleanup admission')
         monkeypatch.setattr(native,'NativeCleanupContext',forbidden)
         suite.execute(account,1,cleanup_runner=object())
-        assert calls == [(chain,a) for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
+        assert calls == [(public.CHAINS[0],'admit_backends')]+[(chain,a) for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
     finally:
         suite.close()
 
@@ -619,3 +715,43 @@ def test_extended_timeout_is_limited_to_oracle_actions(tmp_path,monkeypatch,acti
     monkeypatch.setattr(native.subprocess,'check_output',lambda *args,**kwargs:b'unit-kernel-start')
     native.process(tmp_path/'offline',{'action':action,'config':{}},tmp_path)
     assert observed==[expected]
+
+
+def test_ordinary_loopback_option_is_explicit_fixed_and_bound_per_chain(config):
+    assert native.options(config) == config
+    assert native.backend_options(config, 'testnet4') == {}
+    selected = dict(config, ordinary_backend='qa_loopback_31004')
+    assert native.options(selected) == selected
+    ordinary = native.backend_options(selected, 'testnet4')
+    assert ordinary == {'ordinary_backend': 'qa_loopback_31004'}
+    assert native.backend_options(selected, 'bitcoin-blake2b-testnet4') == {}
+    assert native.backend_options(selected, 'bitcoin') == {}
+    assert native.digest(dict(chain='testnet4', **ordinary)) != native.digest(dict(chain='testnet4'))
+
+
+@pytest.mark.parametrize('selection', ['public', 'http://127.0.0.1:31004', 'http://localhost:31004', 'qa_loopback_31005', '', None, True])
+def test_native_backend_selection_rejects_arbitrary_endpoints_before_source_or_credentials(config, selection):
+    with pytest.raises(Failed):
+        native.options(dict(config, ordinary_backend=selection))
+
+
+def test_real_controller_binds_loopback_in_every_ordinary_request_but_not_B2(config, tmp_path, monkeypatch):
+    selected = dict(config, ordinary_backend='qa_loopback_31004')
+    offline_protocol(selected, tmp_path, monkeypatch)
+    worker = native.process
+    observed = []
+    def capture(executable, request, directory, access_token=None):
+        observed.append(deepcopy(request['config']))
+        return worker(executable, request, directory, access_token)
+    monkeypatch.setattr(native, 'process', capture)
+    suite = native.NativeRecovery(selected, tmp_path/'run', {'consumer': 'offline-only-test'})
+    try:
+        suite.execute({'tokens': {'access_token': 'unit-not-a-credential'}}, 1)
+    finally:
+        suite.close()
+    assert {row['chain'] for row in observed} == set(public.CHAINS)
+    for row in observed:
+        if row['chain'] == 'testnet4':
+            assert row['ordinary_backend'] == 'qa_loopback_31004'
+        else:
+            assert 'ordinary_backend' not in row

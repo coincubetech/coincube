@@ -11,15 +11,15 @@ use iced::{widget::container, Alignment, Length};
 
 use crate::{
     app::{
-        state::connect::{ConnectAccountPanel, ContactsStep},
+        state::connect::{account::ContactsState, ConnectAccountPanel, ContactsStep},
         view::{ConnectAccountMessage, ContactsMessage},
     },
-    services::coincube::{ContactRole, Invite, ReceivedInvite},
+    services::coincube::{display_name, ContactRole, Invite, ReceivedInvite},
 };
 
 use super::{
     action_ink, card_style, centred, format_date, group_title, horizontal_rule, lead, row_tag,
-    ruled_list, sheet_button, sheet_button_style, sheet_title, tenshu_text, ActionKind,
+    ruled_list, sheet_button, sheet_button_style, sheet_title, ActionKind,
 };
 use coincube_ui::font;
 
@@ -93,23 +93,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         return col.into();
     }
 
-    // Show error on the list view only when not loading
-    // (errors during initial load are silently swallowed — the empty state is shown instead)
-    if !cs.loading {
-        if let Some(err) = cs.error.as_deref() {
-            if cs.contacts.is_some() || cs.invites.is_some() || cs.received_invites.is_some() {
-                col = col.push(
-                    container(
-                        text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
-                            .color(color::RED),
-                    )
-                    .padding(8)
-                    .width(Length::Fill),
-                );
-                col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
-            }
-        }
-    }
+    col = append_contacts_error(col, cs);
 
     // Received invites section (invites addressed to this user).
     // Rendered above "Pending Invites" so a freshly-arrived invite is
@@ -180,8 +164,12 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                 .as_ref()
                 .map(|u| u.email.as_str())
                 .unwrap_or("unknown contact");
+            let name = contact
+                .contact_user
+                .as_ref()
+                .and_then(|u| u.display_name.as_deref());
             Row::new()
-                .push(tenshu_text::label(email).width(Length::Fill))
+                .push(super::your_name::person_lines(name, email).width(Length::Fill))
                 .push(row_tag(contact.role.to_string(), false))
                 .push(sheet_button("Edit", ActionKind::Secondary, true).on_press(
                     ConnectAccountMessage::Contacts(ContactsMessage::ShowDetail(contact.id)),
@@ -193,6 +181,30 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     }
 
     col.into()
+}
+
+fn append_contacts_error<'a>(
+    mut col: Column<'a, ConnectAccountMessage>,
+    cs: &ContactsState,
+) -> Column<'a, ConnectAccountMessage> {
+    // Show error on the list view only when not loading
+    // (errors during initial load are silently swallowed — the empty state is shown instead)
+    if !cs.loading {
+        if let Some(err) = cs.error.as_deref() {
+            if cs.contacts.is_some() || cs.invites.is_some() || cs.received_invites.is_some() {
+                col = col.push(
+                    container(
+                        text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .color(color::RED),
+                    )
+                    .padding(8)
+                    .width(Length::Fill),
+                );
+                col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
+            }
+        }
+    }
+    col
 }
 
 fn invite_card<'a>(invite: &'a Invite) -> Element<'a, ConnectAccountMessage> {
@@ -247,8 +259,17 @@ fn received_invite_card<'a>(
     let role_label = invite.role.to_string();
     let expiry_elem = expiry_element(&invite.expires_at);
 
-    let info = Column::new()
-        .push(text::p1_regular(invite.owner_email.as_str()).style(theme::text::primary))
+    // Who is inviting: their name, when they set one, above their email. The
+    // email is always shown: it is what identifies the sender of an invitation
+    // the user is about to accept, and a name is only the sender's own label.
+    let info = match display_name::shown(invite.owner_display_name.as_deref()) {
+        Some(name) => Column::new()
+            .push(text::p1_regular(name).style(theme::text::primary))
+            .push(text::p2_regular(invite.owner_email.as_str()).style(theme::text::secondary)),
+        None => Column::new()
+            .push(text::p1_regular(invite.owner_email.as_str()).style(theme::text::primary)),
+    };
+    let info = info
         .push(
             Row::new()
                 .push(text::p2_regular(role_label).color(role_color(&invite.role)))
@@ -575,11 +596,26 @@ fn contact_detail_ux<'a>(
             ..Default::default()
         });
 
+    // The contact's name, when they set one, above their email. The email
+    // stays on screen: this page is where the contact is removed or added to
+    // a Cube.
+    let shown_name = contact
+        .contact_user
+        .as_ref()
+        .and_then(|u| display_name::shown(u.display_name.as_deref()));
+    let identity = match shown_name {
+        Some(name) => Column::new()
+            .push(text::h4_bold(name).style(theme::text::primary))
+            .push(iced::widget::Space::new().height(Length::Fixed(2.0)))
+            .push(text::p1_regular(email).style(theme::text::secondary)),
+        None => Column::new().push(text::h4_bold(email).style(theme::text::primary)),
+    }
+    .align_x(Alignment::Center);
     let contact_header = container(
         Column::new()
             .push(avatar)
             .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-            .push(text::h4_bold(email).style(theme::text::primary))
+            .push(identity)
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(role_badge)
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))

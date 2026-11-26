@@ -460,7 +460,7 @@ async fn restrict_settings_permissions(path: &std::path::Path) {
 ///
 /// All fields are non-secret: the credential_id is a public identifier and the
 /// rp_id is the relying party domain. The actual PRF output (secret) is never stored.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PasskeyMetadata {
     /// Base64-encoded WebAuthn credential ID
     pub credential_id: String,
@@ -475,10 +475,15 @@ pub struct PasskeyMetadata {
 
 /// Mark a cube as synced with the remote Connect API.
 ///
-/// `owner` is the account the sync ran under. It is recorded as the Cube's
+/// `owner` is the account that created the Cube, when this sync is that
+/// creation's own registration. It is recorded as the Cube's
 /// [`CubeSettings::connect_owner`] only on the *first* sync of a Cube that has
 /// no owner yet — a later sync (or a Cube already marked synced before owners
 /// were tracked) must not attribute it to whoever happens to be signed in.
+/// Every sync path (catch-up, the creation's registration reply, a remote
+/// update such as a rename) now passes `None`: the creation paths (PIN,
+/// passkey and phrase restore) record the owner on disk themselves, and an ownerless Cube was made signed out, so no
+/// account that signs in or acts on it later has a claim to it.
 pub async fn mark_cube_synced(
     network_dir: &NetworkDirectory,
     cube_id: &str,
@@ -674,7 +679,7 @@ pub fn derive_connect_encryption_pubkey(
             CubeEncryptionKey::derive(&signer, chain.bitcoin_network()).public_key_hex(),
         ),
         // No seed file for this fingerprint: nothing to derive, and nothing
-        // wrong. Mapped the same way `load_breez_client` maps an absent signer.
+        // wrong. Mapped the same way `CubeSigner::resolve` maps an absent signer.
         Err(SignerError::SignerNotFound(_)) => ConnectEncryptionKey::NoSeed,
         Err(SignerError::MnemonicStorage(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
             ConnectEncryptionKey::NoSeed
@@ -785,9 +790,11 @@ pub struct CubeSettings {
     // still deserializes — the values are simply ignored, and dropped on the
     // next settings write. That is the whole migration.
     /// Fingerprint of this Cube's master seed MasterSigner.
-    /// Cube-owned wallets (Vault, Liquid, Spark) derive from this seed.
+    /// Cube-owned wallets (Vault, Spark) derive from this seed.
     /// Imported Bitcoin wallets retain their original external signers.
-    /// The serde aliases keep existing settings.json files readable without migration.
+    /// The serde aliases keep existing settings.json files readable without
+    /// migration: alpha builds wrote this field under the Liquid wallet's
+    /// names, and the Liquid wallet's removal does not change that.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -798,8 +805,7 @@ pub struct CubeSettings {
     /// This Cube's Connect-blinding encryption **public** key — 33-byte
     /// compressed secp256k1, lowercase hex (`SPEC-cube-xpub-envelope-v1` §3).
     ///
-    /// Cached here for the same ordering reason as [`Self::liquid_granted`],
-    /// mirrored: the private half is derived from the master seed and so is
+    /// Cached here because the private half is derived from the master seed and so is
     /// only computable while the Cube is unlocked (PIN in hand), but the
     /// *registration* that publishes it to Connect happens later — after
     /// Connect sign-in, on a code path with no PIN. So the public half is
@@ -818,9 +824,6 @@ pub struct CubeSettings {
     /// Fiat price display preference for this cube
     #[serde(default, deserialize_with = "ok_or_none")]
     pub fiat_price: Option<fiat::PriceSetting>,
-    /// Persisted pending Liquid -> Vault transfer, used to restore UX state across app restarts
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_liquid_to_vault_transfer: Option<PendingLiquidToVaultTransfer>,
     /// The Spark cross-network receive (SideShift → bitcoin) still in
     /// progress, so its page survives a lock or restart. Without it, the Shift
     /// ID (which a refund or SideShift support needs) was gone the moment the
@@ -831,17 +834,6 @@ pub struct CubeSettings {
     /// Holds no keys: a shift id, the two addresses and the chosen asset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spark_shift: Option<PendingSparkShift>,
-    /// Last-seen value of the account's `liquidEnabled` grant (Liquid sunset).
-    ///
-    /// The account's last-seen `liquidEnabled` grant, written whenever
-    /// `/connect/features` reports it. It used to decide, at cube open,
-    /// whether a fresh Liquid wallet was kept; since Liquid removal PR 1 the
-    /// Liquid SDK never connects and this is only fed to the constant-false
-    /// [`crate::app::features::LiquidGate`]. Kept so existing settings files
-    /// round-trip; removed (with a serde-compatible load) in Liquid removal
-    /// PR 5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liquid_granted: Option<bool>,
     /// Passkey metadata for passkey-derived master keys (None for random-generated keys)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passkey_metadata: Option<PasskeyMetadata>,
@@ -978,12 +970,14 @@ pub struct CubeSettings {
     /// account that owns its server-side record, and so its Vault and the
     /// Keychain signers attached to it.
     ///
-    /// Written once, on the Cube's first successful registration (see
-    /// [`mark_cube_synced`] and the creation Recovery Kit path), and never
+    /// Written once, when the Cube is created while signed in (or by its
+    /// post-creation registration, see [`mark_cube_synced`]), and never
     /// overwritten: signing in as another account re-registers the same local
     /// Cube UUID as a *new* server row, which must not claim ownership. `None`
-    /// on Cubes registered before this field existed, and on Cubes never
-    /// registered at all — callers treat that as "unknown", not "mismatch".
+    /// on Cubes registered before this field existed and on Cubes created
+    /// signed out — even once the catch-up sync has registered them, since
+    /// the first account to sign in is not evidence of who made the Cube.
+    /// Callers treat `None` as "unknown", not "mismatch".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_owner: Option<ConnectOwner>,
 }
@@ -1000,6 +994,33 @@ pub struct SplitFromRecord {
     pub completed_height: u64,
     /// The signed step 2's own txid.
     pub step2_txid: coincube_core::miniscript::bitcoin::Txid,
+}
+
+/// Whether a Cube must be hidden from the Connect account that is currently
+/// signed in on this device.
+///
+/// Cubes live in the device's `settings.json`, not in an account, so without
+/// this every account that signs in on a shared machine would list (and be
+/// able to open, rename or delete) the previous account's Cubes.
+///
+/// * No recorded owner -> never hidden: ownership is unknown, not foreign.
+/// * Signed out -> never hidden: Cubes must stay reachable offline, and the
+///   PIN / passkey still protects them.
+/// * Signed in, profile loaded -> hidden iff the owner is another user id.
+/// * Signed in, profile not loaded yet -> hidden (fail closed), so the list
+///   cannot flash the previous account's Cubes during sign-in.
+pub fn cube_hidden_from_account(
+    owner: Option<&ConnectOwner>,
+    signed_in: bool,
+    signed_in_user_id: Option<u32>,
+) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    match signed_in_user_id {
+        Some(id) => owner.user_id != id,
+        None => signed_in,
+    }
 }
 
 /// Identity of the Connect account that owns a Cube. See
@@ -1026,12 +1047,6 @@ impl ConnectOwner {
     pub fn is_email(&self, email: &str) -> bool {
         self.email.trim().eq_ignore_ascii_case(email.trim())
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PendingLiquidToVaultTransfer {
-    pub swap_id: String,
-    pub amount_sat: u64,
 }
 
 /// A Spark cross-network receive that has a live shift: everything needed to
@@ -1069,10 +1084,6 @@ impl CubeSettings {
             bitcoin_import: None,
             imported_claim_source: None,
             vault_fingerprint: None,
-            // Unknown until `/connect/features` answers for this account. A new
-            // cube is not granted Liquid; if the account is, the flag lands on
-            // the next features fetch and takes effect at the next cube open.
-            liquid_granted: None,
             master_signer_fingerprint: None,
             // Derived at the first unlock (the PIN is needed to reach the
             // seed), then persisted — see the field docs.
@@ -1082,7 +1093,6 @@ impl CubeSettings {
             remote_synced: false,
             unit_setting: unit::UnitSetting::default(),
             fiat_price: Some(fiat::PriceSetting::default()), // Initialize with default (enabled: true)
-            pending_liquid_to_vault_transfer: None,
             pending_spark_shift: None,
             passkey_metadata: None,
             allow_random_grid_phrase: false,
@@ -2946,43 +2956,8 @@ pub mod global {
 
         fn value(&mut self) -> Result<(), String> {
             match self.peek() {
-                Some(b'{') => {
-                    self.at += 1;
-                    if self.peek() == Some(b'}') {
-                        self.at += 1;
-                        return Ok(());
-                    }
-                    loop {
-                        let key = self.string()?;
-                        if self.peek() != Some(b':') {
-                            return Err(Self::unexpected());
-                        }
-                        self.at += 1;
-                        self.path.push(Step::Key(key));
-                        self.value()?;
-                        self.path.pop();
-                        if !self.next_item(b'}')? {
-                            return Ok(());
-                        }
-                    }
-                }
-                Some(b'[') => {
-                    self.at += 1;
-                    if self.peek() == Some(b']') {
-                        self.at += 1;
-                        return Ok(());
-                    }
-                    let mut index = 0;
-                    loop {
-                        self.path.push(Step::Index(index));
-                        self.value()?;
-                        self.path.pop();
-                        index += 1;
-                        if !self.next_item(b']')? {
-                            return Ok(());
-                        }
-                    }
-                }
+                Some(b'{') => self.object(),
+                Some(b'[') => self.array(),
                 Some(b'"') => self.string().map(drop),
                 Some(b'-' | b'0'..=b'9') => self.number(),
                 Some(b't' | b'f' | b'n') => {
@@ -2992,6 +2967,45 @@ pub mod global {
                     Ok(())
                 }
                 _ => Err(Self::unexpected()),
+            }
+        }
+
+        fn object(&mut self) -> Result<(), String> {
+            self.at += 1;
+            if self.peek() == Some(b'}') {
+                self.at += 1;
+                return Ok(());
+            }
+            loop {
+                let key = self.string()?;
+                if self.peek() != Some(b':') {
+                    return Err(Self::unexpected());
+                }
+                self.at += 1;
+                self.path.push(Step::Key(key));
+                self.value()?;
+                self.path.pop();
+                if !self.next_item(b'}')? {
+                    return Ok(());
+                }
+            }
+        }
+
+        fn array(&mut self) -> Result<(), String> {
+            self.at += 1;
+            if self.peek() == Some(b']') {
+                self.at += 1;
+                return Ok(());
+            }
+            let mut index = 0;
+            loop {
+                self.path.push(Step::Index(index));
+                self.value()?;
+                self.path.pop();
+                index += 1;
+                if !self.next_item(b']')? {
+                    return Ok(());
+                }
             }
         }
 
@@ -4321,27 +4335,30 @@ pub mod global {
 
         /// The child half runs in another process, so the OS lock (not an
         /// in-process mutex) must keep the parent's read after its commit.
+        fn run_global_lock_child(directory: PathBuf) {
+            let path = directory.join(DEFAULT_FILE_NAME);
+            let (locked, waiting) = (
+                directory.join("child-locked"),
+                directory.join("parent-waiting"),
+            );
+            let _hook = install(&path, move |stage| {
+                if stage == Stage::Locked {
+                    std::fs::write(&locked, b"")?;
+                    let deadline = Instant::now() + DEADLOCK;
+                    while !waiting.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Ok(())
+            });
+            GlobalSettings::update_account_tier(&path, AccountTier::Pro).unwrap();
+        }
+
         #[test]
         fn the_global_lock_serializes_writers_across_processes() {
             const CHILD: &str = "COINCUBE_R04B_GLOBAL_LOCK_CHILD";
             if let Some(directory) = std::env::var_os(CHILD) {
-                let directory = PathBuf::from(directory);
-                let path = directory.join(DEFAULT_FILE_NAME);
-                let (locked, waiting) = (
-                    directory.join("child-locked"),
-                    directory.join("parent-waiting"),
-                );
-                let _hook = install(&path, move |stage| {
-                    if stage == Stage::Locked {
-                        std::fs::write(&locked, b"")?;
-                        let deadline = Instant::now() + DEADLOCK;
-                        while !waiting.exists() && Instant::now() < deadline {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                    }
-                    Ok(())
-                });
-                GlobalSettings::update_account_tier(&path, AccountTier::Pro).unwrap();
+                run_global_lock_child(PathBuf::from(directory));
                 return;
             }
             let root = TempRoot::new("process-lock");
@@ -6302,6 +6319,24 @@ mod chain_identity_tests {
     }
 
     #[test]
+    fn cubes_owned_by_another_account_are_hidden() {
+        let owner = ConnectOwner {
+            user_id: 1,
+            email: "a@example.com".to_string(),
+        };
+        // Another account signed in: hidden.
+        assert!(cube_hidden_from_account(Some(&owner), true, Some(2)));
+        // The owner, or nobody, signed in: visible.
+        assert!(!cube_hidden_from_account(Some(&owner), true, Some(1)));
+        assert!(!cube_hidden_from_account(Some(&owner), false, None));
+        // Signed in but profile not loaded yet: fail closed.
+        assert!(cube_hidden_from_account(Some(&owner), true, None));
+        // Unknown owner is never treated as foreign.
+        assert!(!cube_hidden_from_account(None, true, Some(2)));
+        assert!(!cube_hidden_from_account(None, true, None));
+    }
+
+    #[test]
     fn connect_owner_matches_email_case_insensitively() {
         let owner = ConnectOwner {
             user_id: 1,
@@ -6719,5 +6754,88 @@ mod pending_spark_shift_tests {
         let json = serde_json::to_string(&cube).unwrap();
         let back: CubeSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pending_spark_shift, Some(PendingSparkShift::sample()));
+    }
+}
+
+#[cfg(test)]
+mod alpha_settings_compat_tests {
+    //! Liquid removal, master invariant I4: a `settings.json` written by an
+    //! alpha build — Liquid grant, a persisted Liquid → Vault transfer, the
+    //! signer fingerprint under its Liquid-era name, and a live USDt-on-Liquid
+    //! Spark conversion — still loads. The retired keys are ignored, never
+    //! refused.
+
+    use super::*;
+
+    const ALPHA_SETTINGS: &str = r#"{
+        "cubes": [{
+            "id": "00000000-0000-0000-0000-0000000000a1",
+            "name": "Alpha Cube",
+            "network": "bitcoin",
+            "created_at": 1760000000,
+            "backed_up": true,
+            "mfa_done": false,
+            "liquid_wallet_signer_fingerprint": "aabbccdd",
+            "liquid_granted": true,
+            "pending_liquid_to_vault_transfer": {
+                "swap_id": "synthetic-peg-out",
+                "amount_sat": 50000
+            },
+            "pending_spark_shift": {
+                "shift": {
+                    "id": "d97d3994cd95e54364b6",
+                    "depositAddress": "VJL6BYGXdepositaddressVDVL",
+                    "depositCoin": "USDT",
+                    "depositNetwork": "liquid",
+                    "settleAddress": "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg",
+                    "settleCoin": "BTC",
+                    "settleNetwork": "bitcoin",
+                    "depositMin": "10",
+                    "depositMax": "20000",
+                    "status": "waiting"
+                },
+                "deposit_option": "usdt:liquid",
+                "refund_address": "VJL6BYGXrefundaddressVDVL"
+            }
+        }]
+    }"#;
+
+    #[test]
+    fn an_alpha_settings_file_with_liquid_keys_still_loads() {
+        let root = std::env::temp_dir().join(format!("alpha-settings-{}", uuid::Uuid::new_v4()));
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        std::fs::create_dir_all(directory.path()).unwrap();
+        std::fs::write(directory.path().join(SETTINGS_FILE_NAME), ALPHA_SETTINGS).unwrap();
+
+        let settings = Settings::from_file(&directory).expect("an alpha settings file loads");
+        assert_eq!(settings.cubes.len(), 1);
+        let cube = &settings.cubes[0];
+        assert_eq!(cube.name, "Alpha Cube");
+        // The Liquid-era alias still names the Cube master signer.
+        assert_eq!(
+            cube.master_signer_fingerprint.map(|f| f.to_string()),
+            Some("aabbccdd".to_string())
+        );
+        // The USDt-on-Liquid conversion into Spark is still offered and resumes.
+        let shift = cube
+            .pending_spark_shift
+            .as_ref()
+            .expect("the live Spark conversion survives");
+        assert_eq!(shift.deposit_option, "usdt:liquid");
+        assert_eq!(shift.shift.deposit_network.as_deref(), Some("liquid"));
+        assert!(crate::services::sideshift::deposit_option_by_key(&shift.deposit_option).is_some());
+
+        // Writing the Cube back is a plain serialization of what was read: the
+        // retired Liquid keys are simply not part of it.
+        let written = serde_json::to_value(cube).unwrap();
+        assert!(written.get("liquid_granted").is_none());
+        assert!(written.get("pending_liquid_to_vault_transfer").is_none());
+        let reread: CubeSettings = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            reread.master_signer_fingerprint,
+            cube.master_signer_fingerprint
+        );
+        assert_eq!(reread.pending_spark_shift, cube.pending_spark_shift);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

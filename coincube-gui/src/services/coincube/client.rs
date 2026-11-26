@@ -1,11 +1,12 @@
 mod avatar;
 
 use super::{
-    get_countries, AddVaultMemberRequest, ApiResponse, BillingHistoryEntry, CardCheckoutSession,
-    CardPortalSession, ChargeStatusResponse, CheckoutRequest, CheckoutResponse, CoincubeError,
-    ConnectPlan, ConnectVaultResponse, Contact, ContactCube, Country, CreateConnectVaultRequest,
-    CreateInviteRequest, CubeEncryptionPubkeyResponse, CubeInviteOrAddResult, CubeKeyRaw,
-    CubeLimitsResponse, CubeResponse, DownloadStats, FeaturesResponse, Invite, LightningAddress,
+    get_countries, AccountDeletionRequest, AccountDeletionRequestBody, AddVaultMemberRequest,
+    ApiResponse, BillingHistoryEntry, CardCheckoutSession, CardPortalSession, ChargeStatusResponse,
+    CheckoutRequest, CheckoutResponse, CoincubeError, ConnectPlan, ConnectVaultResponse, Contact,
+    ContactCube, Country, CreateConnectVaultRequest, CreateInviteRequest,
+    CubeEncryptionPubkeyResponse, CubeInviteOrAddResult, CubeKeyRaw, CubeLimitsResponse,
+    CubeResponse, DownloadStats, FeaturesResponse, Invite, LightningAddress,
     LightningAddressAvailability, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest,
     PatchConnectVaultRequest, PlanChangePreview, PlanChangeRequest, PlanChangeResult,
     PutCubeEncryptionPubkeyRequest, ReceivedInvite, RecoveryKit, RecoveryKitStatus,
@@ -17,6 +18,7 @@ use super::{
 };
 use super::{
     BackupCodes, LoginReply, SecondFactorChallenge, TotpSetup, TwoFactorLogin, TwoFactorStatus,
+    UpdateDisplayNameRequest,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -122,8 +124,14 @@ impl CoincubeClient {
     }
 
     pub fn new() -> Self {
-        let base_url = crate::services::coincube_api_base_url();
+        Self::with_base_url(crate::services::coincube_api_base_url())
+    }
 
+    /// A client for the Connect API at `base_url`. [`Self::new`] is this
+    /// with the app's configured base URL. The Connect signer pipeline uses
+    /// it with the base URL of the Cube's own client, so every request it
+    /// makes goes to the endpoint that Cube's session belongs to.
+    pub fn with_base_url(base_url: String) -> Self {
         log::info!(
             "Coincube Base URL: {}, Release = {}",
             base_url,
@@ -473,6 +481,24 @@ impl CoincubeClient {
         Ok(res.json().await?)
     }
 
+    /// `PUT /api/v1/user` (authenticated) with only `displayName`: sets the
+    /// name shown beside this account's email, or removes it when `name` is
+    /// empty. Answers with the updated profile as plain JSON. A server that
+    /// predates display names ignores the field and answers without one, so
+    /// the returned [`User::display_name`] is `None`. A name the API refuses
+    /// is a 400.
+    pub async fn update_display_name(&self, name: &str) -> Result<User, CoincubeError> {
+        let url = format!("{}/api/v1/user", self.base_url);
+        let res = self
+            .client
+            .put(&url)
+            .json(&UpdateDisplayNameRequest { display_name: name })
+            .send()
+            .await?;
+        let res = res.check_success().await?;
+        Ok(res.json().await?)
+    }
+
     pub async fn get_connect_plan(&self) -> Result<ConnectPlan, CoincubeError> {
         let url = format!("{}/api/v1/connect/plan", self.base_url);
         let res = self.client.get(&url).send().await?;
@@ -616,6 +642,44 @@ impl CoincubeClient {
         let res = res.check_success().await?;
         let resp: ApiResponse<RedeemCampaignResponse> = res.json().await?;
         Ok(resp.data)
+    }
+
+    /// `GET /api/v1/user/deletion-request` (authenticated). `Ok(None)` when
+    /// the account has no deletion request: a 404 carrying the standard error
+    /// envelope with code `NOT_FOUND`. Any other 404 (a missing route, a proxy
+    /// page) and every other failure, including 401, is returned as an error.
+    pub async fn get_account_deletion_request(
+        &self,
+    ) -> Result<Option<AccountDeletionRequest>, CoincubeError> {
+        let url = format!("{}/api/v1/user/deletion-request", self.base_url);
+        let res = self.client.get(&url).send().await?;
+        let res = match res.check_success().await {
+            Ok(res) => res,
+            Err(info) if info.status_code == 404 && info.code().as_deref() == Some("NOT_FOUND") => {
+                return Ok(None)
+            }
+            Err(info) => return Err(info.into()),
+        };
+        let body = res.text().await?;
+        Ok(Some(serde_json::from_str(&body)?))
+    }
+
+    /// `POST /api/v1/user/deletion-request` (authenticated) with
+    /// `{"source":"desktop"}`. The API answers 201 for a new request and 200
+    /// when one is already pending; both return the pending request.
+    pub async fn request_account_deletion(&self) -> Result<AccountDeletionRequest, CoincubeError> {
+        let url = format!("{}/api/v1/user/deletion-request", self.base_url);
+        let res = self
+            .client
+            .post(&url)
+            .json(&AccountDeletionRequestBody {
+                source: super::ACCOUNT_DELETION_SOURCE,
+            })
+            .send()
+            .await?;
+        let res = res.check_success().await?;
+        let body = res.text().await?;
+        Ok(serde_json::from_str(&body)?)
     }
 
     pub async fn get_verified_devices(&self) -> Result<Vec<VerifiedDevice>, CoincubeError> {
@@ -1287,6 +1351,25 @@ impl CoincubeClient {
         let res = res.check_success().await?;
         let resp: ApiResponse<ConnectVaultResponse> = res.json().await?;
         Ok(resp.data)
+    }
+
+    /// PUT /api/v1/connect/cubes/{cubeId}/vault/sealed-roles — store one
+    /// sealed role per (vault member, phone). Vault owner only. The body is
+    /// ciphertext and ids; Connect never learns a role. A server that
+    /// predates the endpoint answers 404 or 405, which the caller treats like
+    /// any other failure: nothing depends on this call.
+    pub async fn put_vault_sealed_roles(
+        &self,
+        cube_id: u64,
+        req: super::PutSealedRolesRequest,
+    ) -> Result<(), CoincubeError> {
+        let url = format!(
+            "{}/api/v1/connect/cubes/{}/vault/sealed-roles",
+            self.base_url, cube_id
+        );
+        let res = self.client.put(&url).json(&req).send().await?;
+        res.check_success().await?;
+        Ok(())
     }
 
     /// GET /api/v1/connect/cubes/{cubeId}/vault — fetch the existing vault
@@ -4564,5 +4647,281 @@ mod transport_identity_tests {
             let mut normal = normal;
             normal.delete();
         }
+    }
+}
+
+#[cfg(test)]
+mod account_deletion_tests {
+    use super::*;
+    use httpmock::{Method as MockMethod, MockServer};
+
+    const PENDING: &str =
+        r#"{"status":"pending","requested_at":"2026-11-18T12:34:56Z","source":"desktop"}"#;
+
+    fn pending() -> AccountDeletionRequest {
+        AccountDeletionRequest {
+            status: "pending".into(),
+            requested_at: "2026-11-18T12:34:56Z".into(),
+            source: "desktop".into(),
+        }
+    }
+
+    fn signed_in(server: &MockServer) -> CoincubeClient {
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("deletion-jwt");
+        client
+    }
+
+    #[tokio::test]
+    async fn status_returns_the_pending_request() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request")
+                .header("authorization", "Bearer deletion-jwt");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(PENDING);
+        });
+        let got = signed_in(&server)
+            .get_account_deletion_request()
+            .await
+            .unwrap();
+        mock.assert();
+        assert_eq!(got, Some(pending()));
+    }
+
+    #[tokio::test]
+    async fn status_404_means_no_request() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request");
+            then.status(404).body(
+                r#"{"success":false,"error":{"code":"NOT_FOUND","message":"No deletion request"}}"#,
+            );
+        });
+        assert_eq!(
+            signed_in(&server)
+                .get_account_deletion_request()
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn status_plain_text_404_is_an_error_not_absence() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request");
+            then.status(404).body("404 page not found");
+        });
+        let err = signed_in(&server)
+            .get_account_deletion_request()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoincubeError::Unsuccessful(ref info) if info.status_code == 404
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_401_is_an_auth_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request");
+            then.status(401).body(
+                r#"{"success":false,"error":{"code":"UNAUTHORIZED","message":"Unauthorized"}}"#,
+            );
+        });
+        let err = signed_in(&server)
+            .get_account_deletion_request()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoincubeError::Unsuccessful(ref info) if info.status_code == 401
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_500_is_an_error_not_absence() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request");
+            then.status(500).body("{}");
+        });
+        let err = signed_in(&server)
+            .get_account_deletion_request()
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoincubeError::Unsuccessful(ref info) if info.status_code == 500
+        ));
+    }
+
+    #[tokio::test]
+    async fn status_body_off_contract_is_a_parse_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user/deletion-request");
+            then.status(200).body(r#"{"data":{"status":"pending"}}"#);
+        });
+        let err = signed_in(&server)
+            .get_account_deletion_request()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoincubeError::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn request_posts_desktop_source_and_accepts_created_or_existing() {
+        for status in [201, 200] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(MockMethod::POST)
+                    .path("/api/v1/user/deletion-request")
+                    .header("authorization", "Bearer deletion-jwt")
+                    .json_body(serde_json::json!({ "source": "desktop" }));
+                then.status(status)
+                    .header("content-type", "application/json")
+                    .body(PENDING);
+            });
+            let got = signed_in(&server).request_account_deletion().await.unwrap();
+            mock.assert();
+            assert_eq!(got, pending());
+        }
+    }
+
+    #[tokio::test]
+    async fn request_failure_keeps_the_status_code() {
+        for code in [400, 401] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(MockMethod::POST)
+                    .path("/api/v1/user/deletion-request");
+                then.status(code)
+                    .body(r#"{"success":false,"error":{"code":"BAD_REQUEST","message":"bad"}}"#);
+            });
+            let err = signed_in(&server)
+                .request_account_deletion()
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                CoincubeError::Unsuccessful(ref info) if info.status_code == code
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::*;
+    use httpmock::{Method as MockMethod, MockServer};
+    use serde_json::json;
+
+    fn signed_in(server: &MockServer) -> CoincubeClient {
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("name-jwt");
+        client
+    }
+
+    /// The profile as the API answers `PUT` and `GET /api/v1/user`: plain
+    /// JSON, with fields this app does not read.
+    fn profile(display_name: Option<&str>) -> serde_json::Value {
+        let mut body = json!({
+            "id": 7,
+            "uuid": "0b0e2a6e-0000-4000-8000-000000000000",
+            "email": "ama@example.test",
+            "emailVerified": true,
+            "phone": "",
+            "timezone": "UTC",
+        });
+        if let Some(name) = display_name {
+            body["displayName"] = json!(name);
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn saving_sends_only_the_name_and_reads_the_stored_one_back() {
+        let server = MockServer::start();
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt")
+                // Exactly this body: no email or phone, so nothing else on
+                // the profile can change.
+                .json_body(json!({ "displayName": "Ama Adeyemi" }));
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let user = signed_in(&server)
+            .update_display_name("Ama Adeyemi")
+            .await
+            .unwrap();
+        put.assert();
+        assert_eq!(user.id, 7);
+        assert_eq!(user.email, "ama@example.test");
+        assert_eq!(user.display_name.as_deref(), Some("Ama Adeyemi"));
+    }
+
+    #[tokio::test]
+    async fn a_blank_name_is_sent_as_empty_and_clears_it() {
+        let server = MockServer::start();
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .json_body(json!({ "displayName": "" }));
+            then.status(200).json_body(profile(Some("")));
+        });
+        let user = signed_in(&server).update_display_name("").await.unwrap();
+        put.assert();
+        assert_eq!(user.display_name.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn a_server_without_display_names_answers_without_the_field() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        let client = signed_in(&server);
+        let saved = client.update_display_name("Ama Adeyemi").await.unwrap();
+        assert_eq!(saved.display_name, None);
+        assert_eq!(saved.email, "ama@example.test");
+        assert_eq!(client.get_user().await.unwrap().display_name, None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_name_keeps_the_status_and_the_message() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(400).body(
+                r#"{"success":false,"error":{"code":"BAD_REQUEST","message":"Display name must be 60 characters or fewer"}}"#,
+            );
+        });
+        let err = signed_in(&server)
+            .update_display_name(&"a".repeat(61))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoincubeError::Unsuccessful(ref info)
+                if info.status_code == 400 && info.text.contains("60 characters")
+        ));
     }
 }

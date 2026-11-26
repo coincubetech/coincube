@@ -97,6 +97,21 @@ Keep the run URL, source SHA, MSI hash and VM results. A valid signature may sti
 show a SmartScreen reputation warning; "Unknown publisher" is a failure, not an
 expected reputation warning. Historical unsigned assets are not activation proof.
 
+## Bitcoin Blake2b Mobile keys check
+
+Applies to every tagged build that leaves the team, release candidates and tester builds included.
+Owner: whoever cuts the release.
+
+Before publishing, check whether the build lets a user add a Mobile key to a new Bitcoin Blake2b
+Vault: in a Bitcoin Blake2b Cube, open Create Vault and look at the Mobile keys card in the key
+picker. If the card is disabled, this check passes and nothing else is needed.
+
+If the card is enabled, do not publish until a COINCUBE Mobile build made by its release recipe (the
+Android release workflow, or `make ios`) has signed a Bitcoin Blake2b spend requested by this
+Desktop build, and the result verified as replay protected. A build that ships the card before
+phones can sign lets a user create a Vault around a key that cannot sign yet. Nothing in CI or in
+a feature flag enforces this; this check is the only gate.
+
 In order to build the release assets:
 
 ```

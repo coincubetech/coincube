@@ -32,26 +32,26 @@ async fn dispatch_matches_discovery_and_capabilities() {
     let credential = "a".repeat(64);
     for (name, enabled, request, grant) in [
         (
-            "tenshu_prepare_wallet_proposal",
+            "coincube_prepare_wallet_proposal",
             caps.wallet_proposals,
             json!({"request_id":"request-1","network":"regtest","topology":topology}),
             Grant::paired_proposals(credential.clone(), || true).unwrap(),
         ),
         (
-            "tenshu_get_wallet_proposal",
+            "coincube_get_wallet_proposal",
             caps.wallet_proposals,
             json!({"proposal_id":"proposal-1"}),
             Grant::paired_proposals(credential.clone(), || true).unwrap(),
         ),
         (
-            "tenshu_prepare_wallet_creation",
+            "coincube_prepare_wallet_creation",
             caps.wallet_proposals,
             json!({"request_id":"request-1","network":"regtest","topology":topology,
                 "keys":{"primary":["public-1","public-2","public-3","public-4","public-5"],"recovery":["public-6"]}}),
             Grant::paired_creation(credential.clone(), || true).unwrap(),
         ),
         (
-            "tenshu_prepare_transaction",
+            "coincube_prepare_transaction",
             caps.transaction_preparation,
             json!({"wallet_id":"wallet","request_id":"request-1","network":"regtest",
                 "recipients":[{"address":"bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202","amount_sats":10000}],
@@ -59,7 +59,7 @@ async fn dispatch_matches_discovery_and_capabilities() {
             Grant::paired_transactions("wallet".into(), credential.clone(), || true).unwrap(),
         ),
         (
-            "tenshu_get_prepared_transaction",
+            "coincube_get_prepared_transaction",
             caps.transaction_preparation,
             json!({"wallet_id":"wallet","draft_id":"draft-1"}),
             Grant::paired_transactions("wallet".into(), credential.clone(), || true).unwrap(),
@@ -89,4 +89,49 @@ async fn dispatch_matches_discovery_and_capabilities() {
             assert_eq!(reader.0.load(Ordering::SeqCst), 0, "{name}");
         }
     }
+}
+
+/// Longest host entry name COINCUBE Desktop copies into a client configuration.
+const HOST_ENTRY_MAX_LEN: usize = 17;
+
+/// Tool names are part of the client contract: every advertised tool uses the
+/// product prefix, and the pre-rename `tenshu_*` names are unknown tools that
+/// never reach desktop IPC.
+#[tokio::test]
+async fn tools_use_the_coincube_prefix_and_old_names_are_unknown() {
+    let names: Vec<_> = adapter::tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(!names.is_empty());
+    for name in &names {
+        assert!(name.starts_with("coincube_"), "{name}");
+        // Hosts expose tools as `mcp__<entry>__<tool>` and several cap that at
+        // 64 characters. COINCUBE Desktop's copied entry names are at most 17
+        // characters (`coincube-` + 8 id characters; see `server_key` in
+        // coincube-gui's local_mcp.rs), so every tool must fit beside one.
+        let qualified = "mcp__".len() + HOST_ENTRY_MAX_LEN + "__".len() + name.len();
+        assert!(
+            qualified <= 64,
+            "{name} qualifies to {qualified} characters"
+        );
+    }
+    let credential = "a".repeat(64);
+    let reader = Arc::new(RecordingReader::default());
+    let server = Server::start(
+        reader.clone(),
+        Grant::paired_proposals(credential.clone(), || true).unwrap(),
+    )
+    .unwrap();
+    let adapter = Adapter {
+        socket: server.socket.clone(),
+        credential,
+        pairing: None,
+    };
+    for name in &names {
+        let old = name.replacen("coincube_", "tenshu_", 1);
+        let result = adapter.invoke(&old, json!({})).await;
+        assert_eq!(result.unwrap_err().message, "unknown_tool", "{old}");
+    }
+    assert_eq!(reader.0.load(Ordering::SeqCst), 0);
 }

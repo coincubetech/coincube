@@ -28,6 +28,21 @@ key directly. No Liquid or Spark SDK is constructed. A passkey fork Cube derives
 the same key from the session signer its assertion opened. Remote legacy wallet
 routes remain unavailable for the fork.
 
+The App hands that key's public half to Connect's registration wave, which
+publishes it (`PUT /connect/cubes/{id}/encryption-pubkey`) once the Cube's
+account reaches its dashboard, with or without a Vault. A Bitcoin Cube
+persists the value at unlock; a fork Cube derives it again at every open and
+never persists it. Without it Connect has no recipient key for the Cube, and
+COINCUBE Mobile cannot share a key with it.
+
+A Vault-less or managed-local fork Cube opened signed in keeps that session in
+its account panel until a log-out or an account change ends it, and brings
+Mobile signing up from it at open. The panel then becomes an ordinary one
+and signs in through the Bitcoin path: the session is committed to the chain
+folder's `connect.json`, the signer device is registered and the stream
+started (`BTCB2_VAULT_APP.md`, "Connect signer bootstrap"). Live updates and
+the account email work as on a Bitcoin Cube.
+
 A pending fork PIN screen receives a candidate from the exact current completed
 Connect login after its account safety gates, scoped to its data root and API
 provider. The next PIN submission rechecks that account's identity and feature availability before decrypting; it
@@ -44,9 +59,14 @@ local node. Startup retries are user-triggered, one attempt per click, with a
 Loader-owned 30-second minimum interval; failed admission cannot lose that bound
 when its temporary provider is dropped.
 
-Home or App logout/token replacement invalidates every open fork tab before the
-account change propagates. The fork App is dropped into a fresh Home, removing
-its wallet, signing/export panels and matching Cube PIN session. App tasks are
+Home or App logout/token replacement invalidates every open Connect-served fork
+tab before the account change propagates. A local fork tab (no Vault, or a
+managed local node) stays open and keeps its own session, as a Bitcoin tab
+does; a revoked feature still closes it. A Connect-served Cube that still
+requires Connect is dropped into a fresh Home, removing its wallet,
+signing/export panels and matching Cube PIN session. One opened
+Connect-served and since promoted to its managed node stays in its App: it
+loses its Connect client and services only, and keeps the reopen notice. App tasks are
 owned and cancelled; task, subscription and view callbacks carry the session
 generation so stale signing results cannot affect a later reopened App. A CPU
 operation already running may finish, but its revoked completion is discarded.

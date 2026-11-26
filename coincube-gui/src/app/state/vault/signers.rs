@@ -19,7 +19,7 @@ use coincube_core::{
     miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt},
 };
 
-use crate::services::coincube::{CubeKeyRaw, VaultMemberResponse};
+use crate::services::coincube::{display_name, CubeKeyRaw, VaultMemberResponse};
 
 /// Whether a signer can produce a Bitcoin Blake2b *unified* signature
 /// (`SIGHASH_ALL | UNIFIED`), which is what makes a spend impossible to replay
@@ -51,11 +51,7 @@ pub fn resolved_keychain_replay_protection(
     chain: crate::chain::ChainId,
     capabilities: &[String],
 ) -> ReplayProtection {
-    let has_chain_identity = capabilities
-        .iter()
-        .any(|value| value == "chain-identity-v1");
-    let has_unified_signing = capabilities.iter().any(|value| value == "btcb2-unified-v1");
-    if chain.is_blake2b() && has_chain_identity && has_unified_signing {
+    if chain.is_blake2b() && crate::mobile_signing::btcb2_signing_capable(capabilities) {
         ReplayProtection::Capable
     } else {
         ReplayProtection::Legacy
@@ -164,6 +160,9 @@ pub enum RequiredSigner {
         /// `Some(email)` when the signer is a contact; `None` when the
         /// signer is the current user themselves.
         owner_email: Option<String>,
+        /// The contact's display name, when they set one. A label for the
+        /// picker row, shown with `owner_email` and never in place of it.
+        owner_display_name: Option<String>,
         /// Backend `contacts.id` when the signer is a contact; `None`
         /// for self-signers.
         contact_id: Option<u64>,
@@ -234,6 +233,9 @@ pub struct KeychainSignerInfo {
     pub owner_user_id: u64,
     pub name: String,
     pub owner_email: Option<String>,
+    /// The contact's display name, when they set one and the member row
+    /// carried it. A label only; `owner_email` stays the identity shown.
+    pub owner_display_name: Option<String>,
     pub contact_id: Option<u64>,
 }
 
@@ -273,20 +275,22 @@ pub fn build_keychain_index(
             continue;
         };
         let owner_user_id = cube_key.effective_owner_user_id();
-        let (owner_email, contact_id) = if owner_user_id == self_user_id {
-            (None, None)
+        let (owner_email, owner_display_name, contact_id) = if owner_user_id == self_user_id {
+            (None, None, None)
         } else {
             // Contact: prefer the contact summary email when the API sent
             // it, else the owner_email field on the key itself.
-            let email = member
+            let contact_user = member
                 .contact
                 .as_ref()
-                .and_then(|c| c.contact_user.as_ref())
-                .map(|u| u.email.clone())
-                .or_else(|| {
-                    (!cube_key.owner_email.is_empty()).then(|| cube_key.owner_email.clone())
-                });
-            (email, member.contact_id)
+                .and_then(|c| c.contact_user.as_ref());
+            let email = contact_user.map(|u| u.email.clone()).or_else(|| {
+                (!cube_key.owner_email.is_empty()).then(|| cube_key.owner_email.clone())
+            });
+            // The name comes only from the same contact row as the email it
+            // is shown with, so the two always describe one person.
+            let name = contact_user.and_then(|u| display_name::shown(u.display_name.as_deref()));
+            (email, name, member.contact_id)
         };
         index.insert(
             fingerprint,
@@ -295,6 +299,7 @@ pub fn build_keychain_index(
                 owner_user_id,
                 name: cube_key.name.clone(),
                 owner_email,
+                owner_display_name,
                 contact_id,
             },
         );
@@ -451,6 +456,7 @@ pub fn classify_signers(
                     owner_user_id: info.owner_user_id,
                     name: info.name.clone(),
                     owner_email: info.owner_email.clone(),
+                    owner_display_name: info.owner_display_name.clone(),
                     contact_id: info.contact_id,
                     replay_protection,
                 }
@@ -501,6 +507,7 @@ mod tests {
             is_own_key: false,
             used_by_vault: false,
             recovery_role: String::new(),
+            btcb2_signing: None,
         }
     }
 
@@ -520,6 +527,7 @@ mod tests {
                 contact_user: Some(VaultMemberContactUserSummary {
                     id: 0,
                     email: e.to_string(),
+                    display_name: None,
                 }),
             }),
             key: key_id.map(|_| VaultMemberKeySummary {
@@ -529,6 +537,7 @@ mod tests {
                 xpub: String::new(),
                 derivation_path: String::new(),
             }),
+            sealed_roles: Vec::new(),
             created_at: String::new(),
         }
     }
@@ -560,6 +569,54 @@ mod tests {
         assert_eq!(
             contact_entry.owner_email.as_deref(),
             Some("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn build_index_carries_a_contacts_name_beside_their_email() {
+        let cube_keys = vec![
+            cube_key(1, "deadbeef", 100, "My HW"),
+            cube_key(2, "cafef00d", 200, "Alice's HW"),
+            cube_key(3, "0badf00d", 300, "Bob's HW"),
+        ];
+        let named = |mut member: VaultMemberResponse, name: &str| {
+            member
+                .contact
+                .as_mut()
+                .unwrap()
+                .contact_user
+                .as_mut()
+                .unwrap()
+                .display_name = Some(name.to_string());
+            member
+        };
+        let members = vec![
+            vault_member(11, Some(1), None, None),
+            named(
+                vault_member(12, Some(2), Some(42), Some("alice@example.com")),
+                "Alice Example",
+            ),
+            // A name this app would refuse is not carried: email only.
+            named(
+                vault_member(13, Some(3), Some(43), Some("bob@example.com")),
+                "boss@bank.example",
+            ),
+        ];
+        let index = build_keychain_index(&members, &cube_keys, 100);
+        let entry = |fg: &str| index.get(&fg.parse::<Fingerprint>().unwrap()).unwrap();
+        assert_eq!(entry("deadbeef").owner_display_name, None);
+        assert_eq!(
+            entry("cafef00d").owner_display_name.as_deref(),
+            Some("Alice Example")
+        );
+        assert_eq!(
+            entry("cafef00d").owner_email.as_deref(),
+            Some("alice@example.com")
+        );
+        assert_eq!(entry("0badf00d").owner_display_name, None);
+        assert_eq!(
+            entry("0badf00d").owner_email.as_deref(),
+            Some("bob@example.com")
         );
     }
 
@@ -615,6 +672,7 @@ mod tests {
                 owner_user_id: 100,
                 name: "testnet4 keychain".to_string(),
                 owner_email: None,
+                owner_display_name: None,
                 contact_id: None,
             },
         );
@@ -719,11 +777,19 @@ mod tests {
     fn resolved_keychain_replay_protection_requires_both_btcb2_capabilities() {
         use crate::chain::ChainId;
         let cases = [
-            (vec!["chain-identity-v1", "btcb2-unified-v1"], true),
+            (vec!["chain-identity-v1", "btcb2-unified-v2"], true),
+            (
+                vec!["chain-identity-v1", "btcb2-unified-v1", "btcb2-unified-v2"],
+                true,
+            ),
             (vec!["chain-identity-v1"], false),
+            (vec!["btcb2-unified-v2"], false),
+            // A phone that stores only the retired name reads as outdated
+            // (contract §2.6, A1): released builds send it without the library.
+            (vec!["chain-identity-v1", "btcb2-unified-v1"], false),
             (vec!["btcb2-unified-v1"], false),
             (vec![], false),
-            (vec![" chain-identity-v1", "BTCB2-UNIFIED-V1"], false),
+            (vec![" chain-identity-v1", "BTCB2-UNIFIED-V2"], false),
         ];
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             for (capabilities, capable) in &cases {
@@ -813,6 +879,7 @@ mod tests {
                     owner_user_id: 100,
                     name: "phone".to_string(),
                     owner_email: None,
+                    owner_display_name: None,
                     contact_id: None,
                 },
             );

@@ -110,14 +110,6 @@ pub struct PhoneSigner {
     pub(crate) transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
 }
 
-/// The current LAN protocol cannot authenticate a BTCB2 pairing identity.
-/// Keep this gate independent of Cube/runtime exposure until pairing v3 ships.
-pub(crate) fn lan_signing_allowed(chain: crate::chain::ChainId) -> bool {
-    !chain.is_blake2b()
-}
-
-pub(crate) const BTCB2_LAN_UNAVAILABLE: &str = "Mobile signing over the local network is unavailable for Bitcoin Blake2b until chain-bound pairing is supported. Use a supported Connect signer.";
-
 impl std::fmt::Debug for PhoneSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhoneSigner")
@@ -128,6 +120,12 @@ impl std::fmt::Debug for PhoneSigner {
 }
 
 impl PhoneSigner {
+    /// The same rule as the PSBT panel's `uses_unified_signatures`: a Vault on
+    /// Bitcoin Blake2b signs unified; an imported wallet never does.
+    fn uses_unified_signatures(&self) -> bool {
+        self.chain.is_blake2b() && matches!(self.policy.kind(), PhonePolicyKind::Vault(_))
+    }
+
     fn current_binding(&self) -> Result<&SignerBinding, HwiError> {
         match self.policy.kind() {
             PhonePolicyKind::Vault(_) => self.paired_phone.exact_signer_for(&self.policy),
@@ -245,9 +243,9 @@ impl HWI for PhoneSigner {
 
     async fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), HwiError> {
         use crate::services::connect::grpc::connect_v1 as cv1;
-        if !lan_signing_allowed(self.chain) {
-            return Err(HwiError::Device(BTCB2_LAN_UNAVAILABLE.to_string()));
-        }
+        // Chain-bound pairing (v3) decides which chain this phone may sign
+        // for: `current_binding` applies the chain rule in
+        // `PairedPhone::exact_signer_against` (contract §4.5).
         if self.peer_unpaired() {
             return Err(HwiError::Device(protocol::phone_unpaired_text()));
         }
@@ -261,7 +259,13 @@ impl HWI for PhoneSigner {
         signatures::authenticated_prevouts(psbt).map_err(HwiError::Device)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let request_id = uuid::Uuid::new_v4().to_string();
-        let psbt_bytes = psbt.serialize();
+        // One codec for both rails (`crate::mobile_signing`), selected by the
+        // wallet's signature format: a Bitcoin Blake2b Vault signs unified, an
+        // imported wallet ordinary signatures on every chain. On Bitcoin this
+        // is the plain serialisation.
+        let unified = self.uses_unified_signatures();
+        let psbt_bytes = crate::mobile_signing::signing_wire_psbt(unified, psbt.clone())
+            .map_err(|e| HwiError::Device(format!("encode psbt: {}", e)))?;
 
         // LAN is ECIES_V1, the same as the Connect rail. Both halves of the
         // key exchange must be present or we refuse the session outright:
@@ -322,9 +326,12 @@ impl HWI for PhoneSigner {
             }
         };
 
+        // The Vault's chain, the only thing that chooses the session's
+        // network (contract §3.8, §4.5); the phone checks it against its
+        // binding and states it again on the partial signature.
+        let network = self.policy.chain().api_str().to_string();
         let session = cv1::SigningSession {
-            // LAN remains pre-identity and BTCB2-gated until pairing v3 lands.
-            network: String::new(),
+            network: network.clone(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),
             user_id: String::new(),
@@ -400,6 +407,10 @@ impl HWI for PhoneSigner {
             }
         };
 
+        // The phone's statement of the network it signed for, checked before
+        // anything is decrypted, verified or merged (contract R2.13).
+        check_partial_network(&network, &partial.network).map_err(HwiError::Device)?;
+
         // The session went out as ECIES_V1, so the signature must come back
         // sealed. A phone that answers with a plaintext `signed_psbt` is either
         // too old to have decrypted the descriptor it was sent, or is trying to
@@ -430,7 +441,7 @@ impl HWI for PhoneSigner {
             .map_err(|e| {
                 HwiError::Device(format!("could not decrypt the signed transaction: {}", e))
             })?;
-        let signed: Psbt = Psbt::deserialize(&signed_bytes)
+        let signed: Psbt = crate::mobile_signing::returned_wire_psbt(unified, &signed_bytes)
             .map_err(|e| HwiError::Device(format!("decode signed psbt: {}", e)))?;
 
         if signed.unsigned_tx != psbt.unsigned_tx || signed.inputs.len() != psbt.inputs.len() {
@@ -445,7 +456,7 @@ impl HWI for PhoneSigner {
         }
         match self.policy.kind() {
             PhonePolicyKind::Vault(_) => {
-                signatures::merge_verified(psbt, &signed, &self.descriptor, binding)
+                signatures::merge_verified_for(unified, psbt, &signed, &self.descriptor, binding)
             }
             PhonePolicyKind::Imported { wallet, .. } => {
                 signatures::merge_imported_verified(psbt, &signed, wallet, binding)
@@ -454,6 +465,26 @@ impl HWI for PhoneSigner {
         .map_err(HwiError::Device)?;
         Ok(())
     }
+}
+
+/// Contract R2.13: a returned `PartialSignature.network` is required and must
+/// equal the session's, on every chain and every response. Anything else is
+/// discarded before verification and merge.
+fn check_partial_network(session: &str, partial: &str) -> Result<(), String> {
+    const NOT_ACCEPTED: &str = "Your signature wasn't accepted and nothing was broadcast from it.";
+    if partial.is_empty() {
+        return Err(format!(
+            "{} Update COINCUBE Mobile and pair again.",
+            NOT_ACCEPTED
+        ));
+    }
+    if partial != session {
+        return Err(format!(
+            "{} The signature COINCUBE Mobile returned is for a different network. Pair again.",
+            NOT_ACCEPTED
+        ));
+    }
+    Ok(())
 }
 
 /// Error code a peer sends when its stored pairing no longer matches: the
@@ -544,3 +575,7 @@ mod signature_tests;
 #[cfg(test)]
 #[path = "imported_phone_tests.rs"]
 mod imported_phone_tests;
+
+#[cfg(test)]
+#[path = "unified_signature_tests.rs"]
+mod unified_signature_tests;

@@ -4,10 +4,11 @@
 //! atomically replaced. The device-only inventory anchor is the admission
 //! authority. An undeclared ciphertext causes inventory and signing to fail
 //! closed; it is never deleted based on this unauthenticated public manifest.
-//! No mnemonic enters Cube Settings. Keys, ordinary Send, and Recovery Kit are
-//! separate integrations and do not consume this repository yet.
+//! No mnemonic enters Cube Settings. The import's Keys step admits keys here;
+//! the Vault signer picker signs with them (`services::imported_signer`).
+//! The native anchor's signed restart and fault probe passed on 2026-11-17.
 
-// Admission and signing are staged until the external inventory release gate.
+// Some repository operations are still used only by tests and recovery.
 #![allow(dead_code)]
 
 use std::{
@@ -125,6 +126,16 @@ struct RestoredCheckpoint {
     ready: bool,
 }
 
+#[derive(Default)]
+struct UncommittedStageFiles {
+    txn: Option<Uuid>,
+    has_prior: bool,
+    has_prepared: bool,
+    has_intent: bool,
+    intent_tmp: Option<Uuid>,
+    batch_tag: Option<Uuid>,
+}
+
 struct RepositoryGuard {
     _process: MutexGuard<'static, ()>,
     _file: File,
@@ -158,7 +169,6 @@ impl<'a> LocalKeyRepository<'a> {
         if import.attachment() != Some(attachment)
             || directory.path().file_name() != Some(std::ffi::OsStr::new(cube.network.dir_name()))
             || import.operation_id.is_nil()
-            || cube.network.is_blake2b()
         {
             return Err("Imported key scope does not match this Cube.".into());
         }
@@ -447,12 +457,242 @@ impl<'a> LocalKeyRepository<'a> {
         if !retire_files.is_empty() {
             return Ok(());
         }
-        let mut txn = None;
-        let mut has_prior = false;
-        let mut has_prepared = false;
-        let mut has_intent = false;
-        let mut intent_tmp = None;
-        let mut batch_tag = None;
+        let files = self.inspect_uncommitted_stage_files()?;
+        let UncommittedStageFiles {
+            txn,
+            has_prior,
+            has_prepared,
+            intent_tmp,
+            batch_tag,
+            ..
+        } = files;
+        if let Some(tmp_id) = intent_tmp {
+            if txn.is_some() || batch_tag.is_some() {
+                return Err("Imported inventory has an unknown transaction file.".into());
+            }
+            return self.discard_temporary_intent(&authority, digest, tmp_id);
+        }
+        let Some(txn_id) = txn else {
+            if batch_tag.is_some() {
+                return Err("Imported inventory has an unknown transaction file.".into());
+            }
+            return Ok(());
+        };
+        self.verify_stage_intent(&files, &authority, txn_id)?;
+        let published = self.root().join(MANIFEST);
+        let published_bytes = read_manifest_bytes(&published)?;
+        if anchor::digest(&published_bytes) != *digest {
+            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
+        }
+        if let Ok(old) = self.read_manifest_file(&published, &[], false) {
+            self.check_missing_single_key_candidate(&old, &files, txn_id)?;
+            self.check_stage_cleanup_authority(&authority, &published, &published_bytes)?;
+            return self.remove_stage_metadata(&files, txn_id);
+        }
+        if has_prior && read_manifest_bytes(&self.prior(txn_id))? != published_bytes {
+            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
+        }
+        let new_files = if has_prepared {
+            self.verify_staged_ciphertexts(
+                txn_id,
+                &authority,
+                &published_bytes,
+                batch_tag.is_some(),
+                credential,
+                device,
+            )?
+        } else {
+            // An intent can be the only durable transaction file when the
+            // following prior create fails. Without a prepared candidate,
+            // inventory validation must reject undeclared ciphertext before
+            // removing either the intent or a lone prior.
+            self.read_manifest_file(&published, &[], false)?;
+            Vec::new()
+        };
+        self.check_stage_cleanup_authority(&authority, &published, &published_bytes)?;
+        self.remove_staged_ciphertexts(new_files, batch_tag.is_some())?;
+        self.remove_stage_metadata(&files, txn_id)
+    }
+
+    fn verify_stage_intent(
+        &self,
+        files: &UncommittedStageFiles,
+        authority: &Anchor,
+        txn_id: Uuid,
+    ) -> Result<(), String> {
+        if files.batch_tag.is_some_and(|id| id != txn_id) {
+            return Err("Imported inventory has an unknown transaction file.".into());
+        }
+        if !files.has_intent || (!files.has_prior && files.has_prepared) {
+            return Err("Imported inventory has an unproven precommit transaction.".into());
+        }
+        self.check_transaction_files(Some(txn_id))?;
+        if read_manifest_bytes(&self.intent(txn_id))? != authority.encode()? {
+            return Err(
+                "Imported inventory precommit intent differs from its device anchor.".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn remove_staged_ciphertexts(
+        &self,
+        new_files: Vec<String>,
+        is_batch: bool,
+    ) -> Result<(), String> {
+        // Preserve the manifests and intent while deleting candidate
+        // ciphertext: a crash must not leave a key with no candidate identity.
+        // A partial deletion can still require owner-assisted recovery.
+        for name in new_files {
+            let path = self.root().join(name);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == ErrorKind::NotFound && is_batch => {}
+                Err(_) => return Err("Cannot inspect staged imported key.".into()),
+                Ok(_) => remove_staged(&path)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_temporary_intent(
+        &self,
+        authority: &Anchor,
+        digest: &[u8; 32],
+        tmp_id: Uuid,
+    ) -> Result<(), String> {
+        // The canonical intent is published by rename after its bytes are synced.
+        // Discard a stranded temporary file only when no key file exists outside
+        // the unchanged anchored manifest.
+        let published = self.root().join(MANIFEST);
+        let bytes = read_manifest_bytes(&published)?;
+        if anchor::digest(&bytes) != *digest {
+            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
+        }
+        self.read_manifest_file(&published, &[], false)?;
+        self.check_stage_cleanup_authority(authority, &published, &bytes)?;
+        remove_staged(&self.intent_tmp(tmp_id))
+    }
+
+    fn verify_staged_ciphertexts(
+        &self,
+        txn_id: Uuid,
+        authority: &Anchor,
+        published_bytes: &[u8],
+        is_batch: bool,
+        credential: impl FnOnce() -> Result<Zeroizing<String>, String>,
+        device: impl FnOnce() -> Result<coincube_core::seed_crypt::DeviceSecret, String>,
+    ) -> Result<Vec<String>, String> {
+        let published = self.root().join(MANIFEST);
+        let raw_old: Manifest = serde_json::from_slice(published_bytes)
+            .map_err(|_| "Invalid anchored imported manifest.")?;
+        let old_names: Vec<_> = raw_old
+            .records
+            .iter()
+            .map(LocalKeyRecord::file_name)
+            .collect();
+        let prepared = self.prepared(txn_id);
+        let prepared_bytes = read_manifest_bytes(&prepared)?;
+        // The transaction intent and anchored prior were written before a
+        // batch starts staging ciphertext. A crash can leave only some of
+        // the candidate records. Their names are still bounded by the
+        // canonical prepared manifest; none has admission authority.
+        let next = if is_batch {
+            self.read_manifest_structure(&prepared, false)?
+        } else {
+            self.read_manifest_file(&prepared, &old_names, false)?
+        };
+        let next_names: Vec<_> = next.records.iter().map(LocalKeyRecord::file_name).collect();
+        let old = self.read_manifest_file(&published, &next_names, false)?;
+        if serde_json::to_vec(&old).ok().as_deref() != Some(published_bytes) {
+            return Err("Uncommitted imported prior manifest changed.".into());
+        }
+        let admitted: HashSet<_> = old_names.into_iter().collect();
+        let new_files = next_names
+            .into_iter()
+            .filter(|name| !admitted.contains(name))
+            .collect();
+        if is_batch {
+            if !old.records.is_empty() {
+                return Err("Imported batch cannot replace an existing signer set.".into());
+            }
+            let device = device()?;
+            self.verify_batch_tag(txn_id, authority, &prepared_bytes, &device)?;
+        } else if !old.records.is_empty() || !next.records.is_empty() {
+            let credential = credential()?;
+            let device = device()?;
+            self.verify_records(&old, &credential, &device)?;
+            self.verify_records(&next, &credential, &device)?;
+        }
+        if read_manifest_bytes(&prepared)? != prepared_bytes {
+            return Err("Uncommitted imported candidate changed before cleanup.".into());
+        }
+        Ok(new_files)
+    }
+
+    fn check_missing_single_key_candidate(
+        &self,
+        old: &Manifest,
+        files: &UncommittedStageFiles,
+        txn_id: Uuid,
+    ) -> Result<(), String> {
+        // A crash may interrupt the prior or prepared writes. If no
+        // candidate ciphertext exists, none has authority: discard the
+        // incomplete transaction while retaining the unchanged inventory.
+        // A legacy single-key admission always stages its ciphertext
+        // before the prepared manifest. If that manifest is complete
+        // but its candidate key is missing, a deletion may have been
+        // interrupted: keep the transaction fail closed. Batch admission
+        // instead records its authenticated tag before staging any key.
+        if files.has_prepared && files.batch_tag.is_none() {
+            if let Ok(next) = self.read_manifest_structure(&self.prepared(txn_id), false) {
+                let old_names: HashSet<_> =
+                    old.records.iter().map(LocalKeyRecord::file_name).collect();
+                if next
+                    .records
+                    .iter()
+                    .map(LocalKeyRecord::file_name)
+                    .any(|name| !old_names.contains(&name))
+                {
+                    return Err("Imported inventory has a missing single-key candidate.".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_stage_cleanup_authority(
+        &self,
+        authority: &Anchor,
+        published: &Path,
+        published_bytes: &[u8],
+    ) -> Result<(), String> {
+        if anchor::load(&authority.scope)?.as_ref() != Some(authority)
+            || read_manifest_bytes(published)? != published_bytes
+        {
+            return Err("Imported inventory authority changed before staging cleanup.".into());
+        }
+        Ok(())
+    }
+
+    fn remove_stage_metadata(
+        &self,
+        files: &UncommittedStageFiles,
+        txn_id: Uuid,
+    ) -> Result<(), String> {
+        if files.has_prepared {
+            remove_staged(&self.prepared(txn_id))?;
+        }
+        if files.batch_tag.is_some() {
+            remove_staged(&self.batch_tag(txn_id))?;
+        }
+        if files.has_prior {
+            remove_staged(&self.prior(txn_id))?;
+        }
+        remove_staged(&self.intent(txn_id))
+    }
+
+    fn inspect_uncommitted_stage_files(&self) -> Result<UncommittedStageFiles, String> {
+        let mut files = UncommittedStageFiles::default();
         for entry in
             fs::read_dir(self.root()).map_err(|_| "Cannot inspect imported key storage.")?
         {
@@ -462,9 +702,8 @@ impl<'a> LocalKeyRepository<'a> {
                 .strip_prefix(".intent-")
                 .and_then(|rest| rest.strip_suffix(".tmp"))
             {
-                let id = Uuid::parse_str(raw)
-                    .map_err(|_| "Imported inventory has an unknown transaction file.")?;
-                if id.is_nil() || raw != id.to_string() || intent_tmp.replace(id).is_some() {
+                let id = Self::uncommitted_stage_id(raw)?;
+                if files.intent_tmp.replace(id).is_some() {
                     return Err("Imported inventory has an unknown transaction file.".into());
                 }
                 reject_non_file(&entry.path())?;
@@ -474,211 +713,58 @@ impl<'a> LocalKeyRepository<'a> {
                 .strip_prefix(".batch-")
                 .and_then(|rest| rest.strip_suffix(".tag"))
             {
-                let id = Uuid::parse_str(raw)
-                    .map_err(|_| "Imported inventory has an unknown transaction file.")?;
-                if id.is_nil() || raw != id.to_string() || batch_tag.replace(id).is_some() {
+                let id = Self::uncommitted_stage_id(raw)?;
+                if files.batch_tag.replace(id).is_some() {
                     return Err("Imported inventory has an unknown transaction file.".into());
                 }
                 reject_non_file(&entry.path())?;
                 continue;
             }
-            let parsed = IntoIterator::into_iter([
-                (".prior-", ".manifest", &mut has_prior),
-                (".prepared-", ".manifest", &mut has_prepared),
-                (".intent-", ".anchor", &mut has_intent),
-            ])
-            .find_map(|(prefix, suffix, present)| {
-                name.strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_suffix(suffix))
-                    .map(|raw| (raw, present))
-            });
-            if let Some((raw, present)) = parsed {
-                let id = Uuid::parse_str(raw)
-                    .map_err(|_| "Imported inventory has an unknown transaction file.")?;
-                if id.is_nil()
-                    || raw != id.to_string()
-                    || txn.is_some_and(|old| old != id)
-                    || *present
-                {
-                    return Err("Imported inventory has an unknown transaction file.".into());
-                }
-                txn = Some(id);
-                *present = true;
-                reject_non_file(&entry.path())?;
-            } else if name.starts_with(".prior-")
-                || name.starts_with(".prepared-")
-                || name.starts_with(".intent-")
-                || name.starts_with(".batch-")
-            {
-                return Err("Imported inventory has an unknown transaction file.".into());
-            }
+            Self::inspect_canonical_stage_file(&mut files, &name, &entry.path())?;
         }
-        if let Some(tmp_id) = intent_tmp {
-            if txn.is_some() || batch_tag.is_some() {
+        Ok(files)
+    }
+
+    fn inspect_canonical_stage_file(
+        files: &mut UncommittedStageFiles,
+        name: &str,
+        path: &Path,
+    ) -> Result<(), String> {
+        let parsed = IntoIterator::into_iter([
+            (".prior-", ".manifest", &mut files.has_prior),
+            (".prepared-", ".manifest", &mut files.has_prepared),
+            (".intent-", ".anchor", &mut files.has_intent),
+        ])
+        .find_map(|(prefix, suffix, present)| {
+            name.strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .map(|raw| (raw, present))
+        });
+        if let Some((raw, present)) = parsed {
+            let id = Self::uncommitted_stage_id(raw)?;
+            if files.txn.is_some_and(|old| old != id) || *present {
                 return Err("Imported inventory has an unknown transaction file.".into());
             }
-            // The canonical intent is published only by rename after its
-            // bytes are synced. A stranded temporary file can be discarded
-            // if no key file exists outside the unchanged anchored manifest.
-            let published = self.root().join(MANIFEST);
-            let bytes = read_manifest_bytes(&published)?;
-            if anchor::digest(&bytes) != *digest {
-                return Err(
-                    "Uncommitted imported inventory has no unchanged anchored prior.".into(),
-                );
-            }
-            self.read_manifest_file(&published, &[], false)?;
-            if anchor::load(&authority.scope)?.as_ref() != Some(&authority)
-                || read_manifest_bytes(&published)? != bytes
-            {
-                return Err("Imported inventory authority changed before staging cleanup.".into());
-            }
-            return remove_staged(&self.intent_tmp(tmp_id));
-        }
-        let Some(txn_id) = txn else {
-            if batch_tag.is_some() {
-                return Err("Imported inventory has an unknown transaction file.".into());
-            }
-            return Ok(());
-        };
-        if batch_tag.is_some_and(|id| id != txn_id) {
+            files.txn = Some(id);
+            *present = true;
+            reject_non_file(path)?;
+        } else if name.starts_with(".prior-")
+            || name.starts_with(".prepared-")
+            || name.starts_with(".intent-")
+            || name.starts_with(".batch-")
+        {
             return Err("Imported inventory has an unknown transaction file.".into());
         }
-        if !has_intent || (!has_prior && has_prepared) {
-            return Err("Imported inventory has an unproven precommit transaction.".into());
-        }
-        self.check_transaction_files(Some(txn_id))?;
-        if read_manifest_bytes(&self.intent(txn_id))? != authority.encode()? {
-            return Err(
-                "Imported inventory precommit intent differs from its device anchor.".into(),
-            );
-        }
-        let published = self.root().join(MANIFEST);
-        let published_bytes = read_manifest_bytes(&published)?;
-        if anchor::digest(&published_bytes) != *digest {
-            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
-        }
-        if let Ok(old) = self.read_manifest_file(&published, &[], false) {
-            // A crash may interrupt the prior or prepared writes. If no
-            // candidate ciphertext exists, none has authority: discard the
-            // incomplete transaction while retaining the unchanged inventory.
-            // A legacy single-key admission always stages its ciphertext
-            // before the prepared manifest. If that manifest is complete
-            // but its candidate key is missing, a deletion may have been
-            // interrupted: keep the transaction fail closed. Batch admission
-            // instead records its authenticated tag before staging any key.
-            if has_prepared && batch_tag.is_none() {
-                if let Ok(next) = self.read_manifest_structure(&self.prepared(txn_id), false) {
-                    let old_names: HashSet<_> =
-                        old.records.iter().map(LocalKeyRecord::file_name).collect();
-                    if next
-                        .records
-                        .iter()
-                        .map(LocalKeyRecord::file_name)
-                        .any(|name| !old_names.contains(&name))
-                    {
-                        return Err("Imported inventory has a missing single-key candidate.".into());
-                    }
-                }
-            }
-            if anchor::load(&authority.scope)?.as_ref() != Some(&authority)
-                || read_manifest_bytes(&published)? != published_bytes
-            {
-                return Err("Imported inventory authority changed before staging cleanup.".into());
-            }
-            if has_prepared {
-                remove_staged(&self.prepared(txn_id))?;
-            }
-            if batch_tag.is_some() {
-                remove_staged(&self.batch_tag(txn_id))?;
-            }
-            if has_prior {
-                remove_staged(&self.prior(txn_id))?;
-            }
-            return remove_staged(&self.intent(txn_id));
-        }
-        if has_prior && read_manifest_bytes(&self.prior(txn_id))? != published_bytes {
-            return Err("Uncommitted imported inventory has no unchanged anchored prior.".into());
-        }
-        let mut new_files = Vec::new();
-        if has_prepared {
-            let raw_old: Manifest = serde_json::from_slice(&published_bytes)
-                .map_err(|_| "Invalid anchored imported manifest.")?;
-            let old_names: Vec<_> = raw_old
-                .records
-                .iter()
-                .map(LocalKeyRecord::file_name)
-                .collect();
-            let prepared = self.prepared(txn_id);
-            let prepared_bytes = read_manifest_bytes(&prepared)?;
-            // The transaction intent and anchored prior were written before a
-            // batch starts staging ciphertext. A crash can leave only some of
-            // the candidate records. Their names are still bounded by the
-            // canonical prepared manifest; none has admission authority.
-            let next = if batch_tag.is_some() {
-                self.read_manifest_structure(&prepared, false)?
-            } else {
-                self.read_manifest_file(&prepared, &old_names, false)?
-            };
-            let next_names: Vec<_> = next.records.iter().map(LocalKeyRecord::file_name).collect();
-            let old = self.read_manifest_file(&published, &next_names, false)?;
-            if serde_json::to_vec(&old).ok().as_deref() != Some(published_bytes.as_slice()) {
-                return Err("Uncommitted imported prior manifest changed.".into());
-            }
-            let admitted: HashSet<_> = old_names.into_iter().collect();
-            new_files = next_names
-                .into_iter()
-                .filter(|name| !admitted.contains(name))
-                .collect();
-            if batch_tag.is_some() {
-                if !old.records.is_empty() {
-                    return Err("Imported batch cannot replace an existing signer set.".into());
-                }
-                let device = device()?;
-                self.verify_batch_tag(txn_id, &authority, &prepared_bytes, &device)?;
-            } else if !old.records.is_empty() || !next.records.is_empty() {
-                let credential = credential()?;
-                let device = device()?;
-                self.verify_records(&old, &credential, &device)?;
-                self.verify_records(&next, &credential, &device)?;
-            }
-            if read_manifest_bytes(&prepared)? != prepared_bytes {
-                return Err("Uncommitted imported candidate changed before cleanup.".into());
-            }
-        } else {
-            // An intent can be the only durable transaction file when the
-            // following prior create fails. Without a prepared candidate,
-            // inventory validation must reject undeclared ciphertext before
-            // removing either the intent or a lone prior.
-            self.read_manifest_file(&published, &[], false)?;
-        }
-        if anchor::load(&authority.scope)?.as_ref() != Some(&authority)
-            || read_manifest_bytes(&published)? != published_bytes
-        {
-            return Err("Imported inventory authority changed before staging cleanup.".into());
-        }
-        // Preserve the manifests and intent while deleting candidate
-        // ciphertext: a crash must not leave a key with no candidate identity.
-        // A partial deletion can still require owner-assisted recovery.
-        for name in new_files {
-            let path = self.root().join(name);
-            match fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == ErrorKind::NotFound && batch_tag.is_some() => {}
-                Err(_) => return Err("Cannot inspect staged imported key.".into()),
-                Ok(_) => remove_staged(&path)?,
-            }
-        }
-        if has_prepared {
-            remove_staged(&self.prepared(txn_id))?;
-        }
-        if batch_tag.is_some() {
-            remove_staged(&self.batch_tag(txn_id))?;
-        }
-        if has_prior {
-            remove_staged(&self.prior(txn_id))?;
-        }
-        remove_staged(&self.intent(txn_id))?;
         Ok(())
+    }
+
+    fn uncommitted_stage_id(raw: &str) -> Result<Uuid, String> {
+        let id = Uuid::parse_str(raw)
+            .map_err(|_| "Imported inventory has an unknown transaction file.")?;
+        if id.is_nil() || raw != id.to_string() {
+            return Err("Imported inventory has an unknown transaction file.".into());
+        }
+        Ok(id)
     }
 
     fn prepared(&self, txn_id: Uuid) -> PathBuf {
@@ -1182,11 +1268,23 @@ impl<'a> LocalKeyRepository<'a> {
     /// Only a provably empty, live operation can acquire its first authority.
     /// A populated #830 repository needs an explicit owner-approved migration.
     fn provision_empty(&self) -> Result<(), String> {
+        self.provision_empty_with(|| {
+            #[cfg(not(test))]
+            self.check_active()?;
+            Ok(())
+        })
+    }
+
+    /// [`Self::provision_empty`] authorized by `authorize` instead of this
+    /// repository's own session check.
+    fn provision_empty_with(
+        &self,
+        authorize: impl Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
         if anchor::load(&self.anchor_scope())?.is_some() {
             return Ok(());
         }
-        #[cfg(not(test))]
-        self.check_active()?;
+        authorize()?;
         let empty = self.manifest(vec![]);
         let bytes = serde_json::to_vec(&empty).map_err(|_| "Cannot encode key manifest.")?;
         let path = self.root().join(MANIFEST);
@@ -1323,7 +1421,13 @@ impl<'a> LocalKeyRepository<'a> {
         {
             return Err("Legacy imported key manifest is oversized.".into());
         }
-        checkpoint::validate_journal(self, &manifest)?;
+        self.validate_manifest_bindings(&manifest)?;
+        self.validate_manifest_records(&manifest)?;
+        Ok(manifest)
+    }
+
+    fn validate_manifest_bindings(&self, manifest: &Manifest) -> Result<(), String> {
+        checkpoint::validate_journal(self, manifest)?;
         if manifest.restored.as_ref().is_some_and(|binding| {
             manifest.checkpoint.is_some()
                 || manifest.records.is_empty()
@@ -1349,6 +1453,10 @@ impl<'a> LocalKeyRepository<'a> {
         {
             return Err("Imported key manifest belongs to another authority.".into());
         }
+        Ok(())
+    }
+
+    fn validate_manifest_records(&self, manifest: &Manifest) -> Result<(), String> {
         let mut ids = HashSet::new();
         let mut accounts = HashSet::new();
         for record in &manifest.records {
@@ -1371,7 +1479,7 @@ impl<'a> LocalKeyRepository<'a> {
         }) {
             return Err("Imported key manifest records are not canonically ordered.".into());
         }
-        Ok(manifest)
+        Ok(())
     }
 
     fn check_inventory(&self, manifest: &Manifest, retired: &[String]) -> Result<(), String> {
@@ -1428,6 +1536,170 @@ impl<'a> LocalKeyRepository<'a> {
             return Err("Imported key account identity changed.".into());
         }
         Ok(key)
+    }
+
+    /// Copy every stored key into `target`, this wallet's Bitcoin Blake2b
+    /// copy: the paired Cube with the same seed, unlocked the same way, so its
+    /// key credential is this Cube's. Runs in this Cube's session. Each key is
+    /// opened here with every usual check, re-verified against the copy's
+    /// descriptor, and admitted there in one generation. An empty inventory
+    /// copies nothing; a copy that already holds exactly these keys is
+    /// returned as is.
+    pub fn copy_to_pair(
+        &self,
+        target: &LocalKeyRepository<'_>,
+        is_current: impl Fn() -> bool,
+    ) -> Result<Vec<LocalKeyRecord>, String> {
+        if !is_current() {
+            return Err("Copying imported keys was cancelled.".into());
+        }
+        // No recovery words were ever stored for this wallet.
+        if !self.root().exists() {
+            return Ok(Vec::new());
+        }
+        match fs::symlink_metadata(restore::restore_intent_path(
+            self.directory,
+            self.operation_id,
+        )) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => return Err("Finish the imported key restore before copying keys.".into()),
+        }
+        let credential = self.check_active()?;
+        target.check_pair_of(self)?;
+        let entries = {
+            let lock = self.lock()?;
+            let manifest = self.read_manifest_recoverable(&lock)?;
+            if manifest
+                .restored
+                .as_ref()
+                .is_some_and(|binding| !binding.ready)
+            {
+                return Err("Restored imported keys require current Connect authorization.".into());
+            }
+            if manifest.records.is_empty() {
+                return Ok(Vec::new());
+            }
+            let device = self.device(false)?;
+            self.copy_entries_locked(
+                &manifest,
+                &target.attachment.descriptor,
+                &credential,
+                &device,
+            )?
+        };
+        // The copy can't pass its own session check while this Cube is the
+        // one unlocked, so every write to it is authorized as this wallet's
+        // pair instead, under this session's credential.
+        let authorize = || {
+            target.check_pair_of(self)?;
+            self.check_active().map(|_| ())
+        };
+        let _restore_operation_lock = target.lock_unrestored_admission()?;
+        let _lock = target.lock()?;
+        target.provision_empty_with(authorize)?;
+        target.discard_proven_uncommitted_stage_with(
+            || authorize().map(|()| credential.clone()),
+            || target.device(false),
+        )?;
+        let manifest = target.read_manifest()?;
+        let device = target.device(manifest.records.is_empty())?;
+        target.admit_new_batch_locked_with(
+            manifest,
+            entries,
+            &credential,
+            &device,
+            || authorize().is_ok() && is_current(),
+            authorize,
+        )
+    }
+
+    /// Open each record and check it signs for both this wallet and the
+    /// copy's descriptor (the same keys on the other chain).
+    fn copy_entries_locked(
+        &self,
+        manifest: &Manifest,
+        copy: &coincube_core::wallet_descriptor::ImportedWalletDescriptor,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> Result<Vec<(ImportedAccount, ImportedKeySecret)>, String> {
+        let mut entries = Vec::with_capacity(manifest.records.len());
+        for record in &manifest.records {
+            let account = record.account()?;
+            let bytes = read_key_frame(&self.root().join(record.file_name()))?;
+            if bytes[imported_key_crypt::MARKER.len()] != DEVICE_BOUND_FORMAT_VERSION {
+                return Err("Imported key protection was downgraded.".into());
+            }
+            let secret =
+                imported_key_crypt::open(&bytes, credential, &self.binding(record)?, Some(device))
+                    .map_err(|_| "Imported key record could not be authenticated.")?;
+            let (words, passphrase) = secret.into_parts();
+            for descriptor in [&self.attachment.descriptor, copy] {
+                let key = verify_imported_account(
+                    descriptor,
+                    &account.origin,
+                    words.clone(),
+                    passphrase.clone(),
+                )
+                .map_err(|_| "Imported key does not match the copy's wallet.")?;
+                if key.account() != &account {
+                    return Err("Imported key account identity changed.".into());
+                }
+            }
+            let secret = ImportedKeySecret::new(words, passphrase)
+                .map_err(|_| "Imported key record could not be copied.")?;
+            entries.push((account, secret));
+        }
+        Ok(entries)
+    }
+
+    /// This repository is `source`'s Bitcoin Blake2b copy: a live, validated
+    /// pair of the Cube unlocked in this session. Stands in for
+    /// [`Self::check_active`]'s session check, which the copy can't pass while
+    /// its source is open; removal, import identity and Duress still apply.
+    fn check_pair_of(&self, source: &LocalKeyRepository<'_>) -> Result<(), String> {
+        if self.is_removed()? {
+            return Err("This imported key operation was removed.".into());
+        }
+        let settings = Settings::from_file(self.directory)
+            .map_err(|_| "Cannot verify the Bitcoin Blake2b copy.")?;
+        let live = settings
+            .cubes
+            .iter()
+            .find(|cube| cube.id == self.cube.id)
+            .ok_or("The Bitcoin Blake2b copy no longer exists.")?;
+        if live.bitcoin_import.as_ref().is_none_or(|import| {
+            import.operation_id != self.operation_id || import.attachment() != Some(self.attachment)
+        }) {
+            return Err("The Bitcoin Blake2b copy changed; its keys were not copied.".into());
+        }
+        crate::services::bitcoin_import::pairing::validate_target_record(live)?;
+        let binding = live
+            .imported_claim_source
+            .as_deref()
+            .ok_or("This Cube is not a Bitcoin Blake2b copy.")?;
+        if binding.source_cube_id != source.cube.id
+            || Some(&binding.source_wallet)
+                != source
+                    .cube
+                    .bitcoin_import
+                    .as_ref()
+                    .and_then(|i| i.attachment())
+            || live.master_signer_fingerprint != source.cube.master_signer_fingerprint
+            || live.passkey_metadata != source.cube.passkey_metadata
+            || app::session::current_cube_id().as_deref() != Some(&source.cube.id)
+        {
+            return Err("This Cube is not this wallet's Bitcoin Blake2b copy.".into());
+        }
+        let root = self
+            .directory
+            .path()
+            .parent()
+            .ok_or("Missing Cube data root.")?;
+        let duress = DuressLocalState::load(root).map_err(|_| "Cannot check Duress Mode.")?;
+        if duress.enrolled || duress.arming || duress.active {
+            return Err("Imported keys are unavailable during Duress Mode.".into());
+        }
+        Ok(())
     }
 
     /// Ordinary key admission must serialize with password-v3 Restore and
@@ -1505,35 +1777,30 @@ impl<'a> LocalKeyRepository<'a> {
         device: &coincube_core::seed_crypt::DeviceSecret,
         is_current: impl Fn() -> bool,
     ) -> Result<Vec<LocalKeyRecord>, String> {
+        self.admit_new_batch_locked_with(manifest, entries, credential, device, is_current, || {
+            #[cfg(not(test))]
+            self.check_active().map(|_| ())?;
+            Ok(())
+        })
+    }
+
+    /// [`Self::admit_new_batch_locked`] authorized by `authorize` instead of
+    /// this repository's own session check.
+    fn admit_new_batch_locked_with(
+        &self,
+        manifest: Manifest,
+        entries: Vec<(ImportedAccount, ImportedKeySecret)>,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        is_current: impl Fn() -> bool,
+        authorize: impl Fn() -> Result<(), String>,
+    ) -> Result<Vec<LocalKeyRecord>, String> {
         checkpoint::ensure_unbound(&manifest)?;
         if entries.is_empty() || entries.len() > MAX_RECORDS {
             return Err("Imported key batch has an invalid size.".into());
         }
         if !manifest.records.is_empty() {
-            // A commit may have succeeded before the caller received its
-            // result. Reopen only the identical, fully authenticated signer
-            // set so a restore can resume after an uncertain response.
-            if manifest.records.len() != entries.len() {
-                return Err("Imported key batch conflicts with the current inventory.".into());
-            }
-            self.verify_records(&manifest, credential, device)?;
-            let mut seen = Vec::with_capacity(entries.len());
-            for (account, secret) in &entries {
-                self.verify_batch_account(account, secret)?;
-                if seen.contains(account)
-                    || !manifest
-                        .records
-                        .iter()
-                        .any(|record| record.account().ok().as_ref() == Some(account))
-                {
-                    return Err("Imported key batch conflicts with the current inventory.".into());
-                }
-                seen.push(account.clone());
-            }
-            if !is_current() {
-                return Err("Imported key admission was cancelled.".into());
-            }
-            return Ok(manifest.records);
+            return self.reopen_admitted_batch(manifest, entries, credential, device, is_current);
         }
         let mut records = Vec::with_capacity(entries.len());
         let mut ciphertexts = Vec::with_capacity(entries.len());
@@ -1573,11 +1840,7 @@ impl<'a> LocalKeyRepository<'a> {
             credential,
             device,
             is_current,
-            || {
-                #[cfg(not(test))]
-                self.check_active().map(|_| ())?;
-                Ok(())
-            },
+            authorize,
             true,
             || {
                 for (record, ciphertext) in records.iter().zip(ciphertexts.iter()) {
@@ -1587,6 +1850,40 @@ impl<'a> LocalKeyRepository<'a> {
             },
         )?;
         Ok(records)
+    }
+
+    fn reopen_admitted_batch(
+        &self,
+        manifest: Manifest,
+        entries: Vec<(ImportedAccount, ImportedKeySecret)>,
+        credential: &str,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+        is_current: impl Fn() -> bool,
+    ) -> Result<Vec<LocalKeyRecord>, String> {
+        // A commit may have succeeded before the caller received its
+        // result. Reopen only the identical, fully authenticated signer
+        // set so a restore can resume after an uncertain response.
+        if manifest.records.len() != entries.len() {
+            return Err("Imported key batch conflicts with the current inventory.".into());
+        }
+        self.verify_records(&manifest, credential, device)?;
+        let mut seen = Vec::with_capacity(entries.len());
+        for (account, secret) in &entries {
+            self.verify_batch_account(account, secret)?;
+            if seen.contains(account)
+                || !manifest
+                    .records
+                    .iter()
+                    .any(|record| record.account().ok().as_ref() == Some(account))
+            {
+                return Err("Imported key batch conflicts with the current inventory.".into());
+            }
+            seen.push(account.clone());
+        }
+        if !is_current() {
+            return Err("Imported key admission was cancelled.".into());
+        }
+        Ok(manifest.records)
     }
 
     fn verify_batch_account(
@@ -1750,10 +2047,32 @@ impl<'a> LocalKeyRepository<'a> {
         current: &Psbt,
         is_current: impl Fn() -> bool,
     ) -> Result<Psbt, String> {
-        self.with_key(record_id, expected_revision, None, is_current, |key| {
-            key.sign(&self.attachment.descriptor, original, current)
-                .map_err(|_| "Imported signing failed verification.".into())
-        })
+        self.sign_contribution(record_id, expected_revision, original, current, is_current)?
+            .ok_or_else(|| "Imported signing failed verification.".into())
+    }
+
+    /// [`Self::sign`], telling a verified key that had nothing to add (every
+    /// input it signs for already carries its signature) apart from a
+    /// failure: `Ok(None)` for no contribution, an error for anything else.
+    pub fn sign_contribution(
+        &self,
+        record_id: Uuid,
+        expected_revision: Uuid,
+        original: &Psbt,
+        current: &Psbt,
+        is_current: impl Fn() -> bool,
+    ) -> Result<Option<Psbt>, String> {
+        self.with_key(
+            record_id,
+            expected_revision,
+            None,
+            is_current,
+            |key| match key.sign(&self.attachment.descriptor, original, current) {
+                Ok(signed) => Ok(Some(signed)),
+                Err(coincube_core::imported_keys::ImportedKeyError::NoSignatureAdded) => Ok(None),
+                Err(_) => Err("Imported signing failed verification.".into()),
+            },
+        )
     }
 
     pub fn records(&self) -> Result<Vec<LocalKeyRecord>, String> {
@@ -1769,6 +2088,19 @@ impl<'a> LocalKeyRepository<'a> {
         }
         self.check_active()?;
         Ok(manifest.records)
+    }
+
+    /// The records this computer can sign with on its own. Restored keys need
+    /// current Connect authorization for each signature, so none are offered.
+    pub fn local_signing_records(&self) -> Result<Vec<LocalKeyRecord>, String> {
+        let restored = {
+            let lock = self.lock()?;
+            self.read_manifest_recoverable(&lock)?.restored.is_some()
+        };
+        if restored {
+            return Ok(vec![]);
+        }
+        self.records()
     }
 
     pub fn remove(
@@ -1960,23 +2292,11 @@ pub(crate) fn retire_proven_empty_unanchored(
     }
     let parent = directory.path().join("imported-local-keys");
     let root = parent.join(operation_id.to_string());
-    match fs::symlink_metadata(&parent) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o077 != 0 {
-                    return Err("Unanchored imported key parent permissions are unsafe.".into());
-                }
-            }
+    if !unanchored_parent_exists(&parent)? {
+        if !absent()? {
+            return Err("Imported key anchor appeared during release.".into());
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            if !absent()? {
-                return Err("Imported key anchor appeared during release.".into());
-            }
-            return Ok(());
-        }
-        _ => return Err("Unanchored imported key parent is unsafe.".into()),
+        return Ok(());
     }
     let metadata = match fs::symlink_metadata(&root) {
         Ok(metadata) => metadata,
@@ -1998,9 +2318,49 @@ pub(crate) fn retire_proven_empty_unanchored(
             return Err("Unanchored imported key root permissions are unsafe.".into());
         }
     }
+    let files =
+        collect_empty_unanchored_provisions(&root, cube_id, chain, operation_id, wallet_id)?;
+    if !absent()? {
+        return Err("Imported key anchor appeared during release.".into());
+    }
+    for path in files {
+        fs::remove_file(&path).map_err(|_| "Cannot retire empty key provision.")?;
+    }
+    fs::remove_dir(&root).map_err(|_| "Cannot retire empty key root.")?;
+    sync_parent(&root)?;
+    if !absent()? {
+        return Err("Imported key anchor appeared during release.".into());
+    }
+    Ok(())
+}
+
+fn unanchored_parent_exists(parent: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o077 != 0 {
+                    return Err("Unanchored imported key parent permissions are unsafe.".into());
+                }
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        _ => Err("Unanchored imported key parent is unsafe.".into()),
+    }
+}
+
+fn collect_empty_unanchored_provisions(
+    root: &Path,
+    cube_id: &str,
+    chain: &str,
+    operation_id: Uuid,
+    wallet_id: &str,
+) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut saw_tmp = false;
-    for entry in fs::read_dir(&root).map_err(|_| "Cannot inspect unanchored key root.")? {
+    for entry in fs::read_dir(root).map_err(|_| "Cannot inspect unanchored key root.")? {
         let entry = entry.map_err(|_| "Cannot inspect unanchored key root.")?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_tmp = name
@@ -2033,18 +2393,7 @@ pub(crate) fn retire_proven_empty_unanchored(
         }
         files.push(path);
     }
-    if !absent()? {
-        return Err("Imported key anchor appeared during release.".into());
-    }
-    for path in files {
-        fs::remove_file(&path).map_err(|_| "Cannot retire empty key provision.")?;
-    }
-    fs::remove_dir(&root).map_err(|_| "Cannot retire empty key root.")?;
-    sync_parent(&root)?;
-    if !absent()? {
-        return Err("Imported key anchor appeared during release.".into());
-    }
-    Ok(())
+    Ok(files)
 }
 
 fn read_batch_tag(path: &Path) -> Result<[u8; 32], String> {
@@ -2277,159 +2626,191 @@ pub fn native_probe_phase(phase: &str, run_id: Uuid, root: &Path) -> Result<(), 
             });
         }
         let _lock = repository.lock()?;
-        let assert_committed = |generation| -> Result<(), String> {
-            let manifest = repository.read_manifest()?;
-            let expected_records = if generation == 1 { 1 } else { 0 };
-            if manifest.records.len() != expected_records {
-                return Err("Native probe repository has the wrong signer inventory.".into());
-            }
-            if generation == 1 {
-                let verified =
-                    repository.read_key(&manifest.records[0], "synthetic unlock", &device)?;
-                if verified.account() != &account {
-                    return Err("Native probe imported signer identity changed.".into());
-                }
-            }
-            let current = anchor::load(&scope)?.ok_or("Native probe anchor is missing.")?;
-            match current.state {
-                AnchorState::Committed {
-                    generation: actual,
-                    cleanup_txn: None,
-                    ..
-                } if actual == generation => Ok(()),
-                _ => Err("Native probe anchor generation or cleanup state changed.".into()),
-            }
-        };
-        let assert_no_stage = || -> Result<(), String> { repository.check_transaction_files(None) };
-        let stage_synthetic_key = || -> Result<Manifest, String> {
-            let record = LocalKeyRecord::from_account(&account, Uuid::new_v4(), Uuid::new_v4());
-            let secret = ImportedKeySecret::new(
-                Zeroizing::new(phrases[0].clone()),
-                Zeroizing::new(String::new()),
-            )
-            .map_err(|_| "Cannot create synthetic native probe secret.")?;
-            let ciphertext = imported_key_crypt::seal(
-                &secret,
-                "synthetic unlock",
-                &repository.binding(&record)?,
-                Protection::DeviceBound(&device),
-            )
-            .map_err(|_| "Cannot encrypt synthetic native probe key.")?;
-            let staged = repository.root().join(record.file_name());
-            write_new(&staged, &ciphertext)?;
-            Ok(repository.manifest(vec![record]))
-        };
+        NativeAnchorProbe {
+            repository: &repository,
+            root,
+            account: &account,
+            phrase: &phrases[0],
+            device: &device,
+            scope: &scope,
+        }
+        .run(phase)
+    })
+}
+
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+struct NativeAnchorProbe<'probe, 'storage> {
+    repository: &'probe LocalKeyRepository<'storage>,
+    root: &'probe Path,
+    account: &'probe ImportedAccount,
+    phrase: &'probe str,
+    device: &'probe coincube_core::seed_crypt::DeviceSecret,
+    scope: &'probe Scope,
+}
+
+#[cfg(all(target_os = "macos", debug_assertions, feature = "native-anchor-probe"))]
+impl NativeAnchorProbe<'_, '_> {
+    fn run(&self, phase: &str) -> Result<(), String> {
         match phase {
-            "update-fails" | "update-error" | "readback-fails" => {
-                let old = repository.read_manifest()?;
-                let before = anchor::load(&scope)?;
-                let next = if phase == "readback-fails" {
-                    repository.manifest(vec![])
-                } else {
-                    stage_synthetic_key()?
-                };
-                let fault = match phase {
-                    "update-fails" => anchor::NativeProbeFault::UpdateQueryError,
-                    "update-error" => anchor::NativeProbeFault::UpdateThenError,
-                    _ => anchor::NativeProbeFault::UpdateThenReadbackError,
-                };
-                anchor::arm_native_probe_fault(fault);
-                let result = repository.publish_manifest_with_check(
-                    &old,
-                    &next,
-                    "synthetic unlock",
-                    &device,
-                    || true,
-                    || Ok(()),
-                );
-                match phase {
-                    "update-fails" => {
-                        if result.is_ok() {
-                            return Err("Faulted native update unexpectedly succeeded.".into());
-                        }
-                        if anchor::load(&scope)? != before {
-                            return Err("Faulted native update changed the old anchor.".into());
-                        }
-                        repository.discard_proven_uncommitted_stage_with(
-                            || Ok(Zeroizing::new("synthetic unlock".into())),
-                            || Ok(Zeroizing::new([11u8; 32])),
-                        )?;
-                        assert_committed(0)?;
-                        assert_no_stage()
-                    }
-                    "update-error" => {
-                        result?;
-                        assert_committed(1)?;
-                        assert_no_stage()
-                    }
-                    _ => {
-                        if result.is_ok() {
-                            return Err("Faulted native readback unexpectedly succeeded.".into());
-                        }
-                        let pending =
-                            anchor::load(&scope)?.ok_or("Native pending anchor disappeared.")?;
-                        let AnchorState::Pending { txn_id, .. } = pending.state else {
-                            return Err(
-                                "Native readback failure did not preserve pending intent.".into()
-                            );
-                        };
-                        let prepared = repository.prepared(txn_id);
-                        let published = repository.root().join(MANIFEST);
-                        fs::rename(&prepared, &published)
-                            .map_err(|_| "Cannot simulate native post-rename restart.")?;
-                        sync_parent(&published)?;
-                        Ok(())
-                    }
-                }
-            }
+            "update-fails" | "update-error" | "readback-fails" => self.exercise_fault(phase),
             "verify-old" => {
-                assert_committed(0)?;
-                assert_no_stage()
+                self.assert_committed(0)?;
+                self.repository.check_transaction_files(None)
             }
             "verify-committed" => {
-                assert_committed(1)?;
-                assert_no_stage()?;
-                let published = repository.root().join(MANIFEST);
+                self.assert_committed(1)?;
+                self.repository.check_transaction_files(None)?;
+                let published = self.repository.root().join(MANIFEST);
                 let current = read_manifest_bytes(&published)?;
-                let old = fs::read(root.join("generation-0-manifest.json"))
+                let old = fs::read(self.root.join("generation-0-manifest.json"))
                     .map_err(|_| "Cannot read synthetic prior manifest.")?;
                 write_replace(&published, &old)?;
-                if repository.read_manifest().is_ok() {
+                if self.repository.read_manifest().is_ok() {
                     return Err("Replayed native prior manifest was accepted.".into());
                 }
                 write_replace(&published, &current)?;
-                assert_committed(1)
+                self.assert_committed(1)
             }
             "verify-pending-closed" => {
-                if repository.read_manifest().is_ok() {
+                if self.repository.read_manifest().is_ok() {
                     return Err(
                         "Pending native anchor was readable without recovery authority.".into(),
                     );
                 }
-                let pending = anchor::load(&scope)?.ok_or("Native pending anchor disappeared.")?;
+                let pending =
+                    anchor::load(self.scope)?.ok_or("Native pending anchor disappeared.")?;
                 let AnchorState::Pending { txn_id, .. } = pending.state else {
                     return Err("Native pending anchor changed before recovery.".into());
                 };
-                repository.check_transaction_files(Some(txn_id))
+                self.repository.check_transaction_files(Some(txn_id))
             }
             "recover" => {
-                let pending = anchor::load(&scope)?.ok_or("Native pending anchor disappeared.")?;
+                let pending =
+                    anchor::load(self.scope)?.ok_or("Native pending anchor disappeared.")?;
                 if !matches!(pending.state, AnchorState::Pending { .. }) {
                     return Err("Native recovery requires a pending anchor.".into());
                 }
-                let committed =
-                    repository.recover_pending_with(pending, "synthetic unlock", &device)?;
-                repository.finish_cleanup(&committed)?;
-                assert_committed(2)?;
-                assert_no_stage()
+                let committed = self.repository.recover_pending_with(
+                    pending,
+                    "synthetic unlock",
+                    self.device,
+                )?;
+                self.repository.finish_cleanup(&committed)?;
+                self.assert_committed(2)?;
+                self.repository.check_transaction_files(None)
             }
             "verify" => {
-                assert_committed(2)?;
-                assert_no_stage()
+                self.assert_committed(2)?;
+                self.repository.check_transaction_files(None)
             }
             _ => Err("Unknown native anchor probe phase.".into()),
         }
-    })
+    }
+
+    fn assert_committed(&self, generation: u64) -> Result<(), String> {
+        let manifest = self.repository.read_manifest()?;
+        let expected_records = if generation == 1 { 1 } else { 0 };
+        if manifest.records.len() != expected_records {
+            return Err("Native probe repository has the wrong signer inventory.".into());
+        }
+        if generation == 1 {
+            let verified =
+                self.repository
+                    .read_key(&manifest.records[0], "synthetic unlock", self.device)?;
+            if verified.account() != self.account {
+                return Err("Native probe imported signer identity changed.".into());
+            }
+        }
+        let current = anchor::load(self.scope)?.ok_or("Native probe anchor is missing.")?;
+        match current.state {
+            AnchorState::Committed {
+                generation: actual,
+                cleanup_txn: None,
+                ..
+            } if actual == generation => Ok(()),
+            _ => Err("Native probe anchor generation or cleanup state changed.".into()),
+        }
+    }
+
+    fn stage_synthetic_key(&self) -> Result<Manifest, String> {
+        let record = LocalKeyRecord::from_account(self.account, Uuid::new_v4(), Uuid::new_v4());
+        let secret = ImportedKeySecret::new(
+            Zeroizing::new(self.phrase.to_owned()),
+            Zeroizing::new(String::new()),
+        )
+        .map_err(|_| "Cannot create synthetic native probe secret.")?;
+        let ciphertext = imported_key_crypt::seal(
+            &secret,
+            "synthetic unlock",
+            &self.repository.binding(&record)?,
+            Protection::DeviceBound(self.device),
+        )
+        .map_err(|_| "Cannot encrypt synthetic native probe key.")?;
+        let staged = self.repository.root().join(record.file_name());
+        write_new(&staged, &ciphertext)?;
+        Ok(self.repository.manifest(vec![record]))
+    }
+
+    fn exercise_fault(&self, phase: &str) -> Result<(), String> {
+        let old = self.repository.read_manifest()?;
+        let before = anchor::load(self.scope)?;
+        let next = if phase == "readback-fails" {
+            self.repository.manifest(vec![])
+        } else {
+            self.stage_synthetic_key()?
+        };
+        let fault = match phase {
+            "update-fails" => anchor::NativeProbeFault::UpdateQueryError,
+            "update-error" => anchor::NativeProbeFault::UpdateThenError,
+            _ => anchor::NativeProbeFault::UpdateThenReadbackError,
+        };
+        anchor::arm_native_probe_fault(fault);
+        let result = self.repository.publish_manifest_with_check(
+            &old,
+            &next,
+            "synthetic unlock",
+            self.device,
+            || true,
+            || Ok(()),
+        );
+        match phase {
+            "update-fails" => {
+                if result.is_ok() {
+                    return Err("Faulted native update unexpectedly succeeded.".into());
+                }
+                if anchor::load(self.scope)? != before {
+                    return Err("Faulted native update changed the old anchor.".into());
+                }
+                self.repository.discard_proven_uncommitted_stage_with(
+                    || Ok(Zeroizing::new("synthetic unlock".into())),
+                    || Ok(Zeroizing::new([11u8; 32])),
+                )?;
+                self.assert_committed(0)?;
+                self.repository.check_transaction_files(None)
+            }
+            "update-error" => {
+                result?;
+                self.assert_committed(1)?;
+                self.repository.check_transaction_files(None)
+            }
+            _ => {
+                if result.is_ok() {
+                    return Err("Faulted native readback unexpectedly succeeded.".into());
+                }
+                let pending =
+                    anchor::load(self.scope)?.ok_or("Native pending anchor disappeared.")?;
+                let AnchorState::Pending { txn_id, .. } = pending.state else {
+                    return Err("Native readback failure did not preserve pending intent.".into());
+                };
+                let prepared = self.repository.prepared(txn_id);
+                let published = self.repository.root().join(MANIFEST);
+                fs::rename(&prepared, &published)
+                    .map_err(|_| "Cannot simulate native post-rename restart.")?;
+                sync_parent(&published)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2453,8 +2834,12 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::on(ChainId::Regtest)
+        }
+
+        fn on(chain: ChainId) -> Self {
             let root = std::env::temp_dir().join(format!("imported-keys-{}", Uuid::new_v4()));
-            let directory = NetworkDirectory::new(root.join("regtest"));
+            let directory = NetworkDirectory::new(root.join(chain.dir_name()));
             directory.init().unwrap();
             let secp = Secp256k1::new();
             let path = DerivationPath::from_str("m/48h/1h/0h/2h").unwrap();
@@ -2486,8 +2871,7 @@ mod tests {
                 )
             };
             let wallet =
-                ImportedWalletDescriptor::parse(&branch(0), Some(&branch(1)), ChainId::Regtest)
-                    .unwrap();
+                ImportedWalletDescriptor::parse(&branch(0), Some(&branch(1)), chain).unwrap();
             let accounts = phrases
                 .iter()
                 .map(|phrase| {
@@ -2502,9 +2886,8 @@ mod tests {
                     .clone()
                 })
                 .collect();
-            let attachment =
-                ImportedWalletAttachment::new(wallet, ChainId::Regtest, 0, 100).unwrap();
-            let mut cube = CubeSettings::new("Synthetic".into(), ChainId::Regtest);
+            let attachment = ImportedWalletAttachment::new(wallet, chain, 0, 100).unwrap();
+            let mut cube = CubeSettings::new("Synthetic".into(), chain);
             cube.bitcoin_import = Some(Box::new(BitcoinImport {
                 operation_id: Uuid::new_v4(),
                 stage: BitcoinImportStage::Ready {
@@ -2577,6 +2960,134 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// Stored recovery words copy into the Bitcoin Blake2b copy of the
+    /// wallet: the same accounts, sealed under the copy's own scope and device
+    /// secret, readable there. Words that don't sign for the copy's
+    /// descriptor, or a wrong credential, copy nothing.
+    #[test]
+    fn stored_words_copy_into_the_bitcoin_blake2b_copy() {
+        let source = Fixture::on(ChainId::Testnet4);
+        let copy = Fixture::on(ChainId::BitcoinBlake2bTestnet4);
+        assert_eq!(
+            copy.attachment.descriptor,
+            source.attachment.descriptor.paired_blake2b().unwrap()
+        );
+        let device = Zeroizing::new([31u8; 32]);
+        let copy_device = Zeroizing::new([47u8; 32]);
+        let from = source.repository();
+        let entries = (0..3)
+            .map(|index| {
+                (
+                    source.accounts[index].clone(),
+                    ImportedKeySecret::new(
+                        Zeroizing::new(source.phrases[index].clone()),
+                        Zeroizing::new(String::new()),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        from.admit_new_batch_locked(
+            from.read_manifest().unwrap(),
+            entries,
+            "synthetic unlock",
+            &device,
+            || true,
+        )
+        .unwrap();
+        let manifest = from.read_manifest().unwrap();
+
+        assert!(from
+            .copy_entries_locked(
+                &manifest,
+                &copy.attachment.descriptor,
+                "wrong unlock",
+                &device
+            )
+            .is_err());
+        let unrelated = crate::services::split_test_wallets::imported_vault(
+            crate::services::split_test_wallets::SHAPES[0],
+        );
+        assert!(from
+            .copy_entries_locked(
+                &manifest,
+                unrelated.main_descriptor.as_imported().unwrap(),
+                "synthetic unlock",
+                &device,
+            )
+            .is_err());
+
+        let entries = from
+            .copy_entries_locked(
+                &manifest,
+                &copy.attachment.descriptor,
+                "synthetic unlock",
+                &device,
+            )
+            .unwrap();
+        let to = copy.repository();
+        // The copy is written while its source Cube is the one unlocked, so
+        // its own session check fails: only the pair check the copy passes in
+        // (`check_pair_of` in `copy_to_pair`) may authorize the write, and a
+        // refusal there writes nothing.
+        assert!(to.check_active().is_err());
+        assert!(to
+            .admit_new_batch_locked_with(
+                to.read_manifest().unwrap(),
+                from.copy_entries_locked(
+                    &manifest,
+                    &copy.attachment.descriptor,
+                    "synthetic unlock",
+                    &device,
+                )
+                .unwrap(),
+                "synthetic unlock",
+                &copy_device,
+                || true,
+                || Err("not this wallet's pair".into()),
+            )
+            .is_err());
+        assert!(to.read_manifest().unwrap().records.is_empty());
+        let records = to
+            .admit_new_batch_locked_with(
+                to.read_manifest().unwrap(),
+                entries,
+                "synthetic unlock",
+                &copy_device,
+                || true,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        for record in &records {
+            let account = record.account().unwrap();
+            assert!(source.accounts.contains(&account));
+            assert_eq!(
+                to.read_key(record, "synthetic unlock", &copy_device)
+                    .unwrap()
+                    .account(),
+                &account
+            );
+        }
+        // Sealed for the copy: the source's device secret can't open them.
+        assert!(to
+            .read_key(&records[0], "synthetic unlock", &device)
+            .is_err());
+    }
+
+    /// With no recovery words ever stored, there is nothing to copy.
+    #[test]
+    fn a_wallet_without_stored_words_copies_nothing() {
+        let source = Fixture::on(ChainId::Testnet4);
+        let copy = Fixture::on(ChainId::BitcoinBlake2bTestnet4);
+        let from = source.repository();
+        fs::remove_dir_all(from.root()).unwrap();
+        assert!(from
+            .copy_to_pair(&copy.repository(), || true)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -5175,6 +5686,23 @@ mod tests {
     }
 
     #[test]
+    fn restored_keys_are_not_offered_for_local_signing() {
+        let _session_guard = app::session::test_guard();
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        let repository = fixture.repository();
+        let device = Zeroizing::new([95u8; 32]);
+        checkpoint_test_ready_restored(&fixture, &device);
+        assert!(!repository.read_manifest().unwrap().records.is_empty());
+        assert!(repository.local_signing_records().unwrap().is_empty());
+        app::session::close();
+    }
+
+    #[test]
     fn restored_tombstone_release_retires_keys_and_survives_pending_crash() {
         use crate::services::coincube::imported_checkpoint::Checkpoint;
         let _session_guard = app::session::test_guard();
@@ -5339,6 +5867,15 @@ mod tests {
 
     #[test]
     fn interrupted_restore_tombstone_retires_staged_keys_and_clears_intent_on_retry() {
+        let _session_guard = app::session::test_guard();
+        for ready in [false, true] {
+            for crash_after_pending in [false, true] {
+                assert_interrupted_restore_tombstone_retirement(ready, crash_after_pending);
+            }
+        }
+    }
+
+    fn assert_interrupted_restore_tombstone_retirement(ready: bool, crash_after_pending: bool) {
         use crate::services::{
             coincube::imported_checkpoint::Checkpoint,
             recovery::{
@@ -5348,147 +5885,140 @@ mod tests {
                 },
             },
         };
-        let _session_guard = app::session::test_guard();
-        for ready in [false, true] {
-            for crash_after_pending in [false, true] {
-                let fixture = Fixture::new();
-                fixture.save_cube(fixture.cube.clone());
-                app::session::open(
-                    fixture.cube.id.clone(),
-                    Zeroizing::new("synthetic PIN".into()),
-                );
-                let repository = fixture.repository();
-                let device = Zeroizing::new([96u8; 32]);
-                let (record, binding) = checkpoint_test_restored(&fixture, &device, ready);
-                let digest =
-                    imported_descriptor_blob_fingerprint(&checkpoint_test_public(&fixture))
-                        .unwrap();
-                let intent = RestoreIntent {
-                    version: 1,
-                    cube_id: binding.cube_id,
-                    cube_uuid: fixture.cube.id.clone(),
-                    operation_id: repository.operation_id,
-                    wallet_id: fixture.attachment.wallet_id.to_string(),
-                    // A changed public wallet cannot make revoked keys
-                    // permanently undeletable; only the anchored binding
-                    // grants signer identity in this cleanup path.
-                    public_digest: if ready {
-                        "c".repeat(64)
-                    } else {
-                        digest.clone()
-                    },
-                    source_inventory_generation: binding.source_inventory_generation,
-                    checkpoint_generation: binding.generation,
-                    checkpoint_commitment: binding.commitment.clone(),
-                };
-                let path =
-                    restore::restore_intent_path(repository.directory, repository.operation_id);
-                let _operation_lock = lock_restore_intent(&path).unwrap();
-                fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
-                assert_eq!(read_intent(&path).unwrap(), Some(intent.clone()));
-                assert!(repository.remove_operation_storage().is_err());
-                assert!(repository
-                    .with_key(record.record_id, record.revision, None, || true, |_| Ok(()))
-                    .is_err());
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        let repository = fixture.repository();
+        let device = Zeroizing::new([96u8; 32]);
+        let (record, binding) = checkpoint_test_restored(&fixture, &device, ready);
+        let digest =
+            imported_descriptor_blob_fingerprint(&checkpoint_test_public(&fixture)).unwrap();
+        let intent = RestoreIntent {
+            version: 1,
+            cube_id: binding.cube_id,
+            cube_uuid: fixture.cube.id.clone(),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            // A changed public wallet cannot make revoked keys
+            // permanently undeletable; only the anchored binding
+            // grants signer identity in this cleanup path.
+            public_digest: if ready {
+                "c".repeat(64)
+            } else {
+                digest.clone()
+            },
+            source_inventory_generation: binding.source_inventory_generation,
+            checkpoint_generation: binding.generation,
+            checkpoint_commitment: binding.commitment.clone(),
+        };
+        let path = restore::restore_intent_path(repository.directory, repository.operation_id);
+        let _operation_lock = lock_restore_intent(&path).unwrap();
+        fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        assert_eq!(read_intent(&path).unwrap(), Some(intent.clone()));
+        assert!(repository.remove_operation_storage().is_err());
+        assert!(repository
+            .with_key(record.record_id, record.revision, None, || true, |_| Ok(()))
+            .is_err());
 
-                let cube = checkpoint_test_scope(&fixture);
-                let active = Checkpoint {
-                    generation: binding.generation + 1,
-                    commitment: "b".repeat(64),
-                    active: true,
-                };
-                let tombstone = Checkpoint {
-                    generation: binding.generation + 1,
-                    commitment: "b".repeat(64),
-                    active: false,
-                };
-                let old = Checkpoint {
-                    generation: binding.generation,
-                    commitment: "b".repeat(64),
-                    active: false,
-                };
-                for denied in [&active, &old] {
-                    assert!(repository
-                        .release_restored_locked(
-                            repository.read_manifest().unwrap(),
-                            &binding,
-                            Some(&intent),
-                            &cube,
-                            denied,
-                            "synthetic unlock",
-                            &device,
-                            || true,
-                        )
-                        .is_err());
-                }
-                let mut wrong_intent = intent.clone();
-                wrong_intent.wallet_id = "other-wallet".into();
-                assert!(repository
-                    .release_restored_locked(
-                        repository.read_manifest().unwrap(),
-                        &binding,
-                        Some(&wrong_intent),
-                        &cube,
-                        &tombstone,
-                        "synthetic unlock",
-                        &device,
-                        || true,
-                    )
-                    .is_err());
-
-                if crash_after_pending {
-                    anchor::tests::inject_update_fault(
-                        &repository.anchor_scope(),
-                        anchor::tests::UpdateFault::AfterWriteReadbackError,
-                    );
-                }
-                let outcome = repository.release_restored_locked(
+        let cube = checkpoint_test_scope(&fixture);
+        let active = Checkpoint {
+            generation: binding.generation + 1,
+            commitment: "b".repeat(64),
+            active: true,
+        };
+        let tombstone = Checkpoint {
+            generation: binding.generation + 1,
+            commitment: "b".repeat(64),
+            active: false,
+        };
+        let old = Checkpoint {
+            generation: binding.generation,
+            commitment: "b".repeat(64),
+            active: false,
+        };
+        for denied in [&active, &old] {
+            assert!(repository
+                .release_restored_locked(
                     repository.read_manifest().unwrap(),
                     &binding,
                     Some(&intent),
                     &cube,
-                    &tombstone,
+                    denied,
                     "synthetic unlock",
                     &device,
                     || true,
-                );
-                if crash_after_pending {
-                    assert!(outcome.is_err());
-                    let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
-                    assert!(matches!(pending.state, AnchorState::Pending { .. }));
-                    repository
-                        .recover_pending_with(pending, "synthetic unlock", &device)
-                        .unwrap();
-                } else {
-                    outcome.unwrap();
-                }
-                let empty = repository.read_manifest().unwrap();
-                assert!(empty.records.is_empty());
-                assert!(empty.restored.is_none());
-                assert!(!repository.root().join(record.file_name()).exists());
-                assert!(
-                    path.exists(),
-                    "intent survives until explicit reconciliation"
-                );
-                repository
-                    .release_restored_locked(
-                        empty,
-                        &binding,
-                        Some(&intent),
-                        &cube,
-                        &tombstone,
-                        "synthetic unlock",
-                        &device,
-                        || true,
-                    )
-                    .unwrap();
-                clear_intent(&path, &intent).unwrap();
-                assert!(!path.exists());
-                repository.remove_operation_storage().unwrap();
-                assert!(repository.is_removed().unwrap());
-                app::session::close();
-            }
+                )
+                .is_err());
         }
+        let mut wrong_intent = intent.clone();
+        wrong_intent.wallet_id = "other-wallet".into();
+        assert!(repository
+            .release_restored_locked(
+                repository.read_manifest().unwrap(),
+                &binding,
+                Some(&wrong_intent),
+                &cube,
+                &tombstone,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .is_err());
+
+        if crash_after_pending {
+            anchor::tests::inject_update_fault(
+                &repository.anchor_scope(),
+                anchor::tests::UpdateFault::AfterWriteReadbackError,
+            );
+        }
+        let outcome = repository.release_restored_locked(
+            repository.read_manifest().unwrap(),
+            &binding,
+            Some(&intent),
+            &cube,
+            &tombstone,
+            "synthetic unlock",
+            &device,
+            || true,
+        );
+        if crash_after_pending {
+            assert!(outcome.is_err());
+            let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+            assert!(matches!(pending.state, AnchorState::Pending { .. }));
+            repository
+                .recover_pending_with(pending, "synthetic unlock", &device)
+                .unwrap();
+        } else {
+            outcome.unwrap();
+        }
+        let empty = repository.read_manifest().unwrap();
+        assert!(empty.records.is_empty());
+        assert!(empty.restored.is_none());
+        assert!(!repository.root().join(record.file_name()).exists());
+        assert!(
+            path.exists(),
+            "intent survives until explicit reconciliation"
+        );
+        repository
+            .release_restored_locked(
+                empty,
+                &binding,
+                Some(&intent),
+                &cube,
+                &tombstone,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        clear_intent(&path, &intent).unwrap();
+        assert!(!path.exists());
+        repository.remove_operation_storage().unwrap();
+        assert!(repository.is_removed().unwrap());
+        app::session::close();
     }
 
     #[test]

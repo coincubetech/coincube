@@ -534,6 +534,7 @@ impl CoincubeDescriptor {
     /// well-formed: sane BIP32 derivations must be set for every change output, the inner
     /// transaction must have the same number of outputs as the PSBT.
     /// Will detect change outputs paying to either the change keychain or the deposit one.
+    /// An output whose BIP32 derivation gives a hardened derivation index is never one of ours.
     pub fn change_indexes(
         &self,
         psbt: &Psbt,
@@ -568,6 +569,11 @@ impl CoincubeDescriptor {
             } else {
                 continue;
             };
+            // The key origins are set by whoever created the PSBT, which may not be us. None of
+            // our addresses is at a hardened derivation index, and trying to derive one panics.
+            if !der_index.is_normal() {
+                continue;
+            }
 
             // If any of the change and deposit addresses at this derivation index match, count it
             // as a change output.
@@ -1629,6 +1635,48 @@ mod tests {
             .to_string()
             .contains("Analyzed PSBT is inconsistent across inputs."));
 
+        // Read input by input, the least signed input is what all of them
+        // reached: no signature on the primary path, and the recovery path
+        // only where every input unlocks it.
+        let per_input = |psbt: &Psbt| {
+            psbt.inputs
+                .iter()
+                .zip(&psbt.unsigned_tx.input)
+                .map(|(psbt_in, txin)| desc.partial_spend_info_txin(psbt_in, txin))
+                .collect::<Vec<_>>()
+        };
+        let least = PartialSpendInfo::least_signed(per_input(&inconsistent_psbt)).unwrap();
+        assert_eq!(least.primary_path.threshold, 1);
+        assert_eq!(least.primary_path.sigs_count, 0);
+        assert!(least.primary_path.signed_pubkeys.is_empty());
+        assert!(least.recovery_paths.is_empty());
+        let mut one_unlocked = rec_psbt.clone();
+        one_unlocked.unsigned_tx.input[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        let least = PartialSpendInfo::least_signed(per_input(&one_unlocked)).unwrap();
+        assert!(least.recovery_paths.is_empty());
+        let least = PartialSpendInfo::least_signed(per_input(&rec_psbt)).unwrap();
+        assert_eq!(least, desc.partial_spend_info(&rec_psbt).unwrap());
+        // Every input unlocks the recovery path, only input 0 has a recovery
+        // signature: the path stays, with the least count.
+        let mut recov_on_one = rec_psbt.clone();
+        let recov_key = recov_on_one.inputs[0]
+            .bip32_derivation
+            .iter()
+            .find(|(_, (fg, _))| *fg == recov_key_origin.0)
+            .map(|(k, _)| *k)
+            .unwrap();
+        let sig = *recov_on_one.inputs[0].partial_sigs.values().next().unwrap();
+        recov_on_one.inputs[0]
+            .partial_sigs
+            .insert(bitcoin::PublicKey::new(recov_key), sig);
+        assert!(desc.partial_spend_info(&recov_on_one).is_err());
+        let least = PartialSpendInfo::least_signed(per_input(&recov_on_one)).unwrap();
+        let recov = least.recovery_paths.get(&timelock).unwrap();
+        assert_eq!(recov.sigs_count, 0);
+        assert!(recov.signed_pubkeys.is_empty());
+        assert_eq!(least.primary_path.sigs_count, 1);
+        assert!(PartialSpendInfo::least_signed(Vec::new()).is_none());
+
         // If we analyze a descriptor with a multisig we'll get the right threshold.
         let desc = CoincubeDescriptor::from_str("wsh(or_d(multi(2,[f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*,[00112233]xpub6FC8vmQGGfSuQGfKG5L73fZ7WjXit8TzfJYDKwTtHkhrbAhU5Kma41oenVq6aMnpgULJRXpQuxnVysyfdpRhVgD6vYe7XLbFDhmvYmDrAVq/<0;1>/*,[aabbccdd]xpub68XtbpvDM19d39wEKdvadHkZ4FGKf4tnryKzAacttp8BLX3uHj7eK8shRnFBhZ2UL83S9dwXe42Qm6eG6BkR1jy8XwUSNBcHKtET7j4V5FB/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#2kgxuax5").unwrap();
         let info = desc.partial_spend_info(&psbt).unwrap();
@@ -2284,16 +2332,269 @@ mod tests {
         ));
     }
 
+    // A P2WSH and a Taproot descriptor, both reused from unit tests above.
+    fn change_detection_descs() -> [CoincubeDescriptor; 2] {
+        [
+            CoincubeDescriptor::from_str("wsh(or_d(multi(3,[aabb0011/48'/0'/0'/2']xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/0/<0;1>/*,[aabb0012/48'/0'/0'/2']xpub6Bw79HbNSeS2xXw1sngPE3ehnk1U3iSPCgLYzC9LpN8m9nDuaKLZvkg8QXxL5pDmEmQtYscmUD8B9MkAAZbh6vxPzNXMaLfGQ9Sb3z85qhR/0/<0;1>/*,[aabb0013/48'/0'/0'/2']xpub67zuTXF9Ln4731avKTBSawoVVNRuMfmRvkL7kLUaLBRqma9ZqdHBJg9qx8cPUm3oNQMiXT4TmGovXNoQPuwg17RFcVJ8YrnbcooN7pxVJqC/0/<0;1>/*),and_v(v:thresh(2,pkh([aabb0011/48'/0'/0'/2']xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/1/<0;1>/*),a:pkh([aabb0012/48'/0'/0'/2']xpub6Bw79HbNSeS2xXw1sngPE3ehnk1U3iSPCgLYzC9LpN8m9nDuaKLZvkg8QXxL5pDmEmQtYscmUD8B9MkAAZbh6vxPzNXMaLfGQ9Sb3z85qhR/1/<0;1>/*),a:pkh([aabb0013/48'/0'/0'/2']xpub67zuTXF9Ln4731avKTBSawoVVNRuMfmRvkL7kLUaLBRqma9ZqdHBJg9qx8cPUm3oNQMiXT4TmGovXNoQPuwg17RFcVJ8YrnbcooN7pxVJqC/1/<0;1>/*)),older(26352))))").unwrap(),
+            CoincubeDescriptor::from_str("tr(tpubD6NzVbkrYhZ4YdBUPkUhDYj6Sd1QK8vgiCf5RwHnAnSNK5ozemAZzPTYZbgQq4diod7oxFJJYGa8FNRHzRo7URkixzQTuudh38xRRdSc4Hu/<0;1>/*,{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<2;3>/*),older(2)),multi_a(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<0;1>/*)})").unwrap(),
+        ]
+    }
+
     #[test]
     fn change_detection() {
         let secp = secp256k1::Secp256k1::verification_only();
 
-        // Check the change detection both under P2WSH and Taproot. We reuse descriptor from unit
-        // tests above.
-        let desc = CoincubeDescriptor::from_str("wsh(or_d(multi(3,[aabb0011/48'/0'/0'/2']xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/0/<0;1>/*,[aabb0012/48'/0'/0'/2']xpub6Bw79HbNSeS2xXw1sngPE3ehnk1U3iSPCgLYzC9LpN8m9nDuaKLZvkg8QXxL5pDmEmQtYscmUD8B9MkAAZbh6vxPzNXMaLfGQ9Sb3z85qhR/0/<0;1>/*,[aabb0013/48'/0'/0'/2']xpub67zuTXF9Ln4731avKTBSawoVVNRuMfmRvkL7kLUaLBRqma9ZqdHBJg9qx8cPUm3oNQMiXT4TmGovXNoQPuwg17RFcVJ8YrnbcooN7pxVJqC/0/<0;1>/*),and_v(v:thresh(2,pkh([aabb0011/48'/0'/0'/2']xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/1/<0;1>/*),a:pkh([aabb0012/48'/0'/0'/2']xpub6Bw79HbNSeS2xXw1sngPE3ehnk1U3iSPCgLYzC9LpN8m9nDuaKLZvkg8QXxL5pDmEmQtYscmUD8B9MkAAZbh6vxPzNXMaLfGQ9Sb3z85qhR/1/<0;1>/*),a:pkh([aabb0013/48'/0'/0'/2']xpub67zuTXF9Ln4731avKTBSawoVVNRuMfmRvkL7kLUaLBRqma9ZqdHBJg9qx8cPUm3oNQMiXT4TmGovXNoQPuwg17RFcVJ8YrnbcooN7pxVJqC/1/<0;1>/*)),older(26352))))").unwrap();
-        run_change_detection(desc, &secp);
-        let desc = CoincubeDescriptor::from_str("tr(tpubD6NzVbkrYhZ4YdBUPkUhDYj6Sd1QK8vgiCf5RwHnAnSNK5ozemAZzPTYZbgQq4diod7oxFJJYGa8FNRHzRo7URkixzQTuudh38xRRdSc4Hu/<0;1>/*,{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<2;3>/*),older(2)),multi_a(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<0;1>/*)})").unwrap();
-        run_change_detection(desc, &secp);
+        // Check the change detection both under P2WSH and Taproot.
+        for desc in change_detection_descs() {
+            run_change_detection(desc, &secp);
+        }
+    }
+
+    const OWN_OUTPUT_DER_INDEX: u32 = 7;
+
+    // A PSBT whose output 0 pays `desc`'s change address and whose output 1 pays its deposit
+    // address, both at `OWN_OUTPUT_DER_INDEX` and with the key origins the wallet sets itself.
+    fn psbt_with_own_outputs(
+        desc: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+    ) -> Psbt {
+        let mut tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: Vec::new(),
+        };
+        let mut psbt_outs = Vec::new();
+        for der_desc in [
+            desc.change_descriptor()
+                .derive(OWN_OUTPUT_DER_INDEX.into(), secp),
+            desc.receive_descriptor()
+                .derive(OWN_OUTPUT_DER_INDEX.into(), secp),
+        ] {
+            tx.output.push(bitcoin::TxOut {
+                script_pubkey: der_desc.script_pubkey(),
+                value: bitcoin::Amount::from_sat(10_000),
+            });
+            let mut psbt_out = PsbtOut::default();
+            der_desc.update_change_psbt_out(&mut psbt_out);
+            // Several keys, so the tests below can tell the first origin from the others.
+            assert!(psbt_out.bip32_derivation.len() + psbt_out.tap_key_origins.len() > 1);
+            psbt_outs.push(psbt_out);
+        }
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        psbt.outputs = psbt_outs;
+        assert_eq!(
+            desc.change_indexes(&psbt, secp),
+            vec![
+                ChangeOutput::ChangeAddress { index: 0 },
+                ChangeOutput::DepositAddress { index: 1 }
+            ]
+        );
+        psbt
+    }
+
+    // Edit the derivation path of each key origin of a PSBT output. The closure is also given the
+    // position of the origin: the one at position 0 is the one `change_indexes` reads.
+    fn edit_output_origins(
+        psbt_out: &mut PsbtOut,
+        mut edit: impl FnMut(usize, &mut DerivationPath),
+    ) {
+        let wsh_origins = psbt_out.bip32_derivation.values_mut();
+        let tap_origins = psbt_out
+            .tap_key_origins
+            .values_mut()
+            .map(|(_, origin)| origin);
+        for (i, (_, der_path)) in wsh_origins.chain(tap_origins).enumerate() {
+            edit(i, der_path);
+        }
+    }
+
+    // Replace the key origins of a PSBT output: each map gets a single origin ending with the
+    // given step, if any, for a key and a master fingerprint which aren't in our descriptors.
+    fn set_stranger_origins(
+        psbt_out: &mut PsbtOut,
+        wsh_step: Option<bip32::ChildNumber>,
+        tap_step: Option<bip32::ChildNumber>,
+    ) {
+        let key = secp256k1::SecretKey::from_slice(&[0x42; 32])
+            .unwrap()
+            .public_key(&secp256k1::Secp256k1::signing_only());
+        let origin = |step| {
+            (
+                Fingerprint::from([0x42; 4]),
+                DerivationPath::from(vec![step]),
+            )
+        };
+        psbt_out.bip32_derivation = wsh_step
+            .map(|step| (key, origin(step)))
+            .into_iter()
+            .collect();
+        psbt_out.tap_key_origins = tap_step
+            .map(|step| (key.x_only_public_key().0, (Vec::new(), origin(step))))
+            .into_iter()
+            .collect();
+    }
+
+    // Replace a step of a derivation path, counting from its end (0 is the last step).
+    fn set_step_from_end(der_path: &mut DerivationPath, from_end: usize, step: bip32::ChildNumber) {
+        let mut steps: Vec<bip32::ChildNumber> = der_path.into_iter().copied().collect();
+        let pos = steps.len() - 1 - from_end;
+        steps[pos] = step;
+        *der_path = steps.into();
+    }
+
+    // Key origins in a PSBT are set by whoever built it. A hardened last step can't be one of
+    // our derivation indexes: the output must be skipped, not make us panic.
+    fn run_change_detection_hardened_index(desc: CoincubeDescriptor) {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let hardened = bip32::ChildNumber::from_hardened_idx(OWN_OUTPUT_DER_INDEX).unwrap();
+        let base = psbt_with_own_outputs(&desc, &secp);
+
+        // All the origins of the change output end with a hardened step. The output is not
+        // counted as ours anymore, the other one still is.
+        let mut psbt = base.clone();
+        edit_output_origins(&mut psbt.outputs[0], |_, der_path| {
+            set_step_from_end(der_path, 0, hardened)
+        });
+        assert_eq!(
+            desc.change_indexes(&psbt, &secp),
+            vec![ChangeOutput::DepositAddress { index: 1 }]
+        );
+
+        // Same if only the origin we read the index from does.
+        let mut psbt = base.clone();
+        edit_output_origins(&mut psbt.outputs[0], |i, der_path| {
+            if i == 0 {
+                set_step_from_end(der_path, 0, hardened)
+            }
+        });
+        assert_eq!(
+            desc.change_indexes(&psbt, &secp),
+            vec![ChangeOutput::DepositAddress { index: 1 }]
+        );
+
+        // Same for the output paying to a deposit address.
+        let mut psbt = base.clone();
+        edit_output_origins(&mut psbt.outputs[1], |_, der_path| {
+            set_step_from_end(der_path, 0, hardened)
+        });
+        assert_eq!(
+            desc.change_indexes(&psbt, &secp),
+            vec![ChangeOutput::ChangeAddress { index: 0 }]
+        );
+
+        // And for both at once.
+        edit_output_origins(&mut psbt.outputs[0], |_, der_path| {
+            set_step_from_end(der_path, 0, hardened)
+        });
+        assert!(desc.change_indexes(&psbt, &secp).is_empty());
+
+        // Same if both the P2WSH and the Taproot origins are set and the P2WSH one, which is the
+        // one we read the index from, is hardened.
+        let mut psbt = base.clone();
+        let normal = bip32::ChildNumber::from(OWN_OUTPUT_DER_INDEX);
+        set_stranger_origins(&mut psbt.outputs[0], Some(hardened), Some(normal));
+        assert_eq!(
+            desc.change_indexes(&psbt, &secp),
+            vec![ChangeOutput::DepositAddress { index: 1 }]
+        );
+    }
+
+    #[test]
+    fn change_detection_hardened_index_p2wsh() {
+        let [desc, _] = change_detection_descs();
+        assert!(!desc.is_taproot());
+        run_change_detection_hardened_index(desc);
+    }
+
+    #[test]
+    fn change_detection_hardened_index_taproot() {
+        let [_, desc] = change_detection_descs();
+        assert!(desc.is_taproot());
+        run_change_detection_hardened_index(desc);
+    }
+
+    // Change detection takes the derivation index from the last step of the first key origin of
+    // an output and nothing else from the origins: not the step selecting the keychain, not the
+    // fingerprints, not the keys, not the other origins. What decides is whether the script at
+    // this index for either keychain is the one of the transaction output.
+    #[test]
+    fn change_detection_reads_first_origin_index_only() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let own_outputs = vec![
+            ChangeOutput::ChangeAddress { index: 0 },
+            ChangeOutput::DepositAddress { index: 1 },
+        ];
+        let other_index = bip32::ChildNumber::from(OWN_OUTPUT_DER_INDEX + 1);
+
+        for desc in change_detection_descs() {
+            let base = psbt_with_own_outputs(&desc, &secp);
+
+            // The origins of the change output name the receive keychain instead: the step before
+            // last is the multipath one, and all of these descriptors' are `<n;n+1>`. Still
+            // detected, and still as change.
+            let mut psbt = base.clone();
+            edit_output_origins(&mut psbt.outputs[0], |_, der_path| {
+                let change_step = u32::from(der_path[der_path.len() - 2]);
+                assert_eq!(change_step % 2, 1);
+                set_step_from_end(der_path, 1, (change_step - 1).into())
+            });
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs);
+
+            // The only origin is for a key which isn't in the descriptor, from a master key
+            // which isn't either.
+            let mut psbt = base.clone();
+            let own_index = bip32::ChildNumber::from(OWN_OUTPUT_DER_INDEX);
+            assert!(!desc.contains_fingerprint(Fingerprint::from([0x42; 4])));
+            if desc.is_taproot() {
+                set_stranger_origins(&mut psbt.outputs[0], None, Some(own_index));
+            } else {
+                set_stranger_origins(&mut psbt.outputs[0], Some(own_index), None);
+            }
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs);
+
+            // Both the P2WSH and the Taproot origins are set. The Taproot ones aren't read,
+            // whether they give another index or a hardened one.
+            let hardened = bip32::ChildNumber::from_hardened_idx(OWN_OUTPUT_DER_INDEX).unwrap();
+            for tap_index in [other_index, hardened] {
+                let mut psbt = base.clone();
+                set_stranger_origins(&mut psbt.outputs[0], Some(own_index), Some(tap_index));
+                assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs);
+            }
+
+            // The origins disagree on the index. Only the first one is read: the others can give
+            // another index.
+            let mut psbt = base.clone();
+            edit_output_origins(&mut psbt.outputs[0], |i, der_path| {
+                if i > 0 {
+                    set_step_from_end(der_path, 0, other_index)
+                }
+            });
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs);
+            // Or a hardened one.
+            let mut psbt = base.clone();
+            edit_output_origins(&mut psbt.outputs[0], |i, der_path| {
+                if i > 0 {
+                    set_step_from_end(der_path, 0, hardened)
+                }
+            });
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs);
+            // If the first one is the only one to give another index, the output is missed.
+            let mut psbt = base.clone();
+            edit_output_origins(&mut psbt.outputs[0], |i, der_path| {
+                if i == 0 {
+                    set_step_from_end(der_path, 0, other_index)
+                }
+            });
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs[1..]);
+
+            // Origins never make an output ours on their own: here the change output's are kept
+            // for an output paying to a script which isn't ours.
+            let mut psbt = base.clone();
+            psbt.unsigned_tx.output[0].script_pubkey =
+                bitcoin::ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::all_zeros());
+            assert_eq!(desc.change_indexes(&psbt, &secp), own_outputs[1..]);
+        }
     }
 
     #[test]

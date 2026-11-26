@@ -1,7 +1,7 @@
 # coincube-keychain-ffi
 
 A C ABI over `coincube-core`'s unified signature hashing and native-P2WSH
-unified signing, so the Keychain phone signer can reach them instead of
+unified signing, so the COINCUBE Mobile phone signer can reach them instead of
 reimplementing them.
 
 This crate contains **no cryptography**. Every digest comes out of
@@ -23,7 +23,7 @@ first. Five entries:
 | `coincube_unified_sighash_digest` | Raw fields. Mirrors `unified_sighash::unified_sighash` field for field. |
 | `coincube_unified_psbt_digest` | The production digest: one native-P2WSH input of a standard PSBT, at `SIGHASH_ALL\|SIGHASH_UNIFIED`. |
 | `coincube_unified_psbt_sign` | Signs only the authenticated account path+xpub target; native P2WSH accepts either PSBT prevout form. |
-| `coincube_unified_psbt_verify` | Verifies the Keychain native-P2WSH contract, including witness-only inputs. |
+| `coincube_unified_psbt_verify` | Verifies the Mobile signer's native-P2WSH contract, including witness-only inputs. |
 | `coincube_unified_psbt_verify_all` | Verifies and separately counts every unified and legacy signature. |
 
 The signing target must be the exact hardened native-P2WSH account path
@@ -62,7 +62,7 @@ Both are guarded by assertions that fail loudly, and both were verified to fail
 by deliberately introducing them:
 
 1. **Do not refuse `ANYONECANPAY` at the digest layer.** 70 of the 142 supported
-   vectors set `0x80` and core computes them. Keychain's ANYONECANPAY refusal is
+   vectors set `0x80` and core computes them. COINCUBE Mobile's ANYONECANPAY refusal is
    a spend-policy gate on the *signing* path (Lane B3.2), not a property of the
    message. Pushed down here it would make those 70 rows unreachable while the
    suite still looked green on the other 72 — so the KAT asserts the count is
@@ -81,7 +81,7 @@ Every entry catches a panic and returns `CC_ERR_PANIC` rather than unwinding
 into C. That only holds for a build with `panic = "unwind"` — the default for
 `dev` and `release`. The workspace's `minimal` profile sets `panic = "abort"`,
 under which a panic ends the host process before the boundary can report
-anything. Keychain should build this crate with unwind: a bug here should be a
+anything. COINCUBE Mobile should build this crate with unwind: a bug here should be a
 failed signing attempt the user can retry, not an app that disappears mid-flow.
 
 ## Measured cost
@@ -144,7 +144,7 @@ check and the reference call shape for B3.1b's `dart:ffi` wrapper.
 
 Not done here, and not proven by this crate's tests. `staticlib` is what iOS
 links into its framework and `cdylib` is what Android packages per ABI in
-`jniLibs`; wiring those into Keychain's lanes, and the Dart `dart:ffi` wrapper,
+`jniLibs`; wiring those into COINCUBE Mobile's lanes, and the Dart `dart:ffi` wrapper,
 is Lane B3.1b. All three crate types export the same symbols, so the tests in
 `tests/` exercise the shipped boundary.
 

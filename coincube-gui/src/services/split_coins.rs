@@ -47,6 +47,7 @@ use coincube_core::{
     miniscript::bitcoin::{
         consensus::serialize, psbt::Psbt, BlockHash, OutPoint, Transaction, Txid,
     },
+    wallet_descriptor::{SpendAnalysis, WalletDescriptor},
 };
 use coincubed::commands::CoinStatus;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,56 @@ pub struct KeyChoice {
     pub path: RetainedPath,
 }
 
+/// Why a split could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareError {
+    pub message: String,
+    /// The split key, when the fresh check answered that its path no longer
+    /// qualifies (rather than failing to finish): the caller stops offering
+    /// it, so the flow can move on to another split coin.
+    pub rejected_key: Option<OutPoint>,
+}
+
+impl From<String> for PrepareError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            rejected_key: None,
+        }
+    }
+}
+
+impl From<&str> for PrepareError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+/// Why a split key's fresh check did not pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCheckError {
+    pub message: String,
+    /// The check finished and the path does not qualify, as opposed to a
+    /// check that could not finish and may pass later.
+    pub rejected: bool,
+}
+
+/// Whether a re-qualification error is an answer about the path: its links
+/// no longer verify, or the chains now show its root moved or on both. Any
+/// other error is a check that could not finish.
+fn path_rejected(error: &crate::services::claim_observation::http::DiscoveryError) -> bool {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    matches!(
+        error,
+        DiscoveryError::Structural(_)
+            | DiscoveryError::Observation(
+                FailureKind::AncestryRootChanged { .. }
+                    | FailureKind::AncestryRootShared { .. }
+                    | FailureKind::UnsupportedPoison
+            )
+    )
+}
+
 /// A built, stored, unsigned split ready for the PSBT screen.
 #[derive(Debug, Clone)]
 pub struct Prepared {
@@ -124,8 +175,9 @@ pub struct Derived {
     pub unconfirmed: HashSet<OutPoint>,
     /// Outputs of confirmed split-key splits with the key's extended path,
     /// as [`ProofEntry::Saved`]: the path is only structurally checked, so a
-    /// fresh ancestry check must qualify it before it is shown as verified or
-    /// used as a split key. Merge with [`merge_proofs`].
+    /// fresh ancestry check must qualify it before it is shown as verified,
+    /// and the split builder re-qualifies it before it is used as a split
+    /// key. Merge with [`merge_proofs`].
     pub proofs: Vec<(OutPoint, ProofEntry)>,
     /// Whether any record changed (its confirmations moved or it was pruned).
     pub changed: bool,
@@ -155,10 +207,7 @@ pub fn derive(
             .iter()
             .filter(|coin| coin.outpoint.txid == record.txid)
             .collect();
-        let confirmations = match outputs.iter().find_map(|coin| coin.block_height) {
-            Some(height) if height >= 0 && height <= tip => (tip - height + 1) as u32,
-            _ => 0,
-        };
+        let confirmations = split_confirmations(&outputs, tip);
         // Follow the chain both ways: a reorg that drops the split takes its
         // confirmations with it.
         if confirmations != record.confirmations {
@@ -177,32 +226,48 @@ pub fn derive(
             }
             continue;
         }
-        match record.method {
-            // Not a proof for these outputs: the Vault holds the inputs' keys
-            // on Bitcoin too and could still confirm a legacy-signed copy of
-            // this transaction there, which would put the outputs on both
-            // chains. They are shown as split but unconfirmed, never proven.
-            // The twin Cube's inputs are another matter: see `twin_confirmed`.
-            Method::Signature => {
-                derived
-                    .unconfirmed
-                    .extend(outputs.iter().map(|coin| coin.outpoint));
-            }
-            Method::SplitKey => {
-                let Some(tx) = transactions.get(&record.txid) else {
-                    continue;
-                };
-                for coin in &outputs {
-                    if let Some(path) = extended_path(record, tx, coin.outpoint) {
-                        derived
-                            .proofs
-                            .push((coin.outpoint, ProofEntry::Saved(path)));
-                    }
+        record_confirmed_split_outputs(&mut derived, record, &outputs, transactions);
+    }
+    derived
+}
+
+fn split_confirmations(outputs: &[&Coin], tip: i32) -> u32 {
+    match outputs.iter().find_map(|coin| coin.block_height) {
+        Some(height) if height >= 0 && height <= tip => (tip - height + 1) as u32,
+        _ => 0,
+    }
+}
+
+fn record_confirmed_split_outputs(
+    derived: &mut Derived,
+    record: &SplitRecord,
+    outputs: &[&Coin],
+    transactions: &HashMap<Txid, Transaction>,
+) {
+    match record.method {
+        // Not a proof for these outputs: the Vault holds the inputs' keys
+        // on Bitcoin too and could still confirm a legacy-signed copy of
+        // this transaction there, which would put the outputs on both
+        // chains. They are shown as split but unconfirmed, never proven.
+        // The twin Cube's inputs are another matter: see `twin_confirmed`.
+        Method::Signature => {
+            derived
+                .unconfirmed
+                .extend(outputs.iter().map(|coin| coin.outpoint));
+        }
+        Method::SplitKey => {
+            let Some(tx) = transactions.get(&record.txid) else {
+                return;
+            };
+            for coin in outputs {
+                if let Some(path) = extended_path(record, tx, coin.outpoint) {
+                    derived
+                        .proofs
+                        .push((coin.outpoint, ProofEntry::Saved(path)));
                 }
             }
         }
     }
-    derived
 }
 
 /// The proof of a split-key split's output: the split transaction, linked
@@ -235,16 +300,40 @@ pub fn extended_path(
 /// Add [`Derived::proofs`] to the cache's ancestry results. A derived path
 /// only fills a gap: it never replaces a check's own answer, verified or not,
 /// so a coin a check found no path for keeps that answer until it is due
-/// again. Returns whether anything was added.
+/// again. A check that could not finish is not an answer, so the path fills
+/// in beside it ([`ProofEntry::SavedRetry`]). Returns whether anything was
+/// added.
 pub fn merge_proofs(
     chain_proofs: &mut HashMap<OutPoint, ProofEntry>,
     derived: Vec<(OutPoint, ProofEntry)>,
 ) -> bool {
     let mut added = false;
     for (outpoint, entry) in derived {
-        if let std::collections::hash_map::Entry::Vacant(slot) = chain_proofs.entry(outpoint) {
-            slot.insert(entry);
-            added = true;
+        match chain_proofs.entry(outpoint) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+                added = true;
+            }
+            // A check that couldn't finish is no answer: the derived path
+            // fills in and keeps the failure's retry time.
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if let (
+                    ProofEntry::Failed {
+                        failed_at,
+                        attempts,
+                    },
+                    Some(path),
+                ) = (slot.get(), entry.path())
+                {
+                    let (failed_at, attempts) = (*failed_at, *attempts);
+                    slot.insert(ProofEntry::SavedRetry {
+                        path: path.clone(),
+                        failed_at,
+                        attempts,
+                    });
+                    added = true;
+                }
+            }
         }
     }
     added
@@ -371,26 +460,27 @@ pub fn is_separated(
 
 /// Upper bound, in vbytes, of a split spending `shared_count` both-chain
 /// coins plus one more input (the split key, or for a signature split an
-/// overestimate by one input) to one change output of `descriptor`'s Vault.
-/// A funding estimate only, not authorization to construct, sign or
-/// broadcast anything. `None` for a Taproot Vault, no coins, or more inputs
-/// than the estimate covers. Moved from the removed Claim engine
+/// overestimate by one input) to one change output of `descriptor`'s wallet:
+/// a Vault, or an imported wallet of any supported shape. A funding estimate
+/// only, not authorization to construct, sign or broadcast anything. `None`
+/// for a Taproot Vault, no coins, or more inputs than the estimate covers.
+/// Moved from the removed Claim engine
 /// (`coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes`).
-pub fn estimate_split_vbytes(descriptor: &CoincubeDescriptor, shared_count: usize) -> Option<u64> {
+pub fn estimate_split_vbytes(descriptor: &WalletDescriptor, shared_count: usize) -> Option<u64> {
     use coincube_core::miniscript::bitcoin::{
-        absolute::LockTime, bip32::ChildNumber, secp256k1, transaction, Amount, TxIn, TxOut,
+        absolute::LockTime, transaction, Amount, TxIn, TxOut,
     };
-    if descriptor.is_taproot() || shared_count == 0 {
+    if descriptor
+        .as_vault()
+        .is_some_and(CoincubeDescriptor::is_taproot)
+        || shared_count == 0
+    {
         return None;
     }
     let input_count = shared_count
         .checked_add(1)
         .filter(|count| *count <= 20_001)?;
-    let secp = secp256k1::Secp256k1::verification_only();
-    let change_script = descriptor
-        .change_descriptor()
-        .derive(ChildNumber::Normal { index: 0 }, &secp)
-        .script_pubkey();
+    let change_script = descriptor.change_descriptor().script_pubkey(0).ok()?;
     let tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: LockTime::ZERO,
@@ -400,13 +490,15 @@ pub fn estimate_split_vbytes(descriptor: &CoincubeDescriptor, shared_count: usiz
             script_pubkey: change_script,
         }],
     };
-    Some(descriptor.unsigned_tx_max_vbytes(&tx, true))
+    Some(descriptor.spend_max_vbytes(&tx, true))
 }
 
 /// Whether this Vault can split with a replay-protected signature: Bitcoin
 /// Blake2b, and every primary-path signer either signs in process or is a
 /// recorded Keychain key. Any other signer is treated as a hardware device,
-/// which can't make the signature (decision item 3).
+/// which can't make the signature (decision item 3). Never for an imported
+/// Vault: its signers (hardware, the original wallet, words stored in the
+/// Cube) make ordinary signatures only, so it splits with a split key.
 pub fn signature_available(wallet: &Wallet) -> bool {
     if !wallet.chain.is_blake2b() {
         return false;
@@ -687,6 +779,37 @@ fn spent_by(raw: &[u8], txid: Txid) -> Option<HashSet<OutPoint>> {
         .then(|| tx.input.iter().map(|input| input.previous_output).collect())
 }
 
+/// Where a split build is, for the review's status line while it runs.
+/// Checking the split key asks Connect about both chains and can take a
+/// while; the user should see which part is slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStage {
+    CheckingKey,
+    CheckingCoins,
+    Building,
+    Saving,
+}
+
+impl BuildStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            BuildStage::CheckingKey => "Checking the split key on both chains",
+            BuildStage::CheckingCoins => "Checking the coins",
+            BuildStage::Building => "Building the transaction",
+            BuildStage::Saving => "Saving the split",
+        }
+    }
+
+    /// The stage a build of `method` starts in, shown from the moment the
+    /// user presses Sign and send.
+    pub fn first(method: Method) -> Self {
+        match method {
+            Method::SplitKey => BuildStage::CheckingKey,
+            Method::Signature => BuildStage::CheckingCoins,
+        }
+    }
+}
+
 /// Build the split, store it with the daemon, and return it for the PSBT
 /// screen. The caller records it in the journal. For [`Method::SplitKey`]
 /// the key is re-qualified against both chains first; nothing is built if
@@ -702,7 +825,8 @@ pub async fn prepare(
     client: crate::services::coincube::CoincubeClient,
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
-) -> Result<Prepared, String> {
+    mut progress: iced_runtime::task::Sender<BuildStage>,
+) -> Result<Prepared, PrepareError> {
     let chain = wallet.chain;
     if !crate::services::chain_status::checks_enabled(chain) {
         return Err("Splitting coins isn't available on this network.".into());
@@ -712,14 +836,20 @@ pub async fn prepare(
     }
     let key = match (method, key) {
         (Method::SplitKey, Some(key)) => Some(key),
-        (Method::SplitKey, None) => return Err("This split needs a split key.".into()),
+        (Method::SplitKey, None) => return Err("This split needs a split coin.".into()),
         (Method::Signature, _) if !chain.is_blake2b() => {
             return Err("Bitcoin can't split with a replay-protected signature.".into())
         }
         (Method::Signature, _) => None,
     };
     if let Some(key) = &key {
-        requalify(&client, chain, key, generation, live.clone()).await?;
+        progress.send(BuildStage::CheckingKey).await;
+        check_key(&client, chain, key, generation, live.clone())
+            .await
+            .map_err(|error| PrepareError {
+                rejected_key: error.rejected.then_some(key.outpoint),
+                message: error.message,
+            })?;
     }
     let mut requested: BTreeSet<OutPoint> = coins.iter().copied().collect();
     if requested.len() != coins.len() {
@@ -727,10 +857,11 @@ pub async fn prepare(
     }
     if let Some(key) = &key {
         if !requested.insert(key.outpoint) {
-            return Err("The split key can't also be a coin to split.".into());
+            return Err("The split coin can't also be a coin to split.".into());
         }
     }
     let requested: Vec<OutPoint> = requested.into_iter().collect();
+    progress.send(BuildStage::CheckingCoins).await;
     let mut fresh = daemon
         .list_coins(&[CoinStatus::Confirmed], &requested)
         .await
@@ -752,6 +883,7 @@ pub async fn prepare(
     if !crate::services::claim_observation::session_current(&live, generation) {
         return Err("The session changed. Try again.".into());
     }
+    progress.send(BuildStage::Building).await;
     let psbt = match daemon
         .create_spend_tx(&requested, &HashMap::new(), feerate_vb, None)
         .await
@@ -759,13 +891,11 @@ pub async fn prepare(
     {
         CreateSpendResult::Success { psbt, .. } => psbt,
         CreateSpendResult::InsufficientFunds { missing } => {
-            return Err(format!(
-                "These coins don't cover the fee. {} sats short.",
-                missing
-            ))
+            return Err(format!("These coins don't cover the fee. {} sats short.", missing).into())
         }
     };
     check_construction(&psbt, &requested)?;
+    progress.send(BuildStage::Saving).await;
     daemon
         .update_spend_tx(&psbt)
         .await
@@ -820,9 +950,57 @@ pub async fn requalify(
     generation: u64,
     live: tokio::sync::watch::Receiver<u64>,
 ) -> Result<(), String> {
+    check_key(client, chain, key, generation, live)
+        .await
+        .map_err(|error| {
+            if error.rejected {
+                // The split is already built with this coin.
+                format!("{} {}", error.message, KEY_REJECTED_BUILD_AGAIN)
+            } else {
+                error.message
+            }
+        })
+}
+
+/// Why a split coin was rejected, as the user reads it. The reason in
+/// detail goes to the log. Both are in the Spanish catalogue with each of
+/// the next steps below.
+pub const KEY_REJECTED_HISTORY: &str = "The split coin for this split can no longer be used: its history no longer shows it exists on one chain only.";
+pub const KEY_REJECTED_PROOF: &str =
+    "The split coin for this split can no longer be used: its saved history is no longer valid.";
+/// What happens after a rejection, by whether another split coin is held.
+pub const KEY_REJECTED_SEND_ANOTHER: &str = "Send another split coin.";
+pub const KEY_REJECTED_USES_ANOTHER: &str = "The split now uses another split coin.";
+/// The next step where the split is already built: the PSBT screen.
+pub const KEY_REJECTED_BUILD_AGAIN: &str = "Build the split again.";
+/// The check couldn't finish, which says nothing about the split coin.
+pub const KEY_CHECK_UNFINISHED: &str = "The split coin couldn't be checked right now.";
+
+/// [`requalify`], telling a path that no longer qualifies from a check that
+/// could not finish.
+pub async fn check_key(
+    client: &crate::services::coincube::CoincubeClient,
+    chain: ChainId,
+    key: &KeyChoice,
+    generation: u64,
+    live: tokio::sync::watch::Receiver<u64>,
+) -> Result<(), KeyCheckError> {
     use crate::services::claim_observation::{http::HttpObservationSource, CollectionContext};
+    let rejected = |message: &str| {
+        // Which coin, for support: at debug, like the background check.
+        tracing::debug!("split coin {} rejected", key.outpoint);
+        KeyCheckError {
+            message: message.to_string(),
+            rejected: true,
+        }
+    };
+    let unfinished = || KeyCheckError {
+        message: KEY_CHECK_UNFINISHED.to_string(),
+        rejected: false,
+    };
     if key.path.selected() != key.outpoint {
-        return Err("The split key's proof doesn't match it.".into());
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     let source = HttpObservationSource::new(
         client.clone(),
@@ -833,7 +1011,10 @@ pub async fn requalify(
             generation: live,
         },
     )
-    .map_err(|e| format!("Couldn't check the split key: {:?}", e))?;
+    .map_err(|e| {
+        tracing::info!("A split coin's check could not start: {:?}", e);
+        unfinished()
+    })?;
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
     };
@@ -842,12 +1023,22 @@ pub async fn requalify(
     } else {
         source.requalify_ancestry(&key.path, policy).await
     }
-    .map_err(|e| format!("The split key couldn't be verified right now: {:?}", e))?;
-    let path = refreshed
-        .retained_path()
-        .map_err(|e| format!("The split key's proof is invalid: {:?}", e))?;
+    .map_err(|e| {
+        if path_rejected(&e) {
+            tracing::info!("A split coin's history no longer qualifies: {:?}", e);
+            rejected(KEY_REJECTED_HISTORY)
+        } else {
+            tracing::info!("A split coin's check did not finish: {:?}", e);
+            unfinished()
+        }
+    })?;
+    let path = refreshed.retained_path().map_err(|e| {
+        tracing::info!("A split coin's refreshed history is invalid: {:?}", e);
+        rejected(KEY_REJECTED_PROOF)
+    })?;
     if path.selected() != key.outpoint {
-        return Err("The split key's proof doesn't match it.".into());
+        tracing::info!("A split coin's saved history doesn't match it");
+        return Err(rejected(KEY_REJECTED_PROOF));
     }
     Ok(())
 }
@@ -866,6 +1057,7 @@ mod tests {
     #[test]
     fn split_vbytes_estimate_bounds_and_refusals() {
         let wsh = CoincubeDescriptor::from_str("wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr").unwrap();
+        let wsh = WalletDescriptor::Vault(wsh);
         assert_eq!(estimate_split_vbytes(&wsh, 0), None);
         let one = estimate_split_vbytes(&wsh, 1).unwrap();
         let two = estimate_split_vbytes(&wsh, 2).unwrap();
@@ -874,6 +1066,187 @@ mod tests {
         // Each input adds at least its outpoint, sequence and a signature.
         assert!(two >= one + 41 + 18, "{} {}", one, two);
         assert_eq!(estimate_split_vbytes(&wsh, 20_001), None);
+    }
+
+    /// An imported Vault's split is sized from its own shape: each extra
+    /// input costs what that shape's input costs once signed, and the one
+    /// output is a change address of the wallet. The same bounds hold on
+    /// Bitcoin Blake2b, where the wallet's scripts are identical.
+    #[test]
+    fn split_vbytes_estimate_covers_every_imported_shape() {
+        use crate::services::split_test_wallets::{
+            imported_fork_vault, imported_vault, Shape, SHAPES,
+        };
+        for shape in SHAPES {
+            let bitcoin = imported_vault(shape).main_descriptor;
+            let fork = imported_fork_vault(shape).main_descriptor;
+            for descriptor in [&bitcoin, &fork] {
+                assert_eq!(estimate_split_vbytes(descriptor, 0), None, "{shape:?}");
+                assert_eq!(estimate_split_vbytes(descriptor, 20_001), None, "{shape:?}");
+                let one = estimate_split_vbytes(descriptor, 1).unwrap();
+                let two = estimate_split_vbytes(descriptor, 2).unwrap();
+                let three = estimate_split_vbytes(descriptor, 3).unwrap();
+                let input = two - one;
+                // A signed input of this shape, in vbytes, rounded either way.
+                let expected = match shape {
+                    Shape::Wpkh => 68..=69,
+                    Shape::ShWpkh => 91..=92,
+                    Shape::Pkh => 148..=149,
+                    Shape::WshSortedMulti | Shape::WshMulti => 104..=105,
+                };
+                for step in [input, three - two] {
+                    assert!(expected.contains(&step), "{:?}: {}", shape, step);
+                }
+                // Version, locktime, counts, one change output and the
+                // segwit marker around the two inputs.
+                let output = match shape {
+                    Shape::Wpkh => 31,
+                    Shape::ShWpkh => 32,
+                    Shape::Pkh => 34,
+                    Shape::WshSortedMulti | Shape::WshMulti => 43,
+                };
+                let skeleton = one - 2 * input;
+                assert!(
+                    (9 + output..=13 + output).contains(&skeleton),
+                    "{:?}: {}",
+                    shape,
+                    skeleton
+                );
+            }
+        }
+    }
+
+    /// An imported Vault never offers the replay-protected signature, on
+    /// either chain, whatever its signers: it splits with a split key.
+    #[test]
+    fn an_imported_vault_splits_only_with_a_key() {
+        use crate::services::split_test_wallets::{imported_fork_vault, imported_vault, SHAPES};
+        for shape in SHAPES {
+            for mut wallet in [imported_vault(shape), imported_fork_vault(shape)] {
+                wallet.keychain_keys_recorded = true;
+                if let Some(policy) = wallet.policy() {
+                    wallet
+                        .border_wallet_fingerprints
+                        .extend(policy.primary_path().thresh_origins().1.keys().copied());
+                }
+                assert!(
+                    !signature_available(&wallet),
+                    "{shape:?} {:?}",
+                    wallet.chain
+                );
+            }
+        }
+    }
+
+    /// The daemon's imported self-send is what a split builds: for every
+    /// imported shape, on both chains, sweeping the coins and the key into one
+    /// change output passes the split's construction check, and the overlay's
+    /// estimate covers the fee the daemon charged at the same rate.
+    #[test]
+    fn an_imported_sweep_is_a_valid_split_for_every_shape() {
+        use crate::services::split_test_wallets::{imported_fork_vault, imported_vault, SHAPES};
+        use coincube_core::spend::{
+            AddrInfo, CandidateCoin, SpendOutputAddress, SpendTxFees, TxGetter,
+        };
+        struct Txs(Vec<Transaction>);
+        impl TxGetter for Txs {
+            fn get_tx(&mut self, txid: &Txid) -> Option<Transaction> {
+                self.0.iter().find(|tx| tx.compute_txid() == *txid).cloned()
+            }
+        }
+        const FEERATE: u64 = 5;
+        for shape in SHAPES {
+            for wallet in [imported_vault(shape), imported_fork_vault(shape)] {
+                let imported = wallet.main_descriptor.as_imported().unwrap();
+                let network = wallet.chain.bitcoin_network();
+                // A both-chain coin on the receive branch and a split key on
+                // the change branch.
+                let funding = |change: bool, index: u32, sats: u64| {
+                    let descriptor = if change {
+                        imported.change_descriptor()
+                    } else {
+                        imported.receive_descriptor()
+                    };
+                    let previous = Transaction {
+                        version: transaction::Version::TWO,
+                        lock_time: absolute::LockTime::ZERO,
+                        input: vec![TxIn {
+                            previous_output: OutPoint::new(
+                                Txid::from_str(&format!("{:064x}", index + 1)).unwrap(),
+                                0,
+                            ),
+                            ..TxIn::default()
+                        }],
+                        output: vec![TxOut {
+                            value: Amount::from_sat(sats),
+                            script_pubkey: descriptor
+                                .at_derivation_index(index)
+                                .unwrap()
+                                .script_pubkey(),
+                        }],
+                    };
+                    let candidate = CandidateCoin {
+                        outpoint: OutPoint::new(previous.compute_txid(), 0),
+                        amount: Amount::from_sat(sats),
+                        deriv_index: ChildNumber::Normal { index },
+                        is_change: change,
+                        must_select: true,
+                        sequence: None,
+                        ancestor_info: None,
+                    };
+                    (previous, candidate)
+                };
+                let (coin_tx, coin) = funding(false, 0, 100_000);
+                let (key_tx, key) = funding(true, 3, 20_000);
+                let change = SpendOutputAddress {
+                    addr: Address::from_script(
+                        &wallet
+                            .main_descriptor
+                            .change_descriptor()
+                            .script_pubkey(4)
+                            .unwrap(),
+                        network,
+                    )
+                    .unwrap(),
+                    info: Some(AddrInfo {
+                        index: ChildNumber::Normal { index: 4 },
+                        is_change: true,
+                    }),
+                };
+                let secp =
+                    coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+                let created = coincube_core::imported_spend::create_imported_spend(
+                    imported,
+                    &secp,
+                    &mut Txs(vec![coin_tx, key_tx]),
+                    &[],
+                    &[coin, key],
+                    SpendTxFees::Regular(FEERATE),
+                    change,
+                    absolute::LockTime::ZERO,
+                )
+                .unwrap();
+                let requested = [coin.outpoint, key.outpoint];
+                check_construction(&created.psbt, &requested)
+                    .unwrap_or_else(|e| panic!("{shape:?} {:?}: {e}", wallet.chain));
+                let out: u64 = created
+                    .psbt
+                    .unsigned_tx
+                    .output
+                    .iter()
+                    .map(|output| output.value.to_sat())
+                    .sum();
+                let fee = 120_000 - out;
+                let estimate = estimate_split_vbytes(&wallet.main_descriptor, 1).unwrap();
+                assert!(
+                    fee <= FEERATE * estimate && fee + 2 * FEERATE >= FEERATE * estimate,
+                    "{shape:?} {:?}: fee {fee} for an estimate of {estimate} vbytes",
+                    wallet.chain
+                );
+                // The split must not reach past the two coins.
+                assert!(check_construction(&created.psbt, &requested[..1]).is_err());
+            }
+        }
     }
 
     fn tx(inputs: Vec<OutPoint>, coinbase_height: Option<i64>) -> Transaction {
@@ -1001,9 +1374,6 @@ mod tests {
             ProofEntry::NoQualifyingAncestry {
                 checked_at: UNIX_EPOCH,
             },
-            ProofEntry::Failed {
-                failed_at: UNIX_EPOCH,
-            },
         ] {
             let mut proofs: HashMap<_, _> = [(output, answer.clone())].into();
             assert!(!merge_proofs(&mut proofs, derived()));
@@ -1012,6 +1382,43 @@ mod tests {
                 std::mem::discriminant(&answer),
                 "a check's own answer stays"
             );
+        }
+
+        // A check that couldn't finish is no answer: the path fills in and
+        // the failure's retry time stays.
+        let mut proofs: HashMap<_, _> = [(output, ProofEntry::failed(UNIX_EPOCH))].into();
+        assert!(merge_proofs(&mut proofs, derived()));
+        assert!(matches!(
+            proofs.get(&output),
+            Some(ProofEntry::SavedRetry { failed_at, attempts: 1, .. }) if *failed_at == UNIX_EPOCH
+        ));
+        assert!(!merge_proofs(&mut proofs, derived()), "already there");
+    }
+
+    /// Only an answer about the path stops a key being offered; a read that
+    /// didn't finish leaves it for the next try.
+    #[test]
+    fn only_an_answer_about_the_path_rejects_a_key() {
+        use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+        use coincube_core::claim_ancestry::Error;
+        for error in [
+            DiscoveryError::Structural(Error::IncompletePath),
+            DiscoveryError::Observation(FailureKind::AncestryRootChanged { observed_at: 1 }),
+            DiscoveryError::Observation(FailureKind::AncestryRootShared { observed_at: 1 }),
+            DiscoveryError::Observation(FailureKind::UnsupportedPoison),
+        ] {
+            assert!(path_rejected(&error), "{:?}", error);
+        }
+        for error in [
+            DiscoveryError::Observation(FailureKind::Http(503)),
+            DiscoveryError::Observation(FailureKind::Deadline),
+            DiscoveryError::Observation(FailureKind::Unavailable),
+            DiscoveryError::Observation(FailureKind::Stale),
+            DiscoveryError::Observation(FailureKind::Changed),
+            DiscoveryError::Observation(FailureKind::Cancelled),
+            DiscoveryError::Observation(FailureKind::CollectionLimit),
+        ] {
+            assert!(!path_rejected(&error), "{:?}", error);
         }
     }
 
@@ -1854,6 +2261,183 @@ mod tests {
                     None
                 );
             }
+        }
+    }
+
+    /// What a build reports while it runs: the stages in order, none for a
+    /// request refused up front, and nothing past the step that failed.
+    mod build_stages {
+        use super::*;
+        use crate::{
+            daemon::{client::Coincubed, DaemonError},
+            services::split_test_wallets::{imported_fork_vault, Shape},
+            utils::mock::Daemon as MockDaemon,
+        };
+        use iced::futures::{channel::mpsc, StreamExt};
+        use serde_json::{json, Value};
+
+        type Reply = (Option<Value>, Result<Value, DaemonError>);
+
+        fn shared() -> [OutPoint; 2] {
+            [
+                OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 0),
+                OutPoint::new(Txid::from_str(&"22".repeat(32)).unwrap(), 1),
+            ]
+        }
+
+        fn list_coins(outpoints: &[OutPoint]) -> Reply {
+            let coins: Vec<_> = outpoints
+                .iter()
+                .map(|outpoint| coin(*outpoint, Some(100)))
+                .collect();
+            (None, Ok(json!({ "coins": coins })))
+        }
+
+        /// A self-send of exactly `inputs` into one output of the wallet.
+        fn create_spend(inputs: &[OutPoint]) -> Reply {
+            let mut psbt = Psbt::from_unsigned_tx(tx(inputs.to_vec(), None)).unwrap();
+            psbt.outputs[0].bip32_derivation.insert(
+                coincube_core::miniscript::bitcoin::secp256k1::PublicKey::from_str(
+                    "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+                )
+                .unwrap(),
+                (Default::default(), Default::default()),
+            );
+            (
+                None,
+                Ok(json!({ "psbt": psbt.to_string(), "warnings": [] })),
+            )
+        }
+
+        async fn run(
+            replies: Vec<Reply>,
+            method: Method,
+            coins: Vec<OutPoint>,
+            key: Option<KeyChoice>,
+        ) -> (Result<Prepared, String>, Vec<BuildStage>) {
+            let daemon: Arc<dyn Daemon + Send + Sync> =
+                Arc::new(Coincubed::new(MockDaemon::new(replies).run()));
+            let wallet = Arc::new(imported_fork_vault(Shape::Wpkh));
+            assert!(wallet.chain.is_blake2b());
+            let (_session, live) = tokio::sync::watch::channel(7);
+            let (sender, receiver) = mpsc::channel(16);
+            let result = prepare(
+                daemon,
+                wallet,
+                method,
+                coins,
+                key,
+                2,
+                crate::services::coincube::CoincubeClient::new(),
+                7,
+                live,
+                sender.into(),
+            )
+            .await
+            .map_err(|error| error.message);
+            (result, receiver.collect().await)
+        }
+
+        #[tokio::test]
+        async fn a_build_reports_its_stages_in_order() {
+            let coins = shared();
+            let (result, stages) = run(
+                vec![
+                    list_coins(&coins),
+                    create_spend(&coins),
+                    (None, Ok(json!({}))),
+                ],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(
+                stages,
+                [
+                    BuildStage::CheckingCoins,
+                    BuildStage::Building,
+                    BuildStage::Saving,
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_request_reports_no_stage() {
+            let (result, stages) = run(vec![], Method::Signature, vec![], None).await;
+            assert!(result.is_err());
+            assert!(stages.is_empty(), "{:?}", stages);
+        }
+
+        #[tokio::test]
+        async fn a_failed_step_reports_nothing_after_it() {
+            let coins = shared();
+            // The coins changed: never "Building".
+            let (result, stages) = run(
+                vec![list_coins(&coins[..1])],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(stages, [BuildStage::CheckingCoins]);
+
+            // Not enough for the fee: stops at "Building".
+            let (result, stages) = run(
+                vec![list_coins(&coins), (None, Ok(json!({ "missing": 500 })))],
+                Method::Signature,
+                coins.to_vec(),
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().contains("500 sats short"));
+            assert_eq!(stages, [BuildStage::CheckingCoins, BuildStage::Building]);
+        }
+
+        /// A split key is checked first; a proof that fails stops the build
+        /// before the coins are read.
+        #[tokio::test]
+        async fn a_split_key_is_checked_first() {
+            let (record, _) = split_fixture();
+            let path = RetainedPath::decode(
+                record.key.unwrap(),
+                &hex::decode(record.key_path.unwrap()).unwrap(),
+            )
+            .unwrap();
+            // The proof is for another coin than the key, so it fails before
+            // anything asks Connect.
+            let key = KeyChoice {
+                outpoint: shared()[1],
+                path,
+            };
+            let (result, stages) =
+                run(vec![], Method::SplitKey, vec![shared()[0]], Some(key)).await;
+            assert_eq!(result.unwrap_err(), KEY_REJECTED_PROOF);
+            assert_eq!(stages, [BuildStage::CheckingKey]);
+        }
+    }
+
+    /// Every message a key check or a rejection can show is in the Spanish
+    /// catalogue, with each next step: a reworded constant can't silently
+    /// fall back to English.
+    #[test]
+    fn key_check_messages_are_in_the_spanish_catalogue() {
+        use coincube_ui::locale::{notice, render_in, Language};
+        let mut shown = vec![KEY_CHECK_UNFINISHED.to_string()];
+        for reason in [KEY_REJECTED_HISTORY, KEY_REJECTED_PROOF] {
+            for next in [
+                KEY_REJECTED_SEND_ANOTHER,
+                KEY_REJECTED_USES_ANOTHER,
+                KEY_REJECTED_BUILD_AGAIN,
+            ] {
+                shown.push(format!("{reason} {next}"));
+            }
+        }
+        for english in shown {
+            let spanish = render_in(Language::Spanish, || notice(english.clone()));
+            assert_ne!(spanish, english);
         }
     }
 

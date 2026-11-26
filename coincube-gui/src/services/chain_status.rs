@@ -202,13 +202,27 @@ pub enum ProofEntry {
     Verified(coincube_core::claim_ancestry::retained::RetainedPath),
     /// A path loaded from `chain-proofs.json`. It decodes, but decoding only
     /// proves its links fit together, not that the chain still holds them
-    /// (a reorg or a restart in between). Shown as checking and never used as
-    /// a split key until a fresh check turns it into [`Self::Verified`].
+    /// (a reorg or a restart in between). Shown as checking until a fresh
+    /// check turns it into [`Self::Verified`]. The Split coins flow may
+    /// offer its coin as the split coin meanwhile: the split builder
+    /// re-qualifies the path against both chains before anything is built.
     Saved(coincube_core::claim_ancestry::retained::RetainedPath),
     /// The bounded search found no qualifying path at `checked_at`.
     NoQualifyingAncestry { checked_at: SystemTime },
-    /// The check could not finish at `failed_at`. Shown as not checked.
-    Failed { failed_at: SystemTime },
+    /// The check could not finish at `failed_at`, for the `attempts`th time
+    /// in a row. Shown as not checked.
+    Failed { failed_at: SystemTime, attempts: u8 },
+    /// A [`Self::Saved`] path whose fresh check could not finish at
+    /// `failed_at`. A check that can't finish (Connect down, a read timing
+    /// out) says nothing about the path, so the path is kept, written back,
+    /// and re-checked after [`failed_retry`] like any failed check. Shown
+    /// as checking; offered as a split coin on the same terms as
+    /// [`Self::Saved`].
+    SavedRetry {
+        path: coincube_core::claim_ancestry::retained::RetainedPath,
+        failed_at: SystemTime,
+        attempts: u8,
+    },
 }
 
 impl ProofEntry {
@@ -216,8 +230,65 @@ impl ProofEntry {
         match self {
             Self::Verified(_) => Some(ProofOutcome::Verified),
             Self::NoQualifyingAncestry { .. } => Some(ProofOutcome::NoQualifyingAncestry),
-            Self::Saved(_) | Self::Failed { .. } => None,
+            Self::Saved(_) | Self::Failed { .. } | Self::SavedRetry { .. } => None,
         }
+    }
+
+    /// The path this entry holds, verified or waiting for a fresh check.
+    pub fn path(&self) -> Option<&coincube_core::claim_ancestry::retained::RetainedPath> {
+        match self {
+            Self::Verified(path) | Self::Saved(path) | Self::SavedRetry { path, .. } => Some(path),
+            Self::NoQualifyingAncestry { .. } | Self::Failed { .. } => None,
+        }
+    }
+
+    /// Fold a fresh check's `result` into what was held before. A check
+    /// that could not finish keeps a held path (as [`Self::SavedRetry`]);
+    /// every other result is the answer.
+    pub fn after_check(previous: Option<&Self>, result: Self) -> Self {
+        let Self::Failed { failed_at, .. } = result else {
+            return result;
+        };
+        let attempts = previous.map_or(0, Self::failed_attempts).saturating_add(1);
+        match previous.and_then(Self::path) {
+            Some(path) => Self::SavedRetry {
+                path: path.clone(),
+                failed_at,
+                attempts,
+            },
+            None => Self::Failed {
+                failed_at,
+                attempts,
+            },
+        }
+    }
+
+    /// A check that could not finish at `failed_at`, the first in a row.
+    pub fn failed(failed_at: SystemTime) -> Self {
+        Self::Failed {
+            failed_at,
+            attempts: 1,
+        }
+    }
+
+    /// How many checks in a row could not finish.
+    pub fn failed_attempts(&self) -> u8 {
+        match self {
+            Self::Failed { attempts, .. } | Self::SavedRetry { attempts, .. } => *attempts,
+            _ => 0,
+        }
+    }
+
+    /// Whether the last check could not finish and is waiting to be retried.
+    pub fn is_waiting_to_retry(&self) -> bool {
+        self.failed_attempts() > 0
+    }
+
+    /// Whether the check has failed so many times in a row that it is down
+    /// to the longest wait. Some failures never pass (a history too deep or
+    /// too large to search), so by now another coin may be the way forward.
+    pub fn retries_backed_off(&self) -> bool {
+        usize::from(self.failed_attempts()) > FAILED_RETRY_STEPS.len()
     }
 
     fn retry_due(&self, now: SystemTime) -> bool {
@@ -225,7 +296,15 @@ impl ProofEntry {
             Self::Verified(_) => return false,
             Self::Saved(_) => return true,
             Self::NoQualifyingAncestry { checked_at } => (*checked_at, NO_PATH_RETRY),
-            Self::Failed { failed_at } => (*failed_at, FAILED_RETRY),
+            Self::Failed {
+                failed_at,
+                attempts,
+            }
+            | Self::SavedRetry {
+                failed_at,
+                attempts,
+                ..
+            } => (*failed_at, failed_retry(*attempts)),
         };
         now.duration_since(at).map_or(true, |age| age >= after)
     }
@@ -234,8 +313,25 @@ impl ProofEntry {
 /// A coin with no qualifying path may be re-checked after this long: a deeper
 /// confirmation history does not change the answer, so it is rare.
 pub const NO_PATH_RETRY: Duration = Duration::from_secs(24 * 60 * 60);
-/// A check that failed to finish is retried sooner.
+/// The longest a check that failed to finish waits for its next attempt.
 pub const FAILED_RETRY: Duration = Duration::from_secs(30 * 60);
+/// The waits after the first failures in a row, before [`FAILED_RETRY`].
+const FAILED_RETRY_STEPS: [Duration; 4] = [
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+];
+
+/// How long a check that failed to finish `attempts` times in a row waits
+/// for its next attempt. Most failures are a Connect read that didn't answer,
+/// so the first retries come quickly and back off to [`FAILED_RETRY`].
+pub fn failed_retry(attempts: u8) -> Duration {
+    FAILED_RETRY_STEPS
+        .get(usize::from(attempts.saturating_sub(1)))
+        .copied()
+        .unwrap_or(FAILED_RETRY)
+}
 /// At most this many ancestry searches per pass; each can take up to 90 s.
 pub const MAX_CHECKS_PER_PASS: usize = 2;
 
@@ -289,14 +385,7 @@ pub async fn check_ancestry(
     let failed = |outpoints: &[OutPoint]| {
         outpoints
             .iter()
-            .map(|outpoint| {
-                (
-                    *outpoint,
-                    ProofEntry::Failed {
-                        failed_at: SystemTime::now(),
-                    },
-                )
-            })
+            .map(|outpoint| (*outpoint, ProofEntry::failed(SystemTime::now())))
             .collect::<Vec<_>>()
     };
     let source = match HttpObservationSource::new(
@@ -309,7 +398,10 @@ pub async fn check_ancestry(
         },
     ) {
         Ok(source) => source,
-        Err(_) => return failed(&outpoints),
+        Err(error) => {
+            tracing::info!("Ancestry checks could not start: {:?}", error);
+            return failed(&outpoints);
+        }
     };
     let policy = coincube_core::claim::Policy {
         max_observation_age_seconds: 60,
@@ -324,22 +416,19 @@ pub async fn check_ancestry(
         let entry = match found {
             Ok(Some(discovered)) => match discovered.retained_path() {
                 Ok(path) => ProofEntry::Verified(path),
-                Err(_) => ProofEntry::Failed {
-                    failed_at: SystemTime::now(),
-                },
+                Err(error) => {
+                    tracing::info!("An ancestry check's path did not verify: {:?}", error);
+                    ProofEntry::failed(SystemTime::now())
+                }
             },
             Ok(None) => ProofEntry::NoQualifyingAncestry {
                 checked_at: SystemTime::now(),
             },
             Err(error) => {
-                tracing::debug!(
-                    "ancestry check for {} did not finish: {:?}",
-                    outpoint,
-                    error
-                );
-                ProofEntry::Failed {
-                    failed_at: SystemTime::now(),
-                }
+                tracing::debug!("ancestry check for {} did not finish", outpoint);
+                // No coin named: the reason alone is what a support log needs.
+                tracing::info!("An ancestry check did not finish: {:?}", error);
+                ProofEntry::failed(SystemTime::now())
             }
         };
         results.push((outpoint, entry));
@@ -485,6 +574,7 @@ mod tests {
             outpoint(4),
             ProofEntry::Failed {
                 failed_at: now - FAILED_RETRY,
+                attempts: u8::MAX,
             },
         );
         let in_flight = HashSet::new();
@@ -496,6 +586,52 @@ mod tests {
         assert_eq!(
             proof_candidates(coins, entangled, &proofs, &in_flight, now),
             vec![outpoint(5)]
+        );
+    }
+
+    /// A failed check comes back within a minute, then backs off to the
+    /// longest wait; a finished answer starts the count over.
+    #[test]
+    fn failed_checks_retry_quickly_then_back_off() {
+        let now = SystemTime::now();
+        let coin = outpoint(1);
+        let due = |entry: &ProofEntry, after: Duration| {
+            let proofs: HashMap<_, _> = [(coin, entry.clone())].into();
+            !proof_candidates(
+                [coin],
+                |_| Entanglement::NotEntangled,
+                &proofs,
+                &HashSet::new(),
+                now + after,
+            )
+            .is_empty()
+        };
+        let mut entry = ProofEntry::after_check(None, ProofEntry::failed(now));
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            let wait = failed_retry(entry.failed_attempts());
+            assert!(!due(&entry, wait - Duration::from_secs(1)));
+            assert!(due(&entry, wait));
+            waits.push(wait.as_secs() / 60);
+            entry = ProofEntry::after_check(Some(&entry), ProofEntry::failed(now));
+        }
+        assert_eq!(waits, [1, 2, 5, 15, 30, 30]);
+        assert!(entry.is_waiting_to_retry());
+        assert!(entry.retries_backed_off());
+        let fourth = (0..3).fold(ProofEntry::failed(now), |entry, _| {
+            ProofEntry::after_check(Some(&entry), ProofEntry::failed(now))
+        });
+        assert_eq!(fourth.failed_attempts(), 4);
+        assert!(!fourth.retries_backed_off(), "still on the quick retries");
+
+        let answered = ProofEntry::after_check(
+            Some(&entry),
+            ProofEntry::NoQualifyingAncestry { checked_at: now },
+        );
+        assert!(!answered.is_waiting_to_retry());
+        assert_eq!(
+            ProofEntry::after_check(Some(&answered), ProofEntry::failed(now)).failed_attempts(),
+            1
         );
     }
 

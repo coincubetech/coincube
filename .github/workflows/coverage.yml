@@ -42,10 +42,10 @@ jobs:
       # Coverage (including the doctest pass) needs a single nightly toolchain:
       # doctest coverage requires nightly, and running the lib/bins/tests and
       # --doc passes under one toolchain keeps their profraw in one coherent set
-      # for the merged report. Pinned BEFORE rust-lang/rust#148922: that nightly
-      # changed the never-type fallback from `()` to `!`, which breaks the
-      # transitive `lightning 0.0.118` (via lightning-invoice/sdk-common) TLV
-      # read macro. Bump this date only to another pre-#148922 nightly.
+      # for the merged report. The date was first pinned before
+      # rust-lang/rust#148922 for the transitive `lightning 0.0.118`, which
+      # left with breez-sdk-liquid; it stays pinned so coverage runs on a known
+      # toolchain. Moving it to a newer nightly is a separate, tested change.
       CARGO_TOOLCHAIN: nightly-2026-05-15
       COVERAGE_DOCTESTS: 1
       # Current full-workspace baseline is ~26.8%. Keep the gate non-breaking
@@ -57,8 +57,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Pinned before rust-lang/rust#148922 so the transitive `lightning 0.0.118`
-      # still builds; see the CARGO_TOOLCHAIN note above.
+      # Pinned; see the CARGO_TOOLCHAIN note above.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
@@ -73,32 +72,22 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@528e28158500e8adf409c61ac0eaa6bdd47f49ca # cargo-llvm-cov
 
-      # Same Secret Service setup as CI's ubuntu leg, and for the same reason:
-      # the device-secret tests are deliberately not mockable — "the key half
-      # lives in the OS keystore" is the property under test. A bare runner has
-      # no session bus and no keyring daemon, so `org.freedesktop.secrets` is
-      # absent and every test that provisions or reads a device secret fails
-      # with `KeystoreUnreachable` (40 of them here, across services::unlock,
-      # app and home). Coverage never got this treatment when CI did, which is
-      # why it has been red since the seed hardening landed.
-      #
-      # Starting the daemon is not enough on its own: with no keyring file the
-      # Secret Service answers a lookup for the *default* collection with "no
-      # result found", and `secret-tool store` cannot mint it. Write the
-      # empty-password login keyring and its default alias first.
-      #
-      # Keep this in step with the equivalent block in main.yml — they solve
-      # one problem in two places, and a fix applied to only one of them will
-      # look like a flake in the other.
+      # Device-secret tests need the same real Secret Service fixture as CI's
+      # Ubuntu leg. Provision its default collection before starting the daemon.
+      # The fixture checks that the original bus owner survives until coverage
+      # completes and reports a disconnect as infrastructure failure.
+      # Keep in step with main.yml's Ubuntu leg: run the fixture's self-tests
+      # first, and keep the daemon log. The device-secret backend serialises
+      # keystore calls because gnome-keyring 50 aborts under concurrent
+      # client churn (see `backend::serialised`).
       - name: Generate coverage
         run: |
           mkdir -p ~/.local/share/keyrings
           printf '[keyring]\ndisplay-name=login\nctime=0\nmtime=0\nlock-on-idle=false\nlock-after=false\n' > ~/.local/share/keyrings/login.keyring
           printf 'login' > ~/.local/share/keyrings/default
-          dbus-run-session -- bash -c '
-            echo -n "" | gnome-keyring-daemon --daemonize --unlock --components=secrets >/dev/null
-            ./contrib/coverage.sh
-          '
+          python3 contrib/test_keyring_supervision.py
+          python3 contrib/test_keyring_supervision.py --live-kill
+          dbus-run-session -- python3 contrib/with_test_keyring.py -- ./contrib/coverage.sh
 
       - name: Upload coverage artifacts
         if: always()
@@ -108,6 +97,14 @@ jobs:
           path: |
             target/coverage/lcov.info
             target/coverage/summary.json
+
+      - name: Preserve Secret Service fixture diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: keyring-fixture-coverage
+          path: test-logs/gnome-keyring.log
+          if-no-files-found: ignore
 
   spark-bridge-coverage:
     if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}

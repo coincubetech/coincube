@@ -443,24 +443,7 @@ fn details_card<'a>(
         }
         _ => None,
     };
-    let estimate = price
-        .filter(|_| !(masked && swap.max_for_view()))
-        .and_then(|price| {
-            let amount = if swap.max_for_view() {
-                Some(swap.balance(from))
-            } else {
-                swap.typed_amount()
-            }?;
-            let out = converted_at(
-                AssetAmount {
-                    asset: from,
-                    amount,
-                },
-                price,
-                decimals,
-            );
-            Some(format_asset(out.asset, out.amount, decimals))
-        });
+    let estimate = swap_details_estimate(swap, from, price, decimals, masked);
 
     let figures = Column::new()
         .spacing(8)
@@ -524,6 +507,33 @@ fn details_card<'a>(
         .push(iced::widget::rule::horizontal(1))
         .push(section(footer))
         .into()
+}
+
+fn swap_details_estimate(
+    swap: &SparkSwap,
+    from: WalletAsset,
+    price: Option<f64>,
+    decimals: u32,
+    masked: bool,
+) -> Option<String> {
+    price
+        .filter(|_| !(masked && swap.max_for_view()))
+        .and_then(|price| {
+            let amount = if swap.max_for_view() {
+                Some(swap.balance(from))
+            } else {
+                swap.typed_amount()
+            }?;
+            let out = converted_at(
+                AssetAmount {
+                    asset: from,
+                    amount,
+                },
+                price,
+                decimals,
+            );
+            Some(format_asset(out.asset, out.amount, decimals))
+        })
 }
 
 fn review_card<'a>(
@@ -617,7 +627,11 @@ fn result_card<'a>(line: &'static str, title: &'static str, again: bool) -> Elem
             ACTIVITY_ID,
             coincube_ui::locale::copy("See in Activity"),
             ActionKind::Secondary,
-            Some(Message::Menu(Menu::Spark(SparkSubMenu::Transactions(None)))),
+            Some(Message::Activity(
+                crate::app::view::activity::ActivityMessage::ViewAll(
+                    crate::app::view::activity::WalletFilter::Spark,
+                ),
+            )),
         ))
         .push(action(
             AGAIN_ID,
@@ -941,6 +955,20 @@ mod tests {
         assert!(probe.contains("Check Activity before"));
         assert!(probe.contains("See in Activity"));
         assert!(!probe.contains("didn't go through") && !probe.contains("failed"));
+        // The card's link opens Cube › Activity filtered to Spark, not the
+        // Spark-only list.
+        let messages = crate::app::view::shared::landing::capture::activate(
+            swap_body(&cache, &swap),
+            Id::new(ACTIVITY_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            Message::Activity(crate::app::view::activity::ActivityMessage::ViewAll(
+                crate::app::view::activity::WalletFilter::Spark
+            ))
+        )));
     }
 
     /// H-Convert: the side panel says what happens to bitcoin received

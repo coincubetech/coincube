@@ -182,6 +182,8 @@ fn imported_pairing(
         vault_fingerprint: policy.transport_id(),
         transport_pubkey,
         fallback_addr: None,
+        network: Some(wallet.chain().api_str().into()),
+        capabilities: Vec::new(),
     }
 }
 
@@ -291,6 +293,9 @@ enum FakeResponse {
     },
     /// A pre-send refusal must close the transport without a frame.
     NoPresentSession,
+    /// Answer as the inner response would, but with this
+    /// `PartialSignature.network` instead of echoing the session's.
+    Network(Box<FakeResponse>, String),
 }
 
 /// Run a fake phone server on the supplied `listener` that presents
@@ -347,50 +352,58 @@ async fn fake_phone(
     let mut payload = vec![0u8; len];
     tls.read_exact(&mut payload).await?;
     let envelope = LocalEnvelope::decode(payload.as_slice())?;
-    let (session_id, request_id, psbt_bytes, descriptor_bytes, creator_pub) = match envelope.payload
-    {
-        Some(local_v1::local_envelope::Payload::PresentSession(p)) => {
-            let s = p.session.expect("session present");
-            assert_eq!(
-                s.payload_scheme,
-                cv1::PayloadScheme::EciesV1 as i32,
-                "LAN sessions must be ECIES_V1",
-            );
-            assert!(s.psbt.is_empty(), "ECIES_V1 carries no plaintext PSBT");
-            assert_eq!(
-                s.descriptor_envelopes.len(),
-                1,
-                "the descriptor must be sealed to this phone",
-            );
-            let pe = s.psbt_envelopes.first().expect("psbt envelope").clone();
-            let psbt = phone_transport
-                .open(
-                    &pe.ephemeral_pubkey,
-                    &pe.nonce,
-                    &pe.ciphertext,
-                    &s.request_id,
+    let (session_id, request_id, psbt_bytes, descriptor_bytes, creator_pub, session_network) =
+        match envelope.payload {
+            Some(local_v1::local_envelope::Payload::PresentSession(p)) => {
+                let s = p.session.expect("session present");
+                assert_eq!(
+                    s.payload_scheme,
+                    cv1::PayloadScheme::EciesV1 as i32,
+                    "LAN sessions must be ECIES_V1",
+                );
+                assert!(s.psbt.is_empty(), "ECIES_V1 carries no plaintext PSBT");
+                assert_eq!(
+                    s.descriptor_envelopes.len(),
+                    1,
+                    "the descriptor must be sealed to this phone",
+                );
+                let pe = s.psbt_envelopes.first().expect("psbt envelope").clone();
+                let psbt = phone_transport
+                    .open(
+                        &pe.ephemeral_pubkey,
+                        &pe.nonce,
+                        &pe.ciphertext,
+                        &s.request_id,
+                    )
+                    .expect("open sealed PSBT");
+                let de = s.descriptor_envelopes.first().expect("descriptor envelope");
+                let descriptor = phone_transport
+                    .open(
+                        &de.ephemeral_pubkey,
+                        &de.nonce,
+                        &de.ciphertext,
+                        &s.request_id,
+                    )
+                    .expect("open sealed descriptor");
+                assert!(!s.network.is_empty(), "every LAN session names its network");
+                (
+                    s.session_id,
+                    s.request_id,
+                    psbt.to_vec(),
+                    descriptor.to_vec(),
+                    s.creator_transport_pubkey,
+                    s.network,
                 )
-                .expect("open sealed PSBT");
-            let de = s.descriptor_envelopes.first().expect("descriptor envelope");
-            let descriptor = phone_transport
-                .open(
-                    &de.ephemeral_pubkey,
-                    &de.nonce,
-                    &de.ciphertext,
-                    &s.request_id,
-                )
-                .expect("open sealed descriptor");
-            (
-                s.session_id,
-                s.request_id,
-                psbt.to_vec(),
-                descriptor.to_vec(),
-                s.creator_transport_pubkey,
-            )
-        }
-        other => panic!("expected PresentSession, got {:?}", other),
-    };
+            }
+            other => panic!("expected PresentSession, got {:?}", other),
+        };
 
+    // A phone states the network it signed for on every partial signature:
+    // the session's, unless the test asks for another.
+    let (response, partial_network) = match response {
+        FakeResponse::Network(inner, network) => (*inner, network),
+        response => (response, session_network),
+    };
     let reply = match response {
         FakeResponse::EchoPartial
         | FakeResponse::WrongRequest
@@ -412,6 +425,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Set below to the network this phone signed for.
+                        network: String::new(),
                         session_id,
                         // Empty under ECIES_V1.
                         signed_psbt: if plaintext { psbt_bytes } else { Vec::new() },
@@ -467,6 +482,8 @@ async fn fake_phone(
             Some(LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Partial(
                     local_v1::PartialSignature {
+                        // Set below to the network this phone signed for.
+                        network: String::new(),
                         session_id,
                         signed_psbt: Vec::new(),
                         signed_key_ids: vec!["10".into()],
@@ -480,8 +497,15 @@ async fn fake_phone(
                 )),
             })
         }
-        FakeResponse::NoPresentSession => unreachable!(),
+        FakeResponse::NoPresentSession | FakeResponse::Network(..) => unreachable!(),
     };
+    let reply = reply.map(|mut envelope| {
+        if let Some(local_v1::local_envelope::Payload::Partial(partial)) = envelope.payload.as_mut()
+        {
+            partial.network = partial_network;
+        }
+        envelope
+    });
     if let Some(envelope) = reply {
         let mut buf = Vec::with_capacity(envelope.encoded_len());
         envelope.encode(&mut buf)?;
@@ -556,6 +580,8 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some(coincube_core::chain::ChainId::Regtest.api_str().into()),
+        capabilities: Vec::new(),
     };
     let signer = PhoneSigner::new(
         transport,
@@ -583,9 +609,13 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         "echo-back PSBT bytes should be byte-identical"
     );
 
-    // Drain the server task. It returns once the single envelope
-    // round-trip is done.
-    let _ = phone_handle.await;
+    // The server task returns once the single envelope round-trip is done:
+    // the phone must have received and answered the session, and a refusal
+    // before the send fails here instead of hanging.
+    tokio::time::timeout(std::time::Duration::from_secs(10), phone_handle)
+        .await
+        .expect("the phone answered in time")
+        .expect("join");
 
     // Sanity: the test also exercises the fingerprint helper.
     let _hex = pin_hex8(&phone_pin);
@@ -601,8 +631,28 @@ async fn signer_against_response(
     signer_against_chain_response(coincube_core::chain::ChainId::Regtest, response).await
 }
 
+/// A pairing made for `chain` by a phone that reported every capability
+/// this desktop knows, so only the case under test can refuse it.
 async fn signer_against_chain_response(
     chain: coincube_core::chain::ChainId,
+    response: FakeResponse,
+) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
+    signer_against_pairing(
+        chain,
+        chain.api_str(),
+        vec![
+            coincube_gui::mobile_signing::CHAIN_IDENTITY_CAPABILITY.into(),
+            coincube_gui::mobile_signing::BTCB2_UNIFIED_CAPABILITY.into(),
+        ],
+        response,
+    )
+    .await
+}
+
+async fn signer_against_pairing(
+    chain: coincube_core::chain::ChainId,
+    paired_network: &str,
+    capabilities: Vec<String>,
     response: FakeResponse,
 ) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
     let (desk_cert, desk_key) = mint_ed25519_cert("Coincube Desktop (test)");
@@ -646,6 +696,8 @@ async fn signer_against_chain_response(
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: phone_pubkey,
         fallback_addr: None,
+        network: Some(paired_network.into()),
+        capabilities,
     };
     let signer = PhoneSigner::new(
         transport,
@@ -787,57 +839,117 @@ fn stale_or_wrong_exact_pairing_identity_is_not_a_capability() {
         vault_fingerprint: lan_binding::vault(TEST_DESCRIPTOR),
         transport_pubkey: Vec::new(),
         fallback_addr: None,
+        network: Some("mainnet".into()),
+        capabilities: Vec::new(),
     };
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_ok());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_ok());
     let valid = phone.signer_binding.clone();
     phone.signer_binding = None;
     assert!(phone
-        .exact_signer(TEST_DESCRIPTOR)
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
         .unwrap_err()
         .contains("again"));
     phone.signer_binding = valid.clone();
     phone.signer_binding.as_mut().unwrap().xpub = "another-key".into();
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
     phone.signer_binding = valid.clone();
     phone.signer_binding.as_mut().unwrap().descriptor_sha256[0] ^= 1;
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
     phone.signer_binding = valid;
     phone.vault_fingerprint = Fingerprint::default();
-    assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+    assert!(phone
+        .exact_signer(TEST_DESCRIPTOR, coincube_gui::chain::ChainId::Bitcoin)
+        .is_err());
+}
+
+/// The chain rules refuse in the caller, before `PresentSession`: the fake
+/// phone completes as soon as it reads one, so it must still be waiting.
+async fn assert_refused_before_a_session(
+    chain: coincube_core::chain::ChainId,
+    paired_network: &str,
+    capabilities: Vec<String>,
+    expected: &str,
+) {
+    let (signer, mut phone) = signer_against_pairing(
+        chain,
+        paired_network,
+        capabilities,
+        FakeResponse::Error {
+            code: "UNEXPECTED_SESSION".into(),
+            message: "A refused pairing reached the phone".into(),
+        },
+    )
+    .await;
+    let mut psbt = empty_psbt();
+    let before = psbt.serialize();
+    let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(expected), "{}: {}", chain, error);
+    assert_eq!(psbt.serialize(), before);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut phone)
+            .await
+            .is_err(),
+        "{}: a session reached the phone",
+        chain
+    );
+    phone.abort();
+    drop(signer);
 }
 
 #[tokio::test]
-async fn btcb2_lan_refuses_before_a_session_is_sent() {
+async fn a_pairing_for_another_chain_refuses_before_a_session_is_sent() {
     use coincube_core::chain::ChainId;
-    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
-        let (signer, mut phone) = signer_against_chain_response(
+    // Contract R2.7, both ways round between a Bitcoin chain and its twin.
+    for (chain, paired_for) in [
+        (ChainId::Regtest, ChainId::BitcoinBlake2bTestnet4),
+        (ChainId::BitcoinBlake2bTestnet4, ChainId::Regtest),
+        (ChainId::BitcoinBlake2b, ChainId::Bitcoin),
+    ] {
+        let both = vec![
+            coincube_gui::mobile_signing::CHAIN_IDENTITY_CAPABILITY.into(),
+            coincube_gui::mobile_signing::BTCB2_UNIFIED_CAPABILITY.into(),
+        ];
+        assert_refused_before_a_session(
             chain,
-            FakeResponse::Error {
-                code: "UNEXPECTED_SESSION".into(),
-                message: "A BTCB2 session reached LAN".into(),
-            },
+            paired_for.api_str(),
+            both,
+            "Pair again to use it here",
         )
         .await;
-        let mut psbt = empty_psbt();
-        let before = psbt.serialize();
-        let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("chain-bound pairing"),
-            "{}",
-            error
-        );
-        assert_eq!(psbt.serialize(), before);
-        // The fake phone completes immediately after processing PresentSession.
-        // It must remain waiting for a frame; the refusal happens in the caller.
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), &mut phone)
-                .await
-                .is_err()
-        );
-        phone.abort();
-        drop(signer);
+    }
+}
+
+#[tokio::test]
+async fn a_btcb2_pairing_without_both_capabilities_refuses_before_a_session_is_sent() {
+    use coincube_core::chain::ChainId;
+    use coincube_gui::mobile_signing::{BTCB2_UNIFIED_CAPABILITY, CHAIN_IDENTITY_CAPABILITY};
+    use coincube_gui::phone_signer::pairing_store::BTCB2_PHONE_OUTDATED;
+    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+        for capabilities in [
+            Vec::new(),
+            vec![CHAIN_IDENTITY_CAPABILITY.to_string()],
+            vec![
+                CHAIN_IDENTITY_CAPABILITY.to_string(),
+                "btcb2-unified-v1".to_string(),
+            ],
+            vec![BTCB2_UNIFIED_CAPABILITY.to_string()],
+        ] {
+            assert_refused_before_a_session(
+                chain,
+                chain.api_str(),
+                capabilities,
+                BTCB2_PHONE_OUTDATED,
+            )
+            .await;
+        }
     }
 }
 
@@ -949,6 +1061,78 @@ async fn imported_sign_tx_case(name: &str, change: ImportedReviewChange) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn imported_sign_tx_accepts_native_phone_result() {
     imported_sign_tx_case("sortedmulti_first", ImportedReviewChange::None).await;
+}
+
+/// Contract R2.13: a partial signature that is otherwise accepted (the
+/// native one `imported_sign_tx_accepts_native_phone_result` merges) is
+/// discarded when its network is missing or not the session's, before it is
+/// decrypted, verified or merged. Nothing reaches the PSBT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_partial_signature_for_another_or_no_network_is_discarded_before_merge() {
+    for (network, expected) in [
+        (
+            "bitcoin-blake2b",
+            "Your signature wasn't accepted and nothing was broadcast from it. The signature COINCUBE Mobile returned is for a different network. Pair again.",
+        ),
+        (
+            "",
+            "Your signature wasn't accepted and nothing was broadcast from it. Update COINCUBE Mobile and pair again.",
+        ),
+    ] {
+        let (request, original, returned, _wallet, policy) = imported_case("sortedmulti_first");
+        let before = original.serialize();
+        let (review_started_tx, review_started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let response = FakeResponse::Network(
+            Box::new(FakeResponse::Imported {
+                expected_descriptor: policy.descriptor().to_owned(),
+                expected_psbt: before.clone(),
+                signed_psbt: returned.serialize(),
+                review_started: review_started_tx,
+                release_review: release_rx,
+            }),
+            network.into(),
+        );
+        let (signer, phone_handle, _dir, _paired) =
+            imported_signer_against(&request, policy, response).await;
+        let signing = tokio::spawn(async move {
+            let mut psbt = original;
+            let result = async_hwi::HWI::sign_tx(&signer, &mut psbt).await;
+            (result, psbt)
+        });
+        review_started_rx.await.expect("phone reached review");
+        release_tx.send(()).unwrap();
+        let (result, signed) = signing.await.unwrap();
+        phone_handle.await.unwrap();
+        let error = result.expect_err("the signature must be discarded");
+        assert!(error.to_string().contains(expected), "{:?}: {}", network, error);
+        assert_eq!(signed.serialize(), before, "{:?}: nothing merged", network);
+    }
+}
+
+/// R2.13 runs before the signature is opened: a reply sealed to another
+/// request, which would fail to decrypt, is refused for its network first.
+#[tokio::test]
+async fn the_partial_network_is_checked_before_the_signature_is_decrypted() {
+    let (signer, handle) = signer_against_response(FakeResponse::Network(
+        Box::new(FakeResponse::WrongRequest),
+        "bitcoin-blake2b".into(),
+    ))
+    .await;
+    let mut psbt = empty_psbt();
+    let before = psbt.serialize();
+    let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("The signature COINCUBE Mobile returned is for a different network."),
+        "{}",
+        error
+    );
+    assert!(!error.contains("decrypt"), "{}", error);
+    assert_eq!(psbt.serialize(), before);
+    handle.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

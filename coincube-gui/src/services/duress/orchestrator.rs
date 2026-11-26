@@ -244,9 +244,52 @@ impl DuressOrchestrator {
         //    transiently unreadable. Only the in-session drainer needs the key to
         //    decrypt in-flight; without it, the launch-time drainer fires the
         //    POST on a later launch once the key is readable again.
-        if let (Some(acct), Some(encrypted)) =
-            (account_id.as_ref(), self.local_state.duress_code.clone())
-        {
+        self.enqueue_connect_activation(account_id.as_ref());
+
+        // 4. Wipe (anchor) — runs IN PARALLEL with the POST above; starts
+        //    immediately and is never gated on any network condition. Retry so a
+        //    transient lock/IO error doesn't leave Cube seeds or PIN material on
+        //    disk.
+        let mut wiped = false;
+        let mut last_err = None;
+        for attempt in 1..=WIPE_RETRIES {
+            match self.wipe.execute_atomic() {
+                Ok(()) => {
+                    wiped = true;
+                    break;
+                }
+                Err(e) => {
+                    log::error!("duress: wipe attempt {attempt}/{WIPE_RETRIES} failed: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        // 5. Persist active state (the file survives the wipe, so on relaunch we
+        //    route straight to the cryptic screen). Logged-not-fatal: the journal
+        //    already guards an interrupted wipe.
+        self.local_state.active = true;
+        self.local_state.record_local_lock();
+        self.local_state.last_activation_attempt = Some(Utc::now());
+        if let Err(e) = self.local_state.save(&self.data_dir) {
+            log::error!("duress: failed to persist active state: {e}");
+        }
+
+        // 6. Transition UI to the cryptic activation screen.
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(DuressEvent::Activated);
+        }
+
+        match (wiped, last_err) {
+            (true, _) => Ok(()),
+            (false, Some(e)) => Err(DuressError::Io(e)),
+            // Unreachable: WIPE_RETRIES >= 1, so a non-wipe leaves an error.
+            (false, None) => Ok(()),
+        }
+    }
+
+    fn enqueue_connect_activation(&self, account_id: Option<&String>) {
+        if let (Some(acct), Some(encrypted)) = (account_id, self.local_state.duress_code.clone()) {
             let pending = PendingActivation {
                 account_id: acct.clone(),
                 duress_code: encrypted,
@@ -298,46 +341,6 @@ impl DuressOrchestrator {
                 ),
             }
         }
-
-        // 4. Wipe (anchor) — runs IN PARALLEL with the POST above; starts
-        //    immediately and is never gated on any network condition. Retry so a
-        //    transient lock/IO error doesn't leave Cube seeds or PIN material on
-        //    disk.
-        let mut wiped = false;
-        let mut last_err = None;
-        for attempt in 1..=WIPE_RETRIES {
-            match self.wipe.execute_atomic() {
-                Ok(()) => {
-                    wiped = true;
-                    break;
-                }
-                Err(e) => {
-                    log::error!("duress: wipe attempt {attempt}/{WIPE_RETRIES} failed: {e}");
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        // 5. Persist active state (the file survives the wipe, so on relaunch we
-        //    route straight to the cryptic screen). Logged-not-fatal: the journal
-        //    already guards an interrupted wipe.
-        self.local_state.active = true;
-        self.local_state.last_activation_attempt = Some(Utc::now());
-        if let Err(e) = self.local_state.save(&self.data_dir) {
-            log::error!("duress: failed to persist active state: {e}");
-        }
-
-        // 6. Transition UI to the cryptic activation screen.
-        if let Some(tx) = &self.event_tx {
-            let _ = tx.send(DuressEvent::Activated);
-        }
-
-        match (wiped, last_err) {
-            (true, _) => Ok(()),
-            (false, Some(e)) => Err(DuressError::Io(e)),
-            // Unreachable: WIPE_RETRIES >= 1, so a non-wipe leaves an error.
-            (false, None) => Ok(()),
-        }
     }
 
     /// Remote activation received over the gRPC stream (Phase 7b). Locks the
@@ -362,8 +365,7 @@ impl DuressOrchestrator {
     /// Duress cleared server-side (gRPC `DuressCleared` or a launch/sign-in
     /// reconcile). Exits the cryptic screen.
     pub fn handle_remote_clear(&mut self) -> Result<(), DuressError> {
-        self.local_state.active = false;
-        self.local_state.unlock_at = None;
+        self.local_state.clear_lock();
         self.local_state
             .save(&self.data_dir)
             .map_err(DuressError::Io)?;
@@ -502,6 +504,26 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(h.calls.lock().unwrap().as_slice(), &["acct_1".to_string()]);
+        let _ = std::fs::remove_dir_all(&h.dir);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_remote_lock_account_does_not_redirect_the_activation_post() {
+        let mut h = build(Behavior::Ok);
+        h.orch.local_state.account_id = Some("acct_enrolled".to_string());
+        h.orch
+            .local_state
+            .record_remote_lock_account(Some("acct_other".to_string()), None);
+        h.orch.activate(None).await.unwrap();
+        h.notify.notified().await;
+        assert_eq!(
+            h.calls.lock().unwrap().as_slice(),
+            &["acct_enrolled".to_string()]
+        );
+        // A local lock is judged by the enrolment, whatever a remote one left.
+        let state = DuressLocalState::load(&h.dir).unwrap();
+        assert!(state.active);
+        assert_eq!(state.lock_account(), Some("acct_enrolled"));
         let _ = std::fs::remove_dir_all(&h.dir);
     }
 

@@ -91,7 +91,18 @@ pub(crate) fn route_tile_body_with_detail<'a, M: 'a>(
                                 .bold()
                                 .style(theme::text::primary),
                         )
-                        .push(text(place).size(P1_SIZE + 2).style(theme::text::secondary)),
+                        // `wrap()` lays the place out at the row's width, so it
+                        // wraps at word breaks; a word wider than the tile
+                        // (a Cube name with no spaces) breaks between glyphs
+                        // rather than painting past the tile.
+                        .push(
+                            text(place)
+                                .size(P1_SIZE + 2)
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                                .style(theme::text::secondary),
+                        )
+                        .wrap()
+                        .vertical_spacing(0),
                 )
                 .push_maybe(detail.map(|detail| {
                     text(detail)
@@ -544,6 +555,12 @@ pub enum SparkSendMessage {
     ReconcileRequested,
     /// The result of that check.
     ReconcileFinished(crate::app::state::spark::send::ReconcileOutcome),
+    /// The result of that check, when it also claimed the bridge's late
+    /// answer accepting the payment. Kept, so later checks go by its id.
+    LateAnswerChecked {
+        outcome: crate::app::state::spark::send::ReconcileOutcome,
+        answer: coincube_spark_protocol::SendPaymentOk,
+    },
     /// The user chose to send again after reconciliation found no trace of the
     /// payment. Deliberately **not** [`Self::Reset`]: the original idempotency
     /// key and intent are kept, so the SDK dedups if the first attempt did land

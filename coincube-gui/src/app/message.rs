@@ -13,7 +13,6 @@ use coincubed::config::Config as DaemonConfig;
 
 use crate::{
     app::{
-        breez_liquid::BreezError,
         cache::{DaemonCache, FiatPrice},
         error::Error,
         view,
@@ -68,14 +67,6 @@ pub enum Message {
         u64,
         Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
     ),
-    ActivityLiquidLoaded(
-        u64,
-        Result<(Vec<crate::app::wallets::DomainPayment>, bool), String>,
-    ),
-    ActivityRefundablesLoaded(
-        u64,
-        Result<Vec<crate::app::wallets::DomainRefundableSwap>, String>,
-    ),
     ActivityOpenDetail(super::state::activity::ActivityTarget),
     /// A label save from Activity, by its request number: the entry id, the
     /// stored key and the label.
@@ -94,6 +85,10 @@ pub enum Message {
         enabled: bool,
     },
     UpdateDaemonCache(Result<DaemonCache, Error>),
+    UpdateImportedDaemonCache {
+        generation: u64,
+        result: Result<DaemonCache, Error>,
+    },
     CacheUpdated,
     /// Outcome of clearing a restored Vault's pending-rescan marker after a
     /// completed full scan: `Err` carries why the settings write failed, and the
@@ -109,6 +104,15 @@ pub enum Message {
     /// PLAN-duress-vault-gate PR 3). The result is logged inside the task and
     /// discarded here — it must never block or affect the UI.
     CubeVaultReported,
+    /// An imported Vault's Bitcoin Blake2b copy (its paired Cube) was
+    /// created, or why not. Carries the attempt it answers, so a result
+    /// from a predecessor `App` in the same tab is ignored.
+    /// `Ok(Some(reason))`: the copy exists but its stored recovery words
+    /// weren't copied.
+    ImportedCopyCreated(
+        crate::app::cache::AppGeneration,
+        Result<Option<String>, String>,
+    ),
     /// Terminal no-op for the fire-and-forget push of a Spark Stable Balance
     /// decision to the Cube's Connect record
     /// (`ConnectCubePanel::report_spark_stable_balance`). Logged inside the
@@ -140,6 +144,12 @@ pub enum Message {
     CoinsTipHeight(Result<Vec<Coin>, Error>, Result<i32, Error>),
     Labels(Result<HashMap<String, String>, Error>),
     SpendTxs(Result<Vec<SpendTx>, Error>),
+    /// The PSBTs page's paste import number `.0` was stored, or refused.
+    PsbtPasted(u64, Result<(), crate::export::Error>),
+    /// The proposal `.0`, deleted from its detail page, is gone, or not.
+    /// The detail may have been closed meanwhile; the PSBTs panel then
+    /// takes the result.
+    PsbtDeleted(coincube_core::miniscript::bitcoin::Txid, Result<(), Error>),
     Psbt(Result<(Psbt, Vec<String>), Error>),
     /// Debounced trigger to run the create-spend "redraft" (coin selection)
     /// off the UI thread. Carries the redraft generation token; the handler
@@ -158,8 +168,20 @@ pub enum Message {
     RbfPsbt(Result<Txid, Error>),
     Recovery(Result<SpendTx, Error>),
     Signed(Fingerprint, Result<Psbt, Error>),
+    /// An imported wallet's keys stored in this Cube, for the signer picker.
+    CubeKeys(Result<Vec<crate::services::imported_keys::LocalKeyRecord>, String>),
     WalletUpdated(Result<Arc<Wallet>, Error>),
+    /// The result of one imported Vault registration in Vault Settings.
+    DeviceRegistered {
+        attempt: uuid::Uuid,
+        fingerprint: Fingerprint,
+        result: Result<(), Error>,
+    },
     Updated(Result<(), Error>),
+    /// The save result of work the current route's own panel started while
+    /// the import panel stood in for it (a forwarded signature). Delivered to
+    /// that panel, never to the import panel; see `App::update_dispatch`.
+    RoutePanelResult(Box<Message>),
     /// UI-only signal to recompute collected signatures and re-evaluate the
     /// Sign picker's close/broadcast state after an in-memory PSBT merge —
     /// distinct from `Updated(Ok)`, which additionally marks the spend tx as
@@ -209,33 +231,6 @@ pub enum Message {
     BroadcastModal(Result<HashSet<Txid>, Error>),
     RbfModal(Box<HistoryTransaction>, bool, Result<HashSet<Txid>, Error>),
     Export(ImportExportMessage),
-    /// Liquid transactions page fetch result. The `u64` is the
-    /// fetch-generation token: the panel discards any response whose token
-    /// is not the latest dispatched, so a stale pagination response can't
-    /// overwrite data fetched by a subsequent reload / filter change.
-    PaymentsLoaded(
-        u64,
-        Result<Vec<crate::app::wallets::DomainPayment>, BreezError>,
-    ),
-    RefundablesLoaded(Result<Vec<crate::app::wallets::DomainRefundableSwap>, BreezError>),
-    /// Result of a debounced background poll started by
-    /// `App::refresh_refundables_task`. Distinct from `RefundablesLoaded`
-    /// (which is produced by manual panel reloads) so that only poll
-    /// responses touch the App's debounce/in-flight tracking. A reload
-    /// response racing ahead of a poll must not clear the in-flight flag,
-    /// or a second concurrent `list_refundables()` could be launched.
-    RefundablesPolled(Result<Vec<crate::app::wallets::DomainRefundableSwap>, BreezError>),
-    /// Result of a user-initiated `refund_onchain_tx` call. The `swap_address`
-    /// is carried alongside the response so the handler can look up the exact
-    /// `in_flight_refunds` entry that originated this refund — necessary when
-    /// more than one refund is in flight, since the SDK response itself does
-    /// not identify the originating swap.
-    RefundCompleted {
-        swap_address: String,
-        result: Result<breez_sdk_liquid::model::RefundResponse, BreezError>,
-    },
-    BreezInfo(Result<breez_sdk_liquid::prelude::GetInfoResponse, BreezError>),
-    BreezEvent(breez_sdk_liquid::prelude::SdkEvent),
     /// Forwarded from the [`coincube-spark-bridge`] subprocess via
     /// `SparkBackend::event_subscription`. Wrapped in the
     /// [`crate::app::breez_spark::SparkClientEvent`] newtype so the
@@ -332,26 +327,45 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
-    /// Coin control asks the app for what the Split coins overlay needs: the
-    /// chain's fee rate and, without a split key, a fresh receive address.
+    /// Split coins asks the app for what it needs: the chain's fee rate,
+    /// tagged with the panel's fee generation, and a fresh receive address to
+    /// send a split coin to.
     SplitFetch {
-        fee: bool,
+        fee: Option<u64>,
         address: bool,
     },
-    /// The chain-tagged Connect fee rate for the overlay; `None` is
-    /// unavailable, never a guess.
-    SplitFeeRate(Option<u64>),
-    /// A fresh receive address for a split key, or why there isn't one.
+    /// The chain-tagged Connect fee rate for Split coins, for the fetch of
+    /// this generation; `None` is unavailable, never a guess.
+    SplitFeeRate {
+        generation: u64,
+        rate: Option<u64>,
+    },
+    /// A fresh receive address for a split coin, or why there isn't one.
     SplitAddress(Result<String, String>),
-    /// Build the split the overlay shows ([`crate::services::split_coins::prepare`]).
+    /// Build the split Split coins shows ([`crate::services::split_coins::prepare`]).
     SplitRequest {
         method: crate::services::split_coins::Method,
         coins: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
         key: Option<coincube_core::miniscript::bitcoin::OutPoint>,
         feerate_vb: u64,
     },
+    /// A split build reached this stage, for the review's status line.
+    SplitBuildStage(crate::services::split_coins::BuildStage),
     /// The split was built and stored with the daemon, or why not.
     SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
+    /// A split build finished. The `App` that started it turns this into
+    /// [`Self::SplitPrepared`], first recording a rejected split key so the
+    /// coin stops being offered.
+    SplitBuilt {
+        /// The `App` whose build it was: a result that outlives its `App`
+        /// (the Cube was locked or switched) is not recorded in, shown by
+        /// or written into the next.
+        app: crate::app::cache::AppGeneration,
+        result: Result<
+            Box<crate::services::split_coins::SplitRecord>,
+            crate::services::split_coins::PrepareError,
+        >,
+    },
     /// Open Send with exactly these coins chosen.
     SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
     /// The daemon's copies of this Vault's recorded split transactions, for
@@ -442,6 +456,9 @@ pub enum Message {
     ConnectStream(crate::services::connect::grpc::ConnectStreamMessage),
     /// The wait between automatic renewal attempts is over (C1).
     ConnectRenewalRetry,
+    /// The stored signer device ids were discarded after Connect said this
+    /// computer was removed. Nothing follows from it; the outcome is logged.
+    ConnectDeviceIdsDiscarded,
     /// Flips the pulsing Connect light between its bright and dim phase.
     ConnectLightTick,
     /// Connect, not the user, ended the session: shown as Signed out by
@@ -485,13 +502,31 @@ pub enum Message {
     /// payload carries everything `connect_stream_ready_task` needs
     /// so we can fire it from a non-init context.
     TriggerConnectStreamReady {
-        network: coincube_core::miniscript::bitcoin::Network,
+        /// The Cube's chain. It picks the Connect folder and the network name
+        /// sent to Connect; a `bitcoin::Network` cannot tell Bitcoin Blake2b
+        /// from Bitcoin.
+        chain: crate::chain::ChainId,
         datadir: crate::dir::CoincubeDirectory,
         tokens: std::sync::Arc<
             tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>,
         >,
         email: String,
         cube_uuid: Option<String>,
+        /// The id registration returned without saving it
+        /// (`RegisteredDevice::persisted == false`). Only a Connect-served
+        /// Bitcoin Blake2b Cube carries one, pinned to its own session; every
+        /// other Cube leaves it `None` and reads its id from `connect.json`.
+        device_id: Option<String>,
+    },
+    /// A Connect-served Bitcoin Blake2b Cube's own session was written to its
+    /// chain folder's `connect.json` at open (`saved`), or the guarded
+    /// writer refused it. `epoch` is the panel's authentication epoch when
+    /// the write started.
+    ConnectServedSessionSaved {
+        email: String,
+        tokens: crate::services::connect::client::auth::AccessTokenResponse,
+        epoch: u64,
+        saved: bool,
     },
     /// On-demand Connect signing bootstrap for an already-authenticated
     /// session. Fired from the "Sign with Connect" action in the

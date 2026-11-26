@@ -2,8 +2,14 @@
 
 Bitcoin Worldview is an opt-in presentation preference for Tenshu. The redesign's
 navigation, layouts, forms, typography, financial hierarchy and wallet workflows
-provide the common design. The modes vary the illustrations, decorative accents
-and approved display copy.
+provide the common design. The modes vary the approved display copy only:
+mainnet network names and voice lines.
+
+> **Changed on 2026-11-25 (Robert).** Bitcoin Worldview is wording only.
+> COINCUBE Desktop shows no illustrations, the Artwork preference is removed
+> and the modes have no accent colours. The app still draws artwork until the
+> Desktop V3 Phase 1 work lands; that plan is in the company brain under
+> `plans/desktop-v3-phase1/`. This document describes the target.
 
 ## Modes
 
@@ -13,14 +19,11 @@ and approved display copy.
 | Suitcoiner | The Market Has Spoken | Bitcoin (BTC) | LukeCoin (BTCB2) |
 | Luke | No Spam Shall Pass | Spamcoin (BTC) | Bitcoin (XBT) |
 
-- **Samurai** is the default. Preserve the existing Sumi-e artwork, sizing, colors
-  and typography. Keep ordinary financial copy neutral.
-- **Suitcoiner** uses Gilded Wall Street art. Draw from Art Deco, banknote engraving,
-  vintage securities certificates and classical architecture. Use midnight navy,
-  antique gold and warm ivory with restrained ornamentation.
-- **Luke** uses the Purist's Woodcut. Draw from medieval printed manuscripts,
-  monastic architecture, fortresses and crosshatching. Use parchment, black ink
-  and restrained oxblood. Use symbolic imagery for the satire.
+- **Samurai** is the default. Keep ordinary financial copy neutral.
+- **Suitcoiner** speaks for market consensus and institutional adoption.
+- **Luke** speaks for validation, sovereignty and the ledger.
+
+Every mode uses the same colours, typography and layout. None has artwork.
 
 Keep humor in preferences, idle or empty states and optional post-success copy.
 Keep confirmations, failures, security warnings and recovery instructions neutral.
@@ -46,21 +49,9 @@ Retain pane, route, focus, draft, balance privacy and selected-chain state. A
 worldview edit must never run the global reload that reconciles fork availability
 and Split flows.
 
-The **Artwork** row follows Bitcoin Worldview. Each mode saves its own
-`existing` or `scene` choice under the named fields of `artwork` in
-`global_settings.json`. The first option is the default when a mode has no
-saved choice.
-
-| Mode | First option (default) | Second option |
-| --- | --- | --- |
-| Samurai | Kage | Mountain Watch |
-| Suitcoiner | Gilded Exchange | Gilded Wall Street |
-| Luke | The Stone Crossing | Purist’s Woodcut |
-
-Full scenes cover the 160-point Opening and 240-point empty activity slots,
-plus Sent, Received, Restore complete, Recovery Kit protection and removal,
-and the PIN prompt. Opening and empty activity share a scene. The six other
-slots each have their own scene.
+There is no **Artwork** row. Earlier builds saved an `existing` or `scene`
+choice per mode under `artwork` in `global_settings.json`. Stop reading and
+writing it, and keep loading settings files that still carry it.
 
 ## Localization
 
@@ -144,28 +135,23 @@ confirmation statuses, and technical settings neutral. Payment captions are
 secondary to the existing outcome and amount. Broadcasting does not establish
 confirmation. Mode aliases are confined to the existing passive display surfaces.
 
-## Artwork and accents
+## No artwork, no accents
 
-- Reuse the existing assets under `coincube-ui/static/images`. The shared
-  `component/quote_display.rs` maps Kage and Cube art to first-launch, loading,
-  empty and celebration contexts. `image.rs` supplies the castle mark, sealed
-  Cube art for Restore and the recovery illustrations used by Backup and
-  Recovery Kit. Preserve these files and their current Samurai bindings.
-- Bundle artwork under `coincube-ui/static/images/worldview`. The existing
-  sets keep their original screen illustrations, with dedicated send and
-  receive artwork for Bitcoin, Lightning, Note, and Spark. The full-scene
-  sets also have a separate scene for each of those payment directions and
-  methods. Generic payment contexts use the corresponding Sent or Received
-  artwork. Liquid-native payments and Liquid empty activity use the
-  existing presentation.
-- Mascot quote illustrations follow the selected artwork set, including on
-  the startup error screen. Kage, the Broker, and the armored Warden are
-  available in their existing artwork sets. Each full-scene set has its own
-  portrait in the scene's style. Quote choice stays stable during a mode switch.
-- Use restrained decorative accents in both color schemes. Preserve established
-  warning, error, success, focus and chain-identification semantics. Keep asset
-  symbols, user avatars, the interactive Launcher Cube and the app mark outside
-  the decorative registry.
+Decided on 2026-11-25. Before then each mode had two artwork sets and a
+decorative accent colour.
+
+- No screen shows an illustration: not Opening or loading, the startup error,
+  Overview, payment results, empty activity, Backup, Recovery Kit, the PIN
+  prompt or Restore complete. A finished step shows a plain check mark.
+- Quotes stay, as text. Quote choice stays stable during a mode switch.
+- The modes have no accent colour. Warning, error, success, focus and
+  chain-identification colours are unchanged and mean what they meant.
+- Asset symbols, the interactive Launcher Cube and the app mark are not
+  artwork and stay. Whether Cube avatars stay is an open decision in the
+  Desktop V3 Phase 1 plan.
+- The image files under `coincube-ui/static/images/worldview`, `kage` and
+  `recovery`, and the Cube art used only by quote screens, are removed with
+  the code that draws them.
 
 ## Delivery and validation
 
@@ -176,12 +162,11 @@ confirmation. Mode aliases are confined to the existing passive display surfaces
    transaction fixtures across modes for selected inputs, outputs, fees, PSBTs,
    signing, replay eligibility and broadcast routing, including the twin-chain
    case with shared address encodings.
-3. Add alternate illustrations and accents once the settings and identity
-   boundaries are verified. Compare Samurai with the redesign baseline and
-   verify live updates, fallback, contrast, focus and zoom on the supported
-   desktop platforms. Validate Spanish against the same layouts when the
-   locale is available.
+3. Illustrations and accents shipped in this step and are removed by the
+   2026-11-25 decision. Verify that a mode switch still updates network names
+   and voice lines live, and that no screen is left with an empty space where
+   art was. Validate Spanish against the same layouts.
 
-Keychain remains a separate mobile signing surface. Its prompts retain their
+COINCUBE Mobile remains a separate mobile signing surface. Its prompts retain their
 canonical chain identity. Review phone-signing handoffs from Tenshu in each
 worldview.

@@ -11,6 +11,7 @@ use crate::{
     DaemonControl, DaemonHandle,
 };
 use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 use std::convert::TryInto;
 use std::{
@@ -33,6 +34,9 @@ pub struct DummyBitcoind {
     pub poll_failure: Option<&'static str>,
     pub received: Vec<UTxO>,
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
+    /// When set, this backend offers a detached broadcaster that records here
+    /// instead of in `broadcasted`.
+    pub detached_broadcasts: Option<sync::Arc<sync::Mutex<Vec<bitcoin::Txid>>>>,
     pub broadcast_error: Option<String>,
     pub rescan_requests: Vec<u32>,
     pub tip_timestamp: Option<u32>,
@@ -64,6 +68,12 @@ pub struct DummyBitcoind {
     /// What the next `sync_wallet` reports as a reorg's common ancestor, the way
     /// Electrum/Esplora hand it over. Reported once, then `None`.
     pub sync_reorg_ancestor: Option<BlockChainTip>,
+    /// When set, fallible tip reads fail instead of reporting [`Self::tip`].
+    pub chain_tip_error: Option<&'static str>,
+    /// What `imported_range_end` reports: an imported wallet on a node.
+    pub imported_range_end: Option<u32>,
+    /// The range end the node lists now; `refresh_imported_range` adopts it.
+    pub node_range_end: Option<u32>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -93,6 +103,7 @@ impl DummyBitcoind {
             poll_failure: None,
             received: Vec::new(),
             broadcasted: sync::Mutex::new(Vec::new()),
+            detached_broadcasts: None,
             broadcast_error: None,
             rescan_requests: Vec::new(),
             genesis_error: None,
@@ -108,11 +119,28 @@ impl DummyBitcoind {
             history_sync: Default::default(),
             sees_mempool: true,
             sync_reorg_ancestor: None,
+            chain_tip_error: None,
+            imported_range_end: None,
+            node_range_end: None,
         }
     }
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn imported_range_end(&self) -> Option<u32> {
+        self.imported_range_end
+    }
+    fn refresh_imported_range(
+        &mut self,
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<(), String> {
+        if self.imported_range_end.is_some() {
+            if let Some(end) = self.node_range_end {
+                self.imported_range_end = Some(end);
+            }
+        }
+        Ok(())
+    }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.record_replay
             .as_ref()
@@ -183,6 +211,17 @@ impl BitcoinInterface for DummyBitcoind {
 
     fn chain_tip(&self) -> BlockChainTip {
         self.tip
+    }
+
+    fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        match self.chain_tip_error {
+            Some(error) => Err(error.to_string()),
+            None => Ok(self.chain_tip()),
+        }
+    }
+
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        self.try_chain_tip()
     }
 
     fn is_in_chain(&self, tip: &BlockChainTip) -> bool {
@@ -257,11 +296,15 @@ impl BitcoinInterface for DummyBitcoind {
         }
     }
 
-    fn start_rescan(
-        &mut self,
-        _: &descriptors::CoincubeDescriptor,
-        timestamp: u32,
-    ) -> Result<(), String> {
+    fn detached_broadcaster(&self) -> Option<crate::bitcoin::DetachedBroadcaster> {
+        let sent = self.detached_broadcasts.clone()?;
+        Some(sync::Arc::new(move |tx: &bitcoin::Transaction| {
+            sent.lock().unwrap().push(tx.compute_txid());
+            Ok(())
+        }))
+    }
+
+    fn start_rescan(&mut self, _: &WalletDescriptor, timestamp: u32) -> Result<(), String> {
         self.rescan_requests.push(timestamp);
         Ok(())
     }
@@ -305,13 +348,19 @@ struct DummyDbState {
     coins: HashMap<bitcoin::OutPoint, Coin>,
     txs: HashMap<bitcoin::Txid, bitcoin::Transaction>,
     spend_txs: HashMap<bitcoin::Txid, (Psbt, Option<u32>)>,
+    /// Addresses the wallet recognises as its own, as (index, is change).
+    addresses: HashMap<bitcoin::Address, (bip32::ChildNumber, bool)>,
     labels: HashMap<LabelItem, String>,
     timestamp: u32,
     rescan_timestamp: Option<u32>,
     last_poll_timestamp: Option<u32>,
     rollbacks: Vec<BlockChainTip>,
+    chain: coincube_core::chain::ChainId,
+    imported_history: Option<crate::database::ImportedHistory>,
 }
 
+/// A handle on shared state: a clone reads and writes the same database.
+#[derive(Clone)]
 pub struct DummyDatabase {
     db: sync::Arc<sync::RwLock<DummyDbState>>,
 }
@@ -369,6 +418,16 @@ impl DatabaseInterface for DummyDatabase {
 }
 
 impl DummyDatabase {
+    /// Have the wallet recognise `address` as its own. Without this no
+    /// address is, whatever the descriptor derives.
+    pub fn insert_address(&self, address: bitcoin::Address, index: u32, is_change: bool) {
+        self.db
+            .write()
+            .unwrap()
+            .addresses
+            .insert(address, (index.into(), is_change));
+    }
+
     pub fn new() -> DummyDatabase {
         let now: u32 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -385,13 +444,26 @@ impl DummyDatabase {
                 coins: HashMap::new(),
                 txs: HashMap::new(),
                 spend_txs: HashMap::new(),
+                addresses: HashMap::new(),
                 labels: HashMap::new(),
                 timestamp: now,
                 rescan_timestamp: None,
                 last_poll_timestamp: None,
                 rollbacks: Vec::new(),
+                chain: coincube_core::chain::ChainId::Bitcoin,
+                imported_history: None,
             })),
         }
+    }
+
+    /// Make `imported_history()` report an imported wallet's scan state.
+    pub fn set_imported_history(&mut self, history: crate::database::ImportedHistory) {
+        self.db.write().unwrap().imported_history = Some(history);
+    }
+
+    /// Set the chain identity `chain()` reports (Bitcoin by default).
+    pub fn set_chain(&mut self, chain: coincube_core::chain::ChainId) {
+        self.db.write().unwrap().chain = chain;
     }
 
     /// Every tip this database was asked to roll back to, in order.
@@ -413,8 +485,16 @@ impl DummyDatabase {
 }
 
 impl DatabaseConnection for DummyDatabase {
+    fn imported_history(&mut self) -> Option<crate::database::ImportedHistory> {
+        self.db.read().unwrap().imported_history.clone()
+    }
+
     fn network(&mut self) -> bitcoin::Network {
-        bitcoin::Network::Bitcoin
+        self.db.read().unwrap().chain.bitcoin_network()
+    }
+
+    fn chain(&mut self) -> coincube_core::chain::ChainId {
+        self.db.read().unwrap().chain
     }
 
     fn chain_tip(&mut self) -> Option<BlockChainTip> {
@@ -535,6 +615,8 @@ impl DatabaseConnection for DummyDatabase {
                 height: *height,
                 time: *time,
             });
+            // Like the SQLite implementation, confirming a coin marks it mature.
+            coin.is_immature = false;
         }
     }
 
@@ -574,9 +656,9 @@ impl DatabaseConnection for DummyDatabase {
 
     fn derivation_index_by_address(
         &mut self,
-        _: &bitcoin::Address,
+        address: &bitcoin::Address,
     ) -> Option<(bip32::ChildNumber, bool)> {
-        None
+        self.db.read().unwrap().addresses.get(address).copied()
     }
 
     fn coins_by_outpoints(
@@ -601,6 +683,17 @@ impl DatabaseConnection for DummyDatabase {
             .unwrap()
             .spend_txs
             .insert(txid, (psbt.clone(), None));
+    }
+
+    fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), String> {
+        let txid = psbt.unsigned_tx.compute_txid();
+        self.db
+            .write()
+            .unwrap()
+            .spend_txs
+            .entry(txid)
+            .or_insert((psbt.clone(), None));
+        Ok(())
     }
 
     fn spend_tx(&mut self, txid: &bitcoin::Txid) -> Option<Psbt> {
@@ -691,17 +784,13 @@ impl DatabaseConnection for DummyDatabase {
             if let Some(time) = coin.block_info.map(|b| b.time) {
                 if time >= start && time <= end {
                     let row = (coin.outpoint.txid, time);
-                    if !txids_and_time.contains(&row) {
-                        txids_and_time.push(row);
-                    }
+                    append_unique_txid_time(&mut txids_and_time, row);
                 }
             }
             if let Some(time) = coin.spend_block.map(|b| b.time) {
                 if time >= start && time <= end {
                     let row = (coin.spend_txid.expect("spent_at is not none"), time);
-                    if !txids_and_time.contains(&row) {
-                        txids_and_time.push(row);
-                    }
+                    append_unique_txid_time(&mut txids_and_time, row);
                 }
             }
         }
@@ -713,6 +802,29 @@ impl DatabaseConnection for DummyDatabase {
 
     fn list_saved_txids(&mut self) -> Vec<bitcoin::Txid> {
         self.db.read().unwrap().txs.keys().cloned().collect()
+    }
+
+    fn coinbase_txids(&mut self) -> HashSet<bitcoin::Txid> {
+        self.db
+            .read()
+            .unwrap()
+            .txs
+            .iter()
+            .filter(|(_, tx)| tx.is_coinbase())
+            .map(|(txid, _)| *txid)
+            .collect()
+    }
+
+    fn mark_immature_coinbase(&mut self, outpoints: &[bitcoin::OutPoint]) {
+        let mut db = self.db.write().unwrap();
+        for op in outpoints {
+            if let Some(coin) = db.coins.get_mut(op) {
+                if coin.spend_txid.is_none() {
+                    coin.block_info = None;
+                    coin.is_immature = true;
+                }
+            }
+        }
     }
 
     fn new_txs(&mut self, txs: &[bitcoin::Transaction]) {
@@ -763,6 +875,12 @@ impl DatabaseConnection for DummyDatabase {
 
     fn get_labels_bip329(&mut self, _offset: u32, _limit: u32) -> bip329::Labels {
         todo!()
+    }
+}
+
+fn append_unique_txid_time(txids_and_time: &mut Vec<(Txid, u32)>, row: (Txid, u32)) {
+    if !txids_and_time.contains(&row) {
+        txids_and_time.push(row);
     }
 }
 
@@ -892,6 +1010,38 @@ pub fn tmp_dir() -> path::PathBuf {
         thread::current().id(),
         uid(),
     ))
+}
+
+/// A Vault [`WalletDescriptor`] parsed from a multipath descriptor string.
+pub fn vault_wallet_descriptor(desc: &str) -> WalletDescriptor {
+    descriptors::CoincubeDescriptor::from_str(desc)
+        .unwrap()
+        .into()
+}
+
+/// An imported (descriptor-only) mainnet wpkh wallet.
+pub fn imported_wallet_descriptor() -> WalletDescriptor {
+    use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
+    use miniscript::bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+
+    let secp = secp256k1::Secp256k1::new();
+    let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[45; 32]).unwrap();
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+        .unwrap();
+    let key = format!(
+        "[{}/84h/0h/0h]{}",
+        master.fingerprint(&secp),
+        Xpub::from_priv(&secp, &account)
+    );
+    WalletDescriptor::Imported(
+        ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap(),
+    )
 }
 
 impl DummyCoincube {

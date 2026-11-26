@@ -87,7 +87,9 @@ const MAX_POLLS_BEFORE_FORCED_RESCAN: u32 = 6;
 
 /// Interface for the Esplora backend.
 pub struct Esplora {
-    client: client::Client,
+    /// Shared so a broadcast can use it while a sync holds this backend. See
+    /// [`crate::bitcoin::BitcoinInterface::detached_broadcaster`].
+    client: std::sync::Arc<client::Client>,
     bdk_wallet: BdkWallet,
     /// Used for setting the `last_seen` of unconfirmed transactions in a strictly
     /// increasing manner.
@@ -126,13 +128,29 @@ pub struct Esplora {
 }
 
 impl Esplora {
+    /// Read-only public-provider availability probe. No wallet, database or
+    /// authenticated fork authority is created; full sync remains mandatory.
+    pub fn public_backend_ready(
+        config: &crate::config::EsploraConfig,
+        expected_genesis: &BlockHash,
+    ) -> Result<bool, EsploraError> {
+        let client = client::Client::new(
+            config,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .map_err(EsploraError::Client)?;
+        client
+            .public_backend_ready(expected_genesis)
+            .map_err(EsploraError::Client)
+    }
+
     pub fn new(
         client: client::Client,
         bdk_wallet: BdkWallet,
         full_scan: bool,
     ) -> Result<Self, EsploraError> {
         Ok(Self {
-            client,
+            client: std::sync::Arc::new(client),
             bdk_wallet,
             sync_count: 0,
             full_scan,
@@ -192,6 +210,11 @@ impl Esplora {
 
     pub fn client(&self) -> &client::Client {
         &self.client
+    }
+
+    /// The client itself, for a caller that must outlive a borrow of this backend.
+    pub(crate) fn shared_client(&self) -> std::sync::Arc<client::Client> {
+        self.client.clone()
     }
 
     fn local_chain(&self) -> &LocalChain {

@@ -1,10 +1,13 @@
 # BTCB2 split migration: chain-specific inputs
 
-Status: superseded. This records the input-ancestry migration of the paired
-Claim and two-step Split flows. Robert's decision of 2026-10-29 (company-brain
+Status: superseded as a migration plan. This records the input-ancestry
+migration of the paired Claim and two-step Split flows. Robert's decision of
+2026-10-29 (company-brain
 `decisions/2026-10-29-coincube-desktop-btcb2-split-protection-in-coin-control.md`)
-replaced both with one-sided **Split coins** in Coin control
-(`coincube-gui/src/services/split_coins.rs`). S7a removed the Claim wizard, the
+replaced both with one-sided **Split coins**. The live flow is Tools › Split
+coins (`coincube-gui/src/app/state/vault/split_hub.rs` and
+`coincube-gui/src/services/split_coins.rs`). Coin control keeps the banner and
+sends its Split buttons to that tab. S7a removed the Claim wizard, the
 foreign-wallet Split and the launch gate from the GUI; S7b removed the paired
 engine, the OP_RETURN poison, `coincubed`'s `poison_broadcast`, the Claim
 observation assessment and the regtest bridges and consensus modules that
@@ -13,6 +16,60 @@ drove them. What this document says about the input-ancestry engine
 Split coins uses; what it says about Claim and Split intents, paired
 signing, staged submission, the 6-confirmation gate between sides and the
 acceptance gate describes removed code and is kept as history only.
+
+## Current desktop flow
+
+The step is derived from the Vault each time the tab is drawn: get a split
+coin, review and sign, wait out confirmations, then done or the coins still
+left. Waiting for a split coin can take an hour, so the flow is a tab, not a
+dialog. The panel keeps the user's choices (coins left out, split-key versus
+signature), the address a split coin is sent to, the fee rate, and a build
+in flight. Everything else is read back from the Vault.
+
+The fee rate is Connect's six-block (`"6"`) Esplora estimate for this chain
+only (`split_coins::fee_rate`). A missing quote, a rate outside
+`1..=MAX_FEERATE`, or a source for the other chain is unavailable. The
+Bitcoin read has to be a fresh Connect response. There is no local guess.
+An unavailable rate is retried on its own three times, five seconds
+apart, while the review still says it is getting the rate. After that the
+review says the rate is unavailable and offers Try again. A fee answer from
+an older fetch is ignored: each fetch has a generation, and a superseded one
+does not change the rate or start another retry.
+
+A saved ancestry path is not shown as verified. `chain-proofs.json`, next to
+the Vault's daemon data, loads as `ProofEntry::Saved`: the links fit, and a
+fresh check still has to show the chain holds them. A check that cannot finish
+(Connect down, a read that times out) does not erase that path. It becomes
+`SavedRetry`, is written back, stays "checking", and is tried again after
+`failed_retry`: 1, 2, 5 and 15 minutes after the first failures in a row, then
+every `FAILED_RETRY` (30 minutes). A coin with no path whose check cannot
+finish waits the same way, and the split-coin step says the check is being
+retried rather than that it is checking.
+
+The Split coins flow does offer a coin holding a saved path as the split coin
+(`Cache::split_keys`), after any coin verified in this session, so a Vault that
+already holds a split coin goes straight to the review after a restart or
+while the background check cannot finish. That is no fresh observation, and
+none is needed to offer it: `split_coins::prepare` re-qualifies the chosen
+key's path against both chains before anything is built, and the PSBT screen
+does so again, for the split this Cube's journal records, before it may be
+signed or sent. Until a check in this session verifies it, the review labels
+that coin "Checked when you sign" rather than as only on this chain. A read
+that cannot finish stops the build and leaves the coin on offer. An answer
+that the path no longer qualifies (its root moved in a reorg, or is now on
+both chains) stops the build and records a no-path answer for the coin
+(`Cache::split_key_rejected`), so the flow moves on to another split coin or
+back to asking for one. Once a coin's check has failed five times in a row,
+the split-coin step stops saying another coin isn't needed: some failures (a
+history too deep or too large to search) never pass.
+
+A finished answer replaces the path, including a
+completed search that found none. A failed check that was not holding a path
+is not written, so the next launch retries it. A background check never
+replaces a path verified in this session with a later miss or failure; only
+the split build's own rejection does. A background check already in flight
+when the build rejects a coin is older than that answer, so its result is
+dropped.
 
 ## Decision and safety invariant
 

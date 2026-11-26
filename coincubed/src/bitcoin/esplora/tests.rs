@@ -273,7 +273,7 @@ fn esplora_out_of_range_tip_height_fails_the_poll_and_leaves_the_wallet_tip_alon
 
             // A rescan whose first poll is refused stays a rescan: had the
             // refusal cleared it, the poller would take it for complete.
-            let desc = DESCRIPTOR.parse().unwrap();
+            let desc = crate::testutils::vault_wallet_descriptor(DESCRIPTOR);
             shared.start_rescan(&desc, 0).unwrap();
             assert_poll_refused(&mut shared, 20);
             assert_eq!(shared.rescan_progress(), Some(0.0));
@@ -419,4 +419,69 @@ fn esplora_full_scan_reports_its_progress_into_the_history_record() {
     assert_eq!(after.full_scan_completed_at, None);
     cache.poll_succeeded(42);
     assert_eq!(cache.snapshot().full_scan_completed_at, Some(42));
+}
+
+#[test]
+fn public_readiness_checks_genesis_and_tip_without_constructing_a_wallet() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = crate::config::EsploraConfig {
+        addr: format!("http://{}", listener.local_addr().unwrap()),
+        token: None,
+        fallback_addr: None,
+        fallback_token: None,
+        secondary_fallback_addr: None,
+        secondary_fallback_token: None,
+    };
+    let (stop, stopped) = mpsc::channel();
+    let server = scripted_server(
+        listener,
+        tip_at(Arc::new(AtomicU64::new(2)), |_| None),
+        stopped,
+    );
+    let ready = Esplora::public_backend_ready(&config, &genesis_hash());
+    let wrong_chain = Esplora::public_backend_ready(&config, &hash_at(1));
+    stop.send(()).unwrap();
+    server.join().unwrap();
+    assert!(matches!(ready, Ok(true)));
+    assert!(matches!(wrong_chain, Ok(false)));
+}
+
+/// The poller holds the backend's mutex for a whole wallet sync. A broadcast
+/// must reach the server during it instead of queueing behind it.
+#[test]
+fn esplora_broadcast_reaches_the_server_while_the_backend_is_locked_for_a_sync() {
+    let tx = bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn::default()],
+        output: vec![],
+    };
+    let txid = tx.compute_txid().to_string();
+    let posted = Arc::new(AtomicBool::new(false));
+    let chain = tip_at(Arc::new(AtomicU64::new(0)), |_| None);
+    let answer = {
+        let posted = posted.clone();
+        move |path: &str| {
+            if path == "/tx" {
+                posted.store(true, Ordering::SeqCst);
+                return Some(txid.clone());
+            }
+            chain(path)
+        }
+    };
+    let sent = against_server(answer, |backend| {
+        let shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+        let broadcast = shared
+            .detached_broadcaster()
+            .expect("the Esplora backend broadcasts without its lock");
+        let _syncing = shared.lock().unwrap();
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || done.send(broadcast(&tx)).unwrap());
+        finished.recv_timeout(Duration::from_secs(10))
+    });
+    assert_eq!(
+        sent.expect("the broadcast must not wait for the backend lock"),
+        Ok(())
+    );
+    assert!(posted.load(Ordering::SeqCst));
 }

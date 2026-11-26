@@ -1,7 +1,7 @@
-# Multi-signer Keychain signing flow
+# Multi-signer Mobile signing flow
 
 How a desktop user collects signatures from contacts whose private keys
-live in the Coincube Keychain app on their phones. Covers what's in the
+live in the COINCUBE Mobile app on their phones. Covers what's in the
 desktop today (Phases 1–4 of the cross-repo signing-flow rollout); the
 companion phone-app and API plans live alongside it under
 `plans/PLAN-phase-N-*.md`.
@@ -22,7 +22,7 @@ settings panel.
 │  └────────────────┘    └──────────┬───────────┘                    │
 │         ▲                         │                                │
 │         │                         ▼                                │
-│   "Sign via Keychain"        ┌──────────────────────┐              │
+│   "Sign" → "Request"         ┌──────────────────────┐              │
 │   button                     │ GrpcSessionClient    │              │
 │         │                    │ ::resolve_signers    │              │
 │         │                    │ ::create_signing_... │              │
@@ -51,7 +51,7 @@ settings panel.
                                           │ push / poll
                                           ▼
                               ┌──────────────────────┐
-                              │ Keychain phone app   │
+                              │ COINCUBE Mobile app  │
                               └──────────────────────┘
 ```
 
@@ -66,17 +66,44 @@ Three independent gRPC services on the API:
 - **RealtimeService** — a single long-lived bidi stream that pushes
   `SessionEvent`s to the desktop.
 
+## One pipeline, a folder per chain
+
+Every Cube runs the same signer bootstrap and stream, and keeps its Connect
+session, signer device id and event cursor in one file shape, the
+`connect.json` of its chain's folder: `bitcoin/` (and the other Bitcoin
+networks' folders) for a Bitcoin Cube, `bitcoin-blake2b/` or
+`bitcoin-blake2b-testnet4/` for a Bitcoin Blake2b Cube. The transport key
+sits beside it, so a Bitcoin Blake2b Cube registers its own signer device,
+named with its chain. The pipeline's inputs are the Cube's `ChainId` (folder
+and network name) and its Connect endpoint (`App::connect_base_url`).
+
+A Bitcoin Cube's file is written by its in-Cube sign-in. A Connect-served
+Bitcoin Blake2b Cube writes its own session there at open and its pipeline
+stays pinned to that session while it is open
+([`BTCB2_VAULT_APP.md`](BTCB2_VAULT_APP.md)). A local Bitcoin Blake2b Cube
+(on its own node, or with no Vault yet) writes it from its in-Cube sign-in,
+exactly as a Bitcoin Cube does.
+
+When Connect refuses the stream because this computer was removed
+(`DEVICE_REVOKED` or `COMPUTER_REMOVED`), the removal revokes the account's
+signer device on every chain, so the stored device id is discarded in every
+chain folder that holds one; the sessions there stay. A Connect-served Bitcoin
+Blake2b Cube discards it only in its own folder: the same email in another
+folder may be an account on another Connect host, and that folder's own Cube
+clears its id when its stream is refused.
+
 ## Happy-path sequence
 
-User has a Vault with two Keychain signers (themselves on this
+User has a Vault with two Mobile signers (themselves on this
 desktop's Connect account, and one contact "Alice"). They click
-"Sign via Keychain" on a draft spend.
+"Sign" on a draft spend and then "Request" on a Mobile signer's row,
+which opens the "Sign via Mobile" modal.
 
 1. `KeychainSignModal::launch` →
    - REST `GET /connect/cubes/{cube_id}/vault` — returns the vault
      row with its `members` list.
    - REST `GET /connect/cubes/{cube_uuid}/keys` — returns every
-     Keychain key on the cube, including fingerprints.
+     Mobile key on the cube, including fingerprints.
    - REST `GET /me` — viewer user id (used to split self vs. contact
      signers).
    - In-process: `build_keychain_index()` joins members with cube keys
@@ -111,14 +138,13 @@ desktop's Connect account, and one contact "Alice"). They click
 
 6. Once every `PendingSession` is `Completed` the modal auto-closes,
    `tx.sigs` is recomputed against the merged PSBT, and the spend's
-   action buttons switch from "Sign" / "Sign via Keychain" to
-   "Broadcast". The existing `BroadcastModal` handles the rest.
+   action button switches from "Sign" to "Broadcast". The existing `BroadcastModal` handles the rest.
 
 ## Failure modes & UX
 
 | Failure                       | Surface                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| ResolveSigners `unresolved`    | Friendly per-signer message ("Alice hasn't set up the Keychain app yet…")                        |
+| ResolveSigners `unresolved`    | Friendly per-signer message ("Alice hasn't set up COINCUBE Mobile yet…")                         |
 | CreateSigningSession fails    | Per-row Failed status + Retry button; modal stays open                                            |
 | SessionRejected               | Per-row Rejected + Retry button + "Alice declined the request"                                   |
 | SessionExpired                | Per-row Expired + Retry button + "Alice didn't respond within 24h"                               |
@@ -170,7 +196,7 @@ When a user reports "I clicked sign and nothing happened":
 
 - **No push notifications yet.** The phone signer must be in the
   foreground (or open the app) for sessions to be delivered promptly.
-  Push support is in the `keychain-app` and `coincube-api` plans.
+  Push support is in the `coincube-mobile` and `coincube-api` plans.
 - **PSBTs are sent plaintext over TLS.** Per-session payload encryption
   is on the `coincube-api` roadmap (PR 3 in their plan).
 - **`subscribe_vault_ids` is best-effort.** If the cube hasn't been
@@ -183,7 +209,7 @@ When a user reports "I clicked sign and nothing happened":
 ## Related plans
 
 - `plans/PLAN-phase-1-grpc-plumbing.md` — gRPC client + stream basics.
-- `plans/PLAN-phase-2-vault-builder-audit.md` — Vault Builder Keychain
+- `plans/PLAN-phase-2-vault-builder-audit.md` — Vault Builder Mobile key
   picker (already complete on master).
 - `plans/PLAN-phase-3-signing-flow-keystone.md` — this feature's
   implementation plan.

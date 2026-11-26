@@ -34,7 +34,7 @@ pub const RAIL_WIDTH: f32 = 72.0;
 /// has no third level (and the rail should be hidden).
 pub fn items_for(menu: &Menu, ctx: &NavContext) -> Option<Vec<SubItem>> {
     match menu {
-        Menu::Cube(CubeSubMenu::Settings(_)) => Some(cube_settings_items()),
+        Menu::Cube(CubeSubMenu::Settings(_)) => Some(cube_settings_items(ctx.ai_access)),
         Menu::Spark(SparkSubMenu::Settings(_)) => Some(spark_settings_items()),
         Menu::Marketplace(MarketplaceSubMenu::P2P(_)) => Some(p2p_items()),
         Menu::Vault(VaultSubMenu::Settings(_)) => {
@@ -66,19 +66,8 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Option<Element<'a, Message
     )
 }
 
-fn cube_settings_items() -> Vec<SubItem> {
+fn cube_settings_items(ai_access: bool) -> Vec<SubItem> {
     let mut items = vec![
-        SubItem::new(
-            "AI access",
-            settings_icon,
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
-            |m| {
-                matches!(
-                    m,
-                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
-                )
-            },
-        ),
         SubItem::new(
             "General",
             wrench_icon,
@@ -160,6 +149,23 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         ),
     ];
+
+    if ai_access {
+        items.insert(
+            0,
+            SubItem::new(
+                "AI access",
+                settings_icon,
+                Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess)),
+                |m| {
+                    matches!(
+                        m,
+                        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess))
+                    )
+                },
+            ),
+        );
+    }
 
     if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
         items.push(SubItem::new(

@@ -1,11 +1,11 @@
-//! STDIO entry point for the separately packaged, read-only Tenshu MCP companion.
+//! STDIO entry point for the separately packaged COINCUBE Desktop MCP companion.
 use rmcp::{ServiceExt, service::RoleServer, transport::async_rw::AsyncRwTransport};
 /// Run the STDIO server with sanitized diagnostics restricted to standard error.
 #[tokio::main]
 async fn main() {
     if run().await.is_err() {
         eprintln!(
-            "Tenshu MCP unavailable. Check the desktop grant and private client configuration."
+            "COINCUBE MCP unavailable. Check the desktop grant and private client configuration."
         );
         std::process::exit(1);
     }

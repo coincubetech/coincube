@@ -86,7 +86,9 @@ pub struct BuySellPanel {
 
     // services used by several buysell providers
     pub coincube_client: crate::services::coincube::CoincubeClient,
-    pub breez_client: std::sync::Arc<crate::app::breez_liquid::BreezClient>,
+    /// The Cube's Spark wallet: Mavapay buys receive into it and sells are
+    /// paid from it. The panel isn't built without one.
+    pub spark: std::sync::Arc<crate::app::wallets::SparkBackend>,
     pub detected_country: Option<&'static crate::services::coincube::Country>,
 
     // coincube session information, restored from OS keyring
@@ -94,13 +96,17 @@ pub struct BuySellPanel {
 
     // only really useful for address generation
     pub wallet: std::sync::Arc<crate::app::wallet::Wallet>,
+
+    /// Session changes (`SetLoginState`, `LogOut`) that arrived while a sell
+    /// payment was in flight, applied in order once it answers.
+    pub deferred_session: Vec<crate::app::view::BuySellMessage>,
 }
 
 impl BuySellPanel {
     pub fn new(
         network: bitcoin::Network,
         wallet: std::sync::Arc<crate::app::wallet::Wallet>,
-        breez_client: std::sync::Arc<crate::app::breez_liquid::BreezClient>,
+        spark: std::sync::Arc<crate::app::wallets::SparkBackend>,
     ) -> Self {
         BuySellPanel {
             // Start in detecting location state
@@ -109,17 +115,54 @@ impl BuySellPanel {
             network,
             // API state
             coincube_client: crate::services::coincube::CoincubeClient::new(),
-            breez_client,
+            spark,
             detected_country: None,
             login: None,
+            deferred_session: Vec::new(),
         }
     }
 
-    pub fn view<'a>(
-        &'a self,
-        mask_amounts: bool,
-        liquid_shown: bool,
-    ) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    /// A sell checkout's Spark payment is unresolved (with the bridge, or
+    /// checked without a verdict): the flow must not be replaced, nor a held
+    /// session change applied, until it is. See [`SellFulfilment::in_flight`].
+    ///
+    /// [`SellFulfilment::in_flight`]: super::mavapay::SellFulfilment::in_flight
+    pub fn sell_payment_in_flight(&self) -> bool {
+        matches!(&self.step, BuySellFlowState::Mavapay(state) if state.sell_checkout_held())
+    }
+
+    /// A request for the sell payment is with the bridge, so its answer is
+    /// due shortly. Session changes wait for it; once it has come, they are
+    /// applied even if the payment is still unresolved (see
+    /// `BuySellPanel::update`), because a logout must not wait on a payment
+    /// that may never settle.
+    pub fn sell_request_outstanding(&self) -> bool {
+        matches!(&self.step, BuySellFlowState::Mavapay(state) if state.sell_awaiting_answer())
+    }
+
+    /// The held-back session changes, re-dispatched in the order they were
+    /// held, once no request for the sell payment is with the bridge. `None`
+    /// while one still is, or when nothing was held.
+    ///
+    /// One chained task, not a batch: `Task::batch` runs its tasks
+    /// concurrently with no ordering guarantee, so a held `LogOut` could be
+    /// applied before a `SetLoginState` queued ahead of it, or the other way
+    /// round, and leave the session in the state the user didn't end in.
+    pub fn take_deferred_session(&mut self) -> Option<iced::Task<crate::app::message::Message>> {
+        if self.sell_request_outstanding() {
+            return None;
+        }
+        std::mem::take(&mut self.deferred_session)
+            .into_iter()
+            .map(|msg| {
+                iced::Task::done(crate::app::message::Message::View(
+                    crate::app::view::Message::BuySell(msg),
+                ))
+            })
+            .reduce(iced::Task::chain)
+    }
+
+    pub fn view<'a>(&'a self, mask_amounts: bool) -> iced::Element<'a, ViewMessage, theme::Theme> {
         match &self.step {
             BuySellFlowState::DetectingLocation(..)
             | BuySellFlowState::Login { .. }
@@ -129,7 +172,7 @@ impl BuySellPanel {
                 Self::entry_view(&self.step, self.detected_country)
             }
             BuySellFlowState::Mavapay(state) => {
-                Self::provider_view(super::mavapay::ui::form(state, mask_amounts, liquid_shown))
+                Self::provider_view(super::mavapay::ui::form(state, mask_amounts))
             }
             BuySellFlowState::Meld(state) => Self::provider_view(state.view()),
         }
@@ -710,49 +753,52 @@ mod entry_presenter_tests {
                         appearance,
                         theme,
                     );
-                    assert!(has_exact(&inspection, "Buy/Sell"), "{}", name);
-                    for (index, label) in ["Location", "Sign in", "Buy or sell"].iter().enumerate()
-                    {
-                        if index < *current {
-                            assert!(has_exact(&inspection, label), "{}: {}", name, label);
-                            assert!(
-                                !has_exact(&inspection, &format!("{}  {label}", index + 1)),
-                                "{}: completed step remains numbered",
-                                name
-                            );
-                        } else {
-                            let expected = format!("{}  {label}", index + 1);
-                            assert!(has_exact(&inspection, &expected), "{}: {}", name, expected);
-                        }
-                    }
-                    assert_eq!(
-                        inspection
-                            .text
-                            .iter()
-                            .filter(|(value, _)| value == "\u{f633}")
-                            .count(),
-                        *current,
-                        "{name}: stage completion must come from the current state"
-                    );
-                    match *name {
-                        "detecting" => assert!(inspection.contains("Detecting your location...")),
-                        "manual-country" => assert!(inspection.contains("Select Country:")),
-                        "login" => assert!(inspection.contains("Sign in to your account")),
-                        "otp" => assert!(inspection.contains("Resend in 28s")),
-                        "mode" => {
-                            assert!(inspection.contains("View Order History"));
-                            assert!(inspection.contains("Log Out"));
-                        }
-                        _ => unreachable!(),
-                    }
-                    if *name == "mode" {
-                        assert!(inspection.contains("Mavapay"));
-                    }
-                    if *name == "manual-country" || *name == "detecting" {
-                        assert!(!inspection.contains("Provider"));
-                    }
+                    assert_entry_stages(&inspection, name, *current);
                 }
             }
+        }
+    }
+
+    fn assert_entry_stages(inspection: &capture::Inspection, name: &str, current: usize) {
+        assert!(has_exact(inspection, "Buy/Sell"), "{}", name);
+        for (index, label) in ["Location", "Sign in", "Buy or sell"].iter().enumerate() {
+            if index < current {
+                assert!(has_exact(inspection, label), "{}: {}", name, label);
+                assert!(
+                    !has_exact(inspection, &format!("{}  {label}", index + 1)),
+                    "{}: completed step remains numbered",
+                    name
+                );
+            } else {
+                let expected = format!("{}  {label}", index + 1);
+                assert!(has_exact(inspection, &expected), "{}: {}", name, expected);
+            }
+        }
+        assert_eq!(
+            inspection
+                .text
+                .iter()
+                .filter(|(value, _)| value == "\u{f633}")
+                .count(),
+            current,
+            "{name}: stage completion must come from the current state"
+        );
+        match name {
+            "detecting" => assert!(inspection.contains("Detecting your location...")),
+            "manual-country" => assert!(inspection.contains("Select Country:")),
+            "login" => assert!(inspection.contains("Sign in to your account")),
+            "otp" => assert!(inspection.contains("Resend in 28s")),
+            "mode" => {
+                assert!(inspection.contains("View Order History"));
+                assert!(inspection.contains("Log Out"));
+            }
+            _ => unreachable!(),
+        }
+        if name == "mode" {
+            assert!(inspection.contains("Mavapay"));
+        }
+        if name == "manual-country" || name == "detecting" {
+            assert!(!inspection.contains("Provider"));
         }
     }
 }

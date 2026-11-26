@@ -21,6 +21,10 @@ mod transport_tests;
 /// Configuration for the realtime gRPC stream.
 #[derive(Debug, Clone)]
 pub struct ConnectStreamConfig {
+    /// Base URL of the Connect API that `grpc_url` was resolved from. The
+    /// stream itself does not use it; it travels with the address so the App
+    /// records the two together.
+    pub base_url: String,
     pub grpc_url: String,
     pub tokens: Arc<RwLock<AccessTokenResponse>>,
     pub device_id: String,
@@ -48,244 +52,19 @@ pub fn connect_stream(
             let mut attempt: u64 = 0;
 
             loop {
-                let mut refused = None;
-                let grpc_channel =
-                    tokio::time::timeout(CONNECT_TIMEOUT, super::create_channel(&config.grpc_url))
-                        .await
-                        .map_err(|_| {
-                            log::warn!("[CONNECT GRPC] Transport connection timed out");
-                            Trouble::Unreachable
-                        })
-                        .and_then(|result| {
-                            result.map_err(|e| {
-                                log::warn!("[CONNECT GRPC] Transport error: {}", e);
-                                trouble::trouble(&e)
-                            })
-                        });
-                match grpc_channel {
-                    Ok(grpc_channel) => {
-                        let access_token = config.tokens.read().await.access_token.clone();
-                        let interceptor = AuthInterceptor::new(&access_token);
-                        let mut client =
-                            RealtimeServiceClient::with_interceptor(grpc_channel, interceptor);
-
-                        // Set up bidirectional stream
-                        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEnvelope>(64);
-                        let hello = StreamEnvelope {
-                            body: Some(Body::ClientHello(ClientHello {
-                                device_id: config.device_id.clone(),
-                                platform: DevicePlatform::Desktop as i32,
-                                user_agent: config.user_agent.clone(),
-                                subscribe_vault_ids: config.vault_ids.clone(),
-                                last_seen_event_seq: last_seen_seq,
-                            })),
-                        };
-                        let outbound = outbound_stream(hello, rx);
-                        let response =
-                            tokio::time::timeout(CONNECT_TIMEOUT, client.connect(outbound))
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(tonic::Status::deadline_exceeded(
-                                        "Connect opening handshake timed out",
-                                    ))
-                                });
-                        match response {
-                            Ok(response) => {
-                                log::info!("[CONNECT GRPC] Stream connected");
-                                if let Err(e) = channel.send(ConnectStreamMessage::Connected).await
-                                {
-                                    log::warn!(
-                                        "[CONNECT GRPC] Failed to forward Connected event: {}",
-                                        e
-                                    );
-                                }
-                                // Reset on success: backoff so the next
-                                // disconnect retries fast, and `attempt`
-                                // so the warn-every-16 log below flags a
-                                // wedged loop of *consecutive* failures
-                                // rather than cumulative lifetime flaps.
-                                backoff = Duration::from_secs(1);
-                                attempt = 0;
-
-                                let mut inbound = response.into_inner();
-                                loop {
-                                    let message =
-                                        tokio::time::timeout(HEARTBEAT_TIMEOUT, inbound.message())
-                                            .await
-                                            .unwrap_or_else(|_| {
-                                                Err(tonic::Status::deadline_exceeded(
-                                                    "Connect live updates stopped responding",
-                                                ))
-                                            });
-                                    match message {
-                                        Ok(Some(envelope)) => match envelope.body {
-                                            Some(Body::SessionEvent(event)) => {
-                                                if let Err(e) = tx
-                                                    .send(StreamEnvelope {
-                                                        body: Some(Body::ClientAck(ClientAck {
-                                                            event_seq: event.event_seq,
-                                                        })),
-                                                    })
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Outbound channel closed while sending ClientAck (seq {}): {}; reconnecting",
-                                                        event.event_seq,
-                                                        e
-                                                    );
-                                                    break;
-                                                }
-                                                last_seen_seq = event.event_seq;
-                                                if let Err(e) = channel
-                                                    .send(ConnectStreamMessage::SessionEvent(event))
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Failed to forward SessionEvent: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                            Some(Body::Ping(_)) => {
-                                                if let Err(e) = tx
-                                                    .send(StreamEnvelope {
-                                                        body: Some(Body::Pong(Pong {
-                                                            ts_unix_ms: chrono::Utc::now()
-                                                                .timestamp_millis(),
-                                                        })),
-                                                    })
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Outbound channel closed while sending Pong: {}; reconnecting",
-                                                        e
-                                                    );
-                                                    break;
-                                                }
-                                            }
-                                            Some(Body::Error(err)) => {
-                                                if let Err(e) = channel
-                                                    .send(ConnectStreamMessage::Error(format!(
-                                                        "{}: {}",
-                                                        err.code, err.message
-                                                    )))
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Failed to forward Error event: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                            Some(Body::DuressActivated(event)) => {
-                                                // Phase 7b: remote duress activation. Convert the
-                                                // protobuf timestamp and forward; the app locks the
-                                                // cryptic screen WITHOUT wiping.
-                                                let unlock_at =
-                                                    event.duress_unlock_at.and_then(|ts| {
-                                                        chrono::DateTime::from_timestamp(
-                                                            ts.seconds,
-                                                            ts.nanos as u32,
-                                                        )
-                                                    });
-                                                if let Err(e) = channel
-                                                    .send(ConnectStreamMessage::DuressActivated {
-                                                        unlock_at,
-                                                        source: event.source,
-                                                    })
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Failed to forward DuressActivated: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                            Some(Body::DuressCleared(_)) => {
-                                                if let Err(e) = channel
-                                                    .send(ConnectStreamMessage::DuressCleared)
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Failed to forward DuressCleared: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                            Some(Body::DuressDisabled(event)) => {
-                                                // Issue 2: duress turned off account-wide.
-                                                // Forward the account id so the app can
-                                                // disarm only a matching local enrollment.
-                                                if let Err(e) = channel
-                                                    .send(ConnectStreamMessage::DuressDisabled {
-                                                        account_id: event.account_id,
-                                                    })
-                                                    .await
-                                                {
-                                                    log::warn!(
-                                                        "[CONNECT GRPC] Failed to forward DuressDisabled: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                            _ => {}
-                                        },
-                                        Ok(None) => {
-                                            // Stream ended gracefully
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            if e.code() == tonic::Code::Aborted
-                                                && e.message().contains("superseded")
-                                            {
-                                                log::info!(
-                                                    "[CONNECT GRPC] Stream superseded by newer connection; stopping stale stream"
-                                                );
-                                                return;
-                                            }
-                                            if let Some(refusal) = trouble::refusal(&e) {
-                                                // Refused mid-stream.
-                                                refuse_device(&mut channel, &e, refusal).await;
-                                                refused = Some(refusal);
-                                                break;
-                                            }
-                                            log::error!("[CONNECT GRPC] Stream error: {}", e);
-                                            report_failure(&mut channel, &e).await;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if e.code() == tonic::Code::Aborted
-                                    && e.message().contains("superseded")
-                                {
-                                    log::info!(
-                                        "[CONNECT GRPC] Connect attempt superseded by newer connection; stopping stale stream"
-                                    );
-                                    return;
-                                }
-                                if let Some(refusal) = trouble::refusal(&e) {
-                                    refuse_device(&mut channel, &e, refusal).await;
-                                    refused = Some(refusal);
-                                } else {
-                                    log::warn!("[CONNECT GRPC] Connect attempt failed: {}", e);
-                                    report_failure(&mut channel, &e).await;
-                                }
-                            }
-                        }
-                    }
-                    Err(trouble) => {
-                        if let Err(send_err) =
-                            channel.send(ConnectStreamMessage::Trouble(trouble)).await
-                        {
-                            log::warn!(
-                                "[CONNECT GRPC] Failed to forward channel trouble: {}",
-                                send_err
-                            );
-                        }
-                    }
-                }
+                let refused = match run_connect_attempt(
+                    &config,
+                    &mut channel,
+                    &mut last_seen_seq,
+                    &mut backoff,
+                    &mut attempt,
+                )
+                .await
+                {
+                    StreamAttemptOutcome::Superseded => return,
+                    StreamAttemptOutcome::Refused(refusal) => Some(refusal),
+                    StreamAttemptOutcome::Disconnected => None,
+                };
 
                 // No `Disconnected` after a refusal: the status stays on it
                 // instead of flipping back to "reconnecting".
@@ -357,6 +136,253 @@ pub fn connect_stream(
     )
 }
 
+type ConnectEventSender = iced::futures::channel::mpsc::Sender<ConnectStreamMessage>;
+
+enum StreamAttemptOutcome {
+    Disconnected,
+    Refused(Refusal),
+    Superseded,
+}
+
+async fn run_connect_attempt(
+    config: &ConnectStreamConfig,
+    channel: &mut ConnectEventSender,
+    last_seen_seq: &mut i64,
+    backoff: &mut Duration,
+    attempt: &mut u64,
+) -> StreamAttemptOutcome {
+    let grpc_channel =
+        tokio::time::timeout(CONNECT_TIMEOUT, super::create_channel(&config.grpc_url))
+            .await
+            .map_err(|_| {
+                log::warn!("[CONNECT GRPC] Transport connection timed out");
+                Trouble::Unreachable
+            })
+            .and_then(|result| {
+                result.map_err(|e| {
+                    log::warn!("[CONNECT GRPC] Transport error: {}", e);
+                    trouble::trouble(&e)
+                })
+            });
+    match grpc_channel {
+        Ok(grpc_channel) => {
+            let access_token = config.tokens.read().await.access_token.clone();
+            let interceptor = AuthInterceptor::new(&access_token);
+            let mut client = RealtimeServiceClient::with_interceptor(grpc_channel, interceptor);
+
+            // Set up bidirectional stream
+            let (tx, rx) = tokio::sync::mpsc::channel::<StreamEnvelope>(64);
+            let hello = StreamEnvelope {
+                body: Some(Body::ClientHello(ClientHello {
+                    device_id: config.device_id.clone(),
+                    platform: DevicePlatform::Desktop as i32,
+                    user_agent: config.user_agent.clone(),
+                    subscribe_vault_ids: config.vault_ids.clone(),
+                    last_seen_event_seq: *last_seen_seq,
+                })),
+            };
+            let outbound = outbound_stream(hello, rx);
+            let response = tokio::time::timeout(CONNECT_TIMEOUT, client.connect(outbound))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tonic::Status::deadline_exceeded(
+                        "Connect opening handshake timed out",
+                    ))
+                });
+            match response {
+                Ok(response) => {
+                    log::info!("[CONNECT GRPC] Stream connected");
+                    if let Err(e) = channel.send(ConnectStreamMessage::Connected).await {
+                        log::warn!("[CONNECT GRPC] Failed to forward Connected event: {}", e);
+                    }
+                    // Reset on success: backoff so the next
+                    // disconnect retries fast, and `attempt`
+                    // so the warn-every-16 log below flags a
+                    // wedged loop of *consecutive* failures
+                    // rather than cumulative lifetime flaps.
+                    *backoff = Duration::from_secs(1);
+                    *attempt = 0;
+
+                    return read_connect_stream(response.into_inner(), &tx, channel, last_seen_seq)
+                        .await;
+                }
+                Err(e) => return report_open_attempt_failure(channel, &e).await,
+            }
+        }
+        Err(trouble) => {
+            if let Err(send_err) = channel.send(ConnectStreamMessage::Trouble(trouble)).await {
+                log::warn!(
+                    "[CONNECT GRPC] Failed to forward channel trouble: {}",
+                    send_err
+                );
+            }
+        }
+    }
+    StreamAttemptOutcome::Disconnected
+}
+
+async fn report_open_attempt_failure(
+    channel: &mut ConnectEventSender,
+    e: &tonic::Status,
+) -> StreamAttemptOutcome {
+    if e.code() == tonic::Code::Aborted && e.message().contains("superseded") {
+        log::info!(
+            "[CONNECT GRPC] Connect attempt superseded by newer connection; stopping stale stream"
+        );
+        return StreamAttemptOutcome::Superseded;
+    }
+    if let Some(refusal) = trouble::refusal(e) {
+        refuse_device(channel, e, refusal).await;
+        return StreamAttemptOutcome::Refused(refusal);
+    } else {
+        log::warn!("[CONNECT GRPC] Connect attempt failed: {}", e);
+        report_failure(channel, e).await;
+    }
+    StreamAttemptOutcome::Disconnected
+}
+
+async fn read_connect_stream(
+    mut inbound: tonic::Streaming<StreamEnvelope>,
+    tx: &tokio::sync::mpsc::Sender<StreamEnvelope>,
+    channel: &mut ConnectEventSender,
+    last_seen_seq: &mut i64,
+) -> StreamAttemptOutcome {
+    loop {
+        let message = tokio::time::timeout(HEARTBEAT_TIMEOUT, inbound.message())
+            .await
+            .unwrap_or_else(|_| {
+                Err(tonic::Status::deadline_exceeded(
+                    "Connect live updates stopped responding",
+                ))
+            });
+        match message {
+            Ok(Some(envelope)) => {
+                if !forward_inbound_envelope(envelope, tx, channel, last_seen_seq).await {
+                    return StreamAttemptOutcome::Disconnected;
+                }
+            }
+            Ok(None) => {
+                // Stream ended gracefully
+                return StreamAttemptOutcome::Disconnected;
+            }
+            Err(e) => {
+                if e.code() == tonic::Code::Aborted && e.message().contains("superseded") {
+                    log::info!(
+                        "[CONNECT GRPC] Stream superseded by newer connection; stopping stale stream"
+                    );
+                    return StreamAttemptOutcome::Superseded;
+                }
+                if let Some(refusal) = trouble::refusal(&e) {
+                    // Refused mid-stream.
+                    refuse_device(channel, &e, refusal).await;
+                    return StreamAttemptOutcome::Refused(refusal);
+                }
+                log::error!("[CONNECT GRPC] Stream error: {}", e);
+                report_failure(channel, &e).await;
+                return StreamAttemptOutcome::Disconnected;
+            }
+        }
+    }
+}
+
+async fn forward_inbound_envelope(
+    envelope: StreamEnvelope,
+    tx: &tokio::sync::mpsc::Sender<StreamEnvelope>,
+    channel: &mut ConnectEventSender,
+    last_seen_seq: &mut i64,
+) -> bool {
+    match envelope.body {
+        Some(Body::SessionEvent(event)) => {
+            if let Err(e) = tx
+                .send(StreamEnvelope {
+                    body: Some(Body::ClientAck(ClientAck {
+                        event_seq: event.event_seq,
+                    })),
+                })
+                .await
+            {
+                log::warn!(
+                    "[CONNECT GRPC] Outbound channel closed while sending ClientAck (seq {}): {}; reconnecting",
+                    event.event_seq,
+                    e
+                );
+                return false;
+            }
+            *last_seen_seq = event.event_seq;
+            if let Err(e) = channel
+                .send(ConnectStreamMessage::SessionEvent(event))
+                .await
+            {
+                log::warn!("[CONNECT GRPC] Failed to forward SessionEvent: {}", e);
+            }
+        }
+        Some(Body::Ping(_)) => {
+            if let Err(e) = tx
+                .send(StreamEnvelope {
+                    body: Some(Body::Pong(Pong {
+                        ts_unix_ms: chrono::Utc::now().timestamp_millis(),
+                    })),
+                })
+                .await
+            {
+                log::warn!(
+                    "[CONNECT GRPC] Outbound channel closed while sending Pong: {}; reconnecting",
+                    e
+                );
+                return false;
+            }
+        }
+        Some(Body::Error(err)) => {
+            if let Err(e) = channel
+                .send(ConnectStreamMessage::Error(format!(
+                    "{}: {}",
+                    err.code, err.message
+                )))
+                .await
+            {
+                log::warn!("[CONNECT GRPC] Failed to forward Error event: {}", e);
+            }
+        }
+        Some(Body::DuressActivated(event)) => {
+            // Phase 7b: remote duress activation. Convert the
+            // protobuf timestamp and forward; the app locks the
+            // cryptic screen WITHOUT wiping.
+            let unlock_at = event
+                .duress_unlock_at
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32));
+            if let Err(e) = channel
+                .send(ConnectStreamMessage::DuressActivated {
+                    unlock_at,
+                    source: event.source,
+                })
+                .await
+            {
+                log::warn!("[CONNECT GRPC] Failed to forward DuressActivated: {}", e);
+            }
+        }
+        Some(Body::DuressCleared(_)) => {
+            if let Err(e) = channel.send(ConnectStreamMessage::DuressCleared).await {
+                log::warn!("[CONNECT GRPC] Failed to forward DuressCleared: {}", e);
+            }
+        }
+        Some(Body::DuressDisabled(event)) => {
+            // Issue 2: duress turned off account-wide.
+            // Forward the account id so the app can
+            // disarm only a matching local enrollment.
+            if let Err(e) = channel
+                .send(ConnectStreamMessage::DuressDisabled {
+                    account_id: event.account_id,
+                })
+                .await
+            {
+                log::warn!("[CONNECT GRPC] Failed to forward DuressDisabled: {}", e);
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -411,21 +437,29 @@ async fn refuse_device(
     }
 }
 
-/// Report a failure that isn't a refusal. An expired sign-in stays an
-/// `Error` so the App can tell it apart; the REST client refreshes the
-/// shared token and the next attempt uses it. Anything else is trouble:
-/// offline or Connect unreachable.
+/// Report a failure that isn't a refusal. A refused bearer is reported as
+/// [`ConnectStreamMessage::SessionEnded`] so the App can tell it apart; the
+/// next attempt reads the shared token again, so it picks up a new one if
+/// the App has installed one. Anything else is trouble: offline or Connect
+/// unreachable.
 async fn report_failure(
     channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
     status: &tonic::Status,
 ) {
-    let message = if status.code() == tonic::Code::Unauthenticated {
-        ConnectStreamMessage::Error(format!("Connect session expired ({})", status.message()))
+    if let Err(e) = channel.send(failure_message(status)).await {
+        log::warn!("[CONNECT GRPC] Failed to forward the failure: {}", e);
+    }
+}
+
+/// The message for a failure that isn't a refusal; see [`report_failure`].
+fn failure_message(status: &tonic::Status) -> ConnectStreamMessage {
+    if status.code() == tonic::Code::Unauthenticated {
+        ConnectStreamMessage::SessionEnded(format!(
+            "Connect session expired ({})",
+            status.message()
+        ))
     } else {
         ConnectStreamMessage::Trouble(trouble::status_trouble(status))
-    };
-    if let Err(e) = channel.send(message).await {
-        log::warn!("[CONNECT GRPC] Failed to forward the failure: {}", e);
     }
 }
 

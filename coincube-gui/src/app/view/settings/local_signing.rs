@@ -8,6 +8,7 @@ use iced::widget::{
     Column, Container, Row, Space,
 };
 use iced::{Alignment, Length};
+use std::borrow::Cow;
 
 use coincube_ui::component::tenshu::{self, radio_list, segment, FieldSize, Tone};
 use coincube_ui::component::text::*;
@@ -30,6 +31,8 @@ const PAIR_CANCEL_ID: &str = "tenshu.settings.pair.cancel";
 const PAIR_RETRY_ID: &str = "tenshu.settings.pair.retry";
 const RENAME_KEYS_ID: &str = "tenshu.settings.pair.rename-keys";
 const DETAILS_ID: &str = "tenshu.settings.pair.details";
+const FULL_CODE_ID: &str = "tenshu.settings.pair.code.full";
+const COPY_CODE_ID: &str = "tenshu.settings.pair.code.copy";
 
 pub fn section<'a>(
     menu: &'a Menu,
@@ -174,8 +177,14 @@ fn key_subtitle(key: &PairableKey) -> Option<String> {
 fn pair_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     let body: Element<'a, Message> = match &state.flow {
         PairingFlow::Idle => idle_body(state),
-        PairingFlow::PhonePicker { discovered } => picker_body(discovered),
-        PairingFlow::Waiting { phone, offer, qr } => waiting_body(phone, offer, qr.as_ref()),
+        PairingFlow::PhonePicker { discovered } => picker_body(state, discovered),
+        PairingFlow::Waiting { phone, offer, qr } => waiting_body(
+            phone,
+            offer,
+            qr.as_ref(),
+            state.replaced_pairing_notice(&phone.cert_fp8),
+            state.show_full_pairing_code,
+        ),
         PairingFlow::Error(e) => error_body(e),
     };
     page::group(
@@ -221,10 +230,97 @@ fn cancel<'a>(label: &'static str) -> Element<'a, Message> {
     )
 }
 
+/// This computer's pairing code, shown beside the QR it belongs to.
+///
+/// It is the first 8 characters of this computer's certificate fingerprint,
+/// the value COINCUBE Mobile reads from the QR. It sits in its own labelled
+/// block at the foot of the column beside the QR, under a rule: below the
+/// waiting status and the Cancel button, and so apart from the line at the
+/// top of that column that names the phone by the phone's fingerprint. The
+/// two are different values and are not to be compared with each other.
+///
+/// Beside the QR, not above or under it: a real pairing QR is some 570px
+/// tall. Anything under it is off the bottom of a laptop-height window, and
+/// anything above it pushes the QR itself down, which is what the user has
+/// to scan.
+///
+/// Showing it changes nothing about how pairing is verified, and the wording
+/// claims nothing about what a match proves. It is conditional ("if COINCUBE
+/// Mobile asks") because a phone that predates the comparison shows no such
+/// question, and it sends the user to the phone to cancel: a different code
+/// means the phone read another QR, which this computer's Cancel cannot undo.
+///
+/// `None` when the offer carries no well-formed fingerprint, in which case
+/// its QR does not announce a code either (see
+/// [`crate::phone_signer::pairing::encode_offer_with_pairing_code`]).
+fn pairing_code_block<'a>(
+    offer: &crate::phone_signer::pairing::PairingOffer,
+    show_full: bool,
+) -> Option<Element<'a, Message>> {
+    let code = crate::phone_signer::pairing::pairing_code(&offer.cert_fp)?;
+    let mut block = Column::new()
+        .spacing(4)
+        .push(tenshu::label(localized_copy("This computer's pairing code")))
+        .push(
+            iced::widget::text(code.short)
+                .size(26)
+                .font(coincube_ui::font::MONO_MEDIUM),
+        )
+        .push(page::muted(localized_copy(
+            "If COINCUBE Mobile asks whether the codes match, compare its code with this one. If they are different, cancel on the phone.",
+        )));
+    if show_full {
+        // Four groups to a line, so the first line starts with the short code.
+        let lines: Vec<String> = code
+            .full
+            .split(' ')
+            .collect::<Vec<_>>()
+            .chunks(4)
+            .map(|groups| groups.join(" "))
+            .collect();
+        block = block
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(page::muted(localized_copy(
+                "This computer's full pairing code",
+            )))
+            .push(
+                iced::widget::text(lines.join("\n"))
+                    .size(13)
+                    .font(coincube_ui::font::MONO_REGULAR),
+            )
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .push(page::button(
+                        COPY_CODE_ID,
+                        localized_copy("Copy full pairing code"),
+                        Some(Message::Clipboard(code.full)),
+                    ))
+                    .push(page::button(
+                        FULL_CODE_ID,
+                        localized_copy("Hide full pairing code"),
+                        Some(local(LocalSigningMessage::ToggleFullPairingCode)),
+                    )),
+            );
+    } else {
+        block = block
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(page::button(
+                FULL_CODE_ID,
+                localized_copy("Show full pairing code"),
+                Some(local(LocalSigningMessage::ToggleFullPairingCode)),
+            ));
+    }
+    Some(block.into())
+}
+
 fn waiting_body<'a>(
     phone: &'a crate::phone_signer::mdns::DiscoveredPhone,
     offer: &'a crate::phone_signer::pairing::PairingOffer,
     qr: Option<&'a qr_code::Data>,
+    replaced: Option<String>,
+    show_full_code: bool,
 ) -> Element<'a, Message> {
     let remaining = crate::phone_signer::pairing::seconds_remaining(offer);
     let mut info = Column::new()
@@ -238,32 +334,59 @@ fn waiting_body<'a>(
             )
         } else {
             "This offer can no longer be scanned. Start a fresh pairing offer.".to_string()
-        }))
+        }));
+    // Pairing here replaces this phone's pairing for another chain, said
+    // before the user scans (master decision 19).
+    if let Some(notice) = replaced {
+        info = info.push(page::muted(notice));
+    }
+    info = info
+        // A phone that predates v3 pairing refuses this code at scan
+        // (contract §4.1, §4.6).
+        .push(page::muted(localized_format!(
+            "If COINCUBE Mobile reports an unsupported QR version, update COINCUBE Mobile.",
+            "Si COINCUBE Mobile indica una versión de QR no compatible, actualiza COINCUBE Mobile."
+        )))
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(if remaining > 0 {
             page::status(
                 page::Status::Busy,
-                localized_format!("Waiting · expires in {}s", "En espera · vence en {} s", remaining),
+                localized_format!(
+                    "Waiting · expires in {}s",
+                    "En espera · vence en {} s",
+                    remaining
+                ),
             )
         } else {
             page::status(page::Status::Bad, localized_copy("Pairing offer expired"))
         })
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(cancel("Cancel pairing"));
+    // The code belongs to the QR: it is this computer's, it is shown only
+    // while the QR is, and it goes away with the QR when the offer can no
+    // longer be scanned.
+    if qr.is_some_and(|_| remaining > 0) {
+        if let Some(code) = pairing_code_block(offer, show_full_code) {
+            info = info
+                .push(Space::new().height(Length::Fixed(12.0)))
+                .push(page::rule())
+                .push(Space::new().height(Length::Fixed(12.0)))
+                .push(code);
+        }
+    }
     let mut row = Row::new().spacing(24).align_y(Alignment::Start);
     if let Some(qr) = qr.filter(|_| remaining > 0) {
-        row = row.push(
-            Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4))
-                .padding(8)
-                .style(|_| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::WHITE)),
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
+        let qr = Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4))
+            .padding(8)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::WHITE)),
+                border: iced::Border {
+                    radius: 8.0.into(),
                     ..Default::default()
-                }),
-        );
+                },
+                ..Default::default()
+            });
+        row = row.push(qr);
     }
     info = info.width(Length::Fill);
     page::rows([
@@ -276,6 +399,7 @@ fn waiting_body<'a>(
 }
 
 fn picker_body<'a>(
+    state: &'a LocalSigningState,
     discovered: &'a [crate::phone_signer::mdns::DiscoveredPhone],
 ) -> Element<'a, Message> {
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
@@ -284,9 +408,15 @@ fn picker_body<'a>(
         let press = Some(local(LocalSigningMessage::PickPhone(fp8)));
         let id =
             iced::advanced::widget::Id::from(format!("tenshu.settings.pair.phone.{}", d.cert_fp8));
+        // Said before the user picks and scans: pairing here replaces a
+        // pairing this phone has for another chain.
+        let description = match state.replaced_pairing_notice(&d.cert_fp8) {
+            Some(notice) => format!("{} · {}", d.addr, notice),
+            None => d.addr.to_string(),
+        };
         rows.push(
             page::row(localized_format!("Phone {}", "Teléfono {}", d.cert_fp8))
-                .description(d.addr.to_string())
+                .description(description)
                 .control(if i == 0 {
                     page::primary(id, localized_copy("Pair"), press)
                 } else {
@@ -450,33 +580,16 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
         let fp8_for_name = fp8.clone();
         let fp8_for_fb = fp8.clone();
         let fp8_for_save = fp8.clone();
-        // Must be the same predicate signing and the hw refresh loop apply.
-        let has_full_binding = p
-            .signer_binding
-            .as_ref()
-            .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
         let removable = p.signer_binding.as_ref().is_some_and(|binding| {
             binding.descriptor_sha256.len() == 32
                 && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
         });
-        let exact = p
-            .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
-            .is_ok();
-        let (kind, word, detail) = if exact {
-            (page::Status::Ok, "Paired", "Exact vault key paired.")
-        } else if has_full_binding && !removable {
-            (
-                page::Status::Warn,
-                "Other Vault",
-                "This pairing belongs to a different Vault descriptor. Open that Vault to remove it.",
-            )
-        } else {
-            (
-                page::Status::Warn,
-                "Pair again",
-                "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed.",
-            )
-        };
+        let (kind, word, detail) = pairing_row_status(
+            p,
+            &state.descriptor_sha256,
+            &state.vault_key_fingerprints,
+            state.wallet_chain(),
+        );
         rows.push(
             page::row(if p.name.is_empty() {
                 localized_copy("Phone")
@@ -585,6 +698,62 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
     )
 }
 
+/// The settings row's status for one pairing, in order: exact, another
+/// Vault's (only that Vault can remove it), made before v3, refused by this
+/// Vault's chain (contract R2.6 and R2.7), anything else.
+fn pairing_row_status(
+    p: &crate::phone_signer::pairing_store::PairedPhone,
+    descriptor_sha256: &str,
+    vault_key_fingerprints: &[(
+        String,
+        coincube_core::miniscript::bitcoin::bip32::Fingerprint,
+    )],
+    chain: Option<crate::chain::ChainId>,
+) -> (page::Status, &'static str, Cow<'static, str>) {
+    // Must be the same predicate signing and the hw refresh loop apply.
+    let has_full_binding = p
+        .signer_binding
+        .as_ref()
+        .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
+    let removable = p.signer_binding.as_ref().is_some_and(|binding| {
+        binding.descriptor_sha256.len() == 32
+            && hex::encode(&binding.descriptor_sha256) == descriptor_sha256
+    });
+    let exact = chain.is_some_and(|chain| {
+        p.exact_signer_against(descriptor_sha256, vault_key_fingerprints, chain)
+            .is_ok()
+    });
+    if exact {
+        (page::Status::Ok, "Paired", "Exact vault key paired.".into())
+    } else if has_full_binding && !removable {
+        (
+            page::Status::Warn,
+            "Other Vault",
+            "This pairing belongs to a different Vault descriptor. Open that Vault to remove it."
+                .into(),
+        )
+    } else if p.network.is_none() {
+        // A pairing made before v3: kept visible and never used to sign
+        // (contract R2.6, legacy variant). A row of another Vault keeps
+        // the advice above, since only that Vault can remove it.
+        (
+            page::Status::Warn,
+            "Pair again",
+            crate::phone_signer::pairing_store::PRE_V3_PAIRING.into(),
+        )
+    } else if let Some(refusal) = chain.and_then(|chain| p.chain_refusal(chain)) {
+        // Paired for another chain, or a phone that cannot sign this chain.
+        (page::Status::Warn, "Pair again", refusal.into())
+    } else {
+        (
+            page::Status::Warn,
+            "Pair again",
+            "Pair again and select the exact vault key held by this phone. If the phone is lost, a separate recovery flow is needed."
+                .into(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,9 +842,374 @@ mod tests {
             addr: "192.168.100.95:54502".parse().unwrap(),
             instance_name: "x".into(),
         };
-        let _ = picker_body(&[]);
-        let _ = picker_body(std::slice::from_ref(&phone));
+        let state = LocalSigningState::default();
+        let _ = picker_body(&state, &[]);
+        let _ = picker_body(&state, std::slice::from_ref(&phone));
         let _ = error_body(&PairingError::ReplayRefused);
         let _ = error_body(&PairingError::OfferExpired);
+    }
+
+    #[test]
+    fn a_pre_v3_row_of_another_vault_keeps_the_open_that_vault_advice() {
+        use crate::phone_signer::pairing_store::{PairedPhone, SignerBinding, PRE_V3_PAIRING};
+        let this_vault = hex::encode([1u8; 32]);
+        let row = |descriptor: [u8; 32], network: Option<&str>| PairedPhone {
+            signer_binding: Some(SignerBinding {
+                key_id: "1".into(),
+                xpub: "tpubD6NzVbkrYhZ4X".into(),
+                fingerprint: Fingerprint::from_str("f108451f").unwrap(),
+                descriptor_sha256: descriptor.to_vec(),
+                imported_scope: None,
+            }),
+            cert_pin: [7; 32],
+            name: "Phone".into(),
+            paired_at_unix: 1,
+            wallet_fingerprints: Vec::new(),
+            vault_fingerprint: Fingerprint::from_str("00000000").unwrap(),
+            transport_pubkey: vec![2; 33],
+            fallback_addr: None,
+            network: network.map(str::to_owned),
+            capabilities: Vec::new(),
+        };
+        // Another Vault's row cannot be removed here, made before v3 or not.
+        for network in [None, Some("mainnet")] {
+            let (_, word, detail) = pairing_row_status(
+                &row([2; 32], network),
+                &this_vault,
+                &[],
+                Some(crate::chain::ChainId::Bitcoin),
+            );
+            assert_eq!(word, "Other Vault");
+            assert!(detail.contains("Open that Vault to remove it"));
+        }
+        // This Vault's row made before v3 says to pair again.
+        let (_, word, detail) = pairing_row_status(
+            &row([1; 32], None),
+            &this_vault,
+            &[],
+            Some(crate::chain::ChainId::Bitcoin),
+        );
+        assert_eq!((word, detail.as_ref()), ("Pair again", PRE_V3_PAIRING));
+        // This Vault's row paired for another chain says which (R2.7).
+        let (_, word, detail) = pairing_row_status(
+            &row([1; 32], Some("bitcoin-blake2b")),
+            &this_vault,
+            &[],
+            Some(crate::chain::ChainId::Bitcoin),
+        );
+        assert_eq!(
+            (word, detail.as_ref()),
+            (
+                "Pair again",
+                "Paired for Bitcoin Blake2b. Pair again to use it here."
+            )
+        );
+    }
+}
+
+/// Mobile V3 Phase 1, Desktop PR T1: this computer's pairing code on the
+/// waiting screen.
+#[cfg(test)]
+mod pairing_code_view_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::phone_signer::mdns::DiscoveredPhone;
+    use crate::phone_signer::pairing::{pairing_code, PairingOffer};
+    use iced::advanced::widget::Id;
+
+    const FIXTURE: &str = include_str!("../../../phone_signer/fixtures/pairing_code_v1.json");
+
+    struct Fixture {
+        offer: PairingOffer,
+        phone: DiscoveredPhone,
+        code: String,
+        full: String,
+        wrong: String,
+    }
+
+    /// The shared fixture's offer, alive for another 90 seconds, and the
+    /// phone it is aimed at.
+    fn fixture() -> Fixture {
+        let fx: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        let mut offer: PairingOffer =
+            serde_json::from_value(fx["offer"]["fields"].clone()).unwrap();
+        offer.expires_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 90;
+        let text = |a: &str, b: &str| fx[a][b].as_str().unwrap().to_string();
+        Fixture {
+            offer,
+            phone: DiscoveredPhone {
+                cert_fp8: text("phone", "fp8"),
+                addr: "192.168.100.95:54502".parse().unwrap(),
+                instance_name: "COINCUBE-fixture-phone".into(),
+            },
+            code: text("desktop", "pairing_code"),
+            full: text("desktop", "pairing_code_full"),
+            wrong: text("phone", "not_the_pairing_code"),
+        }
+    }
+
+    fn qr() -> qr_code::Data {
+        qr_code::Data::new("synthetic-pairing-offer-not-for-use").unwrap()
+    }
+
+    fn render(
+        fx: &Fixture,
+        qr: &qr_code::Data,
+        show_full: bool,
+        name: &str,
+    ) -> capture::Inspection {
+        capture::inspect(
+            name,
+            waiting_body(&fx.phone, &fx.offer, Some(qr), None, show_full),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        )
+    }
+
+    fn full_lines(full: &str) -> String {
+        full.split(' ')
+            .collect::<Vec<_>>()
+            .chunks(4)
+            .map(|groups| groups.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_waiting_screen_shows_this_computers_code_under_its_own_label() {
+        let fx = fixture();
+        let qr = qr();
+        let screen = render(&fx, &qr, false, "pair-code");
+        assert!(screen.contains("This computer's pairing code"));
+        // The code is its own piece of text, exactly as the fixture has it.
+        assert!(
+            screen.text.iter().any(|(value, _)| *value == fx.code),
+            "{:?}",
+            screen.text
+        );
+        // Conditional, because a phone that predates the comparison never
+        // asks; and it sends the user to the phone to cancel.
+        assert!(screen.contains(
+            "If COINCUBE Mobile asks whether the codes match, compare its code with this one. \
+             If they are different, cancel on the phone."
+        ));
+        // What was there before still is: the automatic check and the cancel.
+        assert!(screen.contains("verify pairing automatically"));
+        assert!(screen.has_focus(Id::new(PAIR_CANCEL_ID)));
+    }
+
+    /// The phone's fingerprint identifies the phone being paired. It stays on
+    /// its own line, in its own form, and is never presented as a code.
+    #[test]
+    fn the_phones_fingerprint_is_kept_apart_from_the_code() {
+        let fx = fixture();
+        let qr = qr();
+        let screen = render(&fx, &qr, true, "pair-code-apart");
+        let phone_line = screen
+            .text
+            .iter()
+            .map(|(value, _)| value.as_str())
+            .find(|value| value.contains(&fx.phone.cert_fp8))
+            .expect("the line that names the phone");
+        assert!(phone_line.contains("on phone"));
+        assert!(!phone_line.contains(&fx.code));
+        // The phone's fingerprint is nowhere formatted like a pairing code,
+        // and the two values differ, so comparing the wrong pair fails.
+        assert!(!screen.contains(&fx.wrong));
+        assert_ne!(fx.wrong, fx.code);
+        assert_eq!(
+            pairing_code(&format!("{}{}", fx.phone.cert_fp8, "0".repeat(56)))
+                .unwrap()
+                .short,
+            fx.wrong
+        );
+        // Only the code's own block uses the word "code" for a value.
+        let labelled: Vec<_> = screen
+            .text
+            .iter()
+            .filter(|(value, _)| value.contains("pairing code"))
+            .collect();
+        assert!(labelled
+            .iter()
+            .all(|(value, _)| !value.contains(&fx.phone.cert_fp8)));
+    }
+
+    #[test]
+    fn the_full_code_can_be_shown_and_copied_from_the_keyboard() {
+        let fx = fixture();
+        let qr = qr();
+
+        let short = render(&fx, &qr, false, "pair-code-short");
+        assert!(!short.contains("This computer's full pairing code"));
+        assert!(!short.contains(&fx.full[10..30]));
+        assert!(short.contains("Show full pairing code"));
+        assert!(short.has_focus(Id::new(FULL_CODE_ID)));
+        assert!(!short.has_focus(Id::new(COPY_CODE_ID)));
+        let shown = capture::activate(
+            waiting_body(&fx.phone, &fx.offer, Some(&qr), None, false),
+            Id::new(FULL_CODE_ID),
+            (1440, 900),
+            false,
+        );
+        assert!(shown.iter().any(|m| matches!(
+            m,
+            Message::Settings(SettingsMessage::LocalSigning(
+                LocalSigningMessage::ToggleFullPairingCode
+            ))
+        )));
+
+        let full = render(&fx, &qr, true, "pair-code-full");
+        // Labelled as this computer's, and the short code is still there.
+        assert!(full.contains("This computer's full pairing code"));
+        assert!(full.text.iter().any(|(value, _)| *value == fx.code));
+        assert!(
+            full.text
+                .iter()
+                .any(|(value, _)| *value == full_lines(&fx.full)),
+            "{:?}",
+            full.text
+        );
+        assert!(full.contains("Copy full pairing code"));
+        assert!(full.contains("Hide full pairing code"));
+        for id in [FULL_CODE_ID, COPY_CODE_ID] {
+            assert!(full.has_focus(Id::new(id)), "{}", id);
+        }
+        let copied = capture::activate(
+            waiting_body(&fx.phone, &fx.offer, Some(&qr), None, true),
+            Id::new(COPY_CODE_ID),
+            (1440, 900),
+            false,
+        );
+        assert!(
+            copied
+                .iter()
+                .any(|m| matches!(m, Message::Clipboard(value) if *value == fx.full)),
+            "the copied text is the full code as shown"
+        );
+    }
+
+    #[test]
+    fn no_code_without_a_live_qr_or_a_well_formed_fingerprint() {
+        let mut fx = fixture();
+        let qr = qr();
+
+        // An offer that can no longer be scanned shows neither QR nor code.
+        fx.offer.expires_at_unix = 1;
+        let expired = render(&fx, &qr, true, "pair-code-expired");
+        assert!(expired.contains("Pairing offer expired"));
+        assert!(!expired.contains("pairing code"));
+        assert!(!expired.contains(&fx.code));
+
+        // A fingerprint that is not one is never shown as a code.
+        let mut fx = fixture();
+        fx.offer.cert_fp = String::new();
+        let malformed = render(&fx, &qr, true, "pair-code-malformed");
+        assert!(!malformed.contains("pairing code"));
+        assert!(malformed.has_focus(Id::new(PAIR_CANCEL_ID)));
+
+        // A live offer with no QR to scan shows no code either.
+        let fx = fixture();
+        let no_qr = capture::inspect(
+            "pair-code-no-qr",
+            waiting_body(&fx.phone, &fx.offer, None, None, true),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(!no_qr.contains("pairing code"));
+        assert!(!no_qr.contains(&fx.code));
+    }
+
+    /// A real pairing QR is far larger than the synthetic one above. The code
+    /// must sit beside it, inside the QR's own height, so it neither falls
+    /// below the QR nor pushes the QR down; and below the Cancel button, away
+    /// from the line that names the phone.
+    #[test]
+    fn the_code_is_beside_a_real_size_qr_and_costs_no_height() {
+        let fx = fixture();
+        let payload =
+            crate::phone_signer::pairing::encode_offer_with_pairing_code(&fx.offer).unwrap();
+        let real_qr = qr_code::Data::new(&payload).unwrap();
+        let render = |show_code: bool| {
+            let mut offer = fx.offer.clone();
+            if !show_code {
+                // No well-formed fingerprint: the same screen without a code.
+                offer.cert_fp = String::new();
+            }
+            capture::inspect(
+                if show_code {
+                    "pair-code-real-qr"
+                } else {
+                    "pair-code-real-qr-no-code"
+                },
+                waiting_body(&fx.phone, &offer, Some(&real_qr), None, false),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+        let bounds_of = |screen: &capture::Inspection, needle: &str| {
+            screen
+                .text
+                .iter()
+                .find(|(value, _)| value.contains(needle))
+                .map(|(_, bounds)| *bounds)
+                .unwrap_or_else(|| panic!("{:?} is on screen", needle))
+        };
+        let with = render(true);
+        let without = render(false);
+
+        let code = bounds_of(&with, &fx.code);
+        let phone_line = bounds_of(&with, &fx.phone.cert_fp8);
+        let cancel = with
+            .focus
+            .iter()
+            .find(|(id, _)| *id == Id::new(PAIR_CANCEL_ID))
+            .map(|(_, bounds)| *bounds)
+            .expect("the Cancel button");
+        // In the column beside the QR, which starts where the phone's line
+        // does, to the right of a QR several hundred pixels wide.
+        assert!(phone_line.x > 500.0, "{:?}", phone_line);
+        assert!(code.x >= phone_line.x, "{:?} {:?}", code, phone_line);
+        // Under the status and the Cancel button, so apart from the phone's
+        // line at the top of the column.
+        assert!(code.y > cancel.y + cancel.height, "{:?} {:?}", code, cancel);
+        assert!(phone_line.y + phone_line.height < cancel.y);
+        // Inside the QR's height: the QR is at least 500px tall and starts
+        // level with the phone's line.
+        assert!(
+            code.y + code.height < phone_line.y + 500.0,
+            "the code is beside the QR, not below it: {:?}",
+            code
+        );
+        // And it moves nothing: the phone's line, which is level with the
+        // top of the QR, is where it is on the same screen without a code.
+        assert_eq!(phone_line.y, bounds_of(&without, &fx.phone.cert_fp8).y);
+        assert!(with.has_focus(Id::new(FULL_CODE_ID)));
+    }
+
+    #[test]
+    fn the_code_block_is_in_spanish_when_the_app_is() {
+        let fx = fixture();
+        coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+            for show_full in [false, true] {
+                let block = capture::inspect(
+                    "pair-code-es",
+                    pairing_code_block(&fx.offer, show_full).unwrap(),
+                    (1440, 900),
+                    "dark",
+                    coincube_ui::theme::Theme::dark(),
+                );
+                assert!(block.contains("Código de vinculación de esta computadora"));
+                // The code itself is the same in every language.
+                assert!(block.text.iter().any(|(value, _)| *value == fx.code));
+                block.assert_spanish("pair-code");
+            }
+        });
     }
 }

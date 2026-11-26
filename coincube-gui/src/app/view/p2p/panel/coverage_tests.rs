@@ -53,6 +53,56 @@ fn update(p: &mut P2PPanel, cache: &Cache, message: P2PMessage) {
     let _ = State::update(p, None, cache, Message::View(view::Message::P2P(message)));
 }
 
+struct ChatTestEvents {
+    open: P2PMessage,
+    send: P2PMessage,
+    retry: fn(uuid::Uuid) -> P2PMessage,
+    edit: fn(String) -> P2PMessage,
+    result: fn(Result<(), String>) -> P2PMessage,
+    action: &'static str,
+}
+
+fn chat_events(dispute: bool) -> ChatTestEvents {
+    if dispute {
+        ChatTestEvents {
+            open: P2PMessage::OpenDisputeChat,
+            send: P2PMessage::SendDisputeChatMessage,
+            retry: P2PMessage::RetryDisputeChatMessage,
+            edit: P2PMessage::DisputeChatInputEdited,
+            result: P2PMessage::DisputeChatMessageSent,
+            action: "AdminDm",
+        }
+    } else {
+        ChatTestEvents {
+            open: P2PMessage::OpenChat,
+            send: P2PMessage::SendChatMessage,
+            retry: P2PMessage::RetryChatMessage,
+            edit: P2PMessage::ChatInputEdited,
+            result: P2PMessage::ChatMessageSent,
+            action: "SendDm",
+        }
+    }
+}
+
+fn chat_state(
+    p: &P2PPanel,
+    dispute: bool,
+) -> (&str, Option<&PendingChatMessage>, &[PendingChatMessage]) {
+    if dispute {
+        (
+            &p.dispute_chat_input.value,
+            p.pending_dispute_chat_message.as_ref(),
+            &p.failed_dispute_chat_messages,
+        )
+    } else {
+        (
+            &p.chat_input.value,
+            p.pending_chat_message.as_ref(),
+            &p.failed_chat_messages,
+        )
+    }
+}
+
 fn trade(status: TradeStatus, side: OrderType) -> P2PTrade {
     P2PTrade {
         id: "synthetic-trade".into(),
@@ -728,6 +778,27 @@ fn trade_status_fallbacks_and_countdown_do_not_need_a_live_coordinator() {
 }
 
 #[test]
+fn restored_waiting_payment_shows_escrow_instead_of_confirm_fiat() {
+    let p = panel();
+    for (side, expected_notice) in [
+        (OrderType::Buy, "Waiting for seller to lock the Bitcoin"),
+        (OrderType::Sell, "Pay the hold invoice"),
+    ] {
+        let mut restored = trade(TradeStatus::WaitingPayment, side);
+        restored.last_dm_action = Some("WaitingPayment".into());
+        let view = inspect(p.trade_detail_view(&restored));
+        assert!(view.contains(expected_notice), "{:?}", view.text);
+        assert!(!view.contains("Confirm Fiat Sent"), "{:?}", view.text);
+        assert!(
+            !view.contains("Waiting for fiat payment"),
+            "{:?}",
+            view.text
+        );
+        assert!(!view.contains("Time remaining"), "{:?}", view.text);
+    }
+}
+
+#[test]
 fn conversation_tabs_show_distinct_empty_states() {
     let mut p = panel();
     assert!(inspect(p.chat_list_view()).contains("No conversations yet"));
@@ -922,6 +993,7 @@ fn spark_payment_completion_is_session_bound_and_clears_transient_state() {
         payment_id: "synthetic-payment".into(),
         amount_sat: 10000,
         fee_sat: 10,
+        status: Some("Completed".to_string()),
     };
     update(
         &mut p,
@@ -1062,9 +1134,12 @@ fn relay_and_coordinator_settings_validate_deduplicate_and_persist_only_in_test_
 }
 
 #[test]
-fn chat_failure_restores_only_the_originating_trade_and_accordions_are_exclusive() {
+fn chat_failure_stays_with_the_originating_trade_and_accordions_are_exclusive() {
     let mut p = panel();
     let cache = enabled_cache();
+    let mut trade = trade(TradeStatus::Active, OrderType::Buy);
+    trade.counterparty_pubkey = Some("synthetic-peer".into());
+    p.trades = vec![trade];
     p.selected_trade = Some("synthetic-trade".into());
     update(&mut p, &cache, P2PMessage::OpenChat);
     update(
@@ -1080,9 +1155,12 @@ fn chat_failure_restores_only_the_originating_trade_and_accordions_are_exclusive
         &cache,
         P2PMessage::ChatMessageSent(Err("synthetic send failure".into())),
     );
-    assert_eq!(p.chat_input.value, "synthetic text");
+    assert!(p.chat_input.value.is_empty());
     assert!(p.pending_chat_message.is_none());
-    update(&mut p, &cache, P2PMessage::SendChatMessage);
+    let failed = &p.failed_chat_messages[0];
+    assert_eq!(failed.original_text, "synthetic text");
+    let id = failed.id;
+    update(&mut p, &cache, P2PMessage::RetryChatMessage(id));
     p.selected_trade = Some("another".into());
     update(
         &mut p,
@@ -1090,6 +1168,8 @@ fn chat_failure_restores_only_the_originating_trade_and_accordions_are_exclusive
         P2PMessage::ChatMessageSent(Err("late failure".into())),
     );
     assert!(p.chat_input.value.is_empty());
+    assert_eq!(p.failed_chat_messages[0].id, id);
+    assert_eq!(p.failed_chat_messages[0].order_id, "synthetic-trade");
     update(&mut p, &cache, P2PMessage::ToggleChatTradeInfo);
     assert!(p.chat_show_trade_info && !p.chat_show_user_info);
     update(&mut p, &cache, P2PMessage::ToggleChatUserInfo);
@@ -1144,13 +1224,17 @@ fn trade_updates_reconstruct_invoice_status_and_preserve_status_for_chat() {
     assert_eq!(p.trades[0].status, TradeStatus::WaitingPayment);
     p.selected_trade = Some("synthetic-trade".into());
     p.trade_action_loading = true;
+    p.trade_action_order_id = Some("synthetic-trade".into());
     p.trade_rating = 5;
     update(
         &mut p,
         &cache,
-        P2PMessage::TradeActionResult(Ok(super::super::mostro::TradeActionResponse::Success {
-            new_status: "FiatSent".into(),
-        })),
+        P2PMessage::TradeActionResult(
+            "synthetic-trade".into(),
+            Ok(super::super::mostro::TradeActionResponse::Success {
+                new_status: "FiatSent".into(),
+            }),
+        ),
     );
     assert_eq!(p.trades[0].status, TradeStatus::FiatSent);
     assert!(p.trades[0].countdown_start_ts.is_none());
@@ -1300,12 +1384,15 @@ fn take_results_start_a_clean_payment_session_and_dismissal_clears_its_state() {
 }
 
 #[test]
-fn peer_and_dispute_chat_persist_only_after_acknowledgement_and_restore_failed_input() {
+fn peer_and_dispute_chat_persist_only_after_acknowledgement() {
     let mut p = panel();
     let _session_fixture = seed_chat_session(&p);
     let cache = enabled_cache();
     p.selected_trade = Some("synthetic-trade".into());
-    p.trades = vec![trade(TradeStatus::Active, OrderType::Buy)];
+    let mut trade = trade(TradeStatus::Dispute, OrderType::Buy);
+    trade.counterparty_pubkey = Some("synthetic-peer".into());
+    trade.admin_pubkey = Some("synthetic-admin".into());
+    p.trades = vec![trade];
     let persisted = |p: &P2PPanel| {
         serde_json::to_value(super::super::mostro::get_trade_messages(
             &p.cube_name(),
@@ -1314,59 +1401,40 @@ fn peer_and_dispute_chat_persist_only_after_acknowledgement_and_restore_failed_i
         .unwrap()
     };
     for dispute in [false, true] {
+        let ChatTestEvents {
+            open,
+            send,
+            retry,
+            edit,
+            result,
+            action,
+        } = chat_events(dispute);
+        update(&mut p, &cache, open);
         let before = persisted(&p);
         let before_count = before.as_array().unwrap().len();
-        let send = || {
-            if dispute {
-                P2PMessage::SendDisputeChatMessage
-            } else {
-                P2PMessage::SendChatMessage
-            }
-        };
-        let edit = |s: &str| {
-            if dispute {
-                P2PMessage::DisputeChatInputEdited(s.into())
-            } else {
-                P2PMessage::ChatInputEdited(s.into())
-            }
-        };
-        let result = |r| {
-            if dispute {
-                P2PMessage::DisputeChatMessageSent(r)
-            } else {
-                P2PMessage::ChatMessageSent(r)
-            }
-        };
-        update(&mut p, &cache, edit("   "));
-        update(&mut p, &cache, send());
+        update(&mut p, &cache, edit("   ".into()));
+        update(&mut p, &cache, send.clone());
         assert!(p.pending_chat_message.is_none() && p.pending_dispute_chat_message.is_none());
         assert_eq!(persisted(&p), before);
-        update(&mut p, &cache, edit(" Synthetic message "));
-        update(&mut p, &cache, send());
-        let pending = if dispute {
-            &p.pending_dispute_chat_message
-        } else {
-            &p.pending_chat_message
-        };
-        assert_eq!(pending.as_ref().unwrap().original_text, "Synthetic message");
+        update(&mut p, &cache, edit(" Synthetic message ".into()));
+        update(&mut p, &cache, send.clone());
+        let (_, pending, _) = chat_state(&p, dispute);
+        assert_eq!(pending.unwrap().original_text, "Synthetic message");
         assert_eq!(persisted(&p), before);
-        update(&mut p, &cache, send());
+        update(&mut p, &cache, send);
         assert_eq!(persisted(&p), before);
         update(&mut p, &cache, result(Err("synthetic offline".into())));
-        let input = if dispute {
-            &p.dispute_chat_input
-        } else {
-            &p.chat_input
-        };
-        assert_eq!(input.value, "Synthetic message");
+        let (input, _, failed) = chat_state(&p, dispute);
+        assert!(input.is_empty());
+        assert_eq!(failed[0].original_text, "Synthetic message");
+        let failed_id = failed[0].id;
         assert_eq!(persisted(&p), before);
-        update(&mut p, &cache, send());
+        update(&mut p, &cache, retry(failed_id));
         assert_eq!(persisted(&p), before);
         update(&mut p, &cache, result(Ok(())));
         assert!(p.pending_chat_message.is_none() && p.pending_dispute_chat_message.is_none());
         let messages = super::super::mostro::get_trade_messages(&p.cube_name(), "synthetic-trade");
         assert_eq!(messages.len(), before_count + 1);
-        let action = if dispute { "AdminDm" } else { "SendDm" };
         let (accepted, previous): (Vec<_>, Vec<_>) =
             messages.iter().partition(|m| m.action == action);
         assert_eq!(accepted.len(), 1);
@@ -1608,4 +1676,226 @@ fn acknowledged_conversations_appear_in_their_lists_and_open_with_the_right_cont
         update(&mut p, &cache, P2PMessage::CloseChat);
         assert!(p.chat_selected_trade.is_none());
     }
+}
+
+#[test]
+fn trade_action_result_applies_to_the_originating_trade_only() {
+    let mut p = panel();
+    let cache = enabled_cache();
+    let mut a = trade(TradeStatus::Active, OrderType::Sell);
+    a.id = "trade-a".into();
+    let mut b = trade(TradeStatus::Active, OrderType::Sell);
+    b.id = "trade-b".into();
+    p.trades = vec![a, b];
+    // User moved on to B and started an action there while A's was pending.
+    p.selected_trade = Some("trade-b".into());
+    p.trade_action_loading = true;
+    p.trade_action_order_id = Some("trade-b".into());
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::TradeActionResult(
+            "trade-a".into(),
+            Ok(super::super::mostro::TradeActionResponse::Success {
+                new_status: "FiatSentOk".into(),
+            }),
+        ),
+    );
+    assert_eq!(p.trades[0].status, TradeStatus::FiatSent);
+    assert_eq!(p.trades[1].status, TradeStatus::Active);
+    assert!(p.trades[1].last_dm_action.is_none());
+    // B's action is still in flight.
+    assert!(p.trade_action_loading);
+    assert_eq!(p.trade_action_order_id.as_deref(), Some("trade-b"));
+}
+
+#[test]
+fn cancel_result_keeps_spark_state_of_another_trade() {
+    let mut p = panel();
+    let cache = enabled_cache();
+    p.spark_pay_session_id = Some("trade-b".into());
+    p.spark_pay_phase = SparkPayPhase::Sending;
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::CancelOrderResult("trade-a".into(), Ok(())),
+    );
+    assert_eq!(p.spark_pay_session_id.as_deref(), Some("trade-b"));
+    assert!(matches!(p.spark_pay_phase, SparkPayPhase::Sending));
+
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::CancelOrderResult("trade-b".into(), Ok(())),
+    );
+    assert!(p.spark_pay_session_id.is_none());
+    assert!(matches!(p.spark_pay_phase, SparkPayPhase::Idle));
+}
+
+#[test]
+fn spark_session_ownership_matches_the_originating_order() {
+    assert!(spark_session_owned_by(None, "a"));
+    assert!(spark_session_owned_by(Some("a"), "a"));
+    assert!(!spark_session_owned_by(Some("b"), "a"));
+}
+
+#[test]
+fn chat_retry_preserves_drafts_and_survives_another_failure_in_each_channel() {
+    let mut p = panel();
+    let cache = enabled_cache();
+    let mut trade = trade(TradeStatus::Dispute, OrderType::Buy);
+    trade.counterparty_pubkey = Some("synthetic-peer".into());
+    trade.admin_pubkey = Some("synthetic-admin".into());
+    p.selected_trade = Some(trade.id.clone());
+    p.trades = vec![trade];
+
+    for dispute in [false, true] {
+        let ChatTestEvents {
+            open,
+            send,
+            retry,
+            edit,
+            result,
+            ..
+        } = chat_events(dispute);
+        let state = |panel: &P2PPanel| {
+            let (input, pending, failed) = chat_state(panel, dispute);
+            (
+                input.to_owned(),
+                pending.map(|m| m.original_text.clone()),
+                failed.first().map(|m| m.original_text.clone()),
+            )
+        };
+        let draft = "new draft".to_owned();
+        let failed_text = "failed message";
+        let failed = Some(failed_text.to_owned());
+        let fail = || result(Err("synthetic relay failure".into()));
+
+        update(&mut p, &cache, open);
+        update(&mut p, &cache, edit(failed_text.into()));
+        update(&mut p, &cache, send);
+        update(&mut p, &cache, edit(draft.clone()));
+        update(&mut p, &cache, fail());
+        assert_eq!(state(&p), (draft.clone(), None, failed.clone()));
+        let id = chat_state(&p, dispute).2[0].id;
+
+        p.selected_trade = Some("different-trade".into());
+        update(&mut p, &cache, retry(id));
+        p.selected_trade = Some("synthetic-trade".into());
+        assert_eq!(state(&p), (draft.clone(), None, failed.clone()));
+        let other_retry = if dispute {
+            P2PMessage::RetryChatMessage(id)
+        } else {
+            P2PMessage::RetryDisputeChatMessage(id)
+        };
+        update(&mut p, &cache, other_retry);
+        assert!(p.pending_chat_message.is_none() && p.pending_dispute_chat_message.is_none());
+
+        update(&mut p, &cache, retry(id));
+        update(&mut p, &cache, retry(id));
+        assert_eq!(state(&p), (draft.clone(), failed.clone(), None));
+
+        update(&mut p, &cache, edit(String::new()));
+        update(&mut p, &cache, fail());
+        assert_eq!(state(&p), (String::new(), None, failed.clone()));
+        update(&mut p, &cache, retry(id));
+        assert_eq!(state(&p), (String::new(), failed, None));
+        update(&mut p, &cache, fail());
+    }
+}
+
+fn peer_chat_with_failed_message() -> (P2PPanel, Cache) {
+    let mut p = panel();
+    let cache = enabled_cache();
+    let mut trade = trade(TradeStatus::Active, OrderType::Buy);
+    trade.counterparty_pubkey = Some("synthetic-peer".into());
+    p.selected_trade = Some(trade.id.clone());
+    p.active_chat = ActiveChat::Peer;
+    p.trades = vec![trade];
+    p.chat_input.value = "first".into();
+    update(&mut p, &cache, P2PMessage::SendChatMessage);
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::ChatMessageSent(Err("synthetic relay failure".into())),
+    );
+    (p, cache)
+}
+
+fn displayed_peer_failure(p: &P2PPanel) -> Option<(uuid::Uuid, bool)> {
+    let trade = &p.trades[0];
+    PendingChatMessage::first_to_show(
+        &p.failed_chat_messages,
+        &p.cube_name(),
+        &trade.id,
+        ActiveChat::Peer.recipient(trade),
+    )
+    .map(|(message, can_retry)| (message.id, can_retry))
+}
+
+#[test]
+fn failed_chat_stays_bound_after_the_current_recipient_rotates() {
+    let (mut p, cache) = peer_chat_with_failed_message();
+    assert!(p.chat_input.value.is_empty());
+    let failed = &p.failed_chat_messages[0];
+    assert_eq!(failed.recipient, "synthetic-peer");
+    let id = failed.id;
+    p.trades[0].counterparty_pubkey = Some("replacement-peer".into());
+    update(&mut p, &cache, P2PMessage::SendChatMessage);
+    update(&mut p, &cache, P2PMessage::RetryChatMessage(id));
+    assert!(p.pending_chat_message.is_none());
+    assert!(p.chat_input.value.is_empty());
+    assert_eq!(p.failed_chat_messages[0].id, id);
+    assert_eq!(p.failed_chat_messages[0].original_text, "first");
+    assert_eq!(displayed_peer_failure(&p), Some((id, false)));
+}
+
+#[test]
+fn authoritative_recipient_change_does_not_block_a_later_eligible_retry() {
+    let (mut p, cache) = peer_chat_with_failed_message();
+    let first_id = p.failed_chat_messages[0].id;
+    update(&mut p, &cache, P2PMessage::RetryChatMessage(first_id));
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::ChatMessageSent(Err(super::super::mostro::CHAT_RECIPIENT_CHANGED.into())),
+    );
+    assert!(p.chat_input.value.is_empty());
+    assert!(p.failed_chat_messages[0].retry_blocked);
+
+    p.chat_input.value = "second".into();
+    update(&mut p, &cache, P2PMessage::SendChatMessage);
+    update(
+        &mut p,
+        &cache,
+        P2PMessage::ChatMessageSent(Err("another relay failure".into())),
+    );
+    let second_id = p.failed_chat_messages[1].id;
+    assert_eq!(displayed_peer_failure(&p), Some((second_id, true)));
+    update(&mut p, &cache, P2PMessage::RetryChatMessage(first_id));
+    assert!(p.pending_chat_message.is_none());
+    update(&mut p, &cache, P2PMessage::RetryChatMessage(second_id));
+    assert_eq!(p.pending_chat_message.as_ref().unwrap().id, second_id);
+    assert_eq!(displayed_peer_failure(&p), Some((first_id, false)));
+}
+
+#[test]
+fn chat_list_reads_conversations_from_the_state_cache() {
+    let mut p = panel();
+    p.trades = vec![trade(TradeStatus::Active, OrderType::Buy)];
+    assert!(p.chat_list_entries(&["SendDm"]).is_empty());
+    p.chat_history_cache.insert(
+        "synthetic-trade".into(),
+        vec![super::super::mostro::TradeMessage {
+            timestamp: 7,
+            action: "SendDm".into(),
+            payload_json: String::new(),
+            is_own: true,
+        }],
+    );
+    let entries = p.chat_list_entries(&["SendDm"]);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].2, 7);
+    assert!(entries[0].1.starts_with("You: "));
+    assert!(p.chat_list_entries(&["AdminDm"]).is_empty());
 }

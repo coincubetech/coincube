@@ -334,6 +334,22 @@ fn classify_connect_fork_with(
     classify_pin_with_guard(root, cube_id, verify, || Ok(()))
 }
 
+/// [`classify_pin_scoped`] for a Connect fork Cube: the fork's own PIN-only
+/// seed trial, with the same metadata recheck around it.
+pub fn classify_connect_fork_scoped(
+    root: &Path,
+    loc: &CubeLocation,
+    pin: &str,
+    validate: impl Fn() -> Result<(), UnlockError>,
+) -> Result<PinAttempt, UnlockError> {
+    classify_pin_with_guard(
+        root,
+        loc.cube_id,
+        || super::unlock_connect_fork(loc, pin),
+        validate,
+    )
+}
+
 /// The destination variant rechecks selected Cube metadata under the same
 /// attempt lock, before and after decryption. A rotated duress marker cannot
 /// turn a pending attempt into an ordinary wrong-PIN charge.

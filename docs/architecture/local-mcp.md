@@ -37,6 +37,10 @@ new adapter executable.
   authenticated local IPC connection, no wallet engine, database or AI SDK.
 - Cube Settings → AI access: opt-in, wallet scope and capability selection,
   persistent client pairing, private configuration and immediate revocation.
+  The whole surface follows the signed-in account's Connect `ai_access` flag
+  (`aiAccessEnabled`), off by default, with `COINCUBE_ENABLE_AI_ACCESS` as a
+  developer build override; see "Feature flag and release status" in
+  `docs/mcp/README.md`.
 
 The service supports macOS/Linux/Windows and embedded Vault daemons on Bitcoin,
 Testnet4, Regtest, Bitcoin Blake2b and Bitcoin Blake2b Testnet4. External daemon
@@ -122,26 +126,26 @@ or reset when it may have leaked.
 
 ## Tools and semantics
 
-- `tenshu_get_capabilities`: static build support, independent of installed
+- `coincube_get_capabilities`: static build support, independent of installed
   wallets and live consent. It cannot authorize operations or reach the desktop.
   Schema version 2 reports both preparation workflows enabled in normal builds
   and exact supported `networks` lists, never live consent.
-- `tenshu_list_wallets`: one authorized active Vault, opaque session wallet ID and
+- `coincube_list_wallets`: one authorized active Vault, opaque session wallet ID and
   exact chain identity in `network`.
-- `tenshu_get_wallet_summary`: current daemon balances in satoshis and sync state;
+- `coincube_get_wallet_summary`: current daemon balances in satoshis and sync state;
   no promise that a policy is presently satisfiable. Identity and health are
   checked before and after the coin read. A pending rescan prevents `synced`;
   chain alerts and invalid sync progress report `sync_failing`. Existing
   full-scan, startup-poll and repeated-poll-failure checks also apply. Only coarse
   health is exposed, never backend messages or scan timestamps.
-- `tenshu_get_transactions`: bounded confirmed history, newest-first; no labels,
+- `coincube_get_transactions`: bounded confirmed history, newest-first; no labels,
   scripts, addresses or chain transaction ids. Each row carries a session activity
   id that changes on the next unlock and differs per client. Limits avoid inventing
   unsupported cursor semantics. History returns `wallet_unavailable` unless
   identity and health checks pass before and after the query, so an incomplete
   empty result is not presented as authoritative. This is not an atomic chain
   snapshot and does not freeze subsequent updates.
-- `tenshu_get_wallet_policy_summary`: script type, deterministic signing thresholds
+- `coincube_get_wallet_policy_summary`: script type, deterministic signing thresholds
   and key counts, recovery delays in blocks. No prediction of recovery eligibility.
 
 Companion tool dispatch is gated by the same default-enabled `native-proposals`
@@ -207,7 +211,7 @@ enrollment are not enabled by this proposal path. Review displays the exact
 chain and node address and binds them to the native approval digest.
 
 No MCP tool signs, broadcasts or asserts device/backup verification. Source-specific
-Keychain/backup verification remains human work in existing flows. Default build
+Mobile key/backup verification remains human work in existing flows. Default build
 availability does not replace packaged-client or release acceptance.
 
 ## Unsigned transaction preparation

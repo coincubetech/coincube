@@ -547,6 +547,18 @@ impl CoincubePolicy {
         Ok(policy)
     }
 
+    /// The policy of an imported public wallet: one spending path, no
+    /// recovery paths. Imported wallets (single key or k-of-n multisig)
+    /// share the Vault's policy view so the same screens can show and sign
+    /// them. Such a policy never compiles to a Vault descriptor.
+    pub fn primary_only(primary_path: PathInfo) -> CoincubePolicy {
+        CoincubePolicy {
+            primary_path,
+            recovery_paths: BTreeMap::new(),
+            is_taproot: false,
+        }
+    }
+
     /// Create a new Coincube policy for use under a Taproot context.
     pub fn new(
         primary_path: PathInfo,
@@ -693,10 +705,9 @@ impl CoincubePolicy {
         &self.primary_path
     }
 
-    /// Timelocks and path info of the recovery paths. Note we guarantee this mapping is never
-    /// empty, as there is always at least one recovery path.
+    /// Timelocks and path info of the recovery paths. Never empty for a Vault policy; empty
+    /// only for an imported wallet's [`CoincubePolicy::primary_only`].
     pub fn recovery_paths(&self) -> &BTreeMap<u16, PathInfo> {
-        assert!(!self.recovery_paths.is_empty());
         &self.recovery_paths
     }
 
@@ -713,8 +724,11 @@ impl CoincubePolicy {
         // Start with the primary spending path. We'll then or() all the recovery paths to it.
         let primary_keys = primary_path.into_ms_policy()?;
 
-        // Incrementally create the top-level policy using all recovery paths.
-        assert!(!recovery_paths.is_empty());
+        // Incrementally create the top-level policy using all recovery paths. A
+        // primary-only (imported) policy has none and is not a Vault policy.
+        if recovery_paths.is_empty() {
+            return Err(CoincubePolicyError::MissingRecoveryPath);
+        }
         recovery_paths
             .into_iter()
             .try_fold(primary_keys, |tl_policy, (timelock, path_info)| {
@@ -833,6 +847,50 @@ pub struct PartialSpendInfo {
 }
 
 impl PartialSpendInfo {
+    /// Spend information for a policy with a primary path only (an imported wallet).
+    pub fn primary_only(primary_path: PathSpendInfo) -> Self {
+        PartialSpendInfo {
+            primary_path,
+            recovery_paths: BTreeMap::new(),
+        }
+    }
+
+    /// The progress every one of `infos` has reached: per path, the least
+    /// signature count and the signers present in all of them, and a recovery
+    /// path only if every one of them makes it available. `None` if `infos`
+    /// is empty.
+    ///
+    /// For a PSBT whose inputs, analysed one by one, disagree (which
+    /// [`super::CoincubeDescriptor::partial_spend_info`] refuses as
+    /// inconsistent): the result never shows the spend as more signed than
+    /// its least signed input.
+    pub fn least_signed(infos: impl IntoIterator<Item = PartialSpendInfo>) -> Option<Self> {
+        fn keep_common(path: &mut PathSpendInfo, other: &PathSpendInfo) {
+            path.sigs_count = path.sigs_count.min(other.sigs_count);
+            path.signed_pubkeys.retain(|fingerprint, count| {
+                other.signed_pubkeys.get(fingerprint).is_some_and(|other| {
+                    *count = (*count).min(*other);
+                    true
+                })
+            });
+        }
+        let mut infos = infos.into_iter();
+        let mut common = infos.next()?;
+        for info in infos {
+            keep_common(&mut common.primary_path, &info.primary_path);
+            common.recovery_paths.retain(|timelock, path| {
+                match info.recovery_paths.get(timelock) {
+                    Some(other) => {
+                        keep_common(path, other);
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        Some(common)
+    }
+
     /// Get the number of signatures present for the primary path
     pub fn primary_path(&self) -> &PathSpendInfo {
         &self.primary_path
@@ -849,6 +907,20 @@ impl PartialSpendInfo {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn a_primary_only_policy_never_compiles_to_a_vault_descriptor() {
+        let key = descriptor::DescriptorPublicKey::from_str(
+            "[8c3ffb6e/48'/1'/0'/2']tpubDEMt3bpQMa99W81K9h8f2FJH1C81eSd6bbSkBP8tcqQHAfSKvuGp2fz6xiVpfShzT9sKPx7DVBphChjxvNd15WcbsCca5oVz1AcUTWHxkdS/<0;1>/*",
+        )
+        .unwrap();
+        let policy = CoincubePolicy::primary_only(PathInfo::Single(key));
+        assert!(policy.recovery_paths().is_empty());
+        assert!(matches!(
+            policy.compile_multipath_descriptor_fallible(),
+            Err(CoincubePolicyError::MissingRecoveryPath)
+        ));
+    }
 
     #[test]
     fn valid_key() {

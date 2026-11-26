@@ -8,7 +8,7 @@ use super::{marketplace, NavContext, SubItem};
 use crate::{
     app::{
         features,
-        menu::{CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, VaultSubMenu},
+        menu::{CubeSettingsOption, CubeSubMenu, Menu, SparkSubMenu, VaultSubMenu},
         settings::preferences::PreferenceChange,
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::{settings::page, shared::glyph, Message},
@@ -42,7 +42,6 @@ pub fn is_settings(menu: &Menu) -> bool {
         Menu::Cube(CubeSubMenu::Settings(_))
             | Menu::Vault(VaultSubMenu::Settings(_))
             | Menu::Spark(SparkSubMenu::Settings(_))
-            | Menu::Liquid(LiquidSubMenu::Settings(_))
     )
 }
 
@@ -473,7 +472,8 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         body = body
             .push(Space::new().height(Length::Fixed(6.0)))
             .push(rule_line())
-            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(Space::new().height(Length::Fixed(6.0)));
+        body = body
             .push(
                 row![
                     row![
@@ -493,11 +493,9 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .push(muted(alert.panel_line(), 13));
     }
 
-    let mut panel = column![
-        container(head).padding([14, 16]),
-        rule_line(),
-        container(body).padding([14, 16]),
-    ];
+    let mut panel = column![container(head).padding([14, 16])]
+        .push(rule_line())
+        .push(container(body).padding([14, 16]));
     if !foot.is_empty() {
         panel = panel
             .push(rule_line())
@@ -640,16 +638,7 @@ fn nav_row_inner<'a>(
                 }),
         );
     }
-    let id = if nested {
-        format!("tenshu.shell.sub.{key}.{message:?}")
-    } else {
-        match key.as_str() {
-            "Lock Cube" => CUBE_LOCK_ID.to_owned(),
-            "Settings" => SETTINGS_ID.to_owned(),
-            "All Cubes" => "tenshu.launcher.all-cubes".to_owned(),
-            _ => format!("tenshu.shell.nav.{key}"),
-        }
-    };
+    let id = nav_row_focus_id(&key, &message, nested);
     let mut button = Action::new(id, body, Message::FocusAction)
         .width(Length::Fill)
         .padding([9, 10])
@@ -674,6 +663,19 @@ fn nav_row_inner<'a>(
         .into()
     } else {
         row
+    }
+}
+
+fn nav_row_focus_id(key: &str, message: &Option<Message>, nested: bool) -> String {
+    if nested {
+        format!("tenshu.shell.sub.{key}.{message:?}")
+    } else {
+        match key {
+            "Lock Cube" => CUBE_LOCK_ID.to_owned(),
+            "Settings" => SETTINGS_ID.to_owned(),
+            "All Cubes" => "tenshu.launcher.all-cubes".to_owned(),
+            _ => format!("tenshu.shell.nav.{key}"),
+        }
     }
 }
 
@@ -916,45 +918,12 @@ fn backup_attention<'a>() -> Element<'a, Message> {
     .into()
 }
 
-/// One anchored sidebar, with only its middle group scrolling.
-pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
-    let overview = Menu::Cube(CubeSubMenu::Overview);
-    let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
-    let activity = activity_route(ctx);
-    let activity_unavailable = false;
-    // A focused row paints 4px beyond its hit bounds. Later selected rows
-    // have opaque fills, so they need this clearance to keep the ring visible.
-    let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
-    top = top
-        .push(route(
-            "Overview",
-            Some(NavIcon::Glyph(glyph::GRID)),
-            menu,
-            overview,
-            false,
-        ))
-        .push(nav_row(
-            "Activity",
-            Some(NavIcon::Glyph(glyph::CLOCK)),
-            matches!(menu, Menu::Cube(CubeSubMenu::Activity)),
-            activity.map(Message::Menu),
-            false,
-            activity_unavailable.then(|| "No wallet with activity on this network".to_owned()),
-        ))
-        .push(route(
-            "Backup & protection",
-            Some(NavIcon::Glyph(glyph::SHIELD_CHECK)),
-            menu,
-            backup,
-            false,
-        ));
-
-    // The scroll viewport clips drawing outside its content. Reserve more
-    // than the focus ring's 4px outer extent at its first and last actions.
-    let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
-    middle = middle.push(section(localized_copy("Wallets")));
-    // Settings scoped to a wallet highlights Settings, not the wallet.
-    let settings_active = is_settings(menu);
+fn append_wallet_rows<'a>(
+    mut middle: Column<'a, Message>,
+    menu: &Menu,
+    ctx: &NavContext<'a>,
+    settings_active: bool,
+) -> Column<'a, Message> {
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
         middle = middle.push(nav_row_with_key(
@@ -1000,41 +969,82 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             None,
         ));
     }
-    if !ctx.network.is_blake2b() && ctx.liquid_gate.show() {
-        let liquid_reason = features::liquid(ctx.network).reason().map(str::to_owned);
-        middle = middle.push(nav_row(
-            "Liquid",
-            Some(NavIcon::Glyph(glyph::DROPLET)),
-            matches!(menu, Menu::Liquid(_)) && !settings_active,
-            liquid_reason
-                .is_none()
-                .then_some(Message::Menu(Menu::Liquid(LiquidSubMenu::Overview))),
-            false,
-            liquid_reason,
-        ));
-    }
+    middle
+}
+
+fn append_marketplace_rows<'a>(
+    mut middle: Column<'a, Message>,
+    menu: &Menu,
+    ctx: &NavContext<'a>,
+) -> Column<'a, Message> {
     let show_marketplace = (ctx.has_p2p && ctx.marketplace_flags.p2p_on())
         || (ctx.has_vault && ctx.marketplace_flags.buy_sell_on());
-    if show_marketplace {
-        middle = middle.push(nav_row(
-            "Marketplace",
-            Some(NavIcon::Font(shop_icon())),
-            matches!(menu, Menu::Marketplace(_)),
-            Some(Message::Menu(super::primary::marketplace_landing_menu(ctx))),
-            false,
-            None,
-        ));
-        if matches!(menu, Menu::Marketplace(_)) {
-            for item in marketplace_children(menu, ctx) {
-                middle = middle.push(item);
-            }
-            if let Some(subpages) = super::tertiary::items_for(menu, ctx) {
-                for item in subpages {
-                    middle = middle.push(subitem(menu, item, None));
-                }
+    if !show_marketplace {
+        return middle;
+    }
+    middle = middle.push(nav_row(
+        "Marketplace",
+        Some(NavIcon::Font(shop_icon())),
+        matches!(menu, Menu::Marketplace(_)),
+        Some(Message::Menu(super::primary::marketplace_landing_menu(ctx))),
+        false,
+        None,
+    ));
+    if matches!(menu, Menu::Marketplace(_)) {
+        for item in marketplace_children(menu, ctx) {
+            middle = middle.push(item);
+        }
+        if let Some(subpages) = super::tertiary::items_for(menu, ctx) {
+            for item in subpages {
+                middle = middle.push(subitem(menu, item, None));
             }
         }
     }
+    middle
+}
+
+/// One anchored sidebar, with only its middle group scrolling.
+pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
+    let overview = Menu::Cube(CubeSubMenu::Overview);
+    let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
+    let activity = activity_route(ctx);
+    let activity_unavailable = false;
+    // A focused row paints 4px beyond its hit bounds. Later selected rows
+    // have opaque fills, so they need this clearance to keep the ring visible.
+    let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
+    top = top
+        .push(route(
+            "Overview",
+            Some(NavIcon::Glyph(glyph::GRID)),
+            menu,
+            overview,
+            false,
+        ))
+        .push(nav_row(
+            "Activity",
+            Some(NavIcon::Glyph(glyph::CLOCK)),
+            matches!(menu, Menu::Cube(CubeSubMenu::Activity)),
+            activity.map(Message::Menu),
+            false,
+            activity_unavailable.then(|| "No wallet with activity on this network".to_owned()),
+        ))
+        .push(route(
+            "Backup & protection",
+            Some(NavIcon::Glyph(glyph::SHIELD_CHECK)),
+            menu,
+            backup,
+            false,
+        ));
+
+    // The scroll viewport clips drawing outside its content. Reserve more
+    // than the focus ring's 4px outer extent at its first and last actions.
+    let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
+    middle = middle.push(section(localized_copy("Wallets")));
+    // Settings scoped to a wallet highlights Settings, not the wallet.
+    let settings_active = is_settings(menu);
+    middle = append_wallet_rows(middle, menu, ctx, settings_active);
+    middle = append_marketplace_rows(middle, menu, ctx);
+
     let foot = column![
         rule::horizontal(1),
         container(nav_row(

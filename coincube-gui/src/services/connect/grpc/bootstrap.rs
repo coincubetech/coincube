@@ -25,6 +25,12 @@ pub enum BootstrapError {
     Channel(CreateChannelError),
     Rpc(tonic::Status),
     Superseded,
+    /// Connect registered this computer, but the id could not be saved: the
+    /// account's session in `connect.json` moved on while the RPC ran. The id
+    /// is still this computer's (Connect keys a signer device by user and
+    /// transport key), so a caller pinned to its own session may use it for
+    /// the life of that session.
+    NotPersisted(String),
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -36,6 +42,10 @@ impl std::fmt::Display for BootstrapError {
             Self::Superseded => {
                 write!(f, "Re-registration was superseded by a newer Connect login")
             }
+            Self::NotPersisted(device_id) => write!(
+                f,
+                "Registered device {device_id}, but a newer Connect session owns connect.json"
+            ),
         }
     }
 }
@@ -70,6 +80,11 @@ impl From<tonic::Status> for BootstrapError {
 /// `env!("CARGO_PKG_VERSION")`) and `os_version` should describe the host
 /// OS (e.g. `std::env::consts::OS`). `device_name` is the user-visible
 /// label the API stores — defaults to a hostname-style string if empty.
+///
+/// `issuer` is the Connect API the session belongs to, as
+/// [`cache::issuing_api`] records it (`None`: the configured API). A cached
+/// id is reused only when the account entry was issued by that same host.
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_device_registered(
     grpc_url: &str,
     tokens: Arc<RwLock<AccessTokenResponse>>,
@@ -78,6 +93,7 @@ pub async fn ensure_device_registered(
     device_name: String,
     app_version: String,
     os_version: String,
+    issuer: Option<&str>,
 ) -> Result<String, BootstrapError> {
     register_device(
         DeviceRegistration {
@@ -88,6 +104,7 @@ pub async fn ensure_device_registered(
             device_name,
             app_version,
             os_version,
+            issuer,
         },
         None,
     )
@@ -102,6 +119,8 @@ pub struct DeviceRegistration<'a> {
     pub device_name: String,
     pub app_version: String,
     pub os_version: String,
+    /// The Connect API the session belongs to ([`cache::issuing_api`]).
+    pub issuer: Option<&'a str>,
 }
 
 pub async fn register_device_for_claim(
@@ -123,6 +142,7 @@ async fn register_device(
         device_name,
         app_version,
         os_version,
+        issuer,
     } = registration;
     if let Some(claim) = claim {
         let owns_claim = Account::from_cache(network_dir, email)?
@@ -141,7 +161,9 @@ async fn register_device(
             // superseded without touching a live request.
             return Err(BootstrapError::Superseded);
         }
+        // An id issued by another host is not this host's device.
         if let Some(existing) = cached
+            .filter(|account| account.issued_by(issuer))
             .and_then(|account| account.device_id)
             .filter(|id| !id.trim().is_empty())
         {
@@ -202,8 +224,9 @@ async fn register_device(
         .await?
         {
             // A claim or newer authentication may have started while this
-            // RPC was in flight.
-            return Err(BootstrapError::Superseded);
+            // RPC was in flight. The id is not saved; it goes back to the
+            // caller, which decides whether it may still use it.
+            return Err(BootstrapError::NotPersisted(resp.device_id));
         }
     }
     tracing::info!(
@@ -225,19 +248,25 @@ async fn persist_registered_device_for_current_session(
     // file checks see one ordering. A later login uses another Arc and
     // still fails the active-cache token check.
     let current_tokens = tokens.read().await;
-    cache::set_device_id_for_email_if_token(
-        network_dir,
-        email,
-        device_id,
-        &current_tokens.refresh_token,
-    )
-    .await
+    cache::set_device_id_for_email_if_token(network_dir, email, device_id, &current_tokens).await
+}
+
+/// What a best-effort registration ended with: the device id, and whether
+/// it is the one saved in `connect.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredDevice {
+    pub device_id: String,
+    /// False when Connect returned the id but the account's session in
+    /// `connect.json` had moved on, so the id was not saved
+    /// ([`BootstrapError::NotPersisted`]).
+    pub persisted: bool,
 }
 
 /// Best-effort wrapper around `ensure_device_registered` that swallows
 /// errors after logging. Use this from post-login orchestration points
 /// where a registration failure shouldn't block the user from opening
 /// the app.
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_device_registered_best_effort(
     grpc_url: &str,
     tokens: Arc<RwLock<AccessTokenResponse>>,
@@ -246,7 +275,8 @@ pub async fn ensure_device_registered_best_effort(
     device_name: String,
     app_version: String,
     os_version: String,
-) -> Option<String> {
+    issuer: Option<&str>,
+) -> Option<RegisteredDevice> {
     match ensure_device_registered(
         grpc_url,
         tokens,
@@ -255,10 +285,24 @@ pub async fn ensure_device_registered_best_effort(
         device_name,
         app_version,
         os_version,
+        issuer,
     )
     .await
     {
-        Ok(id) => Some(id),
+        Ok(device_id) => Some(RegisteredDevice {
+            device_id,
+            persisted: true,
+        }),
+        Err(BootstrapError::NotPersisted(device_id)) => {
+            tracing::warn!(
+                "SignerDevice registered (device_id={device_id}), but a newer Connect \
+                 session owns connect.json; the id was not saved"
+            );
+            Some(RegisteredDevice {
+                device_id,
+                persisted: false,
+            })
+        }
         Err(e) => {
             tracing::warn!("Best-effort SignerDevice registration failed: {}", e);
             None
