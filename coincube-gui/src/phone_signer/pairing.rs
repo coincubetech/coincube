@@ -52,6 +52,30 @@ pub const PAIRING_PSK_LEN: usize = 16;
 /// no v2 offer is read, so the v2 domain is not kept.
 const PAIRING_PROOF_DOMAIN: &[u8] = b"coincube-pair-v3";
 
+/// JSON key of the QR offer's optional pairing-code marker. See
+/// [`encode_offer_with_pairing_code`].
+pub const PAIRING_CODE_KEY: &str = "pc";
+
+/// The pairing-code format this desktop shows on its pairing screen and
+/// announces in the offer's optional `pc` key.
+///
+/// Format 1: the first 8 characters of the desktop certificate fingerprint
+/// (`certFp`, the SHA-256 of the certificate DER as 64 lowercase hex
+/// characters), in upper case, as two groups of four separated by one space:
+/// `A1B2 C3D4`. See [`pairing_code`].
+///
+/// The code is a display of a value both sides already hold. It is not part
+/// of the pairing proof, and nothing in pairing depends on the user comparing
+/// it: the certificate pin and the proof decide whether a pairing completes.
+///
+/// What a match is worth: it rules out the phone having read some other
+/// computer's QR by accident. It does not rule out a deliberately substituted
+/// QR. Eight hex characters are 32 bits, so a QR can carry a certificate
+/// chosen to share them (about 2^32 tries, offline). The comparison is
+/// therefore a convenience for the user and must never be treated as a
+/// control.
+pub const PAIRING_CODE_FORMAT: u32 = 1;
+
 /// Default lifetime of a pairing offer. Long enough to scan from
 /// across the room; short enough that an abandoned QR can't be
 /// reused hours later.
@@ -129,6 +153,40 @@ pub struct PairingOffer {
     /// LAN. Added in protocol v2.
     #[serde(rename = "psk")]
     pub psk_b64: String,
+}
+
+/// This computer's pairing code as both apps show it, in
+/// [`PAIRING_CODE_FORMAT`] 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingCode {
+    /// `A1B2 C3D4`: the first 8 characters of the fingerprint.
+    pub short: String,
+    /// The whole fingerprint in the same style: 16 groups of four upper-case
+    /// characters separated by single spaces. `short` is its first two
+    /// groups.
+    pub full: String,
+}
+
+/// Format a desktop certificate fingerprint (`certFp`: 64 lowercase hex
+/// characters) as the pairing code. `None` for anything else, so a malformed
+/// fingerprint is never shown as a code.
+pub fn pairing_code(cert_fp: &str) -> Option<PairingCode> {
+    let well_formed = cert_fp.len() == 64
+        && cert_fp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !well_formed {
+        return None;
+    }
+    let upper = cert_fp.to_ascii_uppercase();
+    let groups: Vec<&str> = (0..upper.len())
+        .step_by(4)
+        .map(|start| &upper[start..start + 4])
+        .collect();
+    Some(PairingCode {
+        short: groups[..2].join(" "),
+        full: groups.join(" "),
+    })
 }
 
 /// A freshly minted pairing offer. The offer carries a per-offer
@@ -288,6 +346,42 @@ pub fn verify_pairing_proof(
 pub fn encode_offer(offer: &PairingOffer) -> Result<String, String> {
     let json = serde_json::to_vec(offer).map_err(|e| format!("encode offer json: {}", e))?;
     let encoded = URL_SAFE_NO_PAD.encode(json);
+    if encoded.len() > MAX_PAIRING_QR_BYTES {
+        return Err("Pairing QR is too large".into());
+    }
+    Ok(encoded)
+}
+
+/// Encode a pairing offer for a screen that shows this computer's pairing
+/// code beside the QR: the same JSON as [`encode_offer`], plus one optional
+/// key, `"pc": 1` ([`PAIRING_CODE_KEY`], [`PAIRING_CODE_FORMAT`]).
+///
+/// The key tells the phone there is a code on this screen to compare, and in
+/// which format. The phone is to ask "do these match?" only when it reads a
+/// format it knows (the mobile side is planned, not built); without the key,
+/// or with another value, it pairs as it did before. A phone that predates the key ignores it, because its parser
+/// reads the keys it names and no others.
+///
+/// The key is not covered by the pairing proof and does not need to be.
+/// Whoever can alter the QR can already replace every field in it; removing
+/// the key only removes the question on the phone, and keeping it beside a
+/// certificate chosen to share the code's 32 bits makes the question pass.
+/// Pairing is decided by the certificate pin and the proof, with or without
+/// the comparison.
+///
+/// Refuses an offer whose `certFp` is not a well-formed fingerprint: a QR
+/// must never announce a code this screen cannot show.
+pub fn encode_offer_with_pairing_code(offer: &PairingOffer) -> Result<String, String> {
+    if pairing_code(&offer.cert_fp).is_none() {
+        return Err("Pairing offer has no well-formed certificate fingerprint".into());
+    }
+    let mut json = serde_json::to_value(offer).map_err(|e| format!("encode offer json: {}", e))?;
+    let Some(fields) = json.as_object_mut() else {
+        return Err("encode offer json: not an object".into());
+    };
+    fields.insert(PAIRING_CODE_KEY.to_owned(), PAIRING_CODE_FORMAT.into());
+    let bytes = serde_json::to_vec(&json).map_err(|e| format!("encode offer json: {}", e))?;
+    let encoded = URL_SAFE_NO_PAD.encode(bytes);
     if encoded.len() > MAX_PAIRING_QR_BYTES {
         return Err("Pairing QR is too large".into());
     }
@@ -739,5 +833,391 @@ mod tests {
             "cert b64 len {} >= 1024",
             g.offer.cert_der_b64.len(),
         );
+    }
+}
+
+/// The pairing code and the offer's optional `pc` marker (Mobile V3 Phase 1,
+/// Desktop PR T1). Kept apart from the tests above, which are unchanged.
+#[cfg(test)]
+mod pairing_code_tests {
+    use super::*;
+    use crate::dir::CoincubeDirectory;
+    use serde_json::Value;
+    use sha2::Digest;
+
+    /// The fixture both apps test against. COINCUBE Mobile copies this file.
+    const FIXTURE: &str = include_str!("fixtures/pairing_code_v1.json");
+
+    fn fixture() -> Value {
+        serde_json::from_str(FIXTURE).expect("fixture is JSON")
+    }
+
+    fn text<'a>(value: &'a Value, path: &[&str]) -> &'a str {
+        path.iter()
+            .fold(value, |v, key| &v[*key])
+            .as_str()
+            .unwrap_or_else(|| panic!("fixture has no string at {:?}", path))
+    }
+
+    fn decode_json(payload: &str) -> Value {
+        let bytes = URL_SAFE_NO_PAD.decode(payload).expect("base64url");
+        serde_json::from_slice(&bytes).expect("offer json")
+    }
+
+    fn fixture_offer() -> PairingOffer {
+        let fields = fixture()["offer"]["fields"].clone();
+        serde_json::from_value(fields).expect("fixture offer fields")
+    }
+
+    fn generated_offer() -> PairingOffer {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "coincube-pairing-code-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).expect("mkdir");
+        let identity =
+            crate::phone_signer::identity::load_or_create(&CoincubeDirectory::new(path.clone()))
+                .expect("identity");
+        let offer = generate_offer(
+            "f108451f".parse().unwrap(),
+            &identity,
+            "COINCUBE-test-phone".into(),
+            OfferedKey {
+                signer_xpub: "tpubD6NzVbkrYhZ4XfixtureOnlyNotARealKey".into(),
+                descriptor_sha256: "ab".repeat(32),
+            },
+            crate::chain::ChainId::Bitcoin,
+        )
+        .offer;
+        // The code is the short form of the identity's own fingerprint.
+        assert_eq!(offer.cert_fp, identity.cert_fp());
+        assert_eq!(
+            pairing_code(&offer.cert_fp).unwrap().short.replace(' ', ""),
+            identity.cert_fp8().to_ascii_uppercase()
+        );
+        let _ = std::fs::remove_dir_all(path);
+        offer
+    }
+
+    #[test]
+    fn the_code_is_the_first_eight_characters_upper_case_in_two_groups() {
+        let fp = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+        let code = pairing_code(fp).unwrap();
+        assert_eq!(code.short, "A1B2 C3D4");
+        assert_eq!(
+            code.full,
+            "A1B2 C3D4 E5F6 0718 293A 4B5C 6D7E 8F90 1122 3344 5566 7788 99AA BBCC DDEE FF00"
+        );
+        assert!(code.full.starts_with(&code.short));
+        assert_eq!(code.full.replace(' ', "").to_ascii_lowercase(), fp);
+    }
+
+    #[test]
+    fn a_malformed_fingerprint_has_no_code() {
+        let good = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+        assert!(pairing_code(good).is_some());
+        for bad in [
+            String::new(),
+            good[..63].to_string(),
+            format!("{good}0"),
+            good.to_ascii_uppercase(),
+            good.replace('a', "g"),
+            good.replace("a1", "é"),
+            format!(" {}", &good[1..]),
+        ] {
+            assert_eq!(pairing_code(&bad), None, "{bad:?}");
+        }
+    }
+
+    /// One certificate digest and the string both apps must show for it; and
+    /// a phone fingerprint that formats to something else, so a user (or a
+    /// test) comparing the phone's fingerprint with the code sees a mismatch.
+    #[test]
+    fn the_shared_fixture_formats_the_computers_fingerprint_and_not_the_phones() {
+        let fx = fixture();
+        assert_eq!(fx["format"], PAIRING_CODE_FORMAT);
+        assert_eq!(text(&fx, &["marker", "key"]), PAIRING_CODE_KEY);
+        assert_eq!(fx["marker"]["value"], PAIRING_CODE_FORMAT);
+
+        let desktop_fp = text(&fx, &["desktop", "cert_fp"]);
+        let cert = URL_SAFE_NO_PAD
+            .decode(text(&fx, &["desktop", "cert_der_b64"]))
+            .unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&cert)), desktop_fp);
+
+        let code = pairing_code(desktop_fp).unwrap();
+        assert_eq!(code.short, text(&fx, &["desktop", "pairing_code"]));
+        assert_eq!(code.full, text(&fx, &["desktop", "pairing_code_full"]));
+
+        let phone_fp = text(&fx, &["phone", "cert_fp"]);
+        assert_eq!(&phone_fp[..8], text(&fx, &["phone", "fp8"]));
+        let wrong = pairing_code(phone_fp).unwrap().short;
+        assert_eq!(wrong, text(&fx, &["phone", "not_the_pairing_code"]));
+        assert_ne!(wrong, code.short, "comparing the wrong pair must fail");
+    }
+
+    #[test]
+    fn the_marker_is_one_extra_key_and_changes_nothing_else() {
+        for offer in [fixture_offer(), generated_offer()] {
+            let plain = decode_json(&encode_offer(&offer).unwrap());
+            let mut marked = decode_json(&encode_offer_with_pairing_code(&offer).unwrap());
+            let marker = marked
+                .as_object_mut()
+                .unwrap()
+                .remove(PAIRING_CODE_KEY)
+                .expect("the marker is present");
+            assert_eq!(marker, Value::from(PAIRING_CODE_FORMAT));
+            assert_eq!(marked, plain, "every other key and value is identical");
+            assert!(plain.get(PAIRING_CODE_KEY).is_none());
+        }
+    }
+
+    #[test]
+    fn the_fixture_payloads_are_what_the_encoders_produce() {
+        let fx = fixture();
+        let offer = fixture_offer();
+        assert_eq!(
+            encode_offer(&offer).unwrap(),
+            text(&fx, &["offer", "payload_without_marker"])
+        );
+        // Key order is not part of the contract, so compare as JSON.
+        assert_eq!(
+            decode_json(&encode_offer_with_pairing_code(&offer).unwrap()),
+            decode_json(text(&fx, &["offer", "payload_with_marker"]))
+        );
+    }
+
+    #[test]
+    fn this_desktops_own_decoder_reads_a_marked_offer_as_the_same_offer() {
+        let offer = generated_offer();
+        let decoded = decode_offer(&encode_offer_with_pairing_code(&offer).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&offer).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_marked_offer_stays_inside_the_qr_budget() {
+        let offer = generated_offer();
+        let plain = encode_offer(&offer).unwrap();
+        let marked = encode_offer_with_pairing_code(&offer).unwrap();
+        // `"pc":1,` is 7 bytes of JSON: at most 12 base64url characters.
+        assert!(marked.len() > plain.len());
+        assert!(
+            marked.len() <= plain.len() + 12,
+            "{} vs {}",
+            marked.len(),
+            plain.len()
+        );
+        assert!(marked.len() <= MAX_PAIRING_QR_BYTES);
+        iced::widget::qr_code::Data::new(&marked).expect("fits a QR code");
+    }
+
+    /// The largest offer this desktop can make: a full-length xpub, the
+    /// longest mDNS instance name, the longest network id.
+    #[test]
+    fn the_largest_marked_offer_stays_inside_the_qr_budget() {
+        let mut offer = generated_offer();
+        offer.signer_xpub = format!("tpub{}", "D".repeat(107));
+        assert_eq!(offer.signer_xpub.len(), 111);
+        offer.service_name = "s".repeat(63);
+        offer.network = crate::chain::ChainId::BitcoinBlake2bTestnet4
+            .api_str()
+            .to_owned();
+        assert_eq!(offer.network, "bitcoin-blake2b-testnet4");
+        let marked = encode_offer_with_pairing_code(&offer).unwrap();
+        assert!(marked.len() <= MAX_PAIRING_QR_BYTES, "{}", marked.len());
+        iced::widget::qr_code::Data::new(&marked).expect("fits a QR code");
+    }
+
+    #[test]
+    fn a_qr_never_announces_a_code_the_screen_cannot_show() {
+        let mut offer = generated_offer();
+        offer.cert_fp = String::new();
+        assert!(pairing_code(&offer.cert_fp).is_none());
+        assert!(encode_offer_with_pairing_code(&offer).is_err());
+        // The plain encoder is unchanged and still encodes it.
+        assert!(encode_offer(&offer).is_ok());
+    }
+
+    /// The checks COINCUBE Mobile's offer parser makes today
+    /// (`PairingOffer.fromQrPayload` and `_validate` in
+    /// `lib/services/local_signer/pairing_qr.dart`, read at coincube-mobile
+    /// `origin/main` 799b83a52f4f8e8f1b56d6c6028ad7860a91ea4c and unchanged at
+    /// 86050800eba86b09102c4feb4be6d2105f2882aa), in the same order. It decodes the JSON into a map and reads only the keys below:
+    /// there is no check for unknown keys, which is why `pc` is ignored.
+    fn todays_phone_parser(payload: &str, now_unix: u64) -> Result<(), String> {
+        const MAX_QR_PAYLOAD_BYTES: usize = 2048;
+        if payload.len() > MAX_QR_PAYLOAD_BYTES {
+            return Err("payload is too large".into());
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|e| format!("not valid base64url: {e}"))?;
+        let json: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("payload is not JSON: {e}"))?;
+        let json = json.as_object().ok_or("payload is not a JSON object")?;
+        let require_int = |key: &str| {
+            json.get(key)
+                .and_then(Value::as_i64)
+                .ok_or(format!("{key} must be an integer"))
+        };
+        let require_string = |key: &str| {
+            json.get(key)
+                .and_then(Value::as_str)
+                .ok_or(format!("{key} must be a string"))
+        };
+        // Lenient reads: absent is allowed here and judged below; a present
+        // value of another type is a cast failure in Dart.
+        let optional_string = |key: &str| match json.get(key) {
+            None | Some(Value::Null) => Ok(""),
+            Some(Value::String(s)) => Ok(s.as_str()),
+            Some(_) => Err(format!("{key} must be a string")),
+        };
+        let is_lower_hex = |s: &str, len: usize| {
+            s.len() == len
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+
+        let v = require_int("v")?;
+        if v == 1 || v == 2 {
+            return Err("Update COINCUBE on the desktop and pair again.".into());
+        }
+        if v != 3 {
+            return Err(format!("unsupported version {v}"));
+        }
+        optional_string("key")?;
+        optional_string("dh")?;
+        let net = optional_string("net")?;
+        let cert = require_string("cert")?;
+        let cert_fp = require_string("certFp")?;
+        let svc = require_string("svc")?;
+        let wfp = require_string("wfp")?;
+        let exp = require_int("exp")?;
+        let psk = optional_string("psk")?;
+
+        // `canonicalChainId`: the phone's closed set of canonical Connect
+        // network ids (`SignerNetwork.tryFromEnvString`, minus the `bitcoin`
+        // alias of `mainnet`).
+        const CANONICAL_NETWORKS: [&str; 7] = [
+            "mainnet",
+            "testnet",
+            "testnet4",
+            "signet",
+            "regtest",
+            "bitcoin-blake2b",
+            "bitcoin-blake2b-testnet4",
+        ];
+        if !CANONICAL_NETWORKS.contains(&net) {
+            return Err("unsupported network".into());
+        }
+        if psk.is_empty() {
+            return Err("missing psk".into());
+        }
+        let psk_bytes = URL_SAFE_NO_PAD
+            .decode(psk.trim_end_matches('='))
+            .map_err(|e| format!("psk is not valid base64url: {e}"))?;
+        if psk_bytes.len() != 16 {
+            return Err(format!("psk decodes to {} bytes", psk_bytes.len()));
+        }
+        if !is_lower_hex(cert_fp, 64) {
+            return Err("certFp must be 64 lowercase hex chars".into());
+        }
+        if svc.is_empty() || svc.len() > 64 {
+            return Err("svc must be a non-empty mDNS instance name".into());
+        }
+        if !is_lower_hex(wfp, 8) {
+            return Err("wfp must be 8 lowercase hex chars".into());
+        }
+        let cert_bytes = URL_SAFE_NO_PAD
+            .decode(cert.trim_end_matches('='))
+            .map_err(|e| format!("cert is not valid base64url: {e}"))?;
+        if !(80..=4096).contains(&cert_bytes.len()) {
+            return Err(format!(
+                "cert byte length {} out of bounds",
+                cert_bytes.len()
+            ));
+        }
+        if hex::encode(sha2::Sha256::digest(&cert_bytes)) != cert_fp {
+            return Err("cert/certFp mismatch".into());
+        }
+        let window = exp - now_unix as i64;
+        if window <= 0 {
+            return Err("offer already expired".into());
+        }
+        if window < 30 {
+            return Err("expiry too soon".into());
+        }
+        if window > 3600 {
+            return Err("expiry too far in the future".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn todays_phone_parser_accepts_an_offer_with_the_marker() {
+        let fx = fixture();
+        let now = fx["offer"]["now_unix"].as_u64().unwrap();
+        for key in ["payload_without_marker", "payload_with_marker"] {
+            todays_phone_parser(text(&fx, &["offer", key]), now)
+                .unwrap_or_else(|e| panic!("{}: {}", key, e));
+        }
+
+        // And a live offer from this build, as the pairing screen encodes it.
+        let offer = generated_offer();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        todays_phone_parser(&encode_offer(&offer).unwrap(), now).unwrap();
+        todays_phone_parser(&encode_offer_with_pairing_code(&offer).unwrap(), now).unwrap();
+    }
+
+    /// The mirror above is only worth something if it refuses what the phone
+    /// refuses. Spot-check that it is not vacuous.
+    #[test]
+    fn the_parser_mirror_refuses_what_the_phone_refuses() {
+        let fx = fixture();
+        let now = fx["offer"]["now_unix"].as_u64().unwrap();
+        let fields = fx["offer"]["fields"].clone();
+        let with = |edit: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+            let mut fields = fields.as_object().unwrap().clone();
+            fields.insert(PAIRING_CODE_KEY.into(), 1.into());
+            edit(&mut fields);
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&fields).unwrap())
+        };
+        assert!(todays_phone_parser(&with(&|_| {}), now).is_ok());
+        assert!(todays_phone_parser(
+            &with(&|f| {
+                f.insert("v".into(), 2.into());
+            }),
+            now
+        )
+        .is_err());
+        assert!(todays_phone_parser(
+            &with(&|f| {
+                f.remove("psk");
+            }),
+            now
+        )
+        .is_err());
+        assert!(todays_phone_parser(
+            &with(&|f| {
+                f.insert("net".into(), "bitcoin".into());
+            }),
+            now
+        )
+        .is_err());
+        assert!(todays_phone_parser(
+            &with(&|f| {
+                f.insert("certFp".into(), "00".repeat(32).into());
+            }),
+            now
+        )
+        .is_err());
+        assert!(todays_phone_parser(&with(&|_| {}), now + 7200).is_err());
     }
 }

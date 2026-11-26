@@ -90,6 +90,9 @@ pub struct LocalSigningState {
     pub keychain_keys_recorded: bool,
     /// Whether each key's full descriptor string is shown under its name.
     pub show_key_details: bool,
+    /// The waiting screen shows the full form of this computer's pairing
+    /// code under the short one. Display only; cleared with each pairing run.
+    pub show_full_pairing_code: bool,
     /// The loaded Vault, kept so a Keychain lookup's answer is applied to the
     /// latest version of it rather than to the one the lookup started from.
     wallet: Option<Arc<Wallet>>,
@@ -174,6 +177,7 @@ impl Default for LocalSigningState {
             vault_keys: Vec::new(),
             keychain_keys_recorded: false,
             show_key_details: false,
+            show_full_pairing_code: false,
             wallet: None,
             keychain_lookup_started: None,
             vault_key_fingerprints: Vec::new(),
@@ -246,6 +250,7 @@ impl LocalSigningState {
         self.pairing_run.cancel();
         self.pairing_run = Default::default();
         self.pairing_id = self.pairing_id.wrapping_add(1);
+        self.show_full_pairing_code = false;
         self.pairing_id
     }
 
@@ -796,7 +801,7 @@ impl LocalSigningState {
         // and spawn the dial loop anyway — stranding them with
         // no way to complete pairing. A typed error keeps the
         // Try-Again path available instead.
-        let qr = match crate::phone_signer::pairing::encode_offer(&offer)
+        let qr = match waiting_qr_payload(&offer)
             .ok()
             .and_then(|s| qr_code::Data::new(&s).ok())
         {
@@ -946,6 +951,10 @@ impl State for LocalSigningState {
                         Task::none()
                     }
                 }
+            }
+            LocalSigningMessage::ToggleFullPairingCode => {
+                self.show_full_pairing_code = !self.show_full_pairing_code;
+                Task::none()
             }
             LocalSigningMessage::ToggleKeyDetails => {
                 self.show_key_details = !self.show_key_details;
@@ -2833,5 +2842,94 @@ mod tests {
         );
         assert!(matches!(state.flow, PairingFlow::Idle));
         assert_eq!(state.wallet_fingerprint, Some(wallet_b.id_fingerprint()));
+    }
+}
+
+/// The text the waiting screen's QR encodes. The screen shows this computer's
+/// pairing code with the QR, so the QR says so (`pc`): the phone then knows
+/// there is a code to compare. Kept as one function so a test can hold the
+/// screen and its QR to the same encoder.
+fn waiting_qr_payload(offer: &PairingOffer) -> Result<String, String> {
+    crate::phone_signer::pairing::encode_offer_with_pairing_code(offer)
+}
+
+/// Mobile V3 Phase 1, Desktop PR T1: the waiting screen's QR payload and its
+/// "show full pairing code" switch. Kept apart from the pairing tests above,
+/// which are unchanged.
+#[cfg(test)]
+mod pairing_code_state_tests {
+    use super::*;
+    use crate::app::view;
+    use crate::phone_signer::pairing::{pairing_code, PAIRING_CODE_FORMAT, PAIRING_CODE_KEY};
+    use base64::Engine as _;
+
+    /// The waiting screen always shows the code for a well-formed offer, so
+    /// its QR must always announce it. Going back to the unmarked encoder
+    /// here would leave a code on screen that the phone is never told about.
+    #[test]
+    fn the_waiting_screens_qr_announces_the_code_it_shows() {
+        let fx: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../phone_signer/fixtures/pairing_code_v1.json"
+        ))
+        .unwrap();
+        let offer: PairingOffer = serde_json::from_value(fx["offer"]["fields"].clone()).unwrap();
+        let payload = waiting_qr_payload(&offer).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&payload)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json[PAIRING_CODE_KEY], PAIRING_CODE_FORMAT);
+        // The QR carries the fingerprint the screen formats.
+        assert_eq!(json["certFp"], offer.cert_fp.as_str());
+        assert_eq!(
+            pairing_code(json["certFp"].as_str().unwrap())
+                .unwrap()
+                .short,
+            fx["desktop"]["pairing_code"].as_str().unwrap()
+        );
+        qr_code::Data::new(&payload).expect("renders as a QR");
+
+        // No well-formed fingerprint: no QR at all, so no screen without one.
+        let mut bad = offer;
+        bad.cert_fp = String::new();
+        assert!(waiting_qr_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn the_switch_message_shows_and_hides_the_full_code() {
+        let mut state = LocalSigningState::default();
+        // Its own empty data directory, as the neighbouring tests use.
+        let dir = std::env::temp_dir().join(format!("coincube-pair-code-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache {
+            datadir_path: crate::dir::CoincubeDirectory::new(dir.clone()),
+            ..Cache::default()
+        };
+        let toggle = |state: &mut LocalSigningState| {
+            drop(state.update(
+                None,
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::ToggleFullPairingCode),
+                )),
+            ));
+        };
+        toggle(&mut state);
+        assert!(state.show_full_pairing_code);
+        toggle(&mut state);
+        assert!(!state.show_full_pairing_code);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_full_code_is_hidden_until_asked_for_and_again_for_each_pairing_run() {
+        let mut state = LocalSigningState::default();
+        assert!(!state.show_full_pairing_code);
+        state.show_full_pairing_code = true;
+        // Starting or cancelling a pairing begins a new run.
+        state.start_pairing_run();
+        assert!(!state.show_full_pairing_code);
     }
 }
