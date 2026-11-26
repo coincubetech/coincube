@@ -1632,6 +1632,7 @@ mod tests {
                     connect: "Signed in",
                     wallets: "Vault",
                     passkey: false,
+                    mark: None,
                 },
             );
             assert!(art(&svg, PANEL_ART_PX).is_some());
@@ -1660,6 +1661,7 @@ mod tests {
             connect: "Signed out",
             wallets: "Spark",
             passkey: false,
+            mark: None,
         };
         let cubes = |pose: Pose| {
             vec![
@@ -1756,6 +1758,7 @@ mod tests {
             [StageCube {
                 pose: Pose::DETAILS,
                 ghost_details: Some(GhostText {
+                    mark: None,
                     name: "Old laptop",
                     backup: "No Recovery Kit in Connect",
                     restorable: false,

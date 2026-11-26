@@ -354,6 +354,18 @@ pub struct RemoteCube {
     /// Whether Connect reports a Vault on this Cube; `None` when no device
     /// has reported it, or the API predates the field.
     pub has_vault: Option<bool>,
+    /// The Cube's ring-mark variation as Connect keeps it; 0 when the API
+    /// predates the field. Drawn in the muted colour inside the dashed
+    /// treatment, since the Cube lives on another computer.
+    pub mark_variation: u32,
+}
+
+impl RemoteCube {
+    /// The seed this Cube's ring mark is drawn from: its UUID and the
+    /// variation Connect keeps. `None` when the UUID is malformed.
+    pub fn mark_seed(&self) -> Option<String> {
+        coincube_ui::component::ring_mark::seed(&self.uuid, self.mark_variation)
+    }
 }
 
 /// Whether the motion preference saved under `root`, against the system's,
@@ -1817,7 +1829,8 @@ impl Home {
                 request_id,
                 result,
                 connect_off,
-            } => self.apply_remote_cubes(request_id, result, connect_off),
+                marks,
+            } => self.apply_remote_cubes(request_id, result, connect_off, marks),
             Message::CubeRemoteUpdated {
                 cube_id,
                 network,
@@ -8602,6 +8615,9 @@ pub enum Message {
         /// UUIDs of every listed Cube (local ones included) with Connect
         /// features off. Applied only with an `Ok` result.
         connect_off: Vec<String>,
+        /// Every listed Cube's ring-mark variation, local ones included.
+        /// Applied only with an `Ok` result.
+        marks: remote_catalog::MarkVariations,
     },
     /// Another network's Cubes, read without touching its directory.
     NetworkCatalogLoaded {
@@ -8965,7 +8981,10 @@ impl DeleteRemoteCubeModal {
         let header = Row::new()
             .spacing(16)
             .align_y(Alignment::Center)
-            .push(launcher_presenter::ghost_avatar(44.0))
+            .push(launcher_presenter::ghost_avatar(
+                self.cube.mark_seed().as_deref(),
+                44.0,
+            ))
             .push(
                 Column::new()
                     .spacing(6)
@@ -10981,6 +11000,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn phone_cube_step_counts_and_shows_other_networks() {
         let remote = |id: u64, name: &str, chain: ChainId| RemoteCube {
+            mark_variation: 0,
             id,
             uuid: format!("uuid-{id}"),
             name: name.to_string(),
@@ -11490,6 +11510,7 @@ mod tests {
 
     fn remote_cube(uuid: &str, name: &str, network: Network) -> RemoteCube {
         RemoteCube {
+            mark_variation: 0,
             id: 42,
             uuid: uuid.to_string(),
             name: name.to_string(),
@@ -11920,6 +11941,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: current,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote_cube("remote-a", "Remote A", Network::Bitcoin)]),
         });
 
@@ -11946,6 +11968,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: current,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote_cube("remote-a", "Remote A", Network::Bitcoin)]),
         });
 
@@ -12203,6 +12226,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: current,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote.clone()]),
         });
         assert_eq!(home.remote_cubes.len(), 1);
@@ -12210,6 +12234,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: current,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Err("offline".to_string()),
         });
         assert_eq!(home.remote_cubes.len(), 1);
@@ -12247,6 +12272,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: newer,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote_cube("newer", "Newer", Network::Bitcoin)]),
         });
         assert_eq!(home.remote_cubes.len(), 1);
@@ -12256,6 +12282,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: older,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![
                 remote_cube("stale-a", "Stale A", Network::Bitcoin),
                 remote_cube("stale-b", "Stale B", Network::Bitcoin),
@@ -12311,6 +12338,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: inflight,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![
                 remote_cube("remote-a", "Remote A", Network::Bitcoin),
                 remote_cube("remote-b", "Remote B", Network::Bitcoin),
@@ -12330,6 +12358,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: refreshed,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote_cube("remote-b", "Remote B", Network::Bitcoin)]),
         });
         assert_eq!(
@@ -12364,6 +12393,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: inflight,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(vec![remote_cube(
                 "prior-account",
                 "Prior Account Cube",
@@ -12413,6 +12443,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: inflight,
             connect_off: vec!["cube-2".to_string()],
+            marks: Default::default(),
             result: Ok(Vec::new()),
         });
         assert!(
@@ -12424,6 +12455,7 @@ mod tests {
         let _ = home.update(Message::RemoteCubesLoaded {
             request_id: refreshed,
             connect_off: Vec::new(),
+            marks: Default::default(),
             result: Ok(Vec::new()),
         });
         assert!(home.connect_off_cubes.is_empty());
@@ -12952,6 +12984,8 @@ mod tests {
             pending_invites: Vec::new(),
             vault: None,
             connect_features_disabled: false,
+            mark_variation: None,
+            mark_version: None,
         }
     }
 

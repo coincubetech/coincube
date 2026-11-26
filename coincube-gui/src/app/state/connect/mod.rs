@@ -413,15 +413,6 @@ impl State for ConnectPanel {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> coincube_ui::widget::Element<'a, view::Message> {
-        // Get the active avatar image handle for the sidebar
-        let avatar_handle = self.cube.avatar_data.as_ref().and_then(|d| {
-            let url = d.active_avatar_url.as_deref().unwrap_or("");
-            d.variants
-                .iter()
-                .find(|v| url.ends_with(&v.id.to_string()))
-                .and_then(|v| self.cube.avatar_image_cache.get(&v.id))
-                .map(|(_, handle)| handle)
-        });
         let ln_addr = self
             .cube
             .lightning_address
@@ -433,7 +424,6 @@ impl State for ConnectPanel {
             cache,
             view::connect::connect_panel(self),
             &cache.cube_name,
-            avatar_handle,
             ln_addr,
         )
     }

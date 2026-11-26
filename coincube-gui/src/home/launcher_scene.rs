@@ -67,6 +67,8 @@ pub(super) struct FaceText<'a> {
     pub connect: &'a str,
     pub wallets: &'a str,
     pub passkey: bool,
+    /// The seed of the Cube's ring mark, drawn beside the name.
+    pub mark: Option<&'a str>,
 }
 
 /// Persisted facts drawn on a resting Cube. Nothing here needs an unlock.
@@ -1153,6 +1155,8 @@ pub(super) struct GhostText<'a> {
     pub name: &'a str,
     pub backup: &'a str,
     pub restorable: bool,
+    /// The seed of the Cube's ring mark, drawn muted in the dashed ring.
+    pub mark: Option<&'a str>,
 }
 
 /// The ghost's details face (G-Ghost-Details `.fc`) as it turns into place,
@@ -1170,13 +1174,13 @@ pub(super) fn ghost_details_svg(network: ChainId, light: bool, text: GhostText<'
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\" color=\"{ink}\">"
     );
     let name: String = text.name.chars().take(26).collect();
-    // `.av`: a 32px dashed ring holding the cloud.
+    // `.av`: a 32px dashed ring holding the Cube's ring mark, muted.
     let _ = write!(
         svg,
-        "<circle cx=\"44\" cy=\"44\" r=\"15.5\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"3 2\"/><text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
+        "<circle cx=\"44\" cy=\"44\" r=\"15.5\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"3 2\"/>{}<text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
+        mark_fragment(text.mark, light, true, 44.0, 44.0, 24.0),
         xml_text(&name)
     );
-    icon(&mut svg, CLOUD, 36.0, 36.0, 16.0, muted);
     let _ = write!(
         svg,
         "<g opacity=\".6\">{}</g><text x=\"52\" y=\"83\" font-size=\"14\" fill=\"{ink}\">{}</text><path d=\"M28 108.5H392\" stroke=\"{line}\"/>",
@@ -1222,6 +1226,40 @@ fn append_ghost_primary_action(
     );
 }
 
+/// A Cube's ring mark as an SVG group, `size` px square centred on
+/// (`cx`, `cy`), in the theme's ink and accent, or all muted for a Cube on
+/// another computer. The same drawing as the live widget
+/// ([`coincube_ui::component::ring_mark`]).
+fn mark_fragment(
+    seed: Option<&str>,
+    light: bool,
+    muted: bool,
+    cx: f32,
+    cy: f32,
+    size: f32,
+) -> String {
+    use coincube_ui::component::ring_mark;
+    use coincube_ui::theme::palette::ShellPalette;
+    let shell = if light {
+        ShellPalette::light()
+    } else {
+        ShellPalette::dark()
+    };
+    let (ink, accent) = if muted {
+        (shell.muted, shell.muted)
+    } else {
+        (shell.ink, shell.accent)
+    };
+    let mark = seed.map(ring_mark::RingMark::from_seed);
+    format!(
+        "<g transform=\"translate({:.2} {:.2}) scale({:.4})\">{}</g>",
+        cx - size / 2.0,
+        cy - size / 2.0,
+        size / 64.0,
+        ring_mark::svg_body(mark.as_ref(), ink, accent)
+    )
+}
+
 /// `CLOUD` from P-Launcher: the ghost's avatar.
 pub(super) const CLOUD: &str =
     "M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z";
@@ -1237,20 +1275,13 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
     let mut svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\" color=\"{ink}\">"
     );
-    let initial: String = text
-        .name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_else(|| "?".into());
     let name: String = text.name.chars().take(26).collect();
-    let panel = if light { "#ffffff" } else { "#202020" };
     let accent = if light { "#a14d00" } else { "#f3821d" };
-    // `.pn`: a 32px avatar, 10px gap, the name at 20px semibold.
+    // `.pn`: the Cube's 32px ring mark, 10px gap, the name at 20px semibold.
     let _ = write!(
         svg,
-        "<circle cx=\"44\" cy=\"44\" r=\"16\" fill=\"{panel}\"/><text x=\"44\" y=\"49\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\" fill=\"{ink}\">{}</text><text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
-        xml_text(&initial),
+        "{}<text x=\"70\" y=\"51\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">{}</text>",
+        mark_fragment(text.mark, light, false, 44.0, 44.0, 32.0),
         xml_text(&name)
     );
     // `.pnet`: the 18px coin and the network's full name, 8px below.
@@ -1459,6 +1490,71 @@ mod tests {
         assert!(c[0].1 >= 0.0 && c[3].1 <= 600.0);
     }
 
+    /// The details faces draw the Cube's ring mark beside its name, never an
+    /// initial: in ink and accent for a local Cube, all muted in the dashed
+    /// ring for a Cube on another computer, and the dot alone without a seed.
+    #[test]
+    fn details_faces_draw_the_ring_mark_not_an_initial() {
+        use coincube_ui::component::ring_mark;
+        let seed = "9fb93534-081c-4253-b1e2-73a87984a8ab";
+        let outer = ring_mark::RingMark::from_seed(seed).arcs[0].svg_path();
+        let face = |mark, light| {
+            details_svg(
+                ChainId::Bitcoin,
+                light,
+                FaceText {
+                    name: "Savings",
+                    lock: "Locked",
+                    backup: "Confirmed",
+                    connect: "None",
+                    wallets: "Spark",
+                    passkey: false,
+                    mark,
+                },
+            )
+        };
+        for light in [false, true] {
+            let svg = face(Some(seed), light);
+            assert!(svg.contains(&outer), "the mark's outer arc is drawn");
+            assert!(svg.contains("stroke=\"#f3821d\""), "one arc is the accent");
+            assert!(
+                !svg.contains("<text x=\"44\" y=\"49\"") && !svg.contains("r=\"16\""),
+                "no initial in a circle"
+            );
+            assert!(
+                svg.contains("translate(28.00 28.00) scale(0.5000)"),
+                "32px at (44, 44)"
+            );
+            let dot = face(None, light);
+            assert!(!dot.contains(&outer) && dot.contains("r=\"2.6\""));
+        }
+        let ghost = ghost_details_svg(
+            ChainId::Bitcoin,
+            false,
+            GhostText {
+                name: "Savings",
+                backup: "Recovery Kit in Connect",
+                restorable: true,
+                mark: Some(seed),
+            },
+        );
+        assert!(
+            ghost.contains("stroke-dasharray=\"3 2\""),
+            "the dashed ring stays"
+        );
+        assert!(ghost.contains(&outer), "the mark sits in it");
+        assert!(
+            !ghost.contains(CLOUD),
+            "the cloud is gone from the details face"
+        );
+        let ghost_mark =
+            &ghost[ghost.find(&outer).unwrap() - 80..ghost.find(&outer).unwrap() + 200];
+        assert!(
+            !ghost_mark.contains("#f3821d"),
+            "a ghost's mark is all muted"
+        );
+    }
+
     #[test]
     fn face_art_escapes_names_and_follows_persisted_marks() {
         let marks = CubeMarks {
@@ -1539,6 +1635,7 @@ mod tests {
                 connect: "Signed in",
                 wallets: "Vault",
                 passkey: false,
+                mark: None,
             },
         );
         assert!(details.contains("Alice &amp; &lt;Bob&gt;"));
@@ -1658,6 +1755,7 @@ mod tests {
                 ChainId::Bitcoin,
                 false,
                 GhostText {
+                    mark: None,
                     name: "Old <laptop>",
                     backup: "No Recovery Kit in Connect",
                     restorable,

@@ -131,7 +131,7 @@ fn home(light: bool) -> Home {
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            CubeSettings::new_with_raw_id(format!("cube-{i}"), (*name).into(), ChainId::Bitcoin)
+            CubeSettings::new_with_raw_id(fixture_id(i), (*name).into(), ChainId::Bitcoin)
         })
         .collect();
     cubes[0].set_vault(crate::app::settings::VaultIdentity {
@@ -166,10 +166,18 @@ fn capture_appearance(light: bool) -> (&'static str, theme::Theme) {
     }
 }
 
+/// A UUID-shaped id per fixture Cube, so each draws its own ring mark.
+fn fixture_id(i: usize) -> String {
+    format!(
+        "9fb93534-081c-4253-b1e2-{:012x}",
+        0x73a8_7984_a8ab_usize + i
+    )
+}
+
 fn key(i: usize) -> CubeCatalogKey {
     CubeCatalogKey {
         chain: ChainId::Bitcoin,
-        cube_id: format!("cube-{i}"),
+        cube_id: fixture_id(i),
     }
 }
 
@@ -191,7 +199,7 @@ fn launcher_capture_sizes() {
         if let State::Cubes { cubes, .. } = &mut home.state {
             for i in cubes.len()..12 {
                 cubes.push(CubeSettings::new_with_raw_id(
-                    format!("cube-{i}"),
+                    fixture_id(i),
                     format!("Cube {}", i + 1),
                     ChainId::Bitcoin,
                 ));
@@ -240,6 +248,7 @@ fn launcher_capture_sizes() {
 
 fn ghost(uuid: &str, name: &str, kit: bool) -> super::RemoteCube {
     super::RemoteCube {
+        mark_variation: 0,
         id: 9,
         uuid: uuid.into(),
         name: name.into(),
@@ -277,8 +286,8 @@ fn launcher_capture_ghosts() {
             cubes.truncate(2);
         }
         home.remote_cubes = vec![
-            ghost("ghost-kit", "Passkey", true),
-            ghost("ghost-nokit", "Old laptop", false),
+            ghost("3994693e-a3ae-4e68-9323-451b4a95902a", "Passkey", true),
+            ghost("1aa615a9-4b6a-4551-a061-ae14a1dbf721", "Old laptop", false),
         ];
         let mut shot = |home: &Home, name: &str| {
             save(
@@ -293,12 +302,15 @@ fn launcher_capture_ghosts() {
         home.catalog.key.mode = super::launcher_catalog::KeyMode::Pinned;
         shot(&home, "1-key");
         home.catalog.key.mode = super::launcher_catalog::KeyMode::Closed;
-        for uuid in ["ghost-kit", "ghost-nokit"] {
+        for (uuid, name) in [
+            ("3994693e-a3ae-4e68-9323-451b4a95902a", "ghost-kit"),
+            ("1aa615a9-4b6a-4551-a061-ae14a1dbf721", "ghost-nokit"),
+        ] {
             home.catalog.selected = Some(CubeCatalogKey {
                 chain: ChainId::Bitcoin,
                 cube_id: uuid.into(),
             });
-            shot(&home, &format!("2-face-{uuid}"));
+            shot(&home, &format!("2-face-{name}"));
         }
         home.catalog.selected = None;
         home.state = State::NoCube { create_cube: false };

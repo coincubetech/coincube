@@ -122,6 +122,10 @@ pub enum Message {
     /// Stable Balance record (`CubeResponse::spark_stable_balance`). `None`
     /// when no desktop has recorded one (or the API predates the field).
     SparkStableBalanceFromConnect(Option<bool>),
+    /// The Cube's Connect registration answered with its ring-mark variation
+    /// (`CubeResponse::mark_variation`). `None` from an API that predates
+    /// the field, which leaves the local number alone.
+    CubeMarkFromConnect(Option<u32>),
     Fiat(FiatMessage),
     UpdatePanelCache(/* is current panel */ bool),
     View(view::Message),

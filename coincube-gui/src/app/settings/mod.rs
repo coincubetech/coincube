@@ -501,6 +501,30 @@ pub async fn mark_cube_synced(
     .await
 }
 
+/// Record a Cube's ring-mark variation in its network's settings file.
+/// Adopting the server's number (`CubeSettings::mark_variation`) and a
+/// never-registered Cube's own Regenerate both write through here. A Cube
+/// no longer in the file is left alone; the rest of the file is unchanged.
+pub async fn set_cube_mark_variation(
+    network_dir: &NetworkDirectory,
+    cube_id: &str,
+    variation: u32,
+) -> Result<(), SettingsError> {
+    update_settings_file(network_dir, |settings| {
+        Some(with_cube_mark_variation(settings, cube_id, variation))
+    })
+    .await
+}
+
+/// [`set_cube_mark_variation`]'s update, as a total function so a missed
+/// lookup can never turn into the `None` that deletes the file.
+fn with_cube_mark_variation(mut settings: Settings, cube_id: &str, variation: u32) -> Settings {
+    if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+        cube.mark_variation = variation;
+    }
+    settings
+}
+
 /// Backfill helper for Cubes created before
 /// [`CubeSettings::master_signer_fingerprint`] was tracked: walks
 /// `<datadir>/<network>/mnemonics/` for master-seed files
@@ -702,6 +726,10 @@ pub enum CubeConnectState {
     BackedUp,
 }
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Cubes represent user accounts that can contain multiple features (Vault, Liquid wallet, etc.)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CubeSettings {
@@ -728,6 +756,18 @@ pub struct CubeSettings {
     /// load unchanged, and an unset name writes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spark_alias: Option<String>,
+    /// Which variation of the Cube's ring mark is drawn
+    /// (`SPEC-cube-ring-mark-v1`): 0 for a Cube never regenerated. The mark
+    /// is drawn from [`Self::id`] and this number alone, so it works before
+    /// unlock, offline and signed out.
+    ///
+    /// Once the Cube is registered with Connect, the server's number is the
+    /// record: every Cube response that carries a different one overwrites
+    /// this copy. A never-registered Cube keeps its own number here and
+    /// sends it at its first registration. Files written before the field
+    /// existed load as 0, and 0 writes nothing, so they round-trip unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mark_variation: u32,
     /// The chain this Cube lives on — its *identity*, which decides the
     /// directory it is stored under, the Connect network string, the node
     /// and provider it may talk to, and whether this build can run it at all
@@ -1078,6 +1118,7 @@ impl CubeSettings {
             id,
             name,
             spark_alias: None,
+            mark_variation: 0,
             network: network.into(),
             created_at: chrono::Utc::now().timestamp(),
             vault_wallet_id: None,
@@ -1122,6 +1163,13 @@ impl CubeSettings {
 
     pub fn new<C: Into<ChainId>>(name: String, network: C) -> Self {
         Self::new_with_id(uuid::Uuid::new_v4(), name, network)
+    }
+
+    /// The seed this Cube's ring mark is drawn from: its id and
+    /// [`Self::mark_variation`]. `None` when the id is not a UUID, which
+    /// draws the mark's centre dot alone.
+    pub fn mark_seed(&self) -> Option<String> {
+        coincube_ui::component::ring_mark::seed(&self.id, self.mark_variation)
     }
 
     pub fn with_vault(mut self, vault: VaultIdentity) -> Self {
@@ -5647,6 +5695,83 @@ mod test {
             serde_json::from_str(&json).expect("CubeSettings must deserialize");
         assert_eq!(restored.spark_alias.as_deref(), Some("Daily spending"));
         assert_eq!(restored.name, "Family", "the Cube name is a separate value");
+    }
+
+    /// A `settings.json` written before the ring mark loads as variation 0
+    /// and is written back byte for byte; a regenerated Cube keeps its
+    /// number through the same pretty JSON the file is written with.
+    #[test]
+    fn mark_variation_is_optional_and_round_trips() {
+        use super::{CubeSettings, Settings};
+
+        // A minimal Cube as older builds wrote it, without the field.
+        let minimal = r#"{
+            "id": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+            "name": "Savings",
+            "network": "bitcoin",
+            "created_at": 0
+        }"#;
+        let cube: CubeSettings =
+            serde_json::from_str(minimal).expect("pre-field settings must still deserialize");
+        // The whole file as this writer lays it out; with variation 0 it is
+        // what a pre-field build wrote, with no `mark_variation` key.
+        let old = serde_json::to_vec_pretty(&Settings {
+            cubes: vec![cube],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&old).contains("mark_variation"));
+        let settings: Settings =
+            serde_json::from_slice(&old).expect("pre-field settings must still deserialize");
+        assert_eq!(settings.cubes[0].mark_variation, 0);
+        assert_eq!(
+            settings.cubes[0].mark_seed().as_deref(),
+            Some("9fb93534-081c-4253-b1e2-73a87984a8ab")
+        );
+        let written = serde_json::to_vec_pretty(&settings).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&written).contains("mark_variation"),
+            "variation 0 writes nothing"
+        );
+        assert_eq!(written, old, "an old file is written back byte for byte");
+        let rewritten =
+            serde_json::to_vec_pretty(&serde_json::from_slice::<Settings>(&written).unwrap())
+                .unwrap();
+        assert_eq!(rewritten, written, "and stays byte-for-byte stable");
+
+        let mut cube: CubeSettings = settings.cubes[0].clone();
+        cube.mark_variation = 3;
+        let json = serde_json::to_string(&cube).unwrap();
+        assert!(json.contains(r#""mark_variation":3"#));
+        let restored: CubeSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.mark_variation, 3);
+        assert_eq!(
+            restored.mark_seed().as_deref(),
+            Some("9fb93534-081c-4253-b1e2-73a87984a8ab:3")
+        );
+    }
+
+    /// The settings update behind Regenerate and adoption touches only the
+    /// named Cube, and a Cube missing from the file leaves the file as it was
+    /// rather than deleting it.
+    #[test]
+    fn setting_a_mark_variation_touches_only_that_cube() {
+        use super::{with_cube_mark_variation, CubeSettings, Settings};
+        use crate::chain::ChainId;
+
+        let settings = Settings {
+            cubes: vec![
+                CubeSettings::new_with_raw_id("a".into(), "A".into(), ChainId::Bitcoin),
+                CubeSettings::new_with_raw_id("b".into(), "B".into(), ChainId::Bitcoin),
+            ],
+            ..Default::default()
+        };
+        let updated = with_cube_mark_variation(settings.clone(), "b", 7);
+        assert_eq!(updated.cubes[0].mark_variation, 0);
+        assert_eq!(updated.cubes[1].mark_variation, 7);
+        let missing = with_cube_mark_variation(settings, "gone", 7);
+        assert_eq!(missing.cubes.len(), 2);
+        assert!(missing.cubes.iter().all(|cube| cube.mark_variation == 0));
     }
 
     fn split_from_record(byte: u8) -> super::SplitFromRecord {

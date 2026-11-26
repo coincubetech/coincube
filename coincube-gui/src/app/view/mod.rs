@@ -130,7 +130,6 @@ pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
         cache,
         content,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
 }
@@ -149,7 +148,6 @@ pub fn dashboard_headed<'a, T: Into<Element<'a, Message>>>(
         Some(head),
         content,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
         PageWidth::Reading,
     )
@@ -270,7 +268,6 @@ pub fn dashboard_activity<'a, T: Into<Element<'a, Message>>>(
         cache,
         content_column,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
 }
@@ -290,7 +287,6 @@ pub fn dashboard_payment<'a, T: Into<Element<'a, Message>>>(
         head,
         content,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
         PageWidth::Reading,
     )
@@ -325,7 +321,6 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     cache: &'a Cache,
     content: T,
     cube_name: &'a str,
-    avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
     dashboard_with_info_layout(
@@ -334,7 +329,6 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         None,
         content,
         cube_name,
-        avatar_handle,
         lightning_address,
         PageWidth::Reading,
     )
@@ -374,7 +368,6 @@ pub fn replacement_page<'a, T: Into<Element<'a, Message>>>(
         false,
         content,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
         PageWidth::Reading,
     )
@@ -390,7 +383,6 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     head: Option<PageHead<'a, Message>>,
     content: T,
     cube_name: &'a str,
-    avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
@@ -401,7 +393,6 @@ fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
         true,
         content,
         cube_name,
-        avatar_handle,
         lightning_address,
         width,
     )
@@ -417,7 +408,6 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
     route_chrome: bool,
     content: T,
     cube_name: &'a str,
-    avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
@@ -456,14 +446,7 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
         .width(Length::Fill)
         .into();
 
-    dashboard_shell_with_info(
-        menu,
-        cache,
-        content_column,
-        cube_name,
-        avatar_handle,
-        lightning_address,
-    )
+    dashboard_shell_with_info(menu, cache, content_column, cube_name, lightning_address)
 }
 
 /// Iced invokes responsive builders during layout, after the root view has
@@ -552,7 +535,6 @@ pub fn dashboard_with_detail<'a>(
         cache,
         content_column,
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
 }
@@ -574,7 +556,6 @@ pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
         cache,
         body.into(),
         &cache.cube_name,
-        cache.avatar_handle.as_ref(),
         cache.lightning_address.as_deref(),
     )
 }
@@ -584,7 +565,6 @@ fn dashboard_shell_with_info<'a>(
     cache: &'a Cache,
     content_column: Element<'a, Message>,
     cube_name: &'a str,
-    avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
     // Passkey Cubes used to be exempt from this banner, because there was no
@@ -595,7 +575,6 @@ fn dashboard_shell_with_info<'a>(
     let nav_ctx = nav::NavContext {
         cube_name,
         lightning_address,
-        avatar: avatar_handle,
         ..nav::NavContext::from_cache(cache)
     };
 

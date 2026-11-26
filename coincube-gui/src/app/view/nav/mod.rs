@@ -18,18 +18,7 @@ pub mod vault;
 pub use items::SubItem;
 
 use crate::app::{menu::Menu, view::Message};
-use coincube_ui::{
-    color,
-    component::text,
-    icon::cube_icon,
-    image::{tenshu_wordmark, theme_toggle_button},
-    theme,
-    widget::{Button, Column, ColumnExt, Element, Row},
-};
-use iced::{
-    widget::{column, container, row, scrollable, text::Wrapping},
-    Alignment, Length,
-};
+use coincube_ui::widget::Element;
 
 /// Width of the primary + secondary rails. The tertiary rail is an
 /// overlay on the content area, so the sidebar column itself is always
@@ -40,8 +29,6 @@ pub const SIDEBAR_BASE_WIDTH: f32 = primary::RAIL_WIDTH + secondary::RAIL_WIDTH;
 /// Height of the logo header band that caps both rails. Tall enough for the
 /// stacked Tenshu lockup (mark ~2× the label + the "Tenshu" label).
 const WORDMARK_BAND_HEIGHT: f32 = 60.0;
-/// Label font size for the Tenshu lockup in the compact two-rail header.
-const WORDMARK_SIZE: f32 = 14.0;
 /// Fixed height for the identity block (avatar + cube name + LN
 /// address). Fixed so the tertiary overlay's top offset is deterministic.
 const IDENTITY_BLOCK_HEIGHT: f32 = 130.0;
@@ -51,165 +38,11 @@ const IDENTITY_BLOCK_HEIGHT: f32 = 130.0;
 /// to position itself so its items align horizontally with the rails.
 pub const TERTIARY_TOP_OFFSET: f32 = WORDMARK_BAND_HEIGHT + IDENTITY_BLOCK_HEIGHT;
 
-/// Composed sidebar: wordmark · identity block · two rails · theme toggle.
-///
-/// Layout (top to bottom):
-/// ```text
-/// [ Tenshu logo (mark + label)    ]  full 144px
-/// [ avatar + cube name + LN addr  ]  full 144px — pushes both rails down
-/// [ primary (72px) | secondary (72px) ]  fills the remaining height
-/// [ dark/light toggle             ]  full 144px
-/// ```
-///
-/// The two rails sit inside a single scrollable that takes all the height
-/// left between the identity block and the toggle. When the rails are
-/// taller than that (short windows, many submenu items) they scroll
-/// together rather than pushing the toggle off-screen or being clipped.
-/// The rails themselves are content-sized and unstyled; the surrounding
-/// container paints the shared `sidebar_primary` background so it covers
-/// the whole band even when the rails are shorter than the viewport.
-pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
-    // Base sidebar is always 144px wide (primary + secondary rails only).
-    // The tertiary rail lives as an overlay on the content area — see
-    // [`tertiary_rail`] and `dashboard_with_info` — so content never
-    // shifts horizontally when the tertiary rail slides out.
-    let rails_row: Row<Message> = row![primary::rail(menu, ctx), secondary::rail(menu, ctx)]
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH));
-    let rails = container(
-        scrollable(rails_row)
-            .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-            .height(Length::Fill),
-    )
-    .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-    .height(Length::Fill)
-    .style(theme::container::sidebar_primary);
-
-    let wordmark = container(tenshu_wordmark(WORDMARK_SIZE))
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .height(Length::Fixed(WORDMARK_BAND_HEIGHT))
-        .center_x(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .center_y(Length::Fixed(WORDMARK_BAND_HEIGHT))
-        .style(theme::container::sidebar_primary);
-
-    let identity = identity_block(ctx);
-    let toggle = theme_toggle_row(ctx);
-
-    let col: Column<Message> = column![wordmark, identity, rails, toggle]
-        .push_maybe(
-            ctx.connect_authenticated
-                .then(|| coincube_ui::component::session_status::indicator(false)),
-        )
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .height(Length::Fill)
-        .align_x(Alignment::Start);
-    container(col)
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .height(Length::Fill)
-        .style(theme::container::sidebar_primary)
-        .into()
-}
-
 /// Tertiary rail for the current route, to be overlaid on the left
 /// edge of the content area by `dashboard_with_info`. Returns `None`
 /// when the active route has no third level.
 pub fn tertiary_rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Option<Element<'a, Message>> {
     tertiary::rail(menu, ctx)
-}
-
-/// Full-width identity header — avatar + cube name + optional Lightning
-/// Address. Rendered above both rails so the top of each rail is pushed
-/// down equally (the first secondary-rail item lines up with the `Home`
-/// / `Cube` item on the primary rail).
-fn identity_block<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
-    const AVATAR_SIZE: f32 = 56.0;
-
-    let avatar: Element<'a, Message> = if let Some(handle) = ctx.avatar {
-        iced::widget::image(handle.clone())
-            .width(Length::Fixed(AVATAR_SIZE))
-            .height(Length::Fixed(AVATAR_SIZE))
-            .into()
-    } else {
-        container(cube_icon().size(28).color(color::GREY_3))
-            .width(Length::Fixed(AVATAR_SIZE))
-            .height(Length::Fixed(AVATAR_SIZE))
-            .center_x(Length::Fixed(AVATAR_SIZE))
-            .center_y(Length::Fixed(AVATAR_SIZE))
-            .style(
-                |t: &coincube_ui::theme::Theme| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                    border: iced::Border {
-                        radius: (AVATAR_SIZE / 2.0).into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            )
-            .into()
-    };
-
-    // The avatar is managed on Cube → Settings → Avatar, so clicking it
-    // jumps straight there (rather than Cube → Overview, where there's
-    // nothing to do with it).
-    let avatar_button: Element<'a, Message> = Button::new(avatar)
-        .style(theme::button::transparent)
-        .on_press(Message::Menu(Menu::Cube(
-            crate::app::menu::CubeSubMenu::Settings(crate::app::menu::CubeSettingsOption::Avatar),
-        )))
-        .into();
-
-    let mut col: Column<Message> = Column::new()
-        .padding([12, 8])
-        .spacing(4)
-        .align_x(Alignment::Center)
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .push(avatar_button);
-
-    if !ctx.cube_name.is_empty() {
-        let name = text::p2_bold(ctx.cube_name)
-            .style(theme::text::primary)
-            .align_x(Alignment::Center);
-        col = col.push(name);
-    }
-
-    if let Some(addr) = ctx.lightning_address {
-        let display_addr = if addr.contains('@') {
-            addr.to_string()
-        } else {
-            format!("{}@coincube.io", addr)
-        };
-        let label = text::caption(display_addr.clone())
-            .color(color::GREY_3)
-            .width(Length::Fill)
-            .wrapping(Wrapping::WordOrGlyph);
-        let btn: Button<Message> = Button::new(label)
-            .width(Length::Fill)
-            .style(theme::button::transparent)
-            .on_press(Message::Clipboard(display_addr));
-
-        col = col.push(btn);
-    }
-
-    container(col)
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .height(Length::Fixed(IDENTITY_BLOCK_HEIGHT))
-        .style(theme::container::sidebar_primary)
-        .into()
-}
-
-/// Dark/light toggle anchored at the bottom of the sidebar, spanning
-/// both rails. Mirrors the placement in the pre-refactor sidebar.
-fn theme_toggle_row<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
-    let toggle = theme_toggle_button(ctx.theme_mode, Message::ToggleTheme);
-    container(toggle)
-        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-        .padding(iced::Padding {
-            top: 4.0,
-            right: 8.0,
-            bottom: 16.0,
-            left: 8.0,
-        })
-        .style(theme::container::sidebar_primary)
-        .into()
 }
 
 /// Ambient data both rails need while rendering.
@@ -239,7 +72,10 @@ pub struct NavContext<'a> {
     pub spark_alias: Option<&'a str>,
     pub vault_alias: Option<&'a str>,
     pub lightning_address: Option<&'a str>,
-    pub avatar: Option<&'a iced::widget::image::Handle>,
+    /// The seed the Cube's ring mark is drawn from
+    /// ([`crate::app::settings::CubeSettings::mark_seed`]); `None` draws its
+    /// centre dot alone.
+    pub mark_seed: Option<&'a str>,
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     pub connect_authenticated: bool,
     pub connect_email: Option<&'a str>,
@@ -282,7 +118,8 @@ impl<'a> ConnectChrome<'a> {
 
 impl<'a> NavContext<'a> {
     /// The navigation facts the App cache holds. Identity fields (name,
-    /// Lightning address, avatar) are left empty for the caller to fill.
+    /// Lightning address) are left empty for the caller to fill; the Cube's
+    /// mark seed comes from the cache.
     pub fn from_cache(cache: &'a crate::app::cache::Cache) -> Self {
         NavContext {
             has_vault: cache.has_vault,
@@ -298,7 +135,7 @@ impl<'a> NavContext<'a> {
             spark_alias: cache.wallet_names.spark.as_deref(),
             vault_alias: cache.wallet_names.vault.as_deref(),
             lightning_address: None,
-            avatar: None,
+            mark_seed: cache.cube_mark_seed.as_deref(),
             theme_mode: cache.theme_mode,
             connect_authenticated: cache.sidebar_connect_signed_in,
             connect_email: cache.connect_email.as_deref(),
@@ -321,6 +158,7 @@ impl<'a> NavContext<'a> {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+    use coincube_ui::theme;
     use iced::advanced::{
         layout,
         renderer::Headless,

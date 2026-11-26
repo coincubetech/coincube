@@ -1656,6 +1656,52 @@ pub struct CubeResponse {
     /// Absent on older APIs, which never turned them off.
     #[serde(default)]
     pub connect_features_disabled: bool,
+    /// The Cube's ring-mark variation (`SPEC-cube-ring-mark-v1`), kept by
+    /// the API (CA1) and set only by the owner. `None` from an API that
+    /// predates the field: the app then keeps its local number, which is
+    /// right for every Cube never regenerated. See
+    /// [`crate::app::settings::CubeSettings::mark_variation`].
+    ///
+    /// Read leniently, as COINCUBE Mobile reads it, so one bad field never
+    /// fails the whole Cube: absent or `null` is `None`; a number outside
+    /// 0..=2^31-1, or a value of the wrong type, is `Some(0)`.
+    #[serde(default, deserialize_with = "deserialize_mark_variation")]
+    pub mark_variation: Option<u32>,
+    /// The ring-mark spec version the Cube is drawn with; `None` (absent,
+    /// or anything but a number in 1..=65535) means 1. Every version is
+    /// drawn with version 1, as the spec says an app does for a version it
+    /// does not know.
+    #[serde(default, deserialize_with = "deserialize_mark_version")]
+    pub mark_version: Option<u32>,
+}
+
+/// `markVariation`: see [`CubeResponse::mark_variation`].
+fn deserialize_mark_variation<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .filter(|v| *v <= u64::from(coincube_ui::component::ring_mark::MAX_VARIATION))
+                .map_or(0, |v| v as u32),
+        ),
+    })
+}
+
+/// `markVersion`: see [`CubeResponse::mark_version`].
+fn deserialize_mark_version<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .filter(|v| (1..=65_535).contains(v))
+        .map(|v| v as u32))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4925,6 +4971,43 @@ mod cube_has_vault_tests {
         assert!(!cube("").connect_features_disabled);
         assert!(!cube(r#","connectFeaturesDisabled":false"#).connect_features_disabled);
         assert!(cube(r#","connectFeaturesDisabled":true"#).connect_features_disabled);
+    }
+
+    /// `markVariation` and `markVersion` (API CA1) are optional: an older
+    /// API omits both, which the app reads as "keep the local number".
+    #[test]
+    fn response_mark_fields_are_optional() {
+        let cube = |extra: &str| -> CubeResponse {
+            serde_json::from_str(&format!(
+                r#"{{"id":1,"uuid":"u1","name":"Cube","network":"mainnet","status":"active"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let old = cube("");
+        assert_eq!((old.mark_variation, old.mark_version), (None, None));
+        let new = cube(r#","markVariation":17,"markVersion":1"#);
+        assert_eq!((new.mark_variation, new.mark_version), (Some(17), Some(1)));
+        let null = cube(r#","markVariation":null,"markVersion":null"#);
+        assert_eq!((null.mark_variation, null.mark_version), (None, None));
+        // Read as COINCUBE Mobile reads them: a bad value never fails the
+        // Cube; an out-of-range or mistyped variation is 0, a version
+        // outside 1..=65535 is the default 1.
+        for (extra, variation, version) in [
+            (r#","markVariation":2147483647"#, Some(2_147_483_647), None),
+            (r#","markVariation":2147483648"#, Some(0), None),
+            (r#","markVariation":-1,"markVersion":0"#, Some(0), None),
+            (r#","markVariation":"3","markVersion":"2""#, Some(0), None),
+            (r#","markVariation":1.5,"markVersion":65536"#, Some(0), None),
+            (r#","markVersion":65535"#, None, Some(65_535)),
+        ] {
+            let parsed = cube(extra);
+            assert_eq!(
+                (parsed.mark_variation, parsed.mark_version),
+                (variation, version),
+                "{}",
+                extra
+            );
+        }
     }
 }
 

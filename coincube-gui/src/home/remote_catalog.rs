@@ -1,7 +1,7 @@
 //! Connect's remote-only Cube catalog and its request ownership.
 
 use super::{
-    catalog_display_name, derive_phone_recovery, launcher_catalog, locally_stored_cubes,
+    catalog_display_name, derive_phone_recovery, launcher_catalog, locally_stored_cubes, settings,
     CoincubeError, CubeResponse, GhostImport, Home, Message, RemoteCube, Task,
 };
 
@@ -61,9 +61,27 @@ impl Home {
             async move {
                 let server_cubes = rc_client.list_cubes().await.map_err(|e| e.to_string())?;
 
-                // Collect local cube UUIDs across all networks
+                // Collect local cube UUIDs across all networks, and adopt
+                // the server's ring-mark variation wherever it differs from
+                // the local copy: once Connect has a number it is the record
+                // (`CubeSettings::mark_variation`).
+                let marks = server_mark_variations(&server_cubes);
                 let mut local_uuids = std::collections::HashSet::new();
                 for cube in locally_stored_cubes(&datadir) {
+                    if let Some(&variation) = marks.get(&cube.id) {
+                        if variation != cube.mark_variation {
+                            let nd = datadir.network_directory(cube.network);
+                            if let Err(e) =
+                                settings::set_cube_mark_variation(&nd, &cube.id, variation).await
+                            {
+                                log::warn!(
+                                    "[LAUNCHER] Failed to record Connect's mark for cube {}: {}",
+                                    cube.id,
+                                    e
+                                );
+                            }
+                        }
+                    }
                     local_uuids.insert(cube.id);
                 }
 
@@ -137,22 +155,24 @@ impl Home {
                             phone_full_cube,
                             encryption_pubkey: sc.encryption_pubkey,
                             has_vault: sc.has_vault,
+                            mark_variation: sc.mark_variation.unwrap_or_default(),
                         }
                     }),
                 )
                 .await;
 
-                Ok((remote_only, connect_off))
+                Ok((remote_only, connect_off, marks))
             },
-            move |result: Result<(Vec<RemoteCube>, Vec<String>), String>| {
-                let (result, connect_off) = match result {
-                    Ok((remote_only, connect_off)) => (Ok(remote_only), connect_off),
-                    Err(e) => (Err(e), Vec::new()),
+            move |result: Result<RemoteListing, String>| {
+                let (result, connect_off, marks) = match result {
+                    Ok((remote_only, connect_off, marks)) => (Ok(remote_only), connect_off, marks),
+                    Err(e) => (Err(e), Vec::new(), Default::default()),
                 };
                 Message::RemoteCubesLoaded {
                     request_id,
                     result,
                     connect_off,
+                    marks,
                 }
             },
         )
@@ -177,6 +197,7 @@ impl Home {
         request_id: u64,
         result: Result<Vec<RemoteCube>, String>,
         connect_off: Vec<String>,
+        marks: MarkVariations,
     ) -> Task<Message> {
         // Superseded by a newer fetch, or invalidated by logout. Drop
         // it: applying it would either roll the list back to an older
@@ -193,12 +214,50 @@ impl Home {
             Ok(remote_only) => {
                 self.remote_cubes = remote_only;
                 self.connect_off_cubes = connect_off.into_iter().collect();
+                // The fetch already wrote any differing number to disk;
+                // show it now rather than at the next directory probe.
+                self.adopt_mark_variations(&marks);
             }
             Err(e) => {
                 log::warn!("[LAUNCHER] Failed to fetch remote cubes: {e}");
             }
         }
         Task::none()
+    }
+}
+
+/// Each listed Cube's ring-mark variation by UUID, for the Cubes whose
+/// response carried one. An API that predates the field sends none, and
+/// the local numbers stand.
+pub(crate) type MarkVariations = std::collections::HashMap<String, u32>;
+
+type RemoteListing = (Vec<RemoteCube>, Vec<String>, MarkVariations);
+
+fn server_mark_variations(server_cubes: &[CubeResponse]) -> MarkVariations {
+    server_cubes
+        .iter()
+        .filter_map(|sc| sc.mark_variation.map(|v| (sc.uuid.clone(), v)))
+        .collect()
+}
+
+impl Home {
+    /// Take the server's ring-mark variations into the Cubes on screen: the
+    /// current network's list and every other network's catalog.
+    pub(super) fn adopt_mark_variations(&mut self, marks: &MarkVariations) {
+        if marks.is_empty() {
+            return;
+        }
+        let adopt = |cube: &mut crate::app::settings::CubeSettings| {
+            if let Some(&variation) = marks.get(&cube.id) {
+                cube.mark_variation = variation;
+            }
+        };
+        if let super::State::Cubes { cubes, .. } = &mut self.state {
+            cubes.iter_mut().for_each(adopt);
+        }
+        for (_, cubes) in &mut self.network_catalog {
+            cubes.iter_mut().for_each(adopt);
+        }
     }
 }
 
@@ -265,6 +324,7 @@ mod tests {
 
     fn cached() -> RemoteCube {
         RemoteCube {
+            mark_variation: 0,
             id: 9,
             uuid: "cached".into(),
             name: "Cached".into(),
@@ -328,6 +388,93 @@ mod tests {
         for cube in &home.remote_cubes[1..] {
             assert!(!cube.has_encrypted_seed && !cube.phone_recoverable && !cube.phone_full_cube);
         }
+    }
+
+    fn saved_local_mark(dir: &std::path::Path) -> u32 {
+        let datadir = CoincubeDirectory::new(dir.to_path_buf());
+        settings::Settings::from_file(&datadir.network_directory(ChainId::BitcoinBlake2b))
+            .unwrap()
+            .cubes
+            .into_iter()
+            .find(|cube| cube.id == "local")
+            .unwrap()
+            .mark_variation
+    }
+
+    /// Connect's mark variation is the record: listing the account's Cubes
+    /// writes a differing number into the local Cube's settings, and a Cube
+    /// on another computer carries its own.
+    #[tokio::test]
+    async fn listing_adopts_connects_mark_variation() {
+        let server = MockServer::start();
+        let mut local = cube(1, "local");
+        local["markVariation"] = json!(4);
+        local["markVersion"] = json!(1);
+        let mut ghost = cube(2, "ghost");
+        ghost["markVariation"] = json!(9);
+        server.mock(|when, then| {
+            when.method(GET).path("/api/v1/connect/cubes");
+            then.status(200).json_body(json!({"data": [local, ghost]}));
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/connect/cubes/2/recovery-kit/status");
+            then.status(404);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut home = home(dir.path(), server.base_url());
+        assert_eq!(saved_local_mark(dir.path()), 0);
+        for message in outputs(home.fetch_remote_cubes()).await {
+            drop(home.update(message));
+        }
+        assert_eq!(saved_local_mark(dir.path()), 4);
+        assert_eq!(home.remote_cubes.len(), 1);
+        assert_eq!(home.remote_cubes[0].mark_variation, 9);
+        assert_eq!(home.remote_cubes[0].mark_seed(), None, "not a UUID");
+    }
+
+    /// An API that predates the field sends no number: the local one stands.
+    #[tokio::test]
+    async fn listing_without_a_mark_variation_keeps_the_local_one() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/api/v1/connect/cubes");
+            then.status(200)
+                .json_body(json!({"data": [cube(1, "local")]}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let datadir = CoincubeDirectory::new(dir.path().to_path_buf());
+        let mut home = home(dir.path(), server.base_url());
+        settings::set_cube_mark_variation(
+            &datadir.network_directory(ChainId::BitcoinBlake2b),
+            "local",
+            3,
+        )
+        .await
+        .unwrap();
+        for message in outputs(home.fetch_remote_cubes()).await {
+            drop(home.update(message));
+        }
+        assert_eq!(saved_local_mark(dir.path()), 3);
+    }
+
+    /// The Cubes on screen take the listed numbers at once.
+    #[test]
+    fn adopting_marks_updates_the_cubes_on_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut home = home(dir.path(), "http://127.0.0.1:9".into());
+        let chain = ChainId::Testnet4;
+        home.network_catalog = vec![(
+            chain,
+            vec![CubeSettings::new_with_raw_id(
+                "other".into(),
+                "Other".into(),
+                chain,
+            )],
+        )];
+        let marks = super::MarkVariations::from([("other".to_owned(), 6)]);
+        home.adopt_mark_variations(&marks);
+        assert_eq!(home.network_catalog[0].1[0].mark_variation, 6);
     }
 
     #[tokio::test]

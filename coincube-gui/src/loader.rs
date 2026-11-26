@@ -1296,7 +1296,7 @@ pub async fn load_application(
         btc_usd_requested_at: None,
         show_direction_badges: true,
         lightning_address: None,
-        avatar_handle: None,
+        cube_mark_seed: None,
         avatar_regenerations_remaining: None,
         cube_id: config.cube_settings.id.clone(),
         current_cube_server_id: None,

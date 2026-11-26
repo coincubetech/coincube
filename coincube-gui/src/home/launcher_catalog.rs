@@ -26,7 +26,7 @@ use iced::{
 use std::time::{Duration, Instant};
 
 use coincube_ui::{
-    component::{card, text::*},
+    component::{card, ring_mark, text::*},
     icon, theme,
     widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
 };
@@ -147,6 +147,16 @@ pub(crate) struct LauncherScenePeer {
     pub name: String,
     pub status: &'static str,
     pub marks: super::launcher_scene::CubeMarks,
+    /// The ring mark beside the floor label.
+    pub mark: PeerMark,
+}
+
+/// The ring mark a floor label shows: a local Cube's, or a Cube on another
+/// computer's in the muted colour inside the dashed treatment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PeerMark {
+    Local(Option<String>),
+    Ghost(Option<String>),
 }
 
 /// The prototype's Key card: hover peeks, a click pins, a second click or
@@ -694,12 +704,14 @@ impl Home {
                         "Unavailable on this network"
                     },
                     marks: super::launcher_gpu::marks(row.cube),
+                    mark: PeerMark::Local(row.mark_seed.clone()),
                 },
                 FloorEntry::Ghost(cube) => LauncherScenePeer {
                     key: ghost_key(cube),
                     name: catalog_display_name(&cube.name),
                     status: ghost_status(cube, projection.connect_trouble),
                     marks: ghost_marks(cube),
+                    mark: PeerMark::Ghost(cube.mark_seed()),
                 },
             })
             .collect::<Vec<_>>();
@@ -1345,6 +1357,9 @@ pub(super) struct LocalRow<'a> {
     pub(super) index: usize,
     pub(super) cube: &'a CubeSettings,
     pub(super) name: String,
+    /// The seed the Cube's ring mark is drawn from
+    /// ([`CubeSettings::mark_seed`]).
+    pub(super) mark_seed: Option<String>,
     pub(super) vault: String,
     pub(super) connect: (Tone, String),
     /// A short, visible registration refusal; full guidance stays in details.
@@ -1676,6 +1691,7 @@ impl<'a> LocalProjection<'a> {
                 open: open_cube == Some(cube.id.as_str()),
                 wallets: super::launcher_presenter::local_wallets(cube),
                 vault: vault_subtitle(cube),
+                mark_seed: cube.mark_seed(),
                 connect_off: home
                     .connect_off_cubes
                     .contains(&cube.id)
@@ -1911,25 +1927,9 @@ fn wallets_cell<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
         .into()
 }
 
-fn avatar_style(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.selected)),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn cube_avatar<'a>(tone: Tone) -> Element<'a, ViewMessage> {
-    Container::new(icon::cube_icon().style(tone_style(tone)))
-        .width(Length::Fixed(32.0))
-        .height(Length::Fixed(32.0))
-        .align_x(iced::alignment::Horizontal::Center)
-        .align_y(iced::alignment::Vertical::Center)
-        .style(avatar_style)
-        .into()
+/// The Cube's 32px ring mark, beside its name in the list and table.
+fn cube_avatar<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
+    ring_mark::ring_mark(row.mark_seed.as_deref(), 32.0)
 }
 
 fn label_action<'a>(
@@ -1948,7 +1948,6 @@ fn label_action<'a>(
 }
 
 fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a, ViewMessage> {
-    let (tone, _) = row.connect.clone();
     let (backup_tone, backup) = backup_caption(row.cube);
     let name = Column::new()
         .spacing(2)
@@ -1969,7 +1968,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
         Row::new()
             .spacing(CELL_GAP)
             .align_y(Alignment::Center)
-            .push(Container::new(cube_avatar(tone)).width(Length::Fixed(AVATAR_WIDTH)))
+            .push(Container::new(cube_avatar(row)).width(Length::Fixed(AVATAR_WIDTH)))
             .push(name)
             .push(
                 p2_regular(row.key.chain.label())
@@ -1992,7 +1991,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(cube_avatar(tone))
+                    .push(cube_avatar(row))
                     .push(name),
             )
             .push(
@@ -2709,6 +2708,7 @@ mod tests {
         full: bool,
     ) -> RemoteCube {
         RemoteCube {
+            mark_variation: 0,
             id: 7,
             uuid: uuid.to_string(),
             name: name.to_string(),
@@ -3721,6 +3721,7 @@ mod tests {
         home.developer_mode = true;
         home.displayed_networks = vec![ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet];
         let on = |uuid: &str, chain: ChainId| RemoteCube {
+            mark_variation: 0,
             network: settings::network_to_api_string(chain),
             ..remote(uuid, uuid, true, true, false, false)
         };

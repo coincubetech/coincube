@@ -3,6 +3,7 @@ use coincube_ui::localized_format;
 use iced::widget::{mouse_area, Column, Container, Row, Space};
 use iced::{Alignment, Length};
 
+use coincube_ui::component::ring_mark;
 use coincube_ui::component::tenshu::{
     segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
 };
@@ -215,39 +216,16 @@ pub(crate) fn cube_name_status(
     })
 }
 
-/// The Avatar row: the 48px tile, how many regenerations remain and the
-/// action that opens the avatar flow inline.
+/// The Avatar row: the Cube's 48px ring mark, and the action that opens the
+/// old avatar flow inline until Regenerate replaces it.
 fn avatar_row<'a>(cache: &'a cache::Cache, flow_open: bool) -> Element<'a, Message> {
-    let tile: Element<'a, Message> = match cache.avatar_handle.as_ref() {
-        Some(handle) => Container::new(
-            iced::widget::image(handle.clone())
-                .width(Length::Fixed(48.0))
-                .height(Length::Fixed(48.0))
-                .border_radius(12.0),
-        )
-        .into(),
-        None => Container::new(text("No avatar").size(11).style(theme::text::secondary))
-            .width(Length::Fixed(48.0))
-            .height(Length::Fixed(48.0))
-            .center_x(Length::Fixed(48.0))
-            .center_y(Length::Fixed(48.0))
-            .style(|t: &theme::Theme| iced::widget::container::Style {
-                border: iced::Border {
-                    color: t.colors.shell.muted,
-                    width: 1.0,
-                    radius: 12.0.into(),
-                },
-                ..Default::default()
-            })
-            .into(),
-    };
+    let tile: Element<'a, Message> = ring_mark::ring_mark(cache.cube_mark_seed.as_deref(), 48.0);
     let signed_in = cache.connect_authenticated;
     let detail = if !signed_in {
         "Needs Connect sign-in.".to_owned()
-    } else if cache.avatar_handle.is_none() {
-        "Not set up yet.".to_owned()
     } else {
         match cache.avatar_regenerations_remaining {
+            None => "Not set up yet.".to_owned(),
             Some(n) if n >= 0 => {
                 localized_format!("Regenerations left: {}", "Regeneraciones restantes: {}", n)
             }
@@ -259,7 +237,7 @@ fn avatar_row<'a>(cache: &'a cache::Cache, flow_open: bool) -> Element<'a, Messa
             "Close",
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
         )
-    } else if cache.avatar_handle.is_some() {
+    } else if cache.avatar_regenerations_remaining.is_some() {
         (
             "Regenerate…",
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),

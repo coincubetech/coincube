@@ -24,7 +24,7 @@ fn fixture_context() -> NavContext<'static> {
         spark_alias: Some("Daily spending"),
         vault_alias: Some("Family savings"),
         lightning_address: None,
-        avatar: None,
+        mark_seed: None,
         theme_mode: coincube_ui::theme::palette::ThemeMode::Dark,
         connect_authenticated: false,
         connect_email: None,
