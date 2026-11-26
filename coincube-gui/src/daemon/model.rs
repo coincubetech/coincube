@@ -893,7 +893,9 @@ mod tests {
     /// whose inputs or outputs do not match its transaction.
     #[test]
     fn a_stored_imported_spend_the_analysis_refuses_is_listed() {
-        let wallet = imported_vault(Shape::ShWpkh);
+        // A k-of-n wallet: its threshold tells the analysed result from the
+        // placeholder, which has a threshold of 1.
+        let wallet = imported_vault(Shape::WshSortedMulti);
         let address = wallet.preview_change_address().assume_checked();
         let unsigned = Transaction {
             version: transaction::Version::TWO,
@@ -927,6 +929,7 @@ mod tests {
         let mut whole = psbt.clone();
         whole.outputs.push(Default::default());
         let expected = wallet.main_descriptor.spend_info(&whole).unwrap();
+        assert!(expected.primary_path().threshold > 1);
         assert_eq!(spend.sigs, expected);
         assert!(spend.path_ready().is_none());
     }

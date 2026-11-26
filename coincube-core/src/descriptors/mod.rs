@@ -1659,11 +1659,11 @@ mod tests {
         // Every input unlocks the recovery path, only input 0 has a recovery
         // signature: the path stays, with the least count.
         let mut recov_on_one = rec_psbt.clone();
-        let (recov_key, _) = recov_on_one.inputs[0]
+        let recov_key = recov_on_one.inputs[0]
             .bip32_derivation
             .iter()
             .find(|(_, (fg, _))| *fg == recov_key_origin.0)
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, _)| *k)
             .unwrap();
         let sig = *recov_on_one.inputs[0].partial_sigs.values().next().unwrap();
         recov_on_one.inputs[0]
