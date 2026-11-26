@@ -578,6 +578,42 @@ fn a_registered_cube_renamed_signed_out_reopens_signed_out() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A Cube registered before `connect_registered` existed has only
+/// `remote_synced` on disk. Renaming it while signed out must keep it
+/// registered, so a reopened Cube still waits for sign-in.
+#[test]
+fn a_legacy_registered_cube_renamed_signed_out_stays_registered() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("legacy-rename");
+    save_cube(&root);
+    let network_dir =
+        CoincubeDirectory::new(root.clone()).network_directory(crate::chain::ChainId::Bitcoin);
+    run(settings::update_settings_file(&network_dir, |mut s| {
+        for cube in s.cubes.iter_mut() {
+            cube.remote_synced = true;
+        }
+        Some(s)
+    }))
+    .unwrap();
+    let legacy = saved_cube(&root);
+    assert!(legacy.remote_synced && !legacy.connect_registered);
+
+    let mut app = open_saved(&root);
+    assert_eq!(app.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+    settle(
+        &mut app,
+        Message::View(view::Message::Settings(
+            view::SettingsMessage::CubeNameSubmitted("Renamed".into()),
+        )),
+    );
+    let renamed = saved_cube(&root);
+    assert!(!renamed.remote_synced, "a local rename waits to sync");
+    assert!(renamed.connect_registered, "the Connect row is remembered");
+    let reopened = open_saved(&root);
+    assert_eq!(reopened.cache.cube_mark_access, CubeMarkAccess::SignedOut);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A never-registered Cube opened signed out, then registered by the App's
 /// Connect panel after sign-in, stays registered after sign-out, and a
 /// fresh App opened from the file knows it too.

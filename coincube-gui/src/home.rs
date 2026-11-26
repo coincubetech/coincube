@@ -4433,7 +4433,10 @@ impl Home {
                         c.name = name_for_settings;
                         // Mark unsynced so catch-up can pick up the
                         // name change if the remote update fails or
-                        // we're offline.
+                        // we're offline. A Cube that was synced has a
+                        // Connect row; keep that fact first (older files
+                        // record it only as `remote_synced`).
+                        c.connect_registered |= c.remote_synced;
                         c.remote_synced = false;
                     }
                     Some(s)
