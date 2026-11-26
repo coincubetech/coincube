@@ -357,9 +357,9 @@ pub fn encode_offer(offer: &PairingOffer) -> Result<String, String> {
 /// key, `"pc": 1` ([`PAIRING_CODE_KEY`], [`PAIRING_CODE_FORMAT`]).
 ///
 /// The key tells the phone there is a code on this screen to compare, and in
-/// which format. The phone asks "do these match?" only when it reads a format
-/// it knows; without the key, or with another value, it pairs as it did
-/// before. A phone that predates the key ignores it, because its parser
+/// which format. The phone is to ask "do these match?" only when it reads a
+/// format it knows (the mobile side is planned, not built); without the key,
+/// or with another value, it pairs as it did before. A phone that predates the key ignores it, because its parser
 /// reads the keys it names and no others.
 ///
 /// The key is not covered by the pairing proof and does not need to be.

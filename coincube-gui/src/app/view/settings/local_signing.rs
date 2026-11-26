@@ -230,13 +230,19 @@ fn cancel<'a>(label: &'static str) -> Element<'a, Message> {
     )
 }
 
-/// This computer's pairing code, shown above the QR it belongs to.
+/// This computer's pairing code, shown beside the QR it belongs to.
 ///
 /// It is the first 8 characters of this computer's certificate fingerprint,
 /// the value COINCUBE Mobile reads from the QR. It sits in its own labelled
-/// block above the QR, where it is in view whatever the QR's size, and apart
-/// from the line beside the QR that names the phone by the phone's
-/// fingerprint, so the two are not compared with each other.
+/// block at the foot of the column beside the QR, under a rule: below the
+/// waiting status and the Cancel button, and so apart from the line at the
+/// top of that column that names the phone by the phone's fingerprint. The
+/// two are different values and are not to be compared with each other.
+///
+/// Beside the QR, not above or under it: a real pairing QR is some 570px
+/// tall. Anything under it is off the bottom of a laptop-height window, and
+/// anything above it pushes the QR itself down, which is what the user has
+/// to scan.
 ///
 /// Showing it changes nothing about how pairing is verified, and the wording
 /// claims nothing about what a match proves. It is conditional ("if COINCUBE
@@ -254,7 +260,6 @@ fn pairing_code_block<'a>(
     let code = crate::phone_signer::pairing::pairing_code(&offer.cert_fp)?;
     let mut block = Column::new()
         .spacing(4)
-        .max_width(560)
         .push(tenshu::label(localized_copy("This computer's pairing code")))
         .push(
             iced::widget::text(code.short)
@@ -357,6 +362,18 @@ fn waiting_body<'a>(
         })
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(cancel("Cancel pairing"));
+    // The code belongs to the QR: it is this computer's, it is shown only
+    // while the QR is, and it goes away with the QR when the offer can no
+    // longer be scanned.
+    if qr.is_some_and(|_| remaining > 0) {
+        if let Some(code) = pairing_code_block(offer, show_full_code) {
+            info = info
+                .push(Space::new().height(Length::Fixed(12.0)))
+                .push(page::rule())
+                .push(Space::new().height(Length::Fixed(12.0)))
+                .push(code);
+        }
+    }
     let mut row = Row::new().spacing(24).align_y(Alignment::Start);
     if let Some(qr) = qr.filter(|_| remaining > 0) {
         let qr = Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4))
@@ -372,18 +389,8 @@ fn waiting_body<'a>(
         row = row.push(qr);
     }
     info = info.width(Length::Fill);
-    let mut body = Column::new().spacing(16).width(Length::Fill);
-    // The code belongs to the QR: it is this computer's, and it goes away
-    // with the QR when the offer can no longer be scanned. It goes above the
-    // QR because a real pairing QR is some 570px tall, and anything under it
-    // would be off the bottom of a laptop-height window.
-    if qr.is_some_and(|_| remaining > 0) {
-        if let Some(code) = pairing_code_block(offer, show_full_code) {
-            body = body.push(code);
-        }
-    }
     page::rows([
-        Container::new(body.push(row.push(info)))
+        Container::new(row.push(info))
             .padding([16, 0])
             .width(Length::Fill)
             .into(),
@@ -1119,46 +1126,71 @@ mod pairing_code_view_tests {
     }
 
     /// A real pairing QR is far larger than the synthetic one above. The code
-    /// must be in view with it at the smallest window the app supports, above
-    /// the QR and the line that names the phone.
+    /// must sit beside it, inside the QR's own height, so it neither falls
+    /// below the QR nor pushes the QR down; and below the Cancel button, away
+    /// from the line that names the phone.
     #[test]
-    fn the_code_is_in_view_above_a_real_size_qr() {
+    fn the_code_is_beside_a_real_size_qr_and_costs_no_height() {
         let fx = fixture();
         let payload =
             crate::phone_signer::pairing::encode_offer_with_pairing_code(&fx.offer).unwrap();
         let real_qr = qr_code::Data::new(&payload).unwrap();
-        for outer in [(1024, 768), (1440, 900)] {
-            let screen = capture::inspect(
-                "pair-code-real-qr",
-                waiting_body(&fx.phone, &fx.offer, Some(&real_qr), None, false),
-                outer,
+        let render = |show_code: bool| {
+            let mut offer = fx.offer.clone();
+            if !show_code {
+                // No well-formed fingerprint: the same screen without a code.
+                offer.cert_fp = String::new();
+            }
+            capture::inspect(
+                if show_code {
+                    "pair-code-real-qr"
+                } else {
+                    "pair-code-real-qr-no-code"
+                },
+                waiting_body(&fx.phone, &offer, Some(&real_qr), None, false),
+                (1440, 900),
                 "dark",
                 coincube_ui::theme::Theme::dark(),
-            );
-            let bounds_of = |needle: &str| {
-                screen
-                    .text
-                    .iter()
-                    .find(|(value, _)| value.contains(needle))
-                    .map(|(_, bounds)| *bounds)
-                    .unwrap_or_else(|| panic!("{:?} is on screen", needle))
-            };
-            let code = bounds_of(&fx.code);
-            let phone_line = bounds_of(&fx.phone.cert_fp8);
-            assert!(
-                code.y + code.height < 120.0,
-                "the code is at the top at {:?}: {:?}",
-                outer,
-                code
-            );
-            assert!(code.x >= 0.0 && code.x + code.width <= outer.0 as f32);
-            assert!(
-                phone_line.y > code.y + code.height,
-                "the phone's line is below the code block at {:?}",
-                outer
-            );
-            assert!(screen.has_focus(Id::new(FULL_CODE_ID)));
-        }
+            )
+        };
+        let bounds_of = |screen: &capture::Inspection, needle: &str| {
+            screen
+                .text
+                .iter()
+                .find(|(value, _)| value.contains(needle))
+                .map(|(_, bounds)| *bounds)
+                .unwrap_or_else(|| panic!("{:?} is on screen", needle))
+        };
+        let with = render(true);
+        let without = render(false);
+
+        let code = bounds_of(&with, &fx.code);
+        let phone_line = bounds_of(&with, &fx.phone.cert_fp8);
+        let cancel = with
+            .focus
+            .iter()
+            .find(|(id, _)| *id == Id::new(PAIR_CANCEL_ID))
+            .map(|(_, bounds)| *bounds)
+            .expect("the Cancel button");
+        // In the column beside the QR, which starts where the phone's line
+        // does, to the right of a QR several hundred pixels wide.
+        assert!(phone_line.x > 500.0, "{:?}", phone_line);
+        assert!(code.x >= phone_line.x, "{:?} {:?}", code, phone_line);
+        // Under the status and the Cancel button, so apart from the phone's
+        // line at the top of the column.
+        assert!(code.y > cancel.y + cancel.height, "{:?} {:?}", code, cancel);
+        assert!(phone_line.y + phone_line.height < cancel.y);
+        // Inside the QR's height: the QR is at least 500px tall and starts
+        // level with the phone's line.
+        assert!(
+            code.y + code.height < phone_line.y + 500.0,
+            "the code is beside the QR, not below it: {:?}",
+            code
+        );
+        // And it moves nothing: the phone's line, which is level with the
+        // top of the QR, is where it is on the same screen without a code.
+        assert_eq!(phone_line.y, bounds_of(&without, &fx.phone.cert_fp8).y);
+        assert!(with.has_focus(Id::new(FULL_CODE_ID)));
     }
 
     #[test]

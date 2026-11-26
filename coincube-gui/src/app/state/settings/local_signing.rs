@@ -2900,7 +2900,13 @@ mod pairing_code_state_tests {
     #[test]
     fn the_switch_message_shows_and_hides_the_full_code() {
         let mut state = LocalSigningState::default();
-        let cache = Cache::default();
+        // Its own empty data directory, as the neighbouring tests use.
+        let dir = std::env::temp_dir().join(format!("coincube-pair-code-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache {
+            datadir_path: crate::dir::CoincubeDirectory::new(dir.clone()),
+            ..Cache::default()
+        };
         let toggle = |state: &mut LocalSigningState| {
             drop(state.update(
                 None,
@@ -2914,6 +2920,7 @@ mod pairing_code_state_tests {
         assert!(state.show_full_pairing_code);
         toggle(&mut state);
         assert!(!state.show_full_pairing_code);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
