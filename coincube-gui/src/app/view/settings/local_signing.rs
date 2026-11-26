@@ -230,13 +230,19 @@ fn cancel<'a>(label: &'static str) -> Element<'a, Message> {
     )
 }
 
-/// This computer's pairing code, shown under the QR it belongs to.
+/// This computer's pairing code, shown above the QR it belongs to.
 ///
 /// It is the first 8 characters of this computer's certificate fingerprint,
-/// the value COINCUBE Mobile reads from the QR and shows before the user
-/// pairs. It sits in its own labelled block, apart from the line that names
-/// the phone by the phone's fingerprint, so the two are not compared with
-/// each other. Showing it changes nothing about how pairing is verified.
+/// the value COINCUBE Mobile reads from the QR. It sits in its own labelled
+/// block above the QR, where it is in view whatever the QR's size, and apart
+/// from the line beside the QR that names the phone by the phone's
+/// fingerprint, so the two are not compared with each other.
+///
+/// Showing it changes nothing about how pairing is verified, and the wording
+/// claims nothing about what a match proves. It is conditional ("if COINCUBE
+/// Mobile asks") because a phone that predates the comparison shows no such
+/// question, and it sends the user to the phone to cancel: a different code
+/// means the phone read another QR, which this computer's Cancel cannot undo.
 ///
 /// `None` when the offer carries no well-formed fingerprint, in which case
 /// its QR does not announce a code either (see
@@ -246,11 +252,9 @@ fn pairing_code_block<'a>(
     show_full: bool,
 ) -> Option<Element<'a, Message>> {
     let code = crate::phone_signer::pairing::pairing_code(&offer.cert_fp)?;
-    // Narrower than a real pairing QR, so the lines wrap under it instead of
-    // pushing the scanning instructions aside.
     let mut block = Column::new()
         .spacing(4)
-        .max_width(420)
+        .max_width(560)
         .push(tenshu::label(localized_copy("This computer's pairing code")))
         .push(
             iced::widget::text(code.short)
@@ -258,7 +262,7 @@ fn pairing_code_block<'a>(
                 .font(coincube_ui::font::MONO_MEDIUM),
         )
         .push(page::muted(localized_copy(
-            "COINCUBE Mobile shows the same code before you pair. If it shows a different one, cancel pairing.",
+            "If COINCUBE Mobile asks whether the codes match, compare its code with this one. If they are different, cancel on the phone.",
         )));
     if show_full {
         // Four groups to a line, so the first line starts with the short code.
@@ -365,17 +369,21 @@ fn waiting_body<'a>(
                 },
                 ..Default::default()
             });
-        // The code belongs to the QR: it is this computer's, and it goes
-        // away with the QR when the offer can no longer be scanned.
-        let mut scan = Column::new().spacing(12).push(qr);
-        if let Some(code) = pairing_code_block(offer, show_full_code) {
-            scan = scan.push(code);
-        }
-        row = row.push(scan);
+        row = row.push(qr);
     }
     info = info.width(Length::Fill);
+    let mut body = Column::new().spacing(16).width(Length::Fill);
+    // The code belongs to the QR: it is this computer's, and it goes away
+    // with the QR when the offer can no longer be scanned. It goes above the
+    // QR because a real pairing QR is some 570px tall, and anything under it
+    // would be off the bottom of a laptop-height window.
+    if qr.is_some_and(|_| remaining > 0) {
+        if let Some(code) = pairing_code_block(offer, show_full_code) {
+            body = body.push(code);
+        }
+    }
     page::rows([
-        Container::new(row.push(info))
+        Container::new(body.push(row.push(info)))
             .padding([16, 0])
             .width(Length::Fill)
             .into(),
@@ -977,9 +985,11 @@ mod pairing_code_view_tests {
             "{:?}",
             screen.text
         );
+        // Conditional, because a phone that predates the comparison never
+        // asks; and it sends the user to the phone to cancel.
         assert!(screen.contains(
-            "COINCUBE Mobile shows the same code before you pair. \
-             If it shows a different one, cancel pairing."
+            "If COINCUBE Mobile asks whether the codes match, compare its code with this one. \
+             If they are different, cancel on the phone."
         ));
         // What was there before still is: the automatic check and the cancel.
         assert!(screen.contains("verify pairing automatically"));
@@ -1094,6 +1104,61 @@ mod pairing_code_view_tests {
         let malformed = render(&fx, &qr, true, "pair-code-malformed");
         assert!(!malformed.contains("pairing code"));
         assert!(malformed.has_focus(Id::new(PAIR_CANCEL_ID)));
+
+        // A live offer with no QR to scan shows no code either.
+        let fx = fixture();
+        let no_qr = capture::inspect(
+            "pair-code-no-qr",
+            waiting_body(&fx.phone, &fx.offer, None, None, true),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(!no_qr.contains("pairing code"));
+        assert!(!no_qr.contains(&fx.code));
+    }
+
+    /// A real pairing QR is far larger than the synthetic one above. The code
+    /// must be in view with it at the smallest window the app supports, above
+    /// the QR and the line that names the phone.
+    #[test]
+    fn the_code_is_in_view_above_a_real_size_qr() {
+        let fx = fixture();
+        let payload =
+            crate::phone_signer::pairing::encode_offer_with_pairing_code(&fx.offer).unwrap();
+        let real_qr = qr_code::Data::new(&payload).unwrap();
+        for outer in [(1024, 768), (1440, 900)] {
+            let screen = capture::inspect(
+                "pair-code-real-qr",
+                waiting_body(&fx.phone, &fx.offer, Some(&real_qr), None, false),
+                outer,
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            );
+            let bounds_of = |needle: &str| {
+                screen
+                    .text
+                    .iter()
+                    .find(|(value, _)| value.contains(needle))
+                    .map(|(_, bounds)| *bounds)
+                    .unwrap_or_else(|| panic!("{:?} is on screen", needle))
+            };
+            let code = bounds_of(&fx.code);
+            let phone_line = bounds_of(&fx.phone.cert_fp8);
+            assert!(
+                code.y + code.height < 120.0,
+                "the code is at the top at {:?}: {:?}",
+                outer,
+                code
+            );
+            assert!(code.x >= 0.0 && code.x + code.width <= outer.0 as f32);
+            assert!(
+                phone_line.y > code.y + code.height,
+                "the phone's line is below the code block at {:?}",
+                outer
+            );
+            assert!(screen.has_focus(Id::new(FULL_CODE_ID)));
+        }
     }
 
     #[test]
@@ -1108,7 +1173,7 @@ mod pairing_code_view_tests {
                     "dark",
                     coincube_ui::theme::Theme::dark(),
                 );
-                assert!(block.contains("Código de emparejamiento de este ordenador"));
+                assert!(block.contains("Código de vinculación de esta computadora"));
                 // The code itself is the same in every language.
                 assert!(block.text.iter().any(|(value, _)| *value == fx.code));
                 block.assert_spanish("pair-code");

@@ -801,10 +801,7 @@ impl LocalSigningState {
         // and spawn the dial loop anyway — stranding them with
         // no way to complete pairing. A typed error keeps the
         // Try-Again path available instead.
-        // The waiting screen shows this computer's pairing code beside the
-        // QR, so the QR says so (`pc`): the phone then knows there is a code
-        // to compare.
-        let qr = match crate::phone_signer::pairing::encode_offer_with_pairing_code(&offer)
+        let qr = match waiting_qr_payload(&offer)
             .ok()
             .and_then(|s| qr_code::Data::new(&s).ok())
         {
@@ -2848,11 +2845,76 @@ mod tests {
     }
 }
 
-/// Mobile V3 Phase 1, Desktop PR T1: the waiting screen's "show full pairing
-/// code" switch. Kept apart from the pairing tests above, which are unchanged.
+/// The text the waiting screen's QR encodes. The screen shows this computer's
+/// pairing code with the QR, so the QR says so (`pc`): the phone then knows
+/// there is a code to compare. Kept as one function so a test can hold the
+/// screen and its QR to the same encoder.
+fn waiting_qr_payload(offer: &PairingOffer) -> Result<String, String> {
+    crate::phone_signer::pairing::encode_offer_with_pairing_code(offer)
+}
+
+/// Mobile V3 Phase 1, Desktop PR T1: the waiting screen's QR payload and its
+/// "show full pairing code" switch. Kept apart from the pairing tests above,
+/// which are unchanged.
 #[cfg(test)]
 mod pairing_code_state_tests {
     use super::*;
+    use crate::app::view;
+    use crate::phone_signer::pairing::{pairing_code, PAIRING_CODE_FORMAT, PAIRING_CODE_KEY};
+    use base64::Engine as _;
+
+    /// The waiting screen always shows the code for a well-formed offer, so
+    /// its QR must always announce it. Going back to the unmarked encoder
+    /// here would leave a code on screen that the phone is never told about.
+    #[test]
+    fn the_waiting_screens_qr_announces_the_code_it_shows() {
+        let fx: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../phone_signer/fixtures/pairing_code_v1.json"
+        ))
+        .unwrap();
+        let offer: PairingOffer = serde_json::from_value(fx["offer"]["fields"].clone()).unwrap();
+        let payload = waiting_qr_payload(&offer).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&payload)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json[PAIRING_CODE_KEY], PAIRING_CODE_FORMAT);
+        // The QR carries the fingerprint the screen formats.
+        assert_eq!(json["certFp"], offer.cert_fp.as_str());
+        assert_eq!(
+            pairing_code(json["certFp"].as_str().unwrap())
+                .unwrap()
+                .short,
+            fx["desktop"]["pairing_code"].as_str().unwrap()
+        );
+        qr_code::Data::new(&payload).expect("renders as a QR");
+
+        // No well-formed fingerprint: no QR at all, so no screen without one.
+        let mut bad = offer;
+        bad.cert_fp = String::new();
+        assert!(waiting_qr_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn the_switch_message_shows_and_hides_the_full_code() {
+        let mut state = LocalSigningState::default();
+        let cache = Cache::default();
+        let toggle = |state: &mut LocalSigningState| {
+            drop(state.update(
+                None,
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::ToggleFullPairingCode),
+                )),
+            ));
+        };
+        toggle(&mut state);
+        assert!(state.show_full_pairing_code);
+        toggle(&mut state);
+        assert!(!state.show_full_pairing_code);
+    }
 
     #[test]
     fn the_full_code_is_hidden_until_asked_for_and_again_for_each_pairing_run() {

@@ -67,6 +67,13 @@ pub const PAIRING_CODE_KEY: &str = "pc";
 /// The code is a display of a value both sides already hold. It is not part
 /// of the pairing proof, and nothing in pairing depends on the user comparing
 /// it: the certificate pin and the proof decide whether a pairing completes.
+///
+/// What a match is worth: it rules out the phone having read some other
+/// computer's QR by accident. It does not rule out a deliberately substituted
+/// QR. Eight hex characters are 32 bits, so a QR can carry a certificate
+/// chosen to share them (about 2^32 tries, offline). The comparison is
+/// therefore a convenience for the user and must never be treated as a
+/// control.
 pub const PAIRING_CODE_FORMAT: u32 = 1;
 
 /// Default lifetime of a pairing offer. Long enough to scan from
@@ -357,8 +364,10 @@ pub fn encode_offer(offer: &PairingOffer) -> Result<String, String> {
 ///
 /// The key is not covered by the pairing proof and does not need to be.
 /// Whoever can alter the QR can already replace every field in it; removing
-/// the key only removes the question on the phone. Pairing is decided by the
-/// certificate pin and the proof, with or without the comparison.
+/// the key only removes the question on the phone, and keeping it beside a
+/// certificate chosen to share the code's 32 bits makes the question pass.
+/// Pairing is decided by the certificate pin and the proof, with or without
+/// the comparison.
 ///
 /// Refuses an offer whose `certFp` is not a well-formed fingerprint: a QR
 /// must never announce a code this screen cannot show.
@@ -1006,6 +1015,23 @@ mod pairing_code_tests {
         iced::widget::qr_code::Data::new(&marked).expect("fits a QR code");
     }
 
+    /// The largest offer this desktop can make: a full-length xpub, the
+    /// longest mDNS instance name, the longest network id.
+    #[test]
+    fn the_largest_marked_offer_stays_inside_the_qr_budget() {
+        let mut offer = generated_offer();
+        offer.signer_xpub = format!("tpub{}", "D".repeat(107));
+        assert_eq!(offer.signer_xpub.len(), 111);
+        offer.service_name = "s".repeat(63);
+        offer.network = crate::chain::ChainId::BitcoinBlake2bTestnet4
+            .api_str()
+            .to_owned();
+        assert_eq!(offer.network, "bitcoin-blake2b-testnet4");
+        let marked = encode_offer_with_pairing_code(&offer).unwrap();
+        assert!(marked.len() <= MAX_PAIRING_QR_BYTES, "{}", marked.len());
+        iced::widget::qr_code::Data::new(&marked).expect("fits a QR code");
+    }
+
     #[test]
     fn a_qr_never_announces_a_code_the_screen_cannot_show() {
         let mut offer = generated_offer();
@@ -1019,8 +1045,8 @@ mod pairing_code_tests {
     /// The checks COINCUBE Mobile's offer parser makes today
     /// (`PairingOffer.fromQrPayload` and `_validate` in
     /// `lib/services/local_signer/pairing_qr.dart`, read at coincube-mobile
-    /// `origin/main` 799b83a52f4f8e8f1b56d6c6028ad7860a91ea4c), in the same
-    /// order. It decodes the JSON into a map and reads only the keys below:
+    /// `origin/main` 799b83a52f4f8e8f1b56d6c6028ad7860a91ea4c and unchanged at
+    /// 86050800eba86b09102c4feb4be6d2105f2882aa), in the same order. It decodes the JSON into a map and reads only the keys below:
     /// there is no check for unknown keys, which is why `pc` is ignored.
     fn todays_phone_parser(payload: &str, now_unix: u64) -> Result<(), String> {
         const MAX_QR_PAYLOAD_BYTES: usize = 2048;
