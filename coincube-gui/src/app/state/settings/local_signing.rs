@@ -90,6 +90,9 @@ pub struct LocalSigningState {
     pub keychain_keys_recorded: bool,
     /// Whether each key's full descriptor string is shown under its name.
     pub show_key_details: bool,
+    /// The waiting screen shows the full form of this computer's pairing
+    /// code under the short one. Display only; cleared with each pairing run.
+    pub show_full_pairing_code: bool,
     /// The loaded Vault, kept so a Keychain lookup's answer is applied to the
     /// latest version of it rather than to the one the lookup started from.
     wallet: Option<Arc<Wallet>>,
@@ -174,6 +177,7 @@ impl Default for LocalSigningState {
             vault_keys: Vec::new(),
             keychain_keys_recorded: false,
             show_key_details: false,
+            show_full_pairing_code: false,
             wallet: None,
             keychain_lookup_started: None,
             vault_key_fingerprints: Vec::new(),
@@ -246,6 +250,7 @@ impl LocalSigningState {
         self.pairing_run.cancel();
         self.pairing_run = Default::default();
         self.pairing_id = self.pairing_id.wrapping_add(1);
+        self.show_full_pairing_code = false;
         self.pairing_id
     }
 
@@ -796,7 +801,10 @@ impl LocalSigningState {
         // and spawn the dial loop anyway — stranding them with
         // no way to complete pairing. A typed error keeps the
         // Try-Again path available instead.
-        let qr = match crate::phone_signer::pairing::encode_offer(&offer)
+        // The waiting screen shows this computer's pairing code beside the
+        // QR, so the QR says so (`pc`): the phone then knows there is a code
+        // to compare.
+        let qr = match crate::phone_signer::pairing::encode_offer_with_pairing_code(&offer)
             .ok()
             .and_then(|s| qr_code::Data::new(&s).ok())
         {
@@ -946,6 +954,10 @@ impl State for LocalSigningState {
                         Task::none()
                     }
                 }
+            }
+            LocalSigningMessage::ToggleFullPairingCode => {
+                self.show_full_pairing_code = !self.show_full_pairing_code;
+                Task::none()
             }
             LocalSigningMessage::ToggleKeyDetails => {
                 self.show_key_details = !self.show_key_details;
@@ -2833,5 +2845,22 @@ mod tests {
         );
         assert!(matches!(state.flow, PairingFlow::Idle));
         assert_eq!(state.wallet_fingerprint, Some(wallet_b.id_fingerprint()));
+    }
+}
+
+/// Mobile V3 Phase 1, Desktop PR T1: the waiting screen's "show full pairing
+/// code" switch. Kept apart from the pairing tests above, which are unchanged.
+#[cfg(test)]
+mod pairing_code_state_tests {
+    use super::*;
+
+    #[test]
+    fn the_full_code_is_hidden_until_asked_for_and_again_for_each_pairing_run() {
+        let mut state = LocalSigningState::default();
+        assert!(!state.show_full_pairing_code);
+        state.show_full_pairing_code = true;
+        // Starting or cancelling a pairing begins a new run.
+        state.start_pairing_run();
+        assert!(!state.show_full_pairing_code);
     }
 }

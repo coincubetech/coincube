@@ -666,6 +666,9 @@ pub enum LocalSigningMessage {
     Tick,
     /// User cancelled the pairing wizard before the phone connected.
     CancelPairing,
+    /// Show or hide the full form of this computer's pairing code under the
+    /// short one on the waiting screen. Display only.
+    ToggleFullPairingCode,
     /// Result of the pairing listener task. The `u64` is the
     /// `pairing_id` that was active when the listener was spawned;
     /// the settings state ignores completions whose id doesn't match
