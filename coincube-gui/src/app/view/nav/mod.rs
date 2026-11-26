@@ -80,7 +80,7 @@ pub struct NavContext<'a> {
     pub connect_authenticated: bool,
     pub connect_email: Option<&'a str>,
     /// Latest realtime-stream health for the small status dot rendered
-    /// under the cube name in [`identity_block`]. `Inactive` renders
+    /// in the Cube identity. `Inactive` renders
     /// no dot (e.g. local-daemon installs without Connect).
     pub connect_stream_status: &'a crate::app::ConnectionStatus,
     /// The Connect control's chrome: its panel, signed-out notice, light

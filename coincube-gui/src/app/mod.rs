@@ -3654,6 +3654,9 @@ impl App {
             (cube_signer, spark_backend)
         };
         cache.fiat_chain = cube_settings.network;
+        // The sidebar and Display row draw the open Cube's ring mark from
+        // this seed; every constructor goes through here.
+        cache.cube_mark_seed = cube_settings.mark_seed();
         cache.has_vault = wallet.supports_inheritance() || wallet.is_imported();
         cache.has_imported_bitcoin = wallet.is_imported();
         cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
@@ -17956,6 +17959,18 @@ mod settings_navigation_integration_tests {
         }
         // The file still holds the number it was saved with.
         assert_eq!(saved_mark_variation(&app), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every App constructor seeds the sidebar's mark from the open Cube,
+    /// with no test setting it by hand (the loader's Cache starts without it).
+    #[test]
+    fn an_opened_cube_draws_its_own_mark() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("cube-mark-open-{}", uuid::Uuid::new_v4()));
+        let (app, _) = super::shell_tests::bitcoin_app(&root);
+        assert!(app.cache.cube_mark_seed.is_some());
+        assert_eq!(app.cache.cube_mark_seed, app.cube_settings.mark_seed());
         let _ = std::fs::remove_dir_all(&root);
     }
 

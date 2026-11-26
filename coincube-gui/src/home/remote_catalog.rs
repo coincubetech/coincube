@@ -61,27 +61,12 @@ impl Home {
             async move {
                 let server_cubes = rc_client.list_cubes().await.map_err(|e| e.to_string())?;
 
-                // Collect local cube UUIDs across all networks, and adopt
-                // the server's ring-mark variation wherever it differs from
-                // the local copy: once Connect has a number it is the record
-                // (`CubeSettings::mark_variation`).
+                // Collect local cube UUIDs across all networks. Each listed
+                // Cube's mark variation rides back with the result; it is
+                // written to disk only once the result is known current.
                 let marks = server_mark_variations(&server_cubes);
                 let mut local_uuids = std::collections::HashSet::new();
                 for cube in locally_stored_cubes(&datadir) {
-                    if let Some(&variation) = marks.get(&cube.id) {
-                        if variation != cube.mark_variation {
-                            let nd = datadir.network_directory(cube.network);
-                            if let Err(e) =
-                                settings::set_cube_mark_variation(&nd, &cube.id, variation).await
-                            {
-                                log::warn!(
-                                    "[LAUNCHER] Failed to record Connect's mark for cube {}: {}",
-                                    cube.id,
-                                    e
-                                );
-                            }
-                        }
-                    }
                     local_uuids.insert(cube.id);
                 }
 
@@ -214,9 +199,12 @@ impl Home {
             Ok(remote_only) => {
                 self.remote_cubes = remote_only;
                 self.connect_off_cubes = connect_off.into_iter().collect();
-                // The fetch already wrote any differing number to disk;
-                // show it now rather than at the next directory probe.
+                // Connect's number is the record: show it now, and write
+                // any differing one into the Cube's settings file. Only a
+                // current result gets here, so a late, older listing can
+                // never write an older number.
                 self.adopt_mark_variations(&marks);
+                return persist_mark_variations(self.datadir_path.clone(), marks);
             }
             Err(e) => {
                 log::warn!("[LAUNCHER] Failed to fetch remote cubes: {e}");
@@ -232,6 +220,40 @@ impl Home {
 pub(crate) type MarkVariations = std::collections::HashMap<String, u32>;
 
 type RemoteListing = (Vec<RemoteCube>, Vec<String>, MarkVariations);
+
+/// Write each listed number into the local Cube's settings file where it
+/// differs, off the UI thread. A Cube whose number already matches is not
+/// rewritten.
+fn persist_mark_variations(
+    datadir: crate::dir::CoincubeDirectory,
+    marks: MarkVariations,
+) -> Task<Message> {
+    if marks.is_empty() {
+        return Task::none();
+    }
+    Task::perform(
+        async move {
+            for cube in locally_stored_cubes(&datadir) {
+                let Some(&variation) = marks.get(&cube.id) else {
+                    continue;
+                };
+                if variation == cube.mark_variation {
+                    continue;
+                }
+                let nd = datadir.network_directory(cube.network);
+                if let Err(e) = settings::set_cube_mark_variation(&nd, &cube.id, variation).await {
+                    log::warn!(
+                        "[LAUNCHER] Failed to record Connect's mark for cube {}: {}",
+                        cube.id,
+                        e
+                    );
+                }
+            }
+        },
+        |()| (),
+    )
+    .discard()
+}
 
 fn server_mark_variations(server_cubes: &[CubeResponse]) -> MarkVariations {
     server_cubes
@@ -425,7 +447,8 @@ mod tests {
         let mut home = home(dir.path(), server.base_url());
         assert_eq!(saved_local_mark(dir.path()), 0);
         for message in outputs(home.fetch_remote_cubes()).await {
-            drop(home.update(message));
+            let persist = home.update(message);
+            assert!(outputs(persist).await.is_empty());
         }
         assert_eq!(saved_local_mark(dir.path()), 4);
         assert_eq!(home.remote_cubes.len(), 1);
@@ -453,7 +476,8 @@ mod tests {
         .await
         .unwrap();
         for message in outputs(home.fetch_remote_cubes()).await {
-            drop(home.update(message));
+            let persist = home.update(message);
+            assert!(outputs(persist).await.is_empty());
         }
         assert_eq!(saved_local_mark(dir.path()), 3);
     }
@@ -472,9 +496,44 @@ mod tests {
                 chain,
             )],
         )];
-        let marks = super::MarkVariations::from([("other".to_owned(), 6)]);
+        home.state = State::Cubes {
+            cubes: vec![CubeSettings::new_with_raw_id(
+                "here".into(),
+                "Here".into(),
+                ChainId::Bitcoin,
+            )],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        let marks = super::MarkVariations::from([("other".to_owned(), 6), ("here".to_owned(), 2)]);
         home.adopt_mark_variations(&marks);
         assert_eq!(home.network_catalog[0].1[0].mark_variation, 6);
+        let State::Cubes { cubes, .. } = &home.state else {
+            unreachable!()
+        };
+        assert_eq!(cubes[0].mark_variation, 2);
+    }
+
+    /// A listing that a newer fetch (or a logout) has superseded writes
+    /// nothing, so a late, older number can never land on disk.
+    #[tokio::test]
+    async fn a_superseded_listing_writes_no_mark() {
+        let server = MockServer::start();
+        let mut local = cube(1, "local");
+        local["markVariation"] = json!(5);
+        server.mock(|when, then| {
+            when.method(GET).path("/api/v1/connect/cubes");
+            then.status(200).json_body(json!({"data": [local]}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut home = home(dir.path(), server.base_url());
+        let stale = outputs(home.fetch_remote_cubes()).await;
+        home.invalidate_remote_cubes();
+        for message in stale {
+            let persist = home.update(message);
+            assert!(outputs(persist).await.is_empty());
+        }
+        assert_eq!(saved_local_mark(dir.path()), 0);
     }
 
     #[tokio::test]
