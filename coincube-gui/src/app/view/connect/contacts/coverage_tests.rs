@@ -25,6 +25,7 @@ fn received() -> ReceivedInvite {
     ReceivedInvite {
         id: 7,
         owner_email: "sender@example.invalid".into(),
+        owner_display_name: None,
         role: ContactRole::Keyholder,
         expires_at: "2099-01-01T00:00:00Z".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
@@ -247,5 +248,76 @@ fn expiry_labels_use_utc_calendar_days_and_invalid_dates_are_unknown() {
     ] {
         let c = role_color(&role);
         assert!(c.a > 0.0);
+    }
+}
+
+fn contact(display_name: Option<&str>) -> Contact {
+    let mut value = serde_json::json!({
+        "id": 5, "role": "keyholder", "createdAt": "2026-01-01T00:00:00Z",
+        "contactUser": {"id": 6, "email": "contact@example.invalid"}
+    });
+    if let Some(name) = display_name {
+        value["contactUser"]["displayName"] = serde_json::json!(name);
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn a_contact_row_shows_the_name_with_the_email_and_the_email_alone_without_one() {
+    let mut state = ConnectAccountPanel::new();
+    state.contacts_state.contacts = Some(vec![contact(Some("Casey Example"))]);
+    let view = inspect(contacts_ux(&state));
+    assert!(view.contains("Casey Example"));
+    assert!(view.contains("contact@example.invalid"));
+
+    // No name set (""), an older server (no field), and a "name" that reads
+    // as an address all show the email alone.
+    for name in [Some(""), None, Some("boss@bank.example")] {
+        state.contacts_state.contacts = Some(vec![contact(name)]);
+        let view = inspect(contacts_ux(&state));
+        assert!(view.contains("contact@example.invalid"), "{:?}", name);
+        assert!(!view.contains("Casey Example"), "{:?}", name);
+        assert!(!view.contains("boss@bank.example"), "{:?}", name);
+    }
+}
+
+#[test]
+fn contact_detail_keeps_the_email_under_the_name() {
+    let mut state = ConnectAccountPanel::new();
+    state.contacts_state.step = ContactsStep::Detail(5);
+    state.contacts_state.contacts = Some(vec![contact(Some("Casey Example"))]);
+    let view = inspect(contacts_ux(&state));
+    assert!(view.contains("Casey Example"));
+    assert!(view.contains("contact@example.invalid"));
+    // The page where the contact is removed or added to a Cube still names
+    // them by email.
+    assert!(view.contains("Add to Cube(s)…"));
+}
+
+#[test]
+fn a_received_invitation_names_the_sender_and_always_shows_their_email() {
+    let mut invite = received();
+    invite.owner_display_name = Some("Sam Example".into());
+    let view = inspect(received_invite_card(&invite, false));
+    assert!(view.contains("Sam Example"));
+    assert!(view.contains("sender@example.invalid"));
+    assert!(view.contains("Accept"));
+    // Accepting is still one click on the same invite.
+    let messages = capture::click_text(
+        received_invite_card(&invite, false),
+        "Accept",
+        0,
+        (1024, 1000),
+    );
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        ConnectAccountMessage::Contacts(ContactsMessage::AcceptReceivedInvite(7))
+    )));
+
+    for name in [None, Some(String::new())] {
+        invite.owner_display_name = name;
+        let view = inspect(received_invite_card(&invite, false));
+        assert!(view.contains("sender@example.invalid"));
+        assert!(!view.contains("Sam Example"));
     }
 }

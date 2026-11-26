@@ -7,7 +7,7 @@ use crate::{
         view::{
             self, ConnectAccountMessage, ContactsMessage, DeleteAccountMessage, DeletionFailure,
             DuressContactsMessage, DuressMessage, RetryAction, TwoFactorSettingsMessage,
-            TwoFactorStatusResult,
+            TwoFactorStatusResult, YourNameFailure, YourNameMessage,
         },
     },
     services::coincube::{
@@ -26,6 +26,7 @@ use crate::{
 };
 
 use super::delete_account::{deletion_failure, DeleteAccountState, DELETE_ACCOUNT_POLICY_URL};
+use super::your_name::{save_failure, YourNameState};
 use super::{
     delete_connect_secret, read_connect_secret, write_connect_secret, CONNECT_KEYRING_USER,
 };
@@ -1622,6 +1623,15 @@ pub struct ConnectAccountPanel {
     pub two_factor: TwoFactorSettings,
     /// Account › Delete account.
     pub delete_account: DeleteAccountState,
+    /// Account › Your name: the optional name shown beside this account's
+    /// email to the people in its Cubes.
+    pub your_name: YourNameState,
+    /// An interactive sign-in is on its way to the Dashboard. The sheet shows
+    /// the Account section the moment it is admitted, with no navigation to
+    /// trigger a load, so the profile for Your name is read at admission.
+    /// Restored, refreshed and shared sessions leave this unset: they read
+    /// the profile when the Account section is next opened.
+    your_name_read_pending: bool,
     /// This sign-in spent a backup code: how many are left, shown as a
     /// reminder until dismissed or a new set is made.
     pub backup_codes_notice: Option<u32>,
@@ -1691,6 +1701,8 @@ impl ConnectAccountPanel {
             pending_campaign_code: None,
             two_factor: TwoFactorSettings::default(),
             delete_account: DeleteAccountState::default(),
+            your_name: YourNameState::default(),
+            your_name_read_pending: false,
             backup_codes_notice: None,
             signing_in_with_authenticator: false,
         }
@@ -1925,6 +1937,8 @@ impl ConnectAccountPanel {
         // one's authenticator (an open setup key, codes on screen) carries over.
         self.two_factor.reset();
         self.delete_account.reset();
+        self.your_name.reset();
+        self.your_name_read_pending = false;
         self.backup_codes_notice = None;
         self.signing_in_with_authenticator = false;
         self.step = ConnectFlowStep::CheckingSession;
@@ -2151,12 +2165,104 @@ impl ConnectAccountPanel {
         self.delete_account.close();
         self.recovery_services = RecoveryServicesState::Loading;
         self.overview_seq = self.overview_seq.wrapping_add(1);
-        load_overview_counts(
+        let counts = load_overview_counts(
             &self.client,
             self.session_generation,
             self.overview_seq,
             self.contacts_state.active_network.clone(),
+        );
+        iced::Task::batch([counts, self.load_your_name()])
+    }
+
+    /// Reads the profile for Account › Your name. Sign-in and refresh replies
+    /// carry no display name, so the field is filled from `GET /api/v1/user`
+    /// each time the Account section opens.
+    fn load_your_name(&mut self) -> iced::Task<Message> {
+        if self.user.is_none() {
+            return iced::Task::none();
+        }
+        let seq = self.your_name.begin_load();
+        let client = self.client.clone();
+        iced::Task::perform(
+            async move { client.get_user().await.map_err(|_| ()) },
+            move |res| {
+                Message::View(view::Message::ConnectAccount(
+                    ConnectAccountMessage::YourName(YourNameMessage::Loaded(res, seq)),
+                ))
+            },
         )
+    }
+
+    /// Whether `profile` is the signed-in account's. A result for another
+    /// account is never applied to this one.
+    fn is_current_profile(&self, profile: &User) -> bool {
+        self.user.as_ref().is_some_and(|u| u.id == profile.id)
+    }
+
+    fn update_your_name(&mut self, msg: YourNameMessage) -> iced::Task<Message> {
+        match msg {
+            YourNameMessage::Edited(value) => self.your_name.edit(value),
+            YourNameMessage::Save => {
+                if self.user.is_none() || !matches!(self.step, ConnectFlowStep::Dashboard) {
+                    return iced::Task::none();
+                }
+                let Some((name, seq)) = self.your_name.begin_save() else {
+                    return iced::Task::none();
+                };
+                let client = self.client.clone();
+                return iced::Task::perform(
+                    async move {
+                        client
+                            .update_display_name(&name)
+                            .await
+                            .map_err(|e| save_failure(&e))
+                    },
+                    move |res| {
+                        Message::View(view::Message::ConnectAccount(
+                            ConnectAccountMessage::YourName(YourNameMessage::Saved(res, seq)),
+                        ))
+                    },
+                );
+            }
+            YourNameMessage::Loaded(result, seq) => {
+                let name = match result {
+                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile.display_name),
+                    _ => Err(()),
+                };
+                self.your_name.loaded(name, seq);
+            }
+            YourNameMessage::Saved(result, seq) => {
+                let result = match result {
+                    Ok(profile) if self.is_current_profile(&profile) => Ok(profile.display_name),
+                    Ok(_) => Err(YourNameFailure::Other),
+                    Err(failure) => Err(failure),
+                };
+                if let Some(YourNameFailure::SessionEnded) =
+                    self.your_name.save_finished(result, seq)
+                {
+                    log::warn!("[CONNECT] your name: session rejected; signing out");
+                    let logout = self.update_message(ConnectAccountMessage::LogOut);
+                    return iced::Task::batch([
+                        iced::Task::done(Message::ConnectSignedOutBy(
+                            crate::app::SignedOutBy::SessionEnded,
+                        )),
+                        logout,
+                    ]);
+                }
+            }
+        }
+        iced::Task::none()
+    }
+
+    /// The profile read for Account › Your name that an interactive sign-in
+    /// asked for (`your_name_read_pending`), performed once, as that sign-in
+    /// reaches the Dashboard.
+    fn your_name_after_sign_in(&mut self) -> iced::Task<Message> {
+        if std::mem::take(&mut self.your_name_read_pending) {
+            self.load_your_name()
+        } else {
+            iced::Task::none()
+        }
     }
 
     /// Plan entitlement is account-level eligibility only. It does not prove
@@ -2233,6 +2339,7 @@ impl ConnectAccountPanel {
         if !new_login {
             return loaded;
         }
+        self.your_name_read_pending = true;
         iced::Task::batch([
             loaded,
             iced::Task::done(Message::InAppConnectLoginCompleted {
@@ -2419,6 +2526,7 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::Duress(m) => self.update_duress(m),
             ConnectAccountMessage::DuressContacts(m) => self.update_duress_contacts(m),
             ConnectAccountMessage::DeleteAccount(m) => self.update_delete_account(m),
+            ConnectAccountMessage::YourName(m) => self.update_your_name(m),
         }
     }
 
@@ -3526,6 +3634,9 @@ impl ConnectAccountPanel {
         if self.user.as_ref().is_some_and(|u| u.id != user.id) {
             self.two_factor.reset();
             self.delete_account.reset();
+            // The name on screen was the other account's. A read asked for by
+            // this sign-in stays pending.
+            self.your_name.reset();
             self.backup_codes_notice = None;
         }
         self.user = Some(user);
@@ -5148,8 +5259,12 @@ impl ConnectAccountPanel {
         self.unverified = None;
         // Plan & billing opened while the session was still
         // being checked loaded nothing; load its history now,
-        // on every return path below.
-        let billing = self.billing_history_if_open();
+        // on every return path below. With it goes the profile read a
+        // sign-in asked for, for the Account section's Your name field.
+        let billing = iced::Task::batch([
+            self.billing_history_if_open(),
+            self.your_name_after_sign_in(),
+        ]);
         // Cache the fetched state before any early return, so the
         // Duress tab reflects the enabled state on its first paint
         // rather than briefly showing enrollment CTAs.
@@ -5857,6 +5972,8 @@ impl ConnectAccountPanel {
         self.contacts_state.clear();
         self.two_factor.reset();
         self.delete_account.reset();
+        self.your_name.reset();
+        self.your_name_read_pending = false;
         self.backup_codes_notice = None;
         self.signing_in_with_authenticator = false;
         self.duress_contacts.clear();
@@ -6294,7 +6411,8 @@ impl ConnectAccountPanel {
                 self.signed_out_by = None;
                 self.unverified = None;
                 self.error = None;
-                return self.billing_history_if_open();
+                let billing = self.billing_history_if_open();
+                return iced::Task::batch([billing, self.your_name_after_sign_in()]);
             }
 
             // ── Enrollment wizard (Phases 2 & 8) ──
@@ -9988,6 +10106,7 @@ mod add_to_cube_tests {
                 id: user_id,
                 email: email.to_string(),
                 email_verified: Some(true),
+                display_name: None,
             }),
             created_at: "2026-04-20T00:00:00Z".to_string(),
         }
@@ -10786,6 +10905,7 @@ mod plan_lifecycle_tests {
                     id: 1,
                     email: "founder@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 },
                 plan: None,
                 epoch: 0,
@@ -10876,6 +10996,7 @@ mod plan_lifecycle_tests {
             id: 1,
             email: "founder@example.com".into(),
             email_verified: Some(true),
+            display_name: None,
         };
         let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
             user,
@@ -11093,6 +11214,7 @@ mod plan_lifecycle_tests {
                 id: 2,
                 email: "next@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
             plan: None,
             epoch: 0,
@@ -11135,6 +11257,7 @@ mod plan_lifecycle_tests {
                     id: 2,
                     email: "next@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 },
             },
             epoch: 0,
@@ -11166,6 +11289,7 @@ mod plan_lifecycle_tests {
                 id: 2,
                 email: "next@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
             plan: None,
             epoch: 0,
@@ -11207,6 +11331,7 @@ mod plan_lifecycle_tests {
                         id: 2,
                         email: "next@example.invalid".into(),
                         email_verified: Some(true),
+                        display_name: None,
                     },
                 },
                 epoch,
@@ -11221,6 +11346,7 @@ mod plan_lifecycle_tests {
                 id: 2,
                 email: "next@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
             plan: None,
             epoch,
@@ -11460,6 +11586,7 @@ mod plan_lifecycle_tests {
             id: 2,
             email: "replacement@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         panel.plan = Some(duress_entitled_plan());
         panel.features = Some(features_with_duress(Some(true)));
@@ -12753,6 +12880,7 @@ mod plan_lifecycle_tests {
                 id: 7,
                 email: "founder@example.com".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             let gen = panel.session_generation;
             let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
@@ -13454,6 +13582,7 @@ mod retry_card_tests {
                 id: 1,
                 email: "stale@example.com".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
             0,
         ));
@@ -13586,6 +13715,7 @@ mod admitted_session_tests {
                 id: 1,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         }
     }
@@ -13764,6 +13894,7 @@ mod admitted_session_tests {
                 id: 1,
                 email: "old@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             }),
             generation,
             epoch: 0,
@@ -14155,6 +14286,7 @@ mod unverified_session_tests {
                     id: 7,
                     email: email.into(),
                     email_verified: Some(true),
+                    display_name: None,
                 },
             },
         };
@@ -14337,6 +14469,7 @@ mod two_factor_tests {
                 id: 1,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         }
     }
@@ -15038,6 +15171,7 @@ mod delete_account_panel_tests {
             id: 1,
             email: "synthetic@example.test".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         panel
     }
@@ -15192,5 +15326,423 @@ mod delete_account_panel_tests {
         delete(&mut panel, DeleteAccountMessage::Open);
         drop(panel.reload_overview());
         assert!(!panel.delete_account.open);
+    }
+}
+
+#[cfg(test)]
+mod your_name_panel_tests {
+    use super::*;
+    use crate::app::state::connect::your_name::YourNameNotice;
+    use httpmock::{Method as MockMethod, MockServer};
+    use serde_json::json;
+
+    const EMAIL: &str = "ama@example.test";
+
+    fn user(display_name: Option<&str>) -> User {
+        User {
+            id: 7,
+            email: EMAIL.into(),
+            email_verified: Some(true),
+            display_name: display_name.map(str::to_string),
+        }
+    }
+
+    /// A signed-in panel as it is right after sign-in or a relaunch: the
+    /// sign-in reply carries no display name.
+    fn signed_in(server: &MockServer) -> ConnectAccountPanel {
+        let mut panel = ConnectAccountPanel::new();
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("name-jwt");
+        panel.client = client;
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.user = Some(user(None));
+        panel
+    }
+
+    fn profile(display_name: Option<&str>) -> serde_json::Value {
+        let mut body = json!({"id": 7, "email": EMAIL, "emailVerified": true});
+        if let Some(name) = display_name {
+            body["displayName"] = json!(name);
+        }
+        body
+    }
+
+    fn name(panel: &mut ConnectAccountPanel, m: YourNameMessage) -> iced::Task<Message> {
+        panel.update_message(ConnectAccountMessage::YourName(m))
+    }
+
+    /// Runs a task's requests and returns the Your name results among its
+    /// messages.
+    fn your_name_results(task: iced::Task<Message>) -> Vec<YourNameMessage> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(Message::View(
+                                view::Message::ConnectAccount(ConnectAccountMessage::YourName(m)),
+                            )) => Some(m),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            })
+    }
+
+    /// Opens the Account section and applies the profile read it starts.
+    fn open_account(panel: &mut ConnectAccountPanel) {
+        let results = your_name_results(panel.reload_overview());
+        assert_eq!(results.len(), 1, "one profile read per open");
+        for m in results {
+            drop(name(panel, m));
+        }
+    }
+
+    fn save(panel: &mut ConnectAccountPanel, typed: &str) {
+        drop(name(panel, YourNameMessage::Edited(typed.into())));
+        let results = your_name_results(name(panel, YourNameMessage::Save));
+        assert_eq!(results.len(), 1, "{typed:?} should be sent");
+        for m in results {
+            drop(name(panel, m));
+        }
+    }
+
+    #[test]
+    fn saves_a_name_and_a_relaunch_shows_it() {
+        let server = MockServer::start();
+        let mut no_name = server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt");
+            then.status(200).json_body(profile(Some("")));
+        });
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt")
+                .json_body(json!({"displayName": "Ama Adeyemi"}));
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+
+        let mut panel = signed_in(&server);
+        assert!(panel.your_name.saved.is_none(), "hidden until read");
+        open_account(&mut panel);
+        assert_eq!(panel.your_name.saved.as_deref(), Some(""));
+
+        save(&mut panel, "  Ama   Adeyemi ");
+        put.assert();
+        assert_eq!(panel.your_name.saved.as_deref(), Some("Ama Adeyemi"));
+        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+        assert_eq!(panel.your_name.notice, Some(YourNameNotice::Saved));
+        assert_eq!(panel.user.as_ref().unwrap().email, EMAIL);
+
+        // Relaunch: a new panel holds nothing; the server now has the name.
+        no_name.delete();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let mut relaunched = signed_in(&server);
+        assert!(relaunched.your_name.saved.is_none());
+        open_account(&mut relaunched);
+        assert_eq!(relaunched.your_name.value(), "Ama Adeyemi");
+        assert!(relaunched.your_name.notice.is_none());
+    }
+
+    /// Signing in from the sheet: the sheet shows Account the moment the
+    /// sign-in is admitted, with no navigation to trigger a load, whichever
+    /// section's sign-in page the user started from. The profile is read at
+    /// that moment, once.
+    #[test]
+    fn an_interactive_sign_in_reads_the_profile_when_it_is_admitted() {
+        use crate::services::coincube::{DuressCheckOutcome, DuressState, LoginResponse};
+        let server = MockServer::start();
+        let get = server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/user")
+                .header("authorization", "Bearer name-jwt");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let admit = |panel: &mut ConnectAccountPanel| {
+            let gen = panel.session_generation;
+            let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
+                DuressCheckOutcome::Ok(DuressState {
+                    active: false,
+                    unlock_at: None,
+                    enrolled: false,
+                    this_device_registered: true,
+                }),
+                gen,
+                0,
+            ));
+            assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
+            your_name_results(task)
+        };
+
+        // Started from another section's sign-in page: Account is what the
+        // sheet shows once signed in, while `active_sub` still names the
+        // section the user came from.
+        for sub in [ConnectSubMenu::Overview, ConnectSubMenu::PlanBilling] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.client = CoincubeClient::for_test(server.base_url());
+            panel.active_sub = sub;
+            panel.auth_commit_pending = true;
+            // The sign-in reply carries no display name.
+            drop(
+                panel.update_message(ConnectAccountMessage::AuthCommitAccepted {
+                    login: LoginResponse {
+                        requires_2fa: false,
+                        token: "name-jwt".into(),
+                        refresh_token: "name-refresh".into(),
+                        user: user(None),
+                    },
+                    epoch: 0,
+                    refreshed: false,
+                }),
+            );
+            drop(panel.update_message(ConnectAccountMessage::SessionLoaded {
+                user: user(None),
+                plan: None,
+                epoch: 0,
+            }));
+            assert!(panel.your_name.saved.is_none());
+            let before = get.hits();
+            let results = admit(&mut panel);
+            assert_eq!(results.len(), 1, "the profile is read on admission");
+            for m in results {
+                drop(name(&mut panel, m));
+            }
+            assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+            assert_eq!(get.hits(), before + 1);
+
+            // Admitted again without a new sign-in (a retried check): no
+            // second read.
+            panel.step = ConnectFlowStep::CheckingDuress {
+                status: DuressGateStatus::Checking,
+            };
+            assert!(admit(&mut panel).is_empty());
+            assert_eq!(get.hits(), before + 1);
+        }
+    }
+
+    /// A session that was not signed in to just now (restored at launch,
+    /// refreshed, or shared by another tab) makes no profile request of its
+    /// own on admission. Its Account section reads the profile when opened.
+    #[test]
+    fn a_restored_or_shared_session_reads_no_profile_on_admission() {
+        use crate::services::coincube::{DuressCheckOutcome, DuressState};
+        let server = MockServer::start();
+        let get = server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let mut panel = signed_in(&server);
+        panel.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Checking,
+        };
+        let gen = panel.session_generation;
+        let task = panel.update_message(ConnectAccountMessage::DuressStateChecked(
+            DuressCheckOutcome::Ok(DuressState {
+                active: false,
+                unlock_at: None,
+                enrolled: false,
+                this_device_registered: true,
+            }),
+            gen,
+            0,
+        ));
+        assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
+        assert!(your_name_results(task).is_empty());
+        get.assert_hits(0);
+        // Opening the Account section is what reads it.
+        open_account(&mut panel);
+        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+        get.assert_hits(1);
+    }
+
+    #[test]
+    fn a_blank_field_clears_the_name() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("Ama Adeyemi")));
+        });
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .path("/api/v1/user")
+                .json_body(json!({"displayName": ""}));
+            then.status(200).json_body(profile(Some("")));
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        assert_eq!(panel.your_name.value(), "Ama Adeyemi");
+        save(&mut panel, "  ");
+        put.assert();
+        assert_eq!(panel.your_name.saved.as_deref(), Some(""));
+        assert_eq!(panel.your_name.notice, Some(YourNameNotice::Removed));
+    }
+
+    #[test]
+    fn a_server_without_display_names_leaves_the_account_section_as_it_was() {
+        let server = MockServer::start();
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        assert!(panel.your_name.saved.is_none(), "no field to show");
+        // Nothing can be typed or sent while there is no field.
+        drop(name(&mut panel, YourNameMessage::Edited("Ama".into())));
+        assert!(your_name_results(name(&mut panel, YourNameMessage::Save)).is_empty());
+        put.assert_hits(0);
+        assert!(panel.error.is_none());
+        assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
+    }
+
+    #[test]
+    fn a_server_that_drops_the_field_on_save_keeps_the_screen_working() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("")));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(None));
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        save(&mut panel, "Ama");
+        assert_eq!(panel.your_name.notice, Some(YourNameNotice::NotSaved));
+        assert_eq!(panel.your_name.saved.as_deref(), Some(""));
+        assert_eq!(panel.your_name.value(), "Ama", "what was typed is kept");
+        assert!(panel.user.is_some());
+        assert!(panel.error.is_none());
+    }
+
+    #[test]
+    fn a_failed_profile_read_is_quiet() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(500).body("boom");
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        assert!(panel.your_name.saved.is_none());
+        assert!(panel.error.is_none(), "no error card for an optional field");
+        assert!(panel.user.is_some(), "and the session is untouched");
+    }
+
+    #[test]
+    fn the_api_refusing_a_name_is_shown_beside_the_field() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("")));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(400).body(
+                r#"{"success":false,"error":{"code":"BAD_REQUEST","message":"Display name contains characters that are not allowed"}}"#,
+            );
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        // Passes this app's checks; the API has the last word.
+        save(&mut panel, "Ama");
+        assert_eq!(panel.your_name.notice, Some(YourNameNotice::NotAllowed));
+        assert_eq!(panel.your_name.value(), "Ama");
+        assert!(panel.error.is_none());
+        assert!(panel.user.is_some());
+    }
+
+    #[test]
+    fn a_name_this_app_refuses_is_never_sent() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("")));
+        });
+        let put = server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("x")));
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        drop(name(
+            &mut panel,
+            YourNameMessage::Edited("Ama <ama@example.test>".into()),
+        ));
+        assert!(your_name_results(name(&mut panel, YourNameMessage::Save)).is_empty());
+        put.assert_hits(0);
+        assert_eq!(panel.your_name.notice, Some(YourNameNotice::NotAllowed));
+    }
+
+    #[test]
+    fn an_ended_session_signs_out() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(MockMethod::GET).path("/api/v1/user");
+            then.status(200).json_body(profile(Some("")));
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT).path("/api/v1/user");
+            then.status(401).body("");
+        });
+        let mut panel = signed_in(&server);
+        open_account(&mut panel);
+        save(&mut panel, "Ama");
+        assert!(panel.user.is_none());
+        assert!(matches!(panel.step, ConnectFlowStep::Login { .. }));
+        assert!(panel.your_name.saved.is_none());
+    }
+
+    #[test]
+    fn another_accounts_profile_is_never_applied() {
+        let server = MockServer::start();
+        let mut panel = signed_in(&server);
+        let seq = panel.your_name.begin_load();
+        let mut other = user(Some("Someone Else"));
+        other.id = 8;
+        drop(name(&mut panel, YourNameMessage::Loaded(Ok(other), seq)));
+        assert!(panel.your_name.saved.is_none());
+    }
+
+    #[test]
+    fn signing_out_forgets_the_name_and_drops_results_in_flight() {
+        let server = MockServer::start();
+        let mut panel = signed_in(&server);
+        let seq = panel.your_name.begin_load();
+        drop(name(
+            &mut panel,
+            YourNameMessage::Loaded(Ok(user(Some("Ama Adeyemi"))), seq),
+        ));
+        drop(name(&mut panel, YourNameMessage::Edited("Kofi".into())));
+        let sent = panel.your_name.begin_save().unwrap().1;
+        drop(panel.update_message(ConnectAccountMessage::LogOut));
+        assert!(panel.your_name.saved.is_none());
+        assert!(panel.your_name.draft.is_none());
+        // The save's reply arrives after sign-out, and after another sign-in.
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.user = Some(user(None));
+        drop(name(
+            &mut panel,
+            YourNameMessage::Saved(Ok(user(Some("Kofi"))), sent),
+        ));
+        assert!(panel.your_name.saved.is_none());
     }
 }

@@ -1310,6 +1310,7 @@ mod tests {
             notified: (0..n)
                 .map(|i| RecoveryRecipient {
                     email: format!("kh{}@example.com", i),
+                    display_name: None,
                     role: VaultMemberRole::Keyholder,
                 })
                 .collect(),

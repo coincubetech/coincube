@@ -106,6 +106,7 @@ fn seed_bitcoin(root: &std::path::Path, saved_token: &str) -> BitcoinState {
             id: 7,
             email: EMAIL.into(),
             email_verified: Some(true),
+            display_name: None,
         },
     };
     state::connect::write_connect_secret(
@@ -523,6 +524,7 @@ fn a_connect_served_cube_still_refuses_every_login_message() {
                 id: 7,
                 email: EMAIL.into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         };
         for (message, answers_commit) in [
@@ -858,6 +860,7 @@ fn promoted_cube(root: &std::path::Path) -> App {
         id: 7,
         email: EMAIL.into(),
         email_verified: Some(true),
+        display_name: None,
     });
     app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
     app.fork_connect_client = Some(client);
@@ -1088,6 +1091,7 @@ fn a_remote_lock_from_a_connect_served_stream_names_the_cubes_account() {
                 id: 5,
                 email: "other@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         };
         state::connect::write_connect_secret(

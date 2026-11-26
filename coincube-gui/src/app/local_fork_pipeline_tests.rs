@@ -101,6 +101,7 @@ fn login() -> crate::services::coincube::LoginResponse {
             id: 11,
             email: EMAIL.into(),
             email_verified: Some(true),
+            display_name: None,
         },
     }
 }
@@ -590,6 +591,7 @@ fn a_local_cube_saves_its_opening_session_only_with_its_refresh_token() {
             id: 11,
             email: EMAIL.into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
         // The saved sign-in is another session: a later one of the account.

@@ -11248,6 +11248,7 @@ pub(crate) mod tests {
             id: 7,
             email: "synthetic@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
         app.panels.connect.account.bitcoin_blake2b_opt_in = true;
@@ -11749,6 +11750,7 @@ pub(crate) mod tests {
                                 id: 77,
                                 email: "fixture@example.invalid".into(),
                                 email_verified: Some(true),
+                                display_name: None,
                             },
                         },
                         epoch,
@@ -12179,6 +12181,7 @@ pub(crate) mod tests {
                 id: 7,
                 email: "synthetic@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
             app.panels
@@ -12465,6 +12468,7 @@ pub(crate) mod tests {
                     id: 77,
                     email: "fixture@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 },
             })
             .unwrap(),
@@ -12486,6 +12490,7 @@ pub(crate) mod tests {
                     id: 77,
                     email: "fixture@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 }),
                 generation,
                 epoch,
@@ -12572,6 +12577,7 @@ pub(crate) mod tests {
                 id: 77,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         };
         let defers = |messages: &[Message]| {
@@ -13109,6 +13115,7 @@ pub(crate) mod tests {
                 id: 7,
                 email: "synthetic@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         };
         assert!(app.matches_admitted_connect_session(&login));
@@ -13649,6 +13656,7 @@ pub(crate) mod tests {
                 id: 8,
                 email: "replacement@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             },
         };
         let saved_before =
@@ -15715,6 +15723,7 @@ pub(crate) mod shell_tests {
                     id: 99,
                     email: "second@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 });
                 let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
                 let login = crate::services::coincube::LoginResponse {
@@ -15725,6 +15734,7 @@ pub(crate) mod shell_tests {
                         id: 7,
                         email: "first@example.invalid".into(),
                         email_verified: Some(true),
+                        display_name: None,
                     },
                 };
                 let task = gui.reviewer_account(
@@ -16571,6 +16581,7 @@ pub(crate) mod shell_tests {
             id: 7,
             email: "shell@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app.panels.connect.account.step = state::connect::ConnectFlowStep::Dashboard;
         app.cache.connect_authenticated = true;
@@ -16661,6 +16672,7 @@ pub(crate) mod shell_tests {
                         id: 7,
                         email: "fixture@example.invalid".into(),
                         email_verified: Some(true),
+                        display_name: None,
                     });
                     sibling.panels.connect.account.step =
                         state::connect::account::ConnectFlowStep::Dashboard;
@@ -17281,6 +17293,7 @@ pub(crate) mod shell_tests {
             id: 7,
             email: "7@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app.panels.connect.account.step =
             crate::app::state::connect::account::ConnectFlowStep::Dashboard;
@@ -17386,6 +17399,7 @@ pub(crate) mod shell_tests {
                 id,
                 email: format!("{id}@example.invalid"),
                 email_verified: Some(true),
+                display_name: None,
             });
             app.panels.connect.account.step =
                 crate::app::state::connect::account::ConnectFlowStep::Dashboard;

@@ -913,6 +913,7 @@ mod tests {
                 id: 7,
                 email: "user@example.com".to_string(),
                 email_verified: Some(true),
+                display_name: None,
             },
         }
     }

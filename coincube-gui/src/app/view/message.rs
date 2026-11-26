@@ -1356,6 +1356,30 @@ pub enum DeleteAccountMessage {
     ),
 }
 
+/// Why saving the account's display name failed.
+#[derive(Debug, Clone)]
+pub enum YourNameFailure {
+    /// 401/403: the session ended; handled like any other ended session.
+    SessionEnded,
+    /// The API refused the name.
+    Refused(crate::services::coincube::display_name::Refusal),
+    Other,
+}
+
+/// Connect sheet › Account › Your name. Results carry the request token from
+/// `YourNameState`; stale ones are dropped.
+#[derive(Debug, Clone)]
+pub enum YourNameMessage {
+    Edited(String),
+    Save,
+    /// The profile read that fills the field. A failed read is quiet.
+    Loaded(Result<crate::services::coincube::User, ()>, u64),
+    Saved(
+        Result<crate::services::coincube::User, YourNameFailure>,
+        u64,
+    ),
+}
+
 /// Text a user typed that is a secret (an authenticator or backup code). Its
 /// `Debug` is redacted, because messages are formatted into logs.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -1563,6 +1587,7 @@ pub enum ConnectAccountMessage {
     /// The error card's "Try again" was pressed.
     Retry(RetryAction),
     DeleteAccount(DeleteAccountMessage),
+    YourName(YourNameMessage),
     // --- Plan & Billing ---
     /// Focus a Tenshu control (segmented choice, plan row, Copy button)
     /// after pointer activation, as `Action` requires.

@@ -19,7 +19,7 @@ use crate::{
         state::connect::ConnectCubePanel,
         view::{ConnectCubeMembersMessage, ConnectCubeMessage},
     },
-    services::coincube::{member_joined_after_vault, CubeInviteSummary, CubeMember},
+    services::coincube::{display_name, member_joined_after_vault, CubeInviteSummary, CubeMember},
 };
 
 use super::{card_style, format_date};
@@ -322,7 +322,14 @@ fn member_card<'a>(
     };
 
     let joined = format_date(&member.joined_at);
-    let mut info = Column::new().push(text::p1_regular(email.as_str()).style(theme::text::primary));
+    // The member's name, when they set one, above their email. The email is
+    // always shown: this row carries the Remove action.
+    let mut info = match display_name::shown(member.user.display_name.as_deref()) {
+        Some(name) => Column::new()
+            .push(text::p1_regular(name).style(theme::text::primary))
+            .push(text::p2_regular(email.as_str()).style(theme::text::secondary)),
+        None => Column::new().push(text::p1_regular(email.as_str()).style(theme::text::primary)),
+    };
     if let Some(badge) = badge_row {
         info = info.push(badge);
     }
@@ -611,6 +618,7 @@ mod tests {
             user_id: 4,
             user: CubeMemberUser {
                 email: "morgan.with-a-long-household-address@family-office.example.test".into(),
+                display_name: None,
             },
             joined_at: "2026-10-18T00:00:00Z".into(),
         };
@@ -642,6 +650,31 @@ mod tests {
                 }
             }
         }
+        // A member who set a name: the name leads and the email stays on the
+        // row, which carries the Remove action. No name: the email alone.
+        let mut named = member.clone();
+        named.user.email = "morgan@example.test".into();
+        named.user.display_name = Some("Morgan Example".into());
+        let row = capture::inspect(
+            "members-named-row",
+            member_card(&named, None, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(row.contains("Morgan Example"));
+        assert!(row.contains("morgan@example.test"));
+        assert!(row.has_focus(remove_action_id(named.id)));
+        named.user.display_name = Some(String::new());
+        let row = capture::inspect(
+            "members-unnamed-row",
+            member_card(&named, None, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(row.contains("morgan@example.test"));
+        assert!(!row.contains("Morgan Example"));
         let keyboard = capture::activate(
             synthetic_rows(&panel, &invite, &member),
             remove_action_id(member.id),

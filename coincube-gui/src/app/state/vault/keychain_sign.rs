@@ -106,7 +106,7 @@ pub struct PendingSession {
     /// the payload AAD in both directions, so it's needed again to open the
     /// signature envelope that comes back. Empty until a session is created.
     pub request_id: String,
-    /// Display label — `name (owner_email)` or `name (you)`.
+    /// Display label: see [`signer_label`].
     pub label: String,
     /// Latest known session status. Driven by `SessionEvent`s on the
     /// realtime stream; `Pending` between session-create and the first
@@ -1019,20 +1019,15 @@ impl KeychainSignModal {
                     key_id,
                     name,
                     owner_email,
+                    owner_display_name,
                     replay_protection,
                     ..
-                } => {
-                    let suffix = owner_email
-                        .as_deref()
-                        .map(|e| format!(" ({})", e))
-                        .unwrap_or_else(|| " (you)".to_string());
-                    (
-                        *fingerprint,
-                        *key_id,
-                        format!("{}{}", name, suffix),
-                        *replay_protection,
-                    )
-                }
+                } => (
+                    *fingerprint,
+                    *key_id,
+                    signer_label(name, owner_email.as_deref(), owner_display_name.as_deref()),
+                    *replay_protection,
+                ),
                 _ => unreachable!(),
             };
             let outdated = self.wallet.chain.is_blake2b() && !replay_protection.is_capable();
@@ -2637,6 +2632,68 @@ impl KeychainSignModal {
     }
 }
 
+/// The picker row for a Mobile signer: `Key name (owner@example.com)` for a
+/// contact's key, `Key name (owner@example.com · Owner Name)` when the contact
+/// set a display name, and `Key name (you)` for the user's own key.
+///
+/// A contact is always named by email, and the email comes before the name:
+/// the name is the contact's own label and must neither stand in for the
+/// address nor be able to reorder it (see `display_name::one_line`).
+fn signer_label(
+    key_name: &str,
+    owner_email: Option<&str>,
+    owner_display_name: Option<&str>,
+) -> String {
+    let owner = match owner_email {
+        Some(email) => crate::services::coincube::display_name::one_line(owner_display_name, email),
+        None => "you".to_string(),
+    };
+    format!("{} ({})", key_name, owner)
+}
+
+#[cfg(test)]
+mod signer_label_tests {
+    use super::signer_label;
+
+    #[test]
+    fn a_contact_is_named_by_email_with_their_name_after_it() {
+        assert_eq!(
+            signer_label("Kofi's phone", Some("kofi@example.com"), None),
+            "Kofi's phone (kofi@example.com)"
+        );
+        assert_eq!(
+            signer_label(
+                "Kofi's phone",
+                Some("kofi@example.com"),
+                Some("Kofi Adeyemi")
+            ),
+            "Kofi's phone (kofi@example.com · Kofi Adeyemi)"
+        );
+        // No name set, or one this app refuses: the email alone.
+        for name in ["", "boss@bank.example"] {
+            assert_eq!(
+                signer_label("Kofi's phone", Some("kofi@example.com"), Some(name)),
+                "Kofi's phone (kofi@example.com)"
+            );
+        }
+        assert_eq!(signer_label("My phone", None, None), "My phone (you)");
+        // A name is never shown for the user's own key.
+        assert_eq!(
+            signer_label("My phone", None, Some("Ama Adeyemi")),
+            "My phone (you)"
+        );
+    }
+
+    /// The reviewed failure: a Hebrew name in front of an address starting
+    /// with a digit would display with that digit moved to the name's side.
+    /// The address now precedes the name, whole.
+    #[test]
+    fn a_right_to_left_name_cannot_reorder_the_address() {
+        let label = signer_label("Phone", Some("1abc@example.com"), Some("א"));
+        assert_eq!(label, "Phone (1abc@example.com · א)");
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2998,6 +3055,7 @@ pub(crate) mod tests {
                     owner_user_id: 7,
                     name: "Fixture".into(),
                     owner_email: None,
+                    owner_display_name: None,
                     contact_id: None,
                     replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
                 },
@@ -3007,6 +3065,7 @@ pub(crate) mod tests {
                     owner_user_id: 8,
                     name: "Unresolved fixture".into(),
                     owner_email: None,
+                    owner_display_name: None,
                     contact_id: None,
                     replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
                 },

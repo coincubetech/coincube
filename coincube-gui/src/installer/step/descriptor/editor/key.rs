@@ -70,6 +70,26 @@ pub struct ResolvedCubeKeys {
     pub server_cube_id: Option<u64>,
 }
 
+/// The heading over a contact's keys in the picker: their email, with their
+/// display name after it when they set one. The email is always shown and
+/// comes first (see `display_name::one_line`).
+fn contact_heading(owner: &KeychainKeyOwner) -> String {
+    match owner {
+        // No "[Keyholder]" suffix: the contact row's role is not a
+        // per-cube fact (see `on_fetch_cube_keys`), so labelling
+        // every contact key with it was misleading.
+        KeychainKeyOwner::Contact {
+            contact_email,
+            contact_display_name,
+            ..
+        } => crate::services::coincube::display_name::one_line(
+            contact_display_name.as_deref(),
+            contact_email,
+        ),
+        _ => "Contact".to_string(),
+    }
+}
+
 /// Splits a Cube's key list into the viewer's own keys and its contacts' keys,
 /// keeping only the keys listed on the Cube's `chain`
 /// ([`CubeKeyRaw::listed_on_chain`]).
@@ -118,12 +138,18 @@ fn resolve_cube_keys(
                     // than failing.
                     "unknown contact".to_string()
                 };
+                // The name comes from the contact row matched to this key's
+                // owner, so it describes the same person as the email.
+                let contact_display_name = contact.contact_user.as_ref().and_then(|user| {
+                    crate::services::coincube::display_name::shown(user.display_name.as_deref())
+                });
                 contact_keys.push(ResolvedCubeKey {
                     raw: key,
                     owner: KeychainKeyOwner::Contact {
                         primary_owner_id: owner_id,
                         contact_id: contact.id,
                         contact_email,
+                        contact_display_name,
                     },
                 });
             }
@@ -1443,14 +1469,7 @@ impl SelectKeySource {
         }
         for keys in seen_contacts.values() {
             if let Some(first) = keys.first() {
-                let contact_label = match &first.owner {
-                    // No "[Keyholder]" suffix: the contact row's role is not a
-                    // per-cube fact (see `on_fetch_cube_keys`), so labelling
-                    // every contact key with it was misleading.
-                    KeychainKeyOwner::Contact { contact_email, .. } => contact_email.clone(),
-                    _ => "Contact".to_string(),
-                };
-                col = col.push(p1_bold(contact_label));
+                col = col.push(p1_bold(contact_heading(&first.owner)));
                 for rk in keys {
                     col = col.push(self.view_keychain_key_entry(rk, false));
                 }
@@ -3890,9 +3909,45 @@ mod tests {
                 id: contact_user_id,
                 email: format!("contact{contact_user_id}@example.com"),
                 email_verified: None,
+                display_name: None,
             }),
             created_at: "2026-07-20T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn a_contacts_display_name_rides_with_their_key_as_a_label() {
+        let mut contact = contact_with_role(11, 42, ContactRole::Keyholder);
+        contact.contact_user.as_mut().unwrap().display_name = Some("Olu Example".into());
+        let resolved = resolve_cube_keys(
+            vec![contact_owned_raw_key(5, 42)],
+            &[contact],
+            7,
+            crate::chain::ChainId::Signet,
+        );
+        assert_eq!(
+            resolved.contact_keys[0].owner,
+            KeychainKeyOwner::Contact {
+                primary_owner_id: 42,
+                contact_id: 11,
+                contact_email: "owner42@example.com".to_string(),
+                contact_display_name: Some("Olu Example".to_string()),
+            }
+        );
+        // The picker heads that contact's keys with the email, then the name.
+        assert_eq!(
+            contact_heading(&resolved.contact_keys[0].owner),
+            "owner42@example.com · Olu Example"
+        );
+        let mut unnamed = resolved.contact_keys[0].owner.clone();
+        if let KeychainKeyOwner::Contact {
+            contact_display_name,
+            ..
+        } = &mut unnamed
+        {
+            *contact_display_name = None;
+        }
+        assert_eq!(contact_heading(&unnamed), "owner42@example.com");
     }
 
     #[test]
@@ -3930,6 +3985,7 @@ mod tests {
                     contact_id: 11,
                     // Server-supplied `ownerEmail` wins over the contact row.
                     contact_email: "owner42@example.com".to_string(),
+                    contact_display_name: None,
                 },
                 "{}: owner must resolve to the addressable contact id",
                 role

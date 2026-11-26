@@ -11368,6 +11368,7 @@ mod tests {
             id: 7,
             email: "founder@example.com".to_string(),
             email_verified: Some(true),
+            display_name: None,
         });
         home
     }
@@ -11382,6 +11383,7 @@ mod tests {
             id: 7,
             email: "founder@example.com".to_string(),
             email_verified: Some(true),
+            display_name: None,
         });
         home.connect_account.features = Some(
             serde_json::from_value(serde_json::json!({
@@ -15976,6 +15978,7 @@ mod tests {
             id,
             email: format!("user{id}@example.com"),
             email_verified: Some(true),
+            display_name: None,
         };
         let dir = tmp_datadir("switch-drops-open");
         let mut home = signed_in_home_with_datadir(&dir);
@@ -16102,6 +16105,7 @@ mod tests {
             id: 7,
             email: "founder@example.com".to_string(),
             email_verified: Some(true),
+            display_name: None,
         });
         home
     }
@@ -16274,6 +16278,7 @@ mod tests {
                 id: 7,
                 email: "founder@example.com".to_string(),
                 email_verified: Some(true),
+                display_name: None,
             });
             let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
             let [Message::CubeCreated(Ok(cube))] = out.as_slice() else {

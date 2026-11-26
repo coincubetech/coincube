@@ -548,6 +548,7 @@ mod tests {
                     id: 7,
                     email: "fixture@example.invalid".into(),
                     email_verified: Some(true),
+                    display_name: None,
                 });
                 home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
                 drop(gui.update(Message::Pane(
@@ -642,6 +643,7 @@ mod tests {
             id,
             email: "fixture@example.invalid".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
     }
@@ -693,6 +695,7 @@ mod tests {
                 id,
                 email: "fixture@example.invalid".into(),
                 email_verified: Some(true),
+                display_name: None,
             });
             home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
         }

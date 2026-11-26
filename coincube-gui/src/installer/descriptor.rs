@@ -21,6 +21,9 @@ pub enum KeychainKeyOwner {
         primary_owner_id: u64,
         contact_id: u64,
         contact_email: String,
+        /// The contact's display name, when they set one. A label for the
+        /// picker heading, shown with `contact_email`; never an identity.
+        contact_display_name: Option<String>,
     },
 }
 

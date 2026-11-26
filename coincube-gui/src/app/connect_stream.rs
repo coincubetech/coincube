@@ -1390,6 +1390,7 @@ mod remote_duress_tests {
             id: 7,
             email: "b@example.com".into(),
             email_verified: Some(true),
+            display_name: None,
         });
         app
     }
