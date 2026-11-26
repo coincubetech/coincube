@@ -1998,9 +1998,15 @@ pub enum ContactsMessage {
     /// Contact detail cubes fetch failed — includes contact_id for stale guard.
     ContactCubesFailed(u64, String),
     // --- W12: cube multi-select on invite form ---
-    /// Available cubes loaded for the invite form (from `list_cubes`).
-    /// Carries `session_generation` for stale-response guarding.
-    InviteCubesAvailable(Vec<crate::app::state::connect::InviteCubeOption>, u64),
+    /// Available cubes loaded for the invite form (from `list_cubes`), or
+    /// why they could not be. Carries `session_generation` for
+    /// stale-response guarding. A failure is kept apart from an empty list
+    /// so the form never says "An invitation is for a Cube" because of a
+    /// network error.
+    InviteCubesAvailable(
+        Result<Vec<crate::app::state::connect::InviteCubeOption>, String>,
+        u64,
+    ),
     /// User toggled a cube checkbox in the invite form.
     ToggleInviteCube(u64),
     /// A cube id from the last submit was 403'd by the backend (W12).
