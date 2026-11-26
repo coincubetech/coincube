@@ -292,7 +292,7 @@ pub enum KeychainSignMessage {
     SignersResolved(Result<ResolveSignersResponse, OpError>),
     /// The background pass that seals each key's role to its phone finished
     /// (how many seals were stored). Nothing in signing waits on or reads it.
-    KeyRolesSealed(usize),
+    KeyRolesSealed(Option<usize>),
     /// Result of a single `CreateSigningSession` call, keyed by the
     /// fingerprint of the signer being addressed.
     SessionCreated(Fingerprint, Result<SigningSession, OpError>),
@@ -880,6 +880,11 @@ impl KeychainSignModal {
         ) else {
             return Task::none();
         };
+        // The check that stops signing stops this too: nothing is sealed to
+        // signers resolved for another network.
+        if check_session_network(self.wallet.chain, &resp.network, false).is_err() {
+            return Task::none();
+        }
         let targets: Vec<RoleTarget> = resp.targets.iter().map(RoleTarget::from).collect();
         if targets.is_empty() {
             return Task::none();
@@ -4558,5 +4563,61 @@ pub(crate) mod tests {
                 Message::KeychainSign(KeychainSignMessage::Persisted { result: Ok(()), .. })
             )));
         }
+    }
+
+    // ── Sealed key roles (Mobile V3 Phase 1, Desktop PR T2) ─────────────
+
+    fn role_seal_resolved(network: &str) -> ResolveSignersResponse {
+        ResolveSignersResponse {
+            network: network.into(),
+            unresolved: vec![],
+            targets: vec![SignerTarget {
+                key_fingerprint: "f5acc2fd".into(),
+                key_id: "7".into(),
+                capabilities: vec![],
+                transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
+                device_id: "34".into(),
+            }],
+        }
+    }
+
+    /// The pass that seals key roles runs beside signing, from `&self`, and
+    /// only for signers resolved for this Cube's network.
+    #[test]
+    fn the_key_role_pass_runs_only_for_this_cubes_network() {
+        let has_work = |task: Task<Message>| iced_runtime::task::into_stream(task).is_some();
+        let mut m = modal();
+        let chain = m.wallet.chain;
+        // Before classification there is no Vault to seal for.
+        assert!(!has_work(
+            m.seal_key_roles_task(&role_seal_resolved(chain.api_str()))
+        ));
+
+        m.classified = Some(classified_signers_fixture());
+        assert!(has_work(
+            m.seal_key_roles_task(&role_seal_resolved(chain.api_str()))
+        ));
+
+        // Signers resolved for another network, or for none, are not sealed
+        // to: the check that stops signing stops this too.
+        use crate::chain::ChainId;
+        let other = if chain == ChainId::Bitcoin {
+            ChainId::BitcoinBlake2b
+        } else {
+            ChainId::Bitcoin
+        };
+        assert!(!has_work(
+            m.seal_key_roles_task(&role_seal_resolved(other.api_str()))
+        ));
+        assert!(!has_work(m.seal_key_roles_task(&role_seal_resolved(""))));
+
+        // No phones resolved: nothing to do.
+        let mut none = role_seal_resolved(chain.api_str());
+        none.targets.clear();
+        assert!(!has_work(m.seal_key_roles_task(&none)));
+
+        // Building the pass changed nothing signing reads.
+        assert!(m.pending.is_empty());
+        assert!(m.error.is_none());
     }
 }

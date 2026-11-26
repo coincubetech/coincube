@@ -8,9 +8,16 @@
 //!
 //! ## What sealing gives, and what it does not
 //!
-//! Confidentiality only. Anyone who holds a phone's public transport key can
-//! seal to it, so a blob that opens proves nothing about who wrote it. The
-//! role is therefore a **label**: it must gate nothing, on either app.
+//! Confidentiality only, and only against a Connect that stores and relays
+//! honestly: its database, its logs and anyone reading them see ciphertext.
+//! The phone's key reaches this computer through Connect (`ResolveSigners`)
+//! and is not pinned, so a Connect that actively substitutes its own key can
+//! read what is sealed to it. That is the trust the signing rail already
+//! places in the same relayed key, not a new one.
+//!
+//! No authenticity either. Anyone who holds a phone's public transport key
+//! can seal to it, so a blob that opens proves nothing about who wrote it.
+//! The role is therefore a **label**: it must gate nothing, on either app.
 //!
 //! ## Construction
 //!

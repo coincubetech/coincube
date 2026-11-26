@@ -1020,9 +1020,14 @@ impl ConnectCubePanel {
                 }
             }
 
-            ConnectCubeMessage::KeyRolesSealed(_stored) => {
-                // Nothing to render, and no retry: a phone still without a
-                // sealed role gets one at the next Cube open or signing.
+            ConnectCubeMessage::KeyRolesSealed(stored) => {
+                // Nothing to render. A pass that could not finish reopens the
+                // latch so the next trigger tries again; it does not retry on
+                // its own, so a server without sealed roles costs one request
+                // per trigger and no loop.
+                if stored.is_none() {
+                    self.key_roles_seal_started = false;
+                }
             }
 
             ConnectCubeMessage::VaultMembersReconciled(_added) => {
@@ -3616,5 +3621,28 @@ mod tests {
         assert!(!panel.ln_check_missing_cube_id);
         assert!(panel.ln_username_available.is_none());
         assert_eq!(panel.ln_username_input, "founder");
+    }
+}
+
+/// Mobile V3 Phase 1, Desktop PR T2: the latch of the sealed-key-role pass.
+#[cfg(test)]
+mod key_role_latch_tests {
+    use super::*;
+
+    #[test]
+    fn a_pass_that_could_not_finish_reopens_the_latch_and_a_finished_one_does_not() {
+        let mut panel = ConnectCubePanel::new(
+            None,
+            "cube-uuid".to_string(),
+            "Family Vault".to_string(),
+            "regtest".to_string(),
+            false,
+        );
+        assert!(!panel.key_roles_seal_started);
+        for (result, still_closed) in [(Some(0), true), (Some(3), true), (None, false)] {
+            panel.key_roles_seal_started = true;
+            drop(panel.update_message(ConnectCubeMessage::KeyRolesSealed(result)));
+            assert_eq!(panel.key_roles_seal_started, still_closed, "{:?}", result);
+        }
     }
 }

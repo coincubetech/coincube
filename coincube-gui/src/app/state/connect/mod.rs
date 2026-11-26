@@ -595,6 +595,29 @@ mod tests {
         assert!(!panel.cube.enc_pubkey_registered);
     }
 
+    /// The sealed-key-role pass is per Vault too: a rebuilt Vault has other
+    /// keys in other paths, so its latch reopens with the descriptor.
+    #[test]
+    fn a_changed_descriptor_reopens_the_key_role_latch() {
+        let mut panel = ConnectPanel::new(
+            None,
+            "cube-uuid".to_string(),
+            "Family Vault".to_string(),
+            "regtest".to_string(),
+            false,
+        );
+        let desc =
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap();
+        panel.set_vault_descriptor(Some(desc.clone()));
+        panel.cube.key_roles_seal_started = true;
+        panel.set_vault_descriptor(Some(desc));
+        assert!(panel.cube.key_roles_seal_started);
+        panel.set_vault_descriptor(Some(
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC_2).unwrap(),
+        ));
+        assert!(!panel.cube.key_roles_seal_started);
+    }
+
     /// A Vault built or rebuilt mid-session has a membership nobody has
     /// reconciled. A latch closed by an earlier pass must re-open, or the fresh
     /// Vault never gets one.

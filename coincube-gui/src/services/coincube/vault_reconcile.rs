@@ -269,8 +269,11 @@ pub async fn reconcile_cube_vault_members(
 }
 
 /// Whether a recovery path is the Safety Net: the maximum timelock, held only
-/// by provider keys. One rule, shared by the Vault settings view (which names
-/// the path) and the sealed key role (which tells a phone its key sits there).
+/// by provider keys. Shared by the Vault settings view (which names the path)
+/// and the sealed key role (which tells a phone its key sits there), so the
+/// two cannot drift. The installer's own view (`installer/view/mod.rs`) has an
+/// older copy of the test over its in-progress key list; it is not a source
+/// for a role.
 pub(crate) fn is_safety_net_path(
     sequence: u16,
     keys: &[Fingerprint],
@@ -339,6 +342,11 @@ pub(crate) struct RoleTarget {
 /// numbers, whose transport key cannot be sealed to, whose key is not a
 /// keyholder member of this Vault, or whose fingerprint is not a signer of
 /// this descriptor. Nothing here is fatal and nothing is guessed.
+///
+/// Which key id carries which fingerprint is as Connect reports it in the
+/// target. A server that mislabels a target gets a seal for the wrong role,
+/// which is no more than it could seal itself with the phone's public key:
+/// one more reason the role is a label and gates nothing.
 pub(crate) fn missing_sealed_roles(
     vault: &ConnectVaultResponse,
     roles: &std::collections::HashMap<Fingerprint, KeyRole>,
@@ -411,35 +419,39 @@ pub(crate) fn missing_sealed_roles(
     out
 }
 
-/// Seals and stores the roles this Vault's phones are missing. Returns how
-/// many were stored.
+/// Seals and stores the roles this Vault's phones are missing. `Some(n)`: the
+/// pass ran to the end and stored `n` (zero when nothing was missing). `None`:
+/// the store was refused or failed, and a later pass may try again.
 ///
 /// Best-effort, like everything in this module: a server without the endpoint,
 /// a viewer who is not the Vault's owner, or any other failure is logged and
 /// costs nothing but a missing role tag on the phone until a later pass. It
-/// must never fail Vault creation, the launch path or signing, so it returns a
-/// count and no error.
+/// must never fail Vault creation, the launch path or signing, so it returns
+/// no error for a caller to act on.
 ///
 /// What the server receives is ciphertext, ids and a hash of a public key.
-/// The role stays a label on the phone: sealing hides it from Connect and
-/// proves nothing about who wrote it.
+/// That keeps the role out of Connect's storage and out of anything a passive
+/// observer of Connect sees. It is not protection against a Connect that
+/// actively substitutes a phone's transport key: the key sealed to is the one
+/// Connect relays, unpinned, exactly as for signing payloads. And the role
+/// stays a label on the phone: a seal proves nothing about who wrote it.
 pub(crate) async fn seal_missing_key_roles(
     client: &CoincubeClient,
     cube_server_id: u64,
     vault: &ConnectVaultResponse,
     roles: &std::collections::HashMap<Fingerprint, KeyRole>,
     targets: &[RoleTarget],
-) -> usize {
+) -> Option<usize> {
     let sealed_roles = missing_sealed_roles(vault, roles, targets);
     if sealed_roles.is_empty() {
-        return 0;
+        return Some(0);
     }
     let count = sealed_roles.len();
     match client
         .put_vault_sealed_roles(cube_server_id, PutSealedRolesRequest { sealed_roles })
         .await
     {
-        Ok(()) => count,
+        Ok(()) => Some(count),
         Err(e) => {
             tracing::debug!(
                 target: "coincube_gui::signing",
@@ -447,7 +459,7 @@ pub(crate) async fn seal_missing_key_roles(
                 "Key role: sealed roles not stored (retried at the next pass): {}",
                 e,
             );
-            0
+            None
         }
     }
 }
@@ -456,24 +468,23 @@ pub(crate) async fn seal_missing_key_roles(
 /// phones hold its keys (`ResolveSigners`), and seal what is missing.
 ///
 /// `resolve` is the gRPC call, passed in so this stays a REST-only module and
-/// tests can stand in for the resolver. Any failure, including a Cube with no
-/// Connect vault, returns `0`.
+/// tests can stand in for the resolver. `None` when the pass could not finish
+/// (no Vault readable yet, the resolver failed, the store failed), so the
+/// caller may try again at its next trigger; `Some(n)` when it did.
 pub(crate) async fn seal_cube_key_roles<F, Fut>(
     client: &CoincubeClient,
     cube_server_id: u64,
     roles: &std::collections::HashMap<Fingerprint, KeyRole>,
     resolve: F,
-) -> usize
+) -> Option<usize>
 where
     F: FnOnce(u64) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<RoleTarget>, String>>,
 {
     if roles.is_empty() {
-        return 0;
+        return Some(0);
     }
-    let Ok(vault) = client.get_connect_vault(cube_server_id).await else {
-        return 0;
-    };
+    let vault = client.get_connect_vault(cube_server_id).await.ok()?;
     let targets = match resolve(vault.id).await {
         Ok(targets) => targets,
         Err(e) => {
@@ -483,7 +494,7 @@ where
                 "Key role: signers not resolved (retried at the next pass): {}",
                 e,
             );
-            return 0;
+            return None;
         }
     };
     seal_missing_key_roles(client, cube_server_id, &vault, roles, &targets).await
@@ -500,8 +511,23 @@ impl From<&crate::services::connect::grpc::connect_v1::SignerTarget> for RoleTar
     }
 }
 
+/// The targets of a `ResolveSigners` reply, when the reply is for `network`.
+pub(crate) fn role_targets_for_network(
+    resolved: &crate::services::connect::grpc::connect_v1::ResolveSignersResponse,
+    network: &str,
+) -> Result<Vec<RoleTarget>, String> {
+    if resolved.network != network {
+        return Err("signers resolved for another network".to_string());
+    }
+    Ok(resolved.targets.iter().map(RoleTarget::from).collect())
+}
+
 /// `ResolveSigners(vault_id)` over the signing rail, as [`RoleTarget`]s. The
 /// one network call of the cube-open pass that is not REST.
+///
+/// `network` is this Cube's chain as its Connect network id. A reply for
+/// another network, or one that names none, is refused: the same
+/// substituted-identity check signing makes before it seals anything.
 pub(crate) async fn resolve_role_targets(
     grpc_url: &str,
     tokens: std::sync::Arc<
@@ -509,6 +535,7 @@ pub(crate) async fn resolve_role_targets(
     >,
     desktop_device_id: String,
     vault_id: u64,
+    network: &str,
 ) -> Result<Vec<RoleTarget>, String> {
     use crate::services::connect::grpc::{
         create_channel, interceptor::AuthInterceptor, session::GrpcSessionClient,
@@ -525,7 +552,7 @@ pub(crate) async fn resolve_role_targets(
         .resolve_signers(vault_id.to_string())
         .await
         .map_err(|status| status.code().to_string())?;
-    Ok(resolved.targets.iter().map(RoleTarget::from).collect())
+    role_targets_for_network(&resolved, network)
 }
 
 #[cfg(test)]
@@ -1096,7 +1123,7 @@ mod key_role_tests {
             ])
         })
         .await;
-        assert_eq!(stored, 2);
+        assert_eq!(stored, Some(2));
         put.assert_hits(1);
     }
 
@@ -1122,15 +1149,19 @@ mod key_role_tests {
             resolved(vec![target(34, 1, PRIMARY, &primary_pk)])
         })
         .await;
-        assert_eq!(stored, 0);
+        assert_eq!(
+            stored,
+            Some(0),
+            "settled: the pass ran and had nothing to do"
+        );
         put.assert_hits(0);
     }
 
     /// An older server, a viewer who does not own the Vault, a Cube with no
-    /// Connect vault, an unreachable rail: each is a quiet zero, never an
-    /// error for the caller to act on.
+    /// Connect vault, an unreachable rail: each is a quiet `None` ("could not
+    /// finish, may try again"), never an error for the caller to act on.
     #[tokio::test]
-    async fn every_failure_is_a_quiet_zero() {
+    async fn every_failure_is_quiet_and_may_be_tried_again() {
         let (_, pk) = phone(0x41);
         let targets = vec![target(34, 1, PRIMARY, &pk)];
 
@@ -1149,7 +1180,7 @@ mod key_role_tests {
             });
             let t = targets.clone();
             let stored = seal_cube_key_roles(&client(&server), 42, &roles(), |_| resolved(t)).await;
-            assert_eq!(stored, 0, "PUT {}", put_status);
+            assert_eq!(stored, None, "PUT {}", put_status);
             put.assert_hits(1);
         }
 
@@ -1164,7 +1195,7 @@ mod key_role_tests {
             panic!("no vault, so nothing to resolve")
         })
         .await;
-        assert_eq!(stored, 0);
+        assert_eq!(stored, None);
 
         // The rail is down: nothing is sent.
         let server = MockServer::start();
@@ -1183,7 +1214,7 @@ mod key_role_tests {
             Err("unavailable".to_string())
         })
         .await;
-        assert_eq!(stored, 0);
+        assert_eq!(stored, None);
         put.assert_hits(0);
 
         // A Vault with no descriptor signers to name: no request at all.
@@ -1191,7 +1222,30 @@ mod key_role_tests {
             panic!("nothing to seal, so nothing to resolve")
         })
         .await;
-        assert_eq!(stored, 0);
+        assert_eq!(stored, Some(0));
+    }
+
+    /// A reply for another network, or naming none, yields no targets: the
+    /// check signing makes before it seals anything.
+    #[test]
+    fn signers_resolved_for_another_network_are_not_sealed_to() {
+        use crate::services::connect::grpc::connect_v1::{ResolveSignersResponse, SignerTarget};
+        let (_, pk) = phone(0x41);
+        let reply = |network: &str| ResolveSignersResponse {
+            targets: vec![SignerTarget {
+                device_id: "34".into(),
+                key_fingerprint: PRIMARY.into(),
+                key_id: "1".into(),
+                transport_pubkey: pk.clone(),
+                capabilities: Vec::new(),
+            }],
+            unresolved: Vec::new(),
+            network: network.into(),
+        };
+        let ok = role_targets_for_network(&reply("mainnet"), "mainnet").unwrap();
+        assert_eq!(ok, vec![target(34, 1, PRIMARY, &pk)]);
+        assert!(role_targets_for_network(&reply("bitcoin-blake2b"), "mainnet").is_err());
+        assert!(role_targets_for_network(&reply(""), "mainnet").is_err());
     }
 
     /// A server that predates sealed roles sends no `sealedRoles` on members.
