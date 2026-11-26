@@ -18,13 +18,13 @@ pub enum CubeSubMenu {
     /// Activity across the wallets in this open Cube.
     Activity,
     /// Cube-level settings. The inner enum drives the third rail —
-    /// General / Recovery / Payment checks / About / Stats / Avatar / Members.
+    /// General / Recovery / Payment checks / About / Stats / Members.
     Settings(CubeSettingsOption),
 }
 
 /// Third-rail options under Cube → Settings. Consolidates what used
 /// to live at `Menu::Settings(SettingsSubMenu)` (now deleted) plus
-/// Avatar and Members, lifted out of the per-Cube Connect surface.
+/// Members, lifted out of the per-Cube Connect surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CubeSettingsOption {
     AiAccess,
@@ -43,13 +43,10 @@ pub enum CubeSettingsOption {
     Connections,
     About,
     Stats,
-    /// Avatar questionnaire / generation / reveal / management. Renders
-    /// from `ConnectCubePanel` via App-level dispatch — the State
-    /// trait's view signature can't reach Connect state.
-    Avatar,
     /// Cube members + pending-invites management. Feature-flagged by
     /// `feature_flags::CUBE_MEMBERS_UI_ENABLED`; sidebar entry is hidden
-    /// otherwise. Same App-level dispatch as Avatar.
+    /// otherwise. Renders from `ConnectCubePanel` via App-level dispatch —
+    /// the State trait's view signature can't reach Connect state.
     Members,
 }
 
@@ -63,7 +60,8 @@ pub enum MarketplaceSubMenu {
 /// tab. The per-Cube Connect section that used to share this enum has
 /// been removed — its features were relocated:
 /// - `LightningAddress` → Spark → Settings → Lightning Address
-/// - `Avatar` and `CubeMembers` → Cube → Settings → Avatar / Members
+/// - `CubeMembers` → Cube → Settings → Members (the old `Avatar` page is
+///   gone; the Cube's mark is on Cube → Settings → Display)
 ///
 /// Only the variants the Home tab still routes through stay here.
 #[derive(Debug, Clone, PartialEq, Eq)]

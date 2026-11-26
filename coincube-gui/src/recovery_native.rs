@@ -374,6 +374,7 @@ pub async fn create_export(
             network: chain.api_str().into(),
             has_vault: None,
             spark_stable_balance: None,
+            mark_variation: None,
         })
         .await
         .map_err(|_| "native_registration_uncertain")?;

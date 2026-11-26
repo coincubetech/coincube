@@ -918,10 +918,6 @@ pub struct PlanEntitlements {
     pub cube_limit: u32,
     #[serde(default)]
     pub recovery_kit_limit: u32,
-    /// Avatar regenerations allowed: `None` = unlimited (Estate), `Some(0)` =
-    /// disabled (Free).
-    #[serde(default)]
-    pub avatar_regeneration_limit: Option<u32>,
     /// Whether the tier includes duress — gates the duress enrollment UI.
     #[serde(default)]
     pub duress: bool,
@@ -1538,6 +1534,39 @@ pub struct RegisterCubeRequest {
     /// absent-means-unchanged rule as `has_vault`).
     #[serde(rename = "sparkStableBalance", skip_serializing_if = "Option::is_none")]
     pub spark_stable_balance: Option<bool>,
+    /// The Cube's ring-mark variation (`CubeSettings::mark_variation`), sent
+    /// when it is above 0 so a Cube regenerated before it ever registered
+    /// keeps its mark. The server uses it only when it creates the row; a
+    /// re-register of an existing Cube ignores it (API CA1).
+    #[serde(rename = "markVariation", skip_serializing_if = "Option::is_none")]
+    pub mark_variation: Option<u32>,
+}
+
+impl RegisterCubeRequest {
+    /// The `mark_variation` a registration carries for a Cube whose local
+    /// number is `variation`: omitted at 0, the server's own default.
+    pub fn mark_variation_for(variation: u32) -> Option<u32> {
+        (variation > 0).then_some(variation)
+    }
+}
+
+/// Request body for `PUT /api/v1/connect/cubes/{cubeId}/mark` (API CA1): the
+/// owner sets the Cube's ring-mark variation. A set rather than an increment,
+/// so a retried request cannot skip a number.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetCubeMarkRequest {
+    #[serde(rename = "markVariation")]
+    pub mark_variation: u32,
+}
+
+/// The Cube's mark after `PUT /api/v1/connect/cubes/{cubeId}/mark`. The app
+/// takes `mark_variation` from here, not from what it asked for.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CubeMarkResponse {
+    pub mark_variation: u32,
+    #[serde(default)]
+    pub mark_version: Option<u32>,
 }
 
 /// Request body for PUT /api/v1/connect/cubes/{id}
@@ -2126,214 +2155,6 @@ pub fn get_countries() -> &'static [Country] {
     COUNTRIES
         .get_or_init(|| serde_json::from_str(COUNTRIES_JSON).unwrap())
         .as_slice()
-}
-
-// =============================================================================
-// Avatar System Types
-// =============================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarArchetype {
-    Ronin,
-    Samurai,
-    Shogun,
-}
-
-impl std::fmt::Display for AvatarArchetype {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AvatarArchetype::Ronin => write!(f, "Ronin"),
-            AvatarArchetype::Samurai => write!(f, "Samurai"),
-            AvatarArchetype::Shogun => write!(f, "Shogun"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarGender {
-    Man,
-    Woman,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarAgeFeel {
-    Young,
-    Mature,
-    Elder,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarDemeanor {
-    Calm,
-    Fierce,
-    Mysterious,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarArmorStyle {
-    Light,
-    Standard,
-    Heavy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarAccentMotif {
-    OrangeSun,
-    Splatter,
-    Seal,
-    Calligraphy,
-}
-
-/// User-selected questionnaire inputs. Serialized as the request body for
-/// POST /api/v1/connect/avatar/generate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AvatarUserTraits {
-    pub gender: AvatarGender,
-    pub archetype: AvatarArchetype,
-    pub age_feel: AvatarAgeFeel,
-    pub demeanor: AvatarDemeanor,
-    pub armor_style: AvatarArmorStyle,
-    pub accent_motif: AvatarAccentMotif,
-    pub laser_eyes: bool,
-}
-
-impl Default for AvatarUserTraits {
-    fn default() -> Self {
-        Self {
-            gender: AvatarGender::Man,
-            archetype: AvatarArchetype::Ronin,
-            age_feel: AvatarAgeFeel::Mature,
-            demeanor: AvatarDemeanor::Mysterious,
-            armor_style: AvatarArmorStyle::Light,
-            accent_motif: AvatarAccentMotif::Calligraphy,
-            laser_eyes: false,
-        }
-    }
-}
-
-/// Traits derived deterministically from the Lightning address seed (read-only).
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarDerivedTraits {
-    pub pose: String,
-    pub crop_style: String,
-    pub hat_style: String,
-    pub face_visibility: String,
-    pub eye_visibility: String,
-    pub weapon_mode: String,
-    pub shoulder_profile: String,
-    pub cloak_presence: String,
-    pub armor_wear: String,
-    pub enso_style: String,
-    pub ink_density: String,
-    pub brush_texture: String,
-    pub splash_intensity: String,
-    pub orange_placement: String,
-    pub ornament_level: String,
-}
-
-/// Human-readable prompt directives (read-only, server-side provenance).
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarResolvedDirectives {
-    pub composition: String,
-    pub silhouette: String,
-    pub face_treatment: String,
-    pub armor_treatment: String,
-    pub mood: String,
-    pub orange_treatment: String,
-    pub ink_treatment: String,
-    pub eyes_treatment: String,
-    pub background: String,
-    pub archetype_flavor: String,
-}
-
-/// Full avatar identity object returned by the API and cached locally.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarIdentity {
-    pub version: u32,
-    pub seed_version: u32,
-    pub seed_hash: String,
-    pub lightning_address: String,
-    pub archetype: String,
-    pub user_traits: AvatarUserTraits,
-    pub derived_traits: AvatarDerivedTraits,
-    pub resolved_directives: AvatarResolvedDirectives,
-}
-
-/// A single generated variant. `id` is the stable database ID used for
-/// select and image-serve endpoints.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarVariant {
-    pub id: u64,
-    pub index: u32,
-    pub image_url: String,
-}
-
-/// Request body for POST /api/v1/connect/avatar/generate.
-/// Only user_traits is sent — lightning address and variant count are
-/// resolved server-side from the JWT.
-#[derive(Debug, Clone, Serialize)]
-pub struct AvatarGenerateRequest {
-    pub user_traits: AvatarUserTraits,
-}
-
-/// Data returned by POST /api/v1/connect/avatar/generate.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarGenerateData {
-    pub identity: AvatarIdentity,
-    pub variant: AvatarVariant,
-}
-
-/// Request body for POST /api/v1/connect/avatar/select.
-/// Only variant_id is sent — lightning address is resolved server-side.
-#[derive(Debug, Clone, Serialize)]
-pub struct AvatarSelectRequest {
-    pub variant_id: u64,
-}
-
-/// Data returned by POST /api/v1/connect/avatar/select.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AvatarSelectData {
-    pub active_avatar_url: String,
-    pub variant_id: u64,
-}
-
-/// Data returned by GET /api/v1/connect/avatar.
-#[derive(Debug, Clone, Deserialize)]
-pub struct GetAvatarData {
-    pub has_avatar: bool,
-    #[serde(default)]
-    pub active_avatar_url: Option<String>,
-    pub identity: Option<AvatarIdentity>,
-    #[serde(default)]
-    pub variants: Vec<AvatarVariant>,
-    pub regenerations_remaining: i32,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub updated_at: Option<String>,
-}
-
-/// Data returned by GET /api/v1/connect/avatar/public/{lightning_address}.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PublicAvatarData {
-    pub lightning_address: String,
-    pub avatar_url: String,
-    pub archetype: String,
-}
-
-/// Data returned by GET /api/v1/connect/avatar/regenerations.
-/// Plan tier is NOT included (op-sec).
-#[derive(Debug, Clone, Deserialize)]
-pub struct RegenerationData {
-    pub total_allowed: i32,
-    pub used: i32,
-    pub remaining: i32,
 }
 
 // =============================================================================
@@ -4837,7 +4658,7 @@ mod cube_has_vault_tests {
     }
 
     #[test]
-    fn register_request_reports_vault_upgrade_only() {
+    fn register_request_reports_vault_upgrade_only_and_the_mark_above_zero() {
         // Device holds the Vault → assert `hasVault: true`.
         let with_vault = RegisterCubeRequest {
             uuid: "u1".to_string(),
@@ -4845,8 +4666,10 @@ mod cube_has_vault_tests {
             network: "mainnet".to_string(),
             has_vault: Some(true),
             spark_stable_balance: Some(false),
+            mark_variation: RegisterCubeRequest::mark_variation_for(3),
         };
         let v = serde_json::to_value(&with_vault).unwrap();
+        assert_eq!(v["markVariation"], json!(3));
         assert_eq!(v["hasVault"], json!(true));
         assert_eq!(v["sparkStableBalance"], json!(false));
         assert_eq!(v["uuid"], json!("u1"));
@@ -4860,9 +4683,12 @@ mod cube_has_vault_tests {
             network: "mainnet".to_string(),
             has_vault: None,
             spark_stable_balance: None,
+            mark_variation: RegisterCubeRequest::mark_variation_for(0),
         };
         let v = serde_json::to_value(&no_vault).unwrap();
         assert!(v.get("hasVault").is_none());
+        // A Cube at its plain mark sends no number: 0 is the server default.
+        assert!(v.get("markVariation").is_none());
         // Same rule for the Spark decision: no local decision → omitted, so
         // another device's record is left alone.
         assert!(v.get("sparkStableBalance").is_none());

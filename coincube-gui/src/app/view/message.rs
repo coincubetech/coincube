@@ -250,8 +250,11 @@ pub enum Message {
     ConnectAccount(ConnectAccountMessage),
     ConnectCube(ConnectCubeMessage),
     P2P(P2PMessage),
+    /// Regenerate or Back on Cube Settings › Display: set the Cube's mark
+    /// number to one more or one less than it is now.
+    CubeMark(CubeMarkIntent),
     /// Bubbles up from a Connect-requiring feature page (Spark
-    /// Settings → Lightning Address, Cube Settings → Avatar / Members)
+    /// Settings → Lightning Address, Cube Settings → Members)
     /// when an unauthenticated user clicks "Sign In" on the inline
     /// prompt. The Pane intercepts it and focuses the Home tab on its
     /// Connect section.
@@ -2044,7 +2047,15 @@ pub enum ContactsMessage {
     Error(String),
 }
 
-/// Per-Cube Connect messages (Lightning Address, Avatar).
+/// Regenerate and Back on Cube Settings › Display. Each sets the Cube's
+/// ring-mark variation to the current number plus or minus one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CubeMarkIntent {
+    Regenerate,
+    Back,
+}
+
+/// Per-Cube Connect messages (Lightning Address, Members).
 #[derive(Debug, Clone)]
 pub enum ConnectCubeMessage {
     /// Apply whole-tree focus for a keyboard-reachable Members action.
@@ -2168,7 +2179,6 @@ pub enum ConnectCubeMessage {
     KeyRolesSealed(Option<usize>),
     CopyToClipboard(String),
     Error(String),
-    Avatar(AvatarMessage),
     /// Cube-scoped members management (W8 — see
     /// `plans/PLAN-cube-membership-desktop.md`).
     Members(ConnectCubeMembersMessage),
@@ -2196,62 +2206,6 @@ pub enum ConnectCubeMembersMessage {
     RemoveMemberResult(u64, Result<(), String>),
     DismissError,
     DismissRemoveConflict,
-}
-
-#[derive(Debug, Clone)]
-pub enum AvatarMessage {
-    /// Enter the Avatar sub-menu — triggers GET /avatar load.
-    Enter,
-    /// Result of GET /api/v1/connect/avatar. Every result variant carries
-    /// the `generation` of the session that issued the request (see
-    /// `ConnectCubePanel::session_generation`); stale ones are dropped.
-    Loaded {
-        generation: u64,
-        result: Result<crate::services::coincube::GetAvatarData, String>,
-    },
-    /// Navigate to a specific avatar flow step.
-    SetStep(crate::app::state::connect::AvatarFlowStep),
-    // Questionnaire field changes
-    GenderChanged(crate::services::coincube::AvatarGender),
-    ArchetypeChanged(crate::services::coincube::AvatarArchetype),
-    AgeFeelChanged(crate::services::coincube::AvatarAgeFeel),
-    DemeanorChanged(crate::services::coincube::AvatarDemeanor),
-    ArmorStyleChanged(crate::services::coincube::AvatarArmorStyle),
-    AccentMotifChanged(crate::services::coincube::AvatarAccentMotif),
-    LaserEyesToggled(bool),
-    /// Submit the questionnaire — triggers POST /avatar/generate.
-    Generate,
-    /// Result of POST /api/v1/connect/avatar/generate.
-    GenerateComplete {
-        generation: u64,
-        result: Result<crate::services::coincube::AvatarGenerateData, String>,
-    },
-    /// User picks a variant from the gallery.
-    SelectVariant(u64),
-    /// Result of POST /api/v1/connect/avatar/select.
-    VariantSelected {
-        generation: u64,
-        result: Result<crate::services::coincube::AvatarSelectData, String>,
-    },
-    /// Result of GET /api/v1/connect/avatar/regenerations.
-    RegenerationsLoaded {
-        generation: u64,
-        result: Result<crate::services::coincube::RegenerationData, String>,
-    },
-    /// PNG bytes fetched for a variant.
-    ImageLoaded {
-        generation: u64,
-        variant_id: u64,
-        result: Result<Vec<u8>, String>,
-    },
-    /// Retry after a generation error.
-    Retry,
-    /// User pressed Download — save active variant PNG to disk.
-    DownloadAvatar,
-    /// File-save failed after the user picked a destination.
-    SaveError(String),
-    /// No-op — used as a return message for tasks that don't need state changes.
-    Noop,
 }
 
 #[derive(Debug, Clone)]

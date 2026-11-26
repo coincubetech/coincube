@@ -39,16 +39,12 @@ use crate::{
     app::{
         menu::ConnectSubMenu,
         state::connect::{
-            duress_gate_blocked, duress_tier1_gate_blocked, AvatarFlowStep, ConnectAccountPanel,
-            ConnectCubePanel, ConnectFlowStep, ConnectPanel, CubeBackupCompleteness,
-            DuressContactsStep, DuressCube, DuressGateStatus,
+            duress_gate_blocked, duress_tier1_gate_blocked, ConnectAccountPanel, ConnectFlowStep,
+            ConnectPanel, CubeBackupCompleteness, DuressContactsStep, DuressCube, DuressGateStatus,
         },
-        view::{AvatarMessage, ConnectAccountMessage, ConnectCubeMessage, DuressMessage},
+        view::{ConnectAccountMessage, DuressMessage},
     },
-    services::coincube::{
-        AvatarAccentMotif, AvatarAgeFeel, AvatarArchetype, AvatarArmorStyle, AvatarDemeanor,
-        AvatarGender, ConnectPlan,
-    },
+    services::coincube::ConnectPlan,
 };
 
 use crate::app::state::connect::account::{
@@ -933,7 +929,7 @@ fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'stati
         (bell_icon(), "Recovery alerts and emergency contacts for people you trust", false),
         (lightning_outline_icon(), "Hosted Esplora server — use your Vault instantly while your node syncs", false),
         (laptop_icon(), "Sign Vault transactions from your phone with the companion COINCUBE Mobile app", false),
-        (lightning_outline_icon(), "Lightning Address and avatar for Spark wallets", false),
+        (lightning_outline_icon(), "Lightning Address for Spark wallets", false),
         (exclamation_circle_icon(), "Connect-enforced spending policies (Pro and Estate)", true),
     ]
 }
@@ -1900,336 +1896,6 @@ fn divider_line<'a>() -> Element<'a, ConnectAccountMessage> {
         .into()
 }
 
-pub fn avatar_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
-    let title = Row::new()
-        .push(text::h4_bold("Avatar").style(theme::text::primary))
-        .push(iced::widget::Space::new().width(Length::Fill))
-        .align_y(Alignment::Center);
-
-    let body: Element<ConnectCubeMessage> = match &state.avatar_step {
-        AvatarFlowStep::Idle | AvatarFlowStep::Questionnaire => avatar_questionnaire_ux(state),
-        AvatarFlowStep::Generating => container(
-            Column::new()
-                .push(text::p1_bold(localized_copy("Forging your identity…")).color(color::ORANGE))
-                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                .push(
-                    text::p2_regular(localized_copy(
-                        "Generating your sumi-e avatar. This may take up to 30 seconds.",
-                    ))
-                    .color(color::GREY_3),
-                )
-                .padding(24)
-                .spacing(4),
-        )
-        .style(card_style)
-        .width(Length::Fill)
-        .into(),
-
-        AvatarFlowStep::Reveal | AvatarFlowStep::Settings => avatar_settings_ux(state),
-    };
-
-    if let Some(err) = state.avatar_error.as_deref() {
-        let retry_button: Element<ConnectCubeMessage> = if state.registration_error.is_some() {
-            button::primary(None, localized_copy("Retry Connection"))
-                .on_press(ConnectCubeMessage::RetryRegistration)
-                .into()
-        } else {
-            button::primary(None, localized_copy("Try Again"))
-                .on_press(ConnectCubeMessage::Avatar(AvatarMessage::Retry))
-                .into()
-        };
-        return Column::new()
-            .push(title)
-            .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-            .push(
-                container(
-                    Column::new()
-                        .push(text::p1_bold(localized_copy("Error")).color(color::RED))
-                        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(
-                            text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
-                                .color(color::GREY_3),
-                        )
-                        .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-                        .push(retry_button)
-                        .padding(16)
-                        .spacing(4),
-                )
-                .style(card_style)
-                .width(Length::Fill),
-            )
-            .spacing(0)
-            .width(Length::Fill)
-            .into();
-    }
-
-    Column::new()
-        .push(title)
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-        .push(body)
-        .spacing(0)
-        .width(Length::Fill)
-        .into()
-}
-
-fn avatar_trait_label<'a>(label: &'static str) -> iced::widget::Text<'a, theme::Theme> {
-    text::p2_regular(label)
-        .color(color::GREY_3)
-        .width(Length::Fixed(110.0))
-}
-
-/// One selectable trait option. Selected options use the orange
-/// outline style so they stay visually distinct from the solid-orange
-/// "Generate Avatar" CTA below the picker.
-fn avatar_trait_option<'a>(
-    label: &'static str,
-    selected: bool,
-) -> iced::widget::Button<'a, ConnectCubeMessage, theme::Theme> {
-    if selected {
-        button::orange_outline(None, label)
-    } else {
-        button::secondary(None, label)
-    }
-    .width(Length::Fill)
-}
-
-/// A labelled row of mutually exclusive trait options.
-fn avatar_trait_row<'a, V: PartialEq + Copy + 'a>(
-    label: &'static str,
-    current: V,
-    options: &[(&'static str, V)],
-    to_msg: fn(V) -> AvatarMessage,
-) -> Row<'a, ConnectCubeMessage> {
-    options
-        .iter()
-        .enumerate()
-        .fold(
-            Row::new().push(avatar_trait_label(label)),
-            |row, (i, (name, value))| {
-                let row = if i > 0 {
-                    row.push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-                } else {
-                    row
-                };
-                row.push(
-                    avatar_trait_option(name, *value == current)
-                        .on_press(ConnectCubeMessage::Avatar(to_msg(*value))),
-                )
-            },
-        )
-        .align_y(Alignment::Center)
-}
-
-fn avatar_questionnaire_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
-    let draft = &state.avatar_draft;
-
-    let gender_row = avatar_trait_row(
-        "Gender",
-        draft.gender,
-        &[("Man", AvatarGender::Man), ("Woman", AvatarGender::Woman)],
-        AvatarMessage::GenderChanged,
-    );
-
-    let archetype_row = avatar_trait_row(
-        "Archetype",
-        draft.archetype,
-        &[
-            ("Ronin", AvatarArchetype::Ronin),
-            ("Samurai", AvatarArchetype::Samurai),
-            ("Shogun", AvatarArchetype::Shogun),
-        ],
-        AvatarMessage::ArchetypeChanged,
-    );
-
-    let age_row = avatar_trait_row(
-        "Age Feel",
-        draft.age_feel,
-        &[
-            ("Young", AvatarAgeFeel::Young),
-            ("Mature", AvatarAgeFeel::Mature),
-            ("Elder", AvatarAgeFeel::Elder),
-        ],
-        AvatarMessage::AgeFeelChanged,
-    );
-
-    let demeanor_row = avatar_trait_row(
-        "Demeanor",
-        draft.demeanor,
-        &[
-            ("Calm", AvatarDemeanor::Calm),
-            ("Fierce", AvatarDemeanor::Fierce),
-            ("Mysterious", AvatarDemeanor::Mysterious),
-        ],
-        AvatarMessage::DemeanorChanged,
-    );
-
-    let armor_row = avatar_trait_row(
-        "Armor",
-        draft.armor_style,
-        &[
-            ("Light", AvatarArmorStyle::Light),
-            ("Standard", AvatarArmorStyle::Standard),
-            ("Heavy", AvatarArmorStyle::Heavy),
-        ],
-        AvatarMessage::ArmorStyleChanged,
-    );
-
-    let motif_row = avatar_trait_row(
-        "Accent",
-        draft.accent_motif,
-        &[
-            ("Sun", AvatarAccentMotif::OrangeSun),
-            ("Splatter", AvatarAccentMotif::Splatter),
-            ("Seal", AvatarAccentMotif::Seal),
-            ("Calligraphy", AvatarAccentMotif::Calligraphy),
-        ],
-        AvatarMessage::AccentMotifChanged,
-    );
-
-    // Laser eyes is a single toggle, so it reads as "selected" when on.
-    let laser_row = Row::new()
-        .push(avatar_trait_label("Laser Eyes"))
-        .push(
-            avatar_trait_option(
-                if draft.laser_eyes { "On" } else { "Off" },
-                draft.laser_eyes,
-            )
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::LaserEyesToggled(
-                !draft.laser_eyes,
-            ))),
-        )
-        .align_y(Alignment::Center);
-
-    let has_ln = state.lightning_address.is_some();
-    let generate_btn = if has_ln {
-        button::primary(None, localized_copy("Generate Avatar"))
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::Generate))
-    } else {
-        button::primary(None, localized_copy("Set Lightning Address First"))
-    };
-
-    container(
-        Column::new()
-            .push(text::p1_bold(localized_copy("Choose Your Traits")).style(theme::text::primary))
-            .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-            .push(text::p2_regular(localized_copy("Your selections, combined with a hash of your Lightning address, create your unique avatar.")).color(color::GREY_3))
-            .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-            .push(gender_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(archetype_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(age_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(demeanor_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(armor_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(motif_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(laser_row)
-            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-            .push(generate_btn)
-            .padding(16)
-            .spacing(0),
-    )
-    .style(card_style)
-    .width(Length::Fill)
-    .into()
-}
-
-fn avatar_settings_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
-    let Some(ref data) = state.avatar_data else {
-        return container(
-            text::p2_regular(localized_copy("Loading avatar data…")).color(color::GREY_3),
-        )
-        .padding(16)
-        .style(card_style)
-        .width(Length::Fill)
-        .into();
-    };
-
-    let active_url = data.active_avatar_url.as_deref().unwrap_or("");
-
-    // Active avatar image
-    let active_id = data
-        .variants
-        .iter()
-        .find(|v| active_url.ends_with(&v.id.to_string()))
-        .map(|v| v.id);
-
-    let image_widget: Element<ConnectCubeMessage> = if let Some(id) = active_id {
-        if let Some((_, handle)) = state.avatar_image_cache.get(&id) {
-            iced::widget::image(handle.clone())
-                .width(Length::Fixed(200.0))
-                .height(Length::Fixed(200.0))
-                .into()
-        } else {
-            text::p2_regular(localized_copy("Loading image…"))
-                .color(color::GREY_3)
-                .into()
-        }
-    } else {
-        text::p2_regular(localized_copy("No active variant"))
-            .color(color::GREY_3)
-            .into()
-    };
-
-    let archetype_upper: String = data
-        .identity
-        .as_ref()
-        .map(|i| i.archetype.as_str().to_uppercase())
-        .unwrap_or_default();
-
-    let regen_remaining = data.regenerations_remaining;
-    let regen_text: String = if regen_remaining == -1 {
-        "Regenerations: Unlimited".to_string()
-    } else {
-        format!("Regenerations remaining: {}", regen_remaining)
-    };
-
-    // Variant thumbnails row
-    let variant_row = avatar_variant_row(state, data, active_url);
-
-    let regen_btn = if regen_remaining == 0 {
-        button::primary(None, localized_copy("No Regenerations Remaining"))
-    } else {
-        button::primary(None, localized_copy("Regenerate Avatar")).on_press(
-            ConnectCubeMessage::Avatar(AvatarMessage::SetStep(AvatarFlowStep::Questionnaire)),
-        )
-    };
-
-    let download_btn = button::secondary(None, localized_copy("Download PNG"))
-        .on_press(ConnectCubeMessage::Avatar(AvatarMessage::DownloadAvatar));
-
-    container(
-        Column::new()
-            .push(
-                Row::new()
-                    .push(image_widget)
-                    .push(iced::widget::Space::new().width(Length::Fixed(16.0)))
-                    .push(
-                        Column::new()
-                            .push(text::p1_bold(archetype_upper).color(color::ORANGE))
-                            .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                            .push(text::p2_regular(regen_text).color(color::GREY_3))
-                            .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-                            .push(regen_btn)
-                            .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                            .push(download_btn)
-                            .spacing(0),
-                    )
-                    .align_y(Alignment::Start),
-            )
-            .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-            .push(variant_row)
-            .padding(16)
-            .spacing(0),
-    )
-    .style(card_style)
-    .width(Length::Fill)
-    .into()
-}
-
 fn sheet_heading<'a>(
     title: &'static str,
     identity: Option<&'a str>,
@@ -2887,63 +2553,6 @@ fn append_duress_setup<'a>(
     col
 }
 
-fn avatar_variant_row<'a>(
-    state: &'a ConnectCubePanel,
-    data: &'a crate::services::coincube::GetAvatarData,
-    active_url: &str,
-) -> Element<'a, ConnectCubeMessage> {
-    if data.variants.len() > 1 {
-        let mut row = Row::new().spacing(8);
-        for v in &data.variants {
-            let is_active = active_url.ends_with(&v.id.to_string());
-            let vid = v.id;
-            let thumb: Element<ConnectCubeMessage> =
-                if let Some((_, handle)) = state.avatar_image_cache.get(&vid) {
-                    let img = iced::widget::image(handle.clone())
-                        .width(Length::Fixed(60.0))
-                        .height(Length::Fixed(60.0));
-                    if is_active {
-                        container(img)
-                            .style(|_| container::Style {
-                                border: iced::Border {
-                                    color: color::ORANGE,
-                                    width: 2.0,
-                                    radius: 4.0.into(),
-                                },
-                                ..Default::default()
-                            })
-                            .into()
-                    } else {
-                        iced::widget::button(img)
-                            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::SelectVariant(
-                                vid,
-                            )))
-                            .style(|_, _| iced::widget::button::Style::default())
-                            .into()
-                    }
-                } else {
-                    iced::widget::button(
-                        container(text::p2_regular("…").color(color::GREY_3))
-                            .width(Length::Fixed(60.0))
-                            .height(Length::Fixed(60.0))
-                            .align_x(Alignment::Center)
-                            .align_y(Alignment::Center)
-                            .style(card_style),
-                    )
-                    .on_press(ConnectCubeMessage::Avatar(AvatarMessage::SelectVariant(
-                        vid,
-                    )))
-                    .style(|_, _| iced::widget::button::Style::default())
-                    .into()
-                };
-            row = row.push(thumb);
-        }
-        row.into()
-    } else {
-        iced::widget::Space::new().height(Length::Fixed(0.0)).into()
-    }
-}
-
 #[cfg(test)]
 mod renewal_banner_tests {
     //! Visibility tests for `renewal_banner`. The function returns an
@@ -2958,9 +2567,9 @@ mod renewal_banner_tests {
             account::SUPPORTED_PRICING_SCHEMA_VERSION, CheckoutState, DuressDisableState,
         },
         services::coincube::{
-            AvatarVariant, BillingHistoryEntry, ChargeStatus, CheckoutResponse, ConnectPlan,
-            FeaturesResponse, GetAvatarData, LightningAddress, LoginActivity, PlanEntitlements,
-            PlanFeatureInfo, PlanPrice, PlanProvenance, PlanStatus, User, VerifiedDevice,
+            BillingHistoryEntry, ChargeStatus, CheckoutResponse, ConnectPlan, FeaturesResponse,
+            LoginActivity, PlanEntitlements, PlanFeatureInfo, PlanPrice, PlanProvenance,
+            PlanStatus, User, VerifiedDevice,
         },
     };
 
@@ -6376,7 +5985,7 @@ mod renewal_banner_tests {
     }
 
     #[test]
-    fn connect_panel_and_avatar_views_build_active_paths() {
+    fn connect_panel_views_build_active_paths() {
         let mut panel = ConnectPanel::new(
             None,
             "cube-uuid".to_string(),
@@ -6408,70 +6017,6 @@ mod renewal_banner_tests {
             panel.account.step = step;
             let _ = connect_panel(&panel);
         }
-
-        let mut cube = ConnectCubePanel::new(
-            None,
-            "cube-uuid".to_string(),
-            "Family Vault".to_string(),
-            "bitcoin".to_string(),
-            true,
-        );
-        let _ = avatar_ux(&cube);
-
-        cube.lightning_address = Some(LightningAddress {
-            lightning_address: Some("founder@getcoincube.com".to_string()),
-        });
-        cube.avatar_step = AvatarFlowStep::Questionnaire;
-        cube.avatar_draft.gender = AvatarGender::Woman;
-        cube.avatar_draft.archetype = AvatarArchetype::Shogun;
-        cube.avatar_draft.age_feel = AvatarAgeFeel::Elder;
-        cube.avatar_draft.demeanor = AvatarDemeanor::Fierce;
-        cube.avatar_draft.armor_style = AvatarArmorStyle::Heavy;
-        cube.avatar_draft.accent_motif = AvatarAccentMotif::OrangeSun;
-        cube.avatar_draft.laser_eyes = true;
-        let _ = avatar_ux(&cube);
-
-        cube.avatar_step = AvatarFlowStep::Generating;
-        let _ = avatar_ux(&cube);
-
-        cube.avatar_error = Some("avatar unavailable".to_string());
-        let _ = avatar_ux(&cube);
-        cube.registration_error = Some("not registered".to_string());
-        let _ = avatar_ux(&cube);
-        cube.avatar_error = None;
-        cube.registration_error = None;
-
-        cube.avatar_step = AvatarFlowStep::Settings;
-        let _ = avatar_ux(&cube);
-        cube.avatar_data = Some(GetAvatarData {
-            has_avatar: true,
-            active_avatar_url: Some("https://cdn.example/avatar/7".to_string()),
-            identity: None,
-            variants: vec![
-                AvatarVariant {
-                    id: 7,
-                    index: 0,
-                    image_url: "https://cdn.example/avatar/7".to_string(),
-                },
-                AvatarVariant {
-                    id: 8,
-                    index: 1,
-                    image_url: "https://cdn.example/avatar/8".to_string(),
-                },
-            ],
-            regenerations_remaining: -1,
-            created_at: None,
-            updated_at: None,
-        });
-        let _ = avatar_ux(&cube);
-
-        cube.avatar_step = AvatarFlowStep::Reveal;
-        if let Some(data) = cube.avatar_data.as_mut() {
-            data.active_avatar_url = Some("https://cdn.example/avatar/none".to_string());
-            data.regenerations_remaining = 0;
-            data.variants.truncate(1);
-        }
-        let _ = avatar_ux(&cube);
     }
 
     /// Layout uses the actual Connect widgets in a compact scroll viewport.

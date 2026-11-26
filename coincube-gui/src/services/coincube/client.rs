@@ -1,5 +1,3 @@
-mod avatar;
-
 use super::{
     get_countries, AccountDeletionRequest, AccountDeletionRequestBody, AddVaultMemberRequest,
     ApiResponse, BillingHistoryEntry, CardCheckoutSession, CardPortalSession, ChargeStatusResponse,
@@ -17,8 +15,8 @@ use super::{
     VerifiedDevice,
 };
 use super::{
-    BackupCodes, LoginReply, SecondFactorChallenge, TotpSetup, TwoFactorLogin, TwoFactorStatus,
-    UpdateDisplayNameRequest,
+    BackupCodes, CubeMarkResponse, LoginReply, SecondFactorChallenge, SetCubeMarkRequest,
+    TotpSetup, TwoFactorLogin, TwoFactorStatus, UpdateDisplayNameRequest,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -738,6 +736,25 @@ impl CoincubeClient {
         Ok(resp.data)
     }
 
+    /// PUT /api/v1/connect/cubes/{cubeId}/mark — the owner sets the Cube's
+    /// ring-mark variation (API CA1). Returns the number the server kept.
+    pub async fn set_cube_mark(
+        &self,
+        cube_id: &str,
+        mark_variation: u32,
+    ) -> Result<CubeMarkResponse, CoincubeError> {
+        let url = format!("{}/api/v1/connect/cubes/{}/mark", self.base_url, cube_id);
+        let res = self
+            .client
+            .put(&url)
+            .json(&SetCubeMarkRequest { mark_variation })
+            .send()
+            .await?;
+        let res = res.check_success().await?;
+        let resp: ApiResponse<CubeMarkResponse> = res.json().await?;
+        Ok(resp.data)
+    }
+
     /// PUT /api/v1/connect/cubes/{cubeId}/encryption-pubkey — register this
     /// Cube's Connect-blinding encryption pubkey (`coincube-api` PR A1).
     ///
@@ -939,7 +956,7 @@ impl CoincubeClient {
         client
     }
 
-    // --- Cube-scoped endpoints (Lightning Address, Avatar) ---
+    // --- Cube-scoped endpoints (Lightning Address, mark) ---
     // All use /connect/cubes/{cubeId}/... paths (server-side numeric ID)
 
     pub async fn get_lightning_address(
@@ -3515,6 +3532,7 @@ mod cube_member_tests {
                 network: "testnet4".to_string(),
                 has_vault: None,
                 spark_stable_balance: None,
+                mark_variation: None,
             })
             .await
             .expect_err("expected 409");
@@ -3818,7 +3836,6 @@ mod plan_tests {
         assert_eq!(*plan.tier(), PlanTier::Estate);
         assert_eq!(plan.entitlements.cube_limit, 7);
         assert!(plan.entitlements.duress);
-        assert!(plan.entitlements.avatar_regeneration_limit.is_none()); // unlimited
         assert!(plan.plan_provenance.is_some());
     }
 
@@ -4539,7 +4556,6 @@ impl CoincubeClient {
 #[cfg(test)]
 mod transport_identity_tests {
     use super::*;
-    use crate::services::coincube::AvatarGenerateRequest;
     use httpmock::{Method as MockMethod, MockServer};
 
     fn identity() -> reqwest::header::HeaderMap {
@@ -4563,7 +4579,7 @@ mod transport_identity_tests {
     }
 
     #[tokio::test]
-    async fn normal_avatar_and_anchor_transports_keep_captured_identity_and_current_token() {
+    async fn normal_mark_and_anchor_transports_keep_captured_identity_and_current_token() {
         let server = MockServer::start();
         let mut client = CoincubeClient::for_test_with_identity(server.base_url(), identity());
         for token in [Some("first-token"), Some("second-token"), None] {
@@ -4612,10 +4628,10 @@ mod transport_identity_tests {
                 .unwrap();
             normal.assert_hits(2);
             let expected_auth = token.map(|token| format!("Bearer {}", token));
-            let mut avatar = server.mock(|when, then| {
+            let mut mark = server.mock(|when, then| {
                 let when = when
-                    .method(MockMethod::POST)
-                    .path("/api/v1/connect/cubes/7/avatar/generate")
+                    .method(MockMethod::PUT)
+                    .path("/api/v1/connect/cubes/7/mark")
                     .header("x-device-fingerprint", "frozen-fingerprint")
                     .header("x-device-name", "fixture-desktop")
                     .header("x-platform", "desktop");
@@ -4630,20 +4646,12 @@ mod transport_identity_tests {
                         })
                     });
                 }
-                // No image generation: only verify the real request reached the local fixture.
+                // Only verify the real request reached the local fixture.
                 then.status(503);
             });
-            assert!(client
-                .post_avatar_generate(
-                    "7",
-                    AvatarGenerateRequest {
-                        user_traits: Default::default()
-                    }
-                )
-                .await
-                .is_err());
-            avatar.assert();
-            avatar.delete();
+            assert!(client.set_cube_mark("7", 1).await.is_err());
+            mark.assert();
+            mark.delete();
             let mut normal = normal;
             normal.delete();
         }

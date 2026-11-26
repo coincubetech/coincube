@@ -1618,25 +1618,6 @@ impl GeneralSettingsState {
         )
     }
 
-    /// The Display & appearance content without the dashboard, so the App
-    /// can show the avatar flow inline beneath Cube identity.
-    pub fn display_content<'a>(
-        &'a self,
-        cache: &'a Cache,
-        avatar_flow: Option<Element<'a, view::Message>>,
-    ) -> Element<'a, view::Message> {
-        crate::app::view::settings::general::display_content(
-            cache,
-            &self.new_price_setting,
-            &self.new_unit_setting,
-            &self.currencies,
-            self.show_direction_badges,
-            self.saved,
-            self.name_input.as_deref(),
-            avatar_flow,
-        )
-    }
-
     pub fn section(&self) -> SettingsSection {
         self.section
     }

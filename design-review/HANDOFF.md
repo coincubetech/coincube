@@ -105,6 +105,12 @@ Where the plan departs from the boards, the plan wins:
   same 1120px width, centred, as in §4 (master I7, #926).
 - **USDB logo.** The boards use the logo from Flashnet's token list. Confirm its
   licence or use a COINCUBE-drawn mark (plan W2).
+- **Cube avatars are drawn ring marks.** `P-GapsAccount` still shows the old
+  avatar flow (trait questionnaire, "Forging your identity…", the reveal with
+  Download PNG, and the Lightning Address gate). It is removed. Cube Settings ›
+  Display shows the Cube's ring mark at 48px with Regenerate and, once the
+  number is above 0, Back: owner only, free on every plan, and through Connect
+  once the Cube is registered (Cube avatars plan CD3).
 
 Already in the app and not changed by the plan: the Launcher's network activity
 (canvas page "Launcher backdrop (design B)": `P-Launcher-Rail*`,
@@ -273,12 +279,12 @@ Each step is independently reviewable and ships behind nothing; the app keeps
 working after each. Acceptance is checked against the named `P-` artboard and the
 review doc section in parentheses.
 
-1. **Cube shell and side menu.** Identity block (avatar, name, network, chevron)
+1. **Cube shell and side menu.** Identity block (ring mark, name, network, chevron)
    as the Cube switcher with All Cubes / Lock Cube; top bar reduced to mark + chips;
    Settings vs Tools split in the nav. (P-Overview; review doc "Settings vs Tools",
    "Cube switcher moved into the side menu"). Acceptance: nav renders on every
    Cube screen, Lock returns to the Launcher with the Cube shown as Locked.
-2. **Launcher.** Network tabs with "network" wording, avatar + state label per
+2. **Launcher.** Network tabs with "network" wording, ring mark + state label per
    Cube, details face, PIN/passkey face, checks face, no Continue after Opening.
    (P-Launcher, P-Opening; review doc "Launcher sweep", "Opening auto-open").
 3. **Overview hub and wallet pages.** Total balance, wallet cards, Spark page with

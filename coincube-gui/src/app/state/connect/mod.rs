@@ -162,21 +162,6 @@ use crate::{
     daemon::Daemon,
 };
 
-/// Sub-steps within the Avatar sub-menu (does not replace ConnectFlowStep).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AvatarFlowStep {
-    /// No avatar exists and the user hasn't started creation.
-    Idle,
-    /// Trait questionnaire is open.
-    Questionnaire,
-    /// Waiting for OpenAI response (~10–30s).
-    Generating,
-    /// Showing a freshly generated avatar.
-    Reveal,
-    /// Viewing / managing an existing avatar.
-    Settings,
-}
-
 /// Wrapper that holds both the account-level and cube-level Connect panels.
 /// Implements `State` so the existing routing in App works unchanged.
 pub struct ConnectPanel {
@@ -322,6 +307,21 @@ impl ConnectPanel {
         self.cube.spark_stable_balance = decision;
     }
 
+    /// Seed the cube panel with the Cube's ring-mark variation
+    /// (`CubeSettings::mark_variation`) so a first registration carries a
+    /// number regenerated before the Cube ever registered (API CA1). The App
+    /// calls it again whenever the number changes.
+    pub fn set_cube_mark_variation(&mut self, variation: u32) {
+        self.cube.mark_variation = variation;
+    }
+
+    /// Seed whether the Cube already has a Connect row
+    /// (`CubeSettings::remote_synced`), so a registered Cube opened while
+    /// signed out is not mistaken for one that never registered.
+    pub fn set_cube_has_server_record(&mut self, registered: bool) {
+        self.cube.has_server_record = registered;
+    }
+
     pub fn set_vault_fingerprint(&mut self, fingerprint: Option<String>) {
         if self.cube.vault_fingerprint != fingerprint {
             self.cube.vault_fingerprint_asserted = false;
@@ -397,14 +397,6 @@ impl ConnectPanel {
             self.account.reload_duress_cubes(),
         ])
     }
-
-    /// Check if avatar should be loaded and return task if so.
-    pub fn check_and_load_avatar(&self) -> iced::Task<Message> {
-        if let Some(task) = self.cube.load_avatar_if_needed() {
-            return task;
-        }
-        iced::Task::none()
-    }
 }
 
 impl State for ConnectPanel {
@@ -458,22 +450,12 @@ impl State for ConnectPanel {
                 // (idempotent — returns existing if already registered).
                 // The response includes lightning address if already claimed.
                 let now_authenticated = self.account.is_authenticated();
-                if !was_authenticated && now_authenticated {
-                    // First login - register cube, avatar will load after CubeRegistered
+                // First login, or signed in with the cube not yet
+                // registered: register it. The response carries the Cube's
+                // server record (Lightning address, mark variation).
+                if now_authenticated && (!was_authenticated || self.cube.server_cube_id.is_none()) {
                     let register_task = self.cube.register_cube();
                     return iced::Task::batch([task, register_task]);
-                }
-                // Already authenticated - ensure cube is registered, then load avatar
-                if now_authenticated {
-                    if self.cube.server_cube_id.is_none() {
-                        // Need to register cube first, avatar will load after CubeRegistered
-                        let register_task = self.cube.register_cube();
-                        return iced::Task::batch([task, register_task]);
-                    } else {
-                        // Cube already registered, load avatar now
-                        let avatar_task = self.check_and_load_avatar();
-                        return iced::Task::batch([task, avatar_task]);
-                    }
                 }
                 task
             }

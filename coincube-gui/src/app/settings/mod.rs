@@ -501,6 +501,10 @@ pub async fn mark_cube_synced(
     .await
 }
 
+/// The highest ring-mark variation the API accepts (`0..=2^31-1`, API CA1).
+/// Regenerate stops here.
+pub const MARK_VARIATION_MAX: u32 = i32::MAX as u32;
+
 /// Record a Cube's ring-mark variation in its network's settings file.
 /// Adopting the server's number (`CubeSettings::mark_variation`) and a
 /// never-registered Cube's own Regenerate both write through here. A Cube
@@ -1923,9 +1927,9 @@ pub mod global {
         /// No Connect account or free tier — 1 Cube per network.
         #[default]
         Free,
-        /// Pro Connect account — 3 Cubes per network (with Lightning address & avatar).
+        /// Pro Connect account — 3 Cubes per network (with Lightning address).
         Pro,
-        /// Estate Connect account — 10 Cubes per network (with Lightning address & avatar).
+        /// Estate Connect account — 10 Cubes per network (with Lightning address).
         #[serde(alias = "legacy")]
         Estate,
     }
