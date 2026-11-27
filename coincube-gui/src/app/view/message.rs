@@ -2001,7 +2001,7 @@ pub enum ContactsMessage {
     /// Available cubes loaded for the invite form (from `list_cubes`), or
     /// why they could not be. Carries `session_generation` for
     /// stale-response guarding. A failure is kept apart from an empty list
-    /// so the form never says "An invitation is for a Cube" because of a
+    /// so the form never says "Invitations are for a Cube you own." because of a
     /// network error.
     InviteCubesAvailable(
         Result<Vec<crate::app::state::connect::InviteCubeOption>, String>,

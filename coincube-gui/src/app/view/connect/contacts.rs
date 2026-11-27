@@ -416,7 +416,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
         Some(cubes) if !cubes.is_empty() => cubes,
         Some(_) => {
             let mut no_cube = heading.push(
-                text::p1_regular(localized_copy("An invitation is for a Cube"))
+                text::p1_regular(localized_copy("Invitations are for a Cube you own."))
                     .style(theme::text::secondary),
             );
             // A send refused because the chosen Cube is gone reloads the

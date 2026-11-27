@@ -335,7 +335,7 @@ fn invite_form(cubes: Option<Vec<InviteCubeOption>>) -> ConnectAccountPanel {
     state
 }
 
-const NO_CUBE: &str = "An invitation is for a Cube";
+const NO_CUBE: &str = "Invitations are for a Cube you own.";
 
 #[test]
 fn send_needs_a_cube_ticked() {
@@ -496,5 +496,5 @@ fn the_new_invite_strings_are_spanish() {
     let view = render_in(Language::Spanish, || {
         inspect(contacts_ux(&invite_form(Some(vec![]))))
     });
-    assert!(view.contains("Una invitación es para un Cube"));
+    assert!(view.contains("Las invitaciones son para un Cube que te pertenece."));
 }

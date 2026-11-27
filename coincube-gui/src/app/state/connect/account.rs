@@ -7700,7 +7700,7 @@ impl ConnectAccountPanel {
         self.contacts_state.invite_cubes_load_error = None;
         // Load the user's cubes for the form's Cube multi-select (W12).
         // An invitation needs at least one, so the view waits for this
-        // and shows "An invitation is for a Cube" for an empty list.
+        // and shows "Invitations are for a Cube you own." for an empty list.
         load_invite_cubes(
             &self.client,
             self.session_generation,
@@ -9974,7 +9974,7 @@ mod invite_form_tests {
             ContactsMessage::InviteCubesAvailable(Ok(Vec::new()), gen),
         );
         // `Some(empty)` means "loaded, but no Cube": the view replaces the
-        // form with "An invitation is for a Cube".
+        // form with "Invitations are for a Cube you own."
         assert!(matches!(
             panel.contacts_state.invite_available_cubes,
             Some(ref v) if v.is_empty()
@@ -9993,7 +9993,7 @@ mod invite_form_tests {
     }
 
     /// A failed load is not "no Cube": it is kept apart from an empty list,
-    /// so the form never says "An invitation is for a Cube" because of a
+    /// so the form never says "Invitations are for a Cube you own." because of a
     /// network error. A later successful load clears it.
     #[test]
     fn failed_cube_load_is_not_an_empty_list() {
