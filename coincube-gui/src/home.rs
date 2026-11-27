@@ -14155,15 +14155,27 @@ mod tests {
             ));
             assert!(!modal.passkey_pending);
             assert!(modal.passkey_error.is_some(), "{:?}", chain);
-            assert!(!modal.deleted && on_disk(), "{:?}: a failed check deleted", chain);
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: a failed check deleted",
+                chain
+            );
 
             // An answer nobody is waiting for (a late one after Cancel) or
             // one for another Cube admits nothing.
             let _ = modal.update(checked(&cube.id, Ok(())));
-            assert!(!modal.deleted && on_disk(), "{:?}: a stale check deleted", chain);
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: a stale check deleted",
+                chain
+            );
             modal.passkey_pending = true;
             let _ = modal.update(checked("another-cube", Ok(())));
-            assert!(!modal.deleted && on_disk(), "{:?}: another Cube's check", chain);
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: another Cube's check",
+                chain
+            );
 
             let _ = modal.update(checked(&cube.id, Ok(())));
             assert!(modal.deleted, "{:?}: {:?}", chain, modal.passkey_error);
