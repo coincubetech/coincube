@@ -859,11 +859,13 @@ pub struct ContactsState {
     pub loading: bool,
     pub error: Option<String>,
     // --- W12: cube multi-select on the invite form ---
-    /// Cubes the authenticated user owns or is a member of, filtered to
-    /// the active network. Populated on `ShowInviteForm`. `None` while the
-    /// list is loading (the form waits for it); `Some(empty)` means there
-    /// is no Cube to invite anyone to, and the form is replaced by "An
-    /// invitation is for a Cube" (decision 2026-11-26).
+    /// Cubes the authenticated user owns (`GET /connect/cubes` lists only
+    /// the account's own Cubes; shared ones come from another endpoint),
+    /// filtered to the active network. Populated on `ShowInviteForm`.
+    /// `None` while the list is loading (the form waits for it);
+    /// `Some(empty)` means there is no Cube to invite anyone to, and the
+    /// form is replaced by "Invitations are for a Cube you own."
+    /// (decision 2026-11-26).
     pub invite_available_cubes: Option<Vec<InviteCubeOption>>,
     /// Why the invite form's Cube list could not be loaded. Shown, with a
     /// retry, only while no list has loaded.
@@ -8739,8 +8741,9 @@ fn load_duress_state(client: &CoincubeClient, generation: u64) -> iced::Task<Mes
 /// Load the user's cubes for the W12 invite-form multi-select, mapping
 /// the raw `CubeResponse`s into lightweight `InviteCubeOption`s. Used by
 /// both the initial `ShowInviteForm` load and the `InviteCubeForbidden`
-/// reload after a 403 — any backend error silently resolves to an empty
-/// list so the invite form degrades to the plain (cube-less) path.
+/// reload after a 403. A backend error is reported as `Err`, never as an
+/// empty list, so a failed load is not mistaken for "no Cube"; each load
+/// carries its own request number and only the latest one applies.
 ///
 /// When `active_network` is `Some`, only cubes on that network are
 /// returned (PR 5 §2.7 tweak #1 — prevents cross-network invites).

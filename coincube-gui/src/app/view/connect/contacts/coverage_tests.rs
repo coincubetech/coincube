@@ -325,7 +325,7 @@ fn a_received_invitation_names_the_sender_and_always_shows_their_email() {
     }
 }
 
-// ── Cube avatars CD4: an invitation is for a Cube ─────────────────────
+// ── Cube avatars CD4: invitations are for a Cube you own ──────────────
 
 fn invite_form(cubes: Option<Vec<InviteCubeOption>>) -> ConnectAccountPanel {
     let mut state = ConnectAccountPanel::new();
