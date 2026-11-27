@@ -371,6 +371,19 @@ fn no_cube_replaces_the_form_with_one_line() {
     )));
 }
 
+/// A send refused because the only Cube is gone reloads an empty list: the
+/// no-Cube line replaces the form, and the conflict still says why.
+#[test]
+fn a_refused_send_that_leaves_no_cube_still_explains_itself() {
+    let mut state = invite_form(Some(vec![]));
+    state.contacts_state.invite_cube_error = Some("Synthetic refusal".into());
+    let view = inspect(contacts_ux(&state));
+    assert!(view.contains(NO_CUBE));
+    assert!(view.contains("One or more selected cubes is no longer available"));
+    assert!(view.contains("Synthetic refusal"));
+    assert!(!view.contains("Send Invite"));
+}
+
 #[test]
 fn the_form_waits_for_the_cube_list_without_flashing_the_no_cube_line() {
     let mut state = invite_form(None);

@@ -415,14 +415,18 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     let cubes = match cs.invite_available_cubes.as_deref() {
         Some(cubes) if !cubes.is_empty() => cubes,
         Some(_) => {
-            return heading
-                .push(
-                    text::p1_regular(localized_copy("An invitation is for a Cube"))
-                        .style(theme::text::secondary),
-                )
-                .max_width(500)
-                .width(Length::Fill)
-                .into();
+            let mut no_cube = heading.push(
+                text::p1_regular(localized_copy("An invitation is for a Cube"))
+                    .style(theme::text::secondary),
+            );
+            // A send refused because the chosen Cube is gone reloads the
+            // list; if that leaves none, still say what happened.
+            if let Some(msg) = cs.invite_cube_error.as_deref() {
+                no_cube = no_cube
+                    .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+                    .push(invite_cube_conflict_card(msg));
+            }
+            return no_cube.max_width(500).width(Length::Fill).into();
         }
         None => {
             let status: Element<ConnectAccountMessage> = match cs.invite_cubes_load_error.as_deref()
