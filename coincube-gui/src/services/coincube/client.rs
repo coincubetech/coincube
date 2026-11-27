@@ -3688,8 +3688,8 @@ mod cube_member_tests {
     /// The list as API CA1a sends it (coincube-api#552): each invite's
     /// `cubes[]` carries `cubeUuid`, `markVariation` and `markVersion` beside
     /// `cubeId`, `cubeName`, `network` and `encryptionPubkey`. One Cube with
-    /// a bad `markVariation`, and one entry that is not a Cube at all, must
-    /// not fail the list.
+    /// a bad `markVariation` and `network`, and one entry that is not a Cube
+    /// at all, must not fail the list.
     #[tokio::test]
     async fn get_received_invites_parses_cubes_leniently() {
         let server = MockServer::start();
@@ -3713,7 +3713,7 @@ mod cube_member_tests {
                                     "cubeId": 7,
                                     "cubeUuid": "3F2504E0-4F89-41D3-9A0C-0305E82C3301",
                                     "cubeName": "Family",
-                                    "network": "bitcoin",
+                                    "network": "mainnet",
                                     "encryptionPubkey": null,
                                     "markVariation": 4,
                                     "markVersion": 1
@@ -3722,7 +3722,7 @@ mod cube_member_tests {
                                     "cubeId": 8,
                                     "cubeUuid": "6fa459ea-ee8a-4ca4-894e-db77e160355e",
                                     "cubeName": "Savings",
-                                    "network": "bitcoin",
+                                    "network": 7,
                                     "encryptionPubkey": "02ab",
                                     "markVariation": "four",
                                     "markVersion": 0
@@ -3759,6 +3759,11 @@ mod cube_member_tests {
         assert_eq!(
             (cubes[0].mark_variation, cubes[0].mark_version),
             (Some(4), Some(1))
+        );
+        assert_eq!(cubes[0].network.as_deref(), Some("mainnet"));
+        assert_eq!(
+            cubes[1].network, None,
+            "a bad network is None, not a failure"
         );
         assert_eq!(
             cubes[0].mark_seed().as_deref(),

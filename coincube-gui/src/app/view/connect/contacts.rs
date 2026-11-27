@@ -327,10 +327,11 @@ fn received_invite_card<'a>(
 /// Size of a Cube's ring mark on a received invitation.
 const RECEIVED_INVITE_MARK_SIZE: f32 = 32.0;
 
-/// One Cube on a received invitation: its ring mark at 32 px, then its name.
-/// With no UUID from the server (one that predates API CA1a) the name is
-/// shown alone; a UUID that is present but malformed draws the centre dot,
-/// as every other mark site does.
+/// One Cube on a received invitation: its ring mark at 32 px, then its name
+/// and network, which together identify the Cube (RM6). With no network the
+/// line is the name alone. With no UUID from the server (one that predates
+/// API CA1a) no mark is drawn; a UUID that is present but malformed draws
+/// the centre dot, as every other mark site does.
 fn received_invite_cube<'a>(
     cube: &'a crate::services::coincube::ReceivedInviteCube,
 ) -> Element<'a, ConnectAccountMessage> {
@@ -341,8 +342,14 @@ fn received_invite_cube<'a>(
             RECEIVED_INVITE_MARK_SIZE,
         ));
     }
-    row.push(text::p1_bold(cube.cube_name.as_str()).style(theme::text::primary))
-        .into()
+    row = row.push(text::p1_bold(cube.cube_name.as_str()).style(theme::text::primary));
+    if let Some(network) = cube.network.as_deref() {
+        row = row.push(
+            text::p2_regular(super::cube_members::network_name(network))
+                .style(theme::text::secondary),
+        );
+    }
+    row.into()
 }
 
 fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectAccountMessage> {

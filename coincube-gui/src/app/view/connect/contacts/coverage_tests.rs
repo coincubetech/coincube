@@ -395,6 +395,7 @@ fn invite_cube(id: u64, name: &str, uuid: Option<&str>, variation: u32) -> Recei
     ReceivedInviteCube {
         cube_id: id,
         cube_name: name.into(),
+        network: Some("mainnet".into()),
         cube_uuid: uuid.map(str::to_string),
         mark_variation: Some(variation),
         mark_version: Some(1),
@@ -410,6 +411,10 @@ fn a_received_invitation_names_one_cube_with_its_mark_and_the_sender() {
     invite.cubes = vec![invite_cube(4, "Family Cube", Some(UUID_A), 0)];
     let view = inspect(received_invite_card(&invite, false));
     assert!(view.contains("Family Cube"));
+    assert!(
+        view.contains("Bitcoin mainnet"),
+        "the network is beside the name"
+    );
     assert!(view.contains("sender@example.invalid"));
     assert!(view.contains("Accept"));
     assert!(invite.cubes[0].has_mark());
@@ -419,13 +424,14 @@ fn a_received_invitation_names_one_cube_with_its_mark_and_the_sender() {
 #[test]
 fn a_received_invitation_names_two_cubes_each_with_its_own_mark() {
     let mut invite = received();
-    invite.cubes = vec![
-        invite_cube(4, "Family Cube", Some(UUID_A), 3),
-        invite_cube(5, "Savings Cube", Some(UUID_B), 0),
-    ];
+    let mut savings = invite_cube(5, "Savings Cube", Some(UUID_B), 0);
+    savings.network = Some("testnet4".into());
+    invite.cubes = vec![invite_cube(4, "Family Cube", Some(UUID_A), 3), savings];
     let view = inspect(received_invite_card(&invite, false));
     assert!(view.contains("Family Cube"));
+    assert!(view.contains("Bitcoin mainnet"));
     assert!(view.contains("Savings Cube"));
+    assert!(view.contains("Bitcoin testnet4"));
     assert!(view.contains("sender@example.invalid"));
     let seeds: Vec<Option<String>> = invite.cubes.iter().map(|c| c.mark_seed()).collect();
     assert_eq!(
@@ -458,10 +464,13 @@ fn a_received_invitation_without_cubes_renders_as_before() {
 
     let mut older = received();
     older.cubes = vec![invite_cube(4, "Family Cube", None, 0)];
+    older.cubes[0].network = None;
     assert!(!older.cubes[0].has_mark());
     let view = inspect(received_invite_card(&older, false));
     assert!(view.contains("Family Cube"));
     assert!(view.contains("sender@example.invalid"));
+    // No network: the line is the name alone.
+    assert!(!view.contains("Bitcoin"));
 }
 
 #[test]

@@ -2569,6 +2569,12 @@ pub struct ReceivedInvite {
 pub struct ReceivedInviteCube {
     pub cube_id: u64,
     pub cube_name: String,
+    /// Connect's network id for the Cube (`mainnet`, `testnet4`, …). Shown
+    /// beside the name, since the name and network identify a Cube (RM6).
+    /// Absent, blank or not a string is `None`, and the line shows the
+    /// name alone.
+    #[serde(default, deserialize_with = "deserialize_invite_cube_network")]
+    pub network: Option<String>,
     #[serde(default)]
     pub cube_uuid: Option<String>,
     /// Read as [`CubeResponse::mark_variation`] is.
@@ -2594,6 +2600,19 @@ impl ReceivedInviteCube {
             .as_deref()
             .is_some_and(|uuid| !uuid.trim().is_empty())
     }
+}
+
+/// `network` on a received invite's Cube: a non-blank string, else `None`.
+fn deserialize_invite_cube_network<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .map(str::trim)
+        .filter(|network| !network.is_empty())
+        .map(str::to_string))
 }
 
 /// `cubes` on a received invite: absent or `null` is empty, and an entry
@@ -6295,7 +6314,7 @@ mod received_invite_cubes_tests {
     fn one_and_two_cubes_parse_with_their_seeds() {
         let one = invite(Some(json!([{
             "cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family",
-            "network": "bitcoin", "encryptionPubkey": null,
+            "network": "mainnet", "encryptionPubkey": null,
             "markVariation": 0, "markVersion": 1
         }])));
         assert_eq!(
@@ -6303,6 +6322,7 @@ mod received_invite_cubes_tests {
             vec![ReceivedInviteCube {
                 cube_id: 7,
                 cube_name: "Family".into(),
+                network: Some("mainnet".into()),
                 cube_uuid: Some(UUID_A.into()),
                 mark_variation: Some(0),
                 mark_version: Some(1),
@@ -6351,6 +6371,25 @@ mod received_invite_cubes_tests {
             // Absent or bad, the variation draws the plain-UUID mark.
             assert_eq!(parsed.cubes[0].mark_seed().as_deref(), Some(UUID_A));
         }
+    }
+
+    /// `network` is optional and read leniently: absent, `null`, blank or
+    /// not a string is `None`, and the Cube still parses.
+    #[test]
+    fn an_absent_or_bad_network_is_none() {
+        for network in [None, Some(json!(null)), Some(json!("  ")), Some(json!(4))] {
+            let mut cube = json!({"cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family"});
+            if let Some(network) = network.clone() {
+                cube["network"] = network;
+            }
+            let parsed = invite(Some(json!([cube])));
+            assert_eq!(parsed.cubes.len(), 1, "{:?}", network);
+            assert_eq!(parsed.cubes[0].network, None, "{:?}", network);
+        }
+        let parsed = invite(Some(json!([
+            {"cubeId": 7, "cubeName": "Family", "network": "testnet4"}
+        ])));
+        assert_eq!(parsed.cubes[0].network.as_deref(), Some("testnet4"));
     }
 
     /// A server before CA1a sends `cubeId` and `cubeName` only: the Cube is
