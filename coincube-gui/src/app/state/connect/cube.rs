@@ -1305,11 +1305,17 @@ impl ConnectCubePanel {
                 let stable_balance_task = iced::Task::done(Message::SparkStableBalanceFromConnect(
                     cube_resp.spark_stable_balance,
                 ));
+                // The server's mark variation is the record once it has
+                // one (`CubeSettings::mark_variation`); the App owns the
+                // local copy and the sidebar's seed.
+                let mark_task =
+                    iced::Task::done(Message::CubeMarkFromConnect(cube_resp.mark_variation));
                 let mut tasks = vec![
                     enc_key_task,
                     vault_fp_task,
                     reconcile_members_task,
                     stable_balance_task,
+                    mark_task,
                 ];
                 tasks.extend(reconcile_task);
                 tasks.extend(recheck_task);
@@ -2603,6 +2609,8 @@ mod tests {
             pending_invites: Vec::new(),
             vault: None,
             connect_features_disabled: false,
+            mark_variation: None,
+            mark_version: None,
         }
     }
 
@@ -2803,6 +2811,8 @@ mod tests {
             pending_invites: vec![],
             vault: None,
             connect_features_disabled: false,
+            mark_variation: None,
+            mark_version: None,
         }
     }
 

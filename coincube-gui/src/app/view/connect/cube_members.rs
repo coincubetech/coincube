@@ -275,26 +275,13 @@ fn member_card<'a>(
     loading: bool,
 ) -> Element<'a, ConnectCubeMessage> {
     let email = &member.user.email;
-    let initial = email
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
-
-    let avatar = container(text::p1_bold(initial).style(theme::text::primary))
-        .width(Length::Fixed(36.0))
-        .height(Length::Fixed(36.0))
-        .center_x(Length::Fixed(36.0))
-        .center_y(Length::Fixed(36.0))
-        .style(|t| container::Style {
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            border: iced::Border {
-                radius: 18.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+    // Initials in a thin ring: the display name when the API sends one,
+    // else the email. A person is never drawn as a Cube mark.
+    let avatar = coincube_ui::component::ring_mark::person_mark(
+        member.user.display_name.as_deref(),
+        Some(email.as_str()),
+        36.0,
+    );
 
     // W16-desktop: show a "Joined after Vault" cue on members who landed
     // after the attached Vault's signing quorum was sealed. The implication
@@ -528,7 +515,9 @@ fn invite_status(status: &str) -> &str {
     }
 }
 
-fn network_name(network: &str) -> &str {
+/// Connect's network id (`mainnet`, `testnet4`, `bitcoin-blake2b`, …) as a
+/// label. Shared with the received invitations in Contacts.
+pub(super) fn network_name(network: &str) -> &str {
     match network {
         "mainnet" => "Bitcoin mainnet",
         "testnet" => "Bitcoin testnet",

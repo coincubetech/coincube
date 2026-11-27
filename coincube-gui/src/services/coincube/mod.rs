@@ -1656,6 +1656,52 @@ pub struct CubeResponse {
     /// Absent on older APIs, which never turned them off.
     #[serde(default)]
     pub connect_features_disabled: bool,
+    /// The Cube's ring-mark variation (`SPEC-cube-ring-mark-v1`), kept by
+    /// the API (CA1) and set only by the owner. `None` from an API that
+    /// predates the field: the app then keeps its local number, which is
+    /// right for every Cube never regenerated. See
+    /// [`crate::app::settings::CubeSettings::mark_variation`].
+    ///
+    /// Read leniently, as COINCUBE Mobile reads it, so one bad field never
+    /// fails the whole Cube: absent or `null` is `None`; a number outside
+    /// 0..=2^31-1, or a value of the wrong type, is `Some(0)`.
+    #[serde(default, deserialize_with = "deserialize_mark_variation")]
+    pub mark_variation: Option<u32>,
+    /// The ring-mark spec version the Cube is drawn with; `None` (absent,
+    /// or anything but a number in 1..=65535) means 1. Every version is
+    /// drawn with version 1, as the spec says an app does for a version it
+    /// does not know.
+    #[serde(default, deserialize_with = "deserialize_mark_version")]
+    pub mark_version: Option<u32>,
+}
+
+/// `markVariation`: see [`CubeResponse::mark_variation`].
+fn deserialize_mark_variation<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .filter(|v| *v <= u64::from(coincube_ui::component::ring_mark::MAX_VARIATION))
+                .map_or(0, |v| v as u32),
+        ),
+    })
+}
+
+/// `markVersion`: see [`CubeResponse::mark_version`].
+fn deserialize_mark_version<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .filter(|v| (1..=65_535).contains(v))
+        .map(|v| v as u32))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2504,6 +2550,94 @@ pub struct ReceivedInvite {
     pub role: ContactRole,
     pub expires_at: String,
     pub created_at: String,
+    /// The Cubes this invitation is for (`cubes[]`), in the server's order.
+    /// Empty from a server that predates the field (or sends `null`), and
+    /// for an older invitation that names no Cube: the row then shows only
+    /// the inviter, as it did before. An entry that cannot be read is
+    /// dropped rather than failing the whole list.
+    #[serde(default, deserialize_with = "deserialize_received_invite_cubes")]
+    pub cubes: Vec<ReceivedInviteCube>,
+}
+
+/// One Cube named by a [`ReceivedInvite`]. The name identifies the Cube;
+/// the ring mark drawn from `cube_uuid` and `mark_variation` only sits
+/// beside it (master plan invariant RM6). The UUID and mark fields come
+/// from API CA1a; a server without them still sends `cubeId` and
+/// `cubeName`, and the row then shows the name with no mark.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceivedInviteCube {
+    pub cube_id: u64,
+    pub cube_name: String,
+    /// Connect's network id for the Cube (`mainnet`, `testnet4`, …). Shown
+    /// beside the name, since the name and network identify a Cube (RM6).
+    /// Absent, blank or not a string is `None`, and the line shows the
+    /// name alone.
+    #[serde(default, deserialize_with = "deserialize_invite_cube_network")]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub cube_uuid: Option<String>,
+    /// Read as [`CubeResponse::mark_variation`] is.
+    #[serde(default, deserialize_with = "deserialize_mark_variation")]
+    pub mark_variation: Option<u32>,
+    /// Read as [`CubeResponse::mark_version`] is.
+    #[serde(default, deserialize_with = "deserialize_mark_version")]
+    pub mark_version: Option<u32>,
+}
+
+impl ReceivedInviteCube {
+    /// The ring-mark seed, or `None` when the server sent no UUID (no mark
+    /// is drawn then). A UUID that is present but malformed also gives
+    /// `None` here; the view draws the centre dot for it.
+    pub fn mark_seed(&self) -> Option<String> {
+        let uuid = self.cube_uuid.as_deref()?;
+        coincube_ui::component::ring_mark::seed(uuid, self.mark_variation.unwrap_or(0))
+    }
+
+    /// Whether the server sent a UUID to draw a mark from.
+    pub fn has_mark(&self) -> bool {
+        self.cube_uuid
+            .as_deref()
+            .is_some_and(|uuid| !uuid.trim().is_empty())
+    }
+}
+
+/// `network` on a received invite's Cube: a non-blank string, else `None`.
+fn deserialize_invite_cube_network<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .map(str::trim)
+        .filter(|network| !network.is_empty())
+        .map(str::to_string))
+}
+
+/// `cubes` on a received invite: absent or `null` is empty, and an entry
+/// that does not parse is dropped, so one bad Cube never hides the
+/// invitation.
+fn deserialize_received_invite_cubes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ReceivedInviteCube>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Array(entries) => entries
+            .into_iter()
+            .filter_map(|entry| match serde_json::from_value(entry) {
+                Ok(cube) => Some(cube),
+                Err(e) => {
+                    log::warn!("[CONTACTS] Skipping an unreadable Cube on an invite: {}", e);
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4926,6 +5060,43 @@ mod cube_has_vault_tests {
         assert!(!cube(r#","connectFeaturesDisabled":false"#).connect_features_disabled);
         assert!(cube(r#","connectFeaturesDisabled":true"#).connect_features_disabled);
     }
+
+    /// `markVariation` and `markVersion` (API CA1) are optional: an older
+    /// API omits both, which the app reads as "keep the local number".
+    #[test]
+    fn response_mark_fields_are_optional() {
+        let cube = |extra: &str| -> CubeResponse {
+            serde_json::from_str(&format!(
+                r#"{{"id":1,"uuid":"u1","name":"Cube","network":"mainnet","status":"active"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let old = cube("");
+        assert_eq!((old.mark_variation, old.mark_version), (None, None));
+        let new = cube(r#","markVariation":17,"markVersion":1"#);
+        assert_eq!((new.mark_variation, new.mark_version), (Some(17), Some(1)));
+        let null = cube(r#","markVariation":null,"markVersion":null"#);
+        assert_eq!((null.mark_variation, null.mark_version), (None, None));
+        // Read as COINCUBE Mobile reads them: a bad value never fails the
+        // Cube; an out-of-range or mistyped variation is 0, a version
+        // outside 1..=65535 is the default 1.
+        for (extra, variation, version) in [
+            (r#","markVariation":2147483647"#, Some(2_147_483_647), None),
+            (r#","markVariation":2147483648"#, Some(0), None),
+            (r#","markVariation":-1,"markVersion":0"#, Some(0), None),
+            (r#","markVariation":"3","markVersion":"2""#, Some(0), None),
+            (r#","markVariation":1.5,"markVersion":65536"#, Some(0), None),
+            (r#","markVersion":65535"#, None, Some(65_535)),
+        ] {
+            let parsed = cube(extra);
+            assert_eq!(
+                (parsed.mark_variation, parsed.mark_version),
+                (variation, version),
+                "{}",
+                extra
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6106,5 +6277,137 @@ mod btcb2_signing_tests {
         // A Bitcoin-family Cube does not newly hide a string it can't parse.
         assert!(key_json("bitcoin", None).listed_on_chain(ChainId::Bitcoin));
         assert!(!key_json("bitcoin", None).listed_on_chain(ChainId::BitcoinBlake2b));
+    }
+}
+
+#[cfg(test)]
+mod received_invite_cubes_tests {
+    //! `cubes[]` on a received invitation (Cube avatars CD4; API CA1a). The
+    //! field is optional and read leniently: an older server, an older
+    //! invitation or one bad entry never fails the invite.
+    use super::{ReceivedInvite, ReceivedInviteCube};
+    use serde_json::json;
+
+    const UUID_A: &str = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+    const UUID_B: &str = "6fa459ea-ee8a-4ca4-894e-db77e160355e";
+
+    fn invite(cubes: Option<serde_json::Value>) -> ReceivedInvite {
+        let mut value = json!({
+            "id": 9, "ownerEmail": "ama@example.test", "role": "keyholder",
+            "expiresAt": "2099-01-01T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z"
+        });
+        if let Some(cubes) = cubes {
+            value["cubes"] = cubes;
+        }
+        serde_json::from_value(value).expect("the invite parses")
+    }
+
+    #[test]
+    fn an_invite_without_cubes_parses_as_before() {
+        assert!(invite(None).cubes.is_empty());
+        assert!(invite(Some(json!(null))).cubes.is_empty());
+        assert!(invite(Some(json!([]))).cubes.is_empty());
+        assert!(invite(Some(json!({"cubeId": 1}))).cubes.is_empty());
+    }
+
+    #[test]
+    fn one_and_two_cubes_parse_with_their_seeds() {
+        let one = invite(Some(json!([{
+            "cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family",
+            "network": "mainnet", "encryptionPubkey": null,
+            "markVariation": 0, "markVersion": 1
+        }])));
+        assert_eq!(
+            one.cubes,
+            vec![ReceivedInviteCube {
+                cube_id: 7,
+                cube_name: "Family".into(),
+                network: Some("mainnet".into()),
+                cube_uuid: Some(UUID_A.into()),
+                mark_variation: Some(0),
+                mark_version: Some(1),
+            }]
+        );
+        assert_eq!(one.cubes[0].mark_seed().as_deref(), Some(UUID_A));
+
+        let two = invite(Some(json!([
+            {"cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family",
+             "markVariation": 4, "markVersion": 1},
+            {"cubeId": 8, "cubeUuid": UUID_B.to_uppercase(), "cubeName": "Savings",
+             "markVariation": 2147483647, "markVersion": 1}
+        ])));
+        let names: Vec<&str> = two.cubes.iter().map(|c| c.cube_name.as_str()).collect();
+        assert_eq!(names, ["Family", "Savings"]);
+        assert_eq!(
+            two.cubes[0].mark_seed(),
+            Some(format!("{}:4", UUID_A)),
+            "the seed carries the variation"
+        );
+        assert_eq!(
+            two.cubes[1].mark_seed(),
+            Some(format!("{}:2147483647", UUID_B)),
+            "an uppercase UUID gives the lowercase seed"
+        );
+    }
+
+    /// A bad mark field is read as `CubeResponse` reads it; it never fails
+    /// the invite.
+    #[test]
+    fn a_bad_mark_field_does_not_fail_the_invite() {
+        for (variation, want) in [
+            (json!("4"), Some(0)),
+            (json!(-1), Some(0)),
+            (json!(1.5), Some(0)),
+            (json!(2_147_483_648u64), Some(0)),
+            (json!(null), None),
+        ] {
+            let parsed = invite(Some(json!([{
+                "cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family",
+                "markVariation": variation, "markVersion": "one"
+            }])));
+            assert_eq!(parsed.cubes.len(), 1, "{}", variation);
+            assert_eq!(parsed.cubes[0].mark_variation, want, "{}", variation);
+            assert_eq!(parsed.cubes[0].mark_version, None, "{}", variation);
+            // Absent or bad, the variation draws the plain-UUID mark.
+            assert_eq!(parsed.cubes[0].mark_seed().as_deref(), Some(UUID_A));
+        }
+    }
+
+    /// `network` is optional and read leniently: absent, `null`, blank or
+    /// not a string is `None`, and the Cube still parses.
+    #[test]
+    fn an_absent_or_bad_network_is_none() {
+        for network in [None, Some(json!(null)), Some(json!("  ")), Some(json!(4))] {
+            let mut cube = json!({"cubeId": 7, "cubeUuid": UUID_A, "cubeName": "Family"});
+            if let Some(network) = network.clone() {
+                cube["network"] = network;
+            }
+            let parsed = invite(Some(json!([cube])));
+            assert_eq!(parsed.cubes.len(), 1, "{:?}", network);
+            assert_eq!(parsed.cubes[0].network, None, "{:?}", network);
+        }
+        let parsed = invite(Some(json!([
+            {"cubeId": 7, "cubeName": "Family", "network": "testnet4"}
+        ])));
+        assert_eq!(parsed.cubes[0].network.as_deref(), Some("testnet4"));
+    }
+
+    /// A server before CA1a sends `cubeId` and `cubeName` only: the Cube is
+    /// named with no mark. A malformed UUID has no seed, so the view draws
+    /// the centre dot. An entry that is not a Cube is dropped alone.
+    #[test]
+    fn missing_or_malformed_uuids_and_unreadable_entries() {
+        let parsed = invite(Some(json!([
+            {"cubeId": 7, "cubeName": "Family", "network": "bitcoin",
+             "encryptionPubkey": null},
+            {"cubeId": 8, "cubeName": "Savings", "cubeUuid": "not-a-uuid"},
+            {"cubeName": "No id"},
+            42
+        ])));
+        assert_eq!(parsed.cubes.len(), 2);
+        assert!(!parsed.cubes[0].has_mark());
+        assert_eq!(parsed.cubes[0].mark_seed(), None);
+        assert!(parsed.cubes[1].has_mark());
+        assert_eq!(parsed.cubes[1].mark_seed(), None);
     }
 }

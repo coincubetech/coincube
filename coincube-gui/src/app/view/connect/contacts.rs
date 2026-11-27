@@ -269,6 +269,22 @@ fn received_invite_card<'a>(
         None => Column::new()
             .push(text::p1_regular(invite.owner_email.as_str()).style(theme::text::primary)),
     };
+    // The Cubes the invitation is for, each named with its ring mark beside
+    // it. The name identifies the Cube; the mark only decorates (master plan
+    // invariant RM6), and the inviter's email stays in the row. An invite
+    // with no Cubes (an older server or invitation) renders as before.
+    let info = if invite.cubes.is_empty() {
+        info
+    } else {
+        let mut cubes = Column::new().spacing(6);
+        for cube in &invite.cubes {
+            cubes = cubes.push(received_invite_cube(cube));
+        }
+        Column::new()
+            .push(cubes)
+            .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
+            .push(info.spacing(2))
+    };
     let info = info
         .push(
             Row::new()
@@ -306,6 +322,34 @@ fn received_invite_card<'a>(
     .style(card_style)
     .width(Length::Fill)
     .into()
+}
+
+/// Size of a Cube's ring mark on a received invitation.
+const RECEIVED_INVITE_MARK_SIZE: f32 = 32.0;
+
+/// One Cube on a received invitation: its ring mark at 32 px, then its name
+/// and network, which together identify the Cube (RM6). With no network the
+/// line is the name alone. With no UUID from the server (one that predates
+/// API CA1a) no mark is drawn; a UUID that is present but malformed draws
+/// the centre dot, as every other mark site does.
+fn received_invite_cube<'a>(
+    cube: &'a crate::services::coincube::ReceivedInviteCube,
+) -> Element<'a, ConnectAccountMessage> {
+    let mut row = Row::new().spacing(10).align_y(Alignment::Center);
+    if cube.has_mark() {
+        row = row.push(coincube_ui::component::ring_mark::ring_mark(
+            cube.mark_seed().as_deref(),
+            RECEIVED_INVITE_MARK_SIZE,
+        ));
+    }
+    row = row.push(text::p1_bold(cube.cube_name.as_str()).style(theme::text::primary));
+    if let Some(network) = cube.network.as_deref() {
+        row = row.push(
+            text::p2_regular(super::cube_members::network_name(network))
+                .style(theme::text::secondary),
+        );
+    }
+    row.into()
 }
 
 fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectAccountMessage> {
@@ -359,6 +403,57 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     .padding([5, 0])
     .on_press(ConnectAccountMessage::Contacts(ContactsMessage::BackToList));
 
+    let heading = Column::new()
+        .push(back_button)
+        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+        .push(text::h4_bold(localized_copy("Invite Contact")).style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
+
+    // Every invitation names at least one Cube (decision 2026-11-26), so
+    // the form waits for the list of Cubes it offers: the user should not
+    // type an address into a form that then turns out to have no Cube.
+    let cubes = match cs.invite_available_cubes.as_deref() {
+        Some(cubes) if !cubes.is_empty() => cubes,
+        Some(_) => {
+            let mut no_cube = heading.push(
+                text::p1_regular(localized_copy("Invitations are for a Cube you own."))
+                    .style(theme::text::secondary),
+            );
+            // A send refused because the chosen Cube is gone reloads the
+            // list; if that leaves none, still say what happened.
+            if let Some(msg) = cs.invite_cube_error.as_deref() {
+                no_cube = no_cube
+                    .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+                    .push(invite_cube_conflict_card(msg));
+            }
+            return no_cube.max_width(500).width(Length::Fill).into();
+        }
+        None => {
+            let status: Element<ConnectAccountMessage> = match cs.invite_cubes_load_error.as_deref()
+            {
+                Some(err) => Column::new()
+                    .push(
+                        text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .color(color::RED),
+                    )
+                    .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+                    .push(button::secondary(None, localized_copy("Retry")).on_press(
+                        ConnectAccountMessage::Contacts(ContactsMessage::ShowInviteForm),
+                    ))
+                    .into(),
+                None => text::p1_regular(localized_copy("Loading…"))
+                    .color(color::GREY_3)
+                    .into(),
+            };
+            return heading
+                .push(status)
+                .max_width(500)
+                .width(Length::Fill)
+                .into();
+        }
+    };
+    let has_cube = !cs.invite_cube_selections.is_empty();
+
     let email = &cs.invite_email;
     let email_trimmed = email.trim();
     let email_valid = email_address::EmailAddress::parse_with_options(
@@ -379,18 +474,16 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
         .into()
     } else {
         button::primary(None, localized_copy("Send Invite"))
-            .on_press_maybe((email_valid && !email_trimmed.is_empty()).then_some(
-                ConnectAccountMessage::Contacts(ContactsMessage::SubmitInvite),
-            ))
+            .on_press_maybe(
+                (email_valid && !email_trimmed.is_empty() && has_cube).then_some(
+                    ConnectAccountMessage::Contacts(ContactsMessage::SubmitInvite),
+                ),
+            )
             .width(Length::Fill)
             .into()
     };
 
-    let mut form = Column::new()
-        .push(back_button)
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(text::h4_bold(localized_copy("Invite Contact")).style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+    let mut form = heading
         .push(text::p2_regular(localized_copy("Email Address")).color(color::GREY_3))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
@@ -398,7 +491,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
                 .on_input(|s| {
                     ConnectAccountMessage::Contacts(ContactsMessage::InviteEmailChanged(s))
                 })
-                .on_submit_maybe((email_valid && !cs.invite_sending).then_some(
+                .on_submit_maybe((email_valid && has_cube && !cs.invite_sending).then_some(
                     ConnectAccountMessage::Contacts(ContactsMessage::SubmitInvite),
                 ))
                 .size(16)
@@ -409,20 +502,13 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     // Keyholder is the only usable role today; invite_role stays in
     // ContactsState pre-initialised so reintroduction is a small diff.
 
-    // W12: optional cube multi-select. Only rendered when the backend
-    // returned a non-empty cube list.
-    if let Some(cubes) = cs.invite_available_cubes.as_deref() {
-        if !cubes.is_empty() {
-            form = form
-                .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-                .push(
-                    text::p2_regular(localized_copy("Also add to Cube(s) (optional)"))
-                        .color(color::GREY_3),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                .push(invite_cubes_section(cubes, &cs.invite_cube_selections));
-        }
-    }
+    // W12 cube multi-select. At least one Cube must be ticked before Send
+    // is enabled.
+    form = form
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(text::p2_regular(localized_copy("For which Cubes?")).color(color::GREY_3))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(invite_cubes_section(cubes, &cs.invite_cube_selections));
 
     form = form
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
@@ -555,29 +641,18 @@ fn contact_detail_ux<'a>(
         .as_ref()
         .map(|u| u.email.as_str())
         .unwrap_or("unknown contact");
-    let first_char = email
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
     let rc = role_color(&contact.role);
     let role_label = contact.role.to_string();
     let connected_date = format_date(&contact.created_at);
 
-    let avatar = container(text::h3(first_char).color(color::WHITE))
-        .width(Length::Fixed(64.0))
-        .height(Length::Fixed(64.0))
-        .center_x(Length::Fixed(64.0))
-        .center_y(Length::Fixed(64.0))
-        .style(|_t| container::Style {
-            background: Some(iced::Background::Color(color::ORANGE)),
-            border: iced::Border {
-                radius: 32.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+    // Initials in a thin ring: the display name when the contact set one,
+    // else the email. A person is never drawn as a Cube mark.
+    let user = contact.contact_user.as_ref();
+    let avatar = coincube_ui::component::ring_mark::person_mark(
+        user.and_then(|u| u.display_name.as_deref()),
+        user.map(|u| u.email.as_str()),
+        64.0,
+    );
 
     let role_badge = container(text::p2_regular(role_label).color(rc))
         .padding(iced::Padding {

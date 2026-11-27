@@ -2439,6 +2439,7 @@ mod top_bar_tests {
         home.remote_cubes = ["r1", "r2", "r3"]
             .iter()
             .map(|uuid| super::super::RemoteCube {
+                mark_variation: 0,
                 id: 42,
                 uuid: (*uuid).to_string(),
                 name: format!("Remote {uuid}"),

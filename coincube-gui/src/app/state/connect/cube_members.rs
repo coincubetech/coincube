@@ -443,6 +443,8 @@ mod tests {
             pending_invites,
             vault: None,
             connect_features_disabled: false,
+            mark_variation: None,
+            mark_version: None,
         }
     }
 

@@ -152,7 +152,7 @@ impl Fixture {
             spark_alias: Some("Daily spending"),
             vault_alias: Some("Family savings"),
             lightning_address: None,
-            avatar: None,
+            mark_seed: None,
             theme_mode: self.mode,
             connect_authenticated: false,
             connect_email: None,

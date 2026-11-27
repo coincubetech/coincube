@@ -411,10 +411,12 @@ pub struct Cache {
     pub show_direction_badges: bool,
     /// Cached Lightning Address for display in the sidebar across all panels
     pub lightning_address: Option<String>,
-    /// Cached avatar image handle for display in the sidebar across all panels
     /// Avatar regenerations the Connect account has left, when known.
     pub avatar_regenerations_remaining: Option<i32>,
-    pub avatar_handle: Option<iced::widget::image::Handle>,
+    /// The seed the open Cube's ring mark is drawn from
+    /// ([`crate::app::settings::CubeSettings::mark_seed`]), kept in step
+    /// with the Cube's `mark_variation`. `None` draws the mark's centre dot.
+    pub cube_mark_seed: Option<String>,
     /// Id of the current Cube.
     pub cube_id: String,
     /// Connect's numeric id for the active Cube (mirror of
@@ -605,7 +607,7 @@ impl std::default::Default for Cache {
             btc_usd_requested_at: None,
             show_direction_badges: true,
             lightning_address: None,
-            avatar_handle: None,
+            cube_mark_seed: None,
             avatar_regenerations_remaining: None,
             cube_id: String::new(),
             current_cube_server_id: None,

@@ -670,23 +670,15 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .as_ref()
         .map(|user| user.email.as_str())
         .unwrap_or("—");
-    let avatar = container(
-        person_outline_icon()
-            .size(24)
-            .style(theme::tenshu::text::accent),
-    )
-    .width(48)
-    .height(48)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(|theme: &theme::Theme| container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.selected)),
-        border: iced::Border {
-            radius: 24.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    // The signed-in person's initials in a thin ring.
+    let avatar = coincube_ui::component::ring_mark::person_mark(
+        state
+            .user
+            .as_ref()
+            .and_then(|user| user.display_name.as_deref()),
+        state.user.as_ref().map(|user| user.email.as_str()),
+        48.0,
+    );
     let column = Column::new()
         .push(sheet_title(localized_copy("Account")))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))

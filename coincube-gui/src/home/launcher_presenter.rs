@@ -14,6 +14,7 @@ use iced::{
 use coincube_ui::{
     component::{
         quote_display::Quote,
+        ring_mark,
         tenshu::{self, top_bar, ActionButton, ActionKind},
     },
     icon, theme,
@@ -86,35 +87,6 @@ pub(super) fn wallet_face_mark(cube: &crate::app::settings::CubeSettings) -> Wal
     } else {
         WalletFaceMark::None
     }
-}
-
-// The generated avatar is not available in this pre-unlock catalog. Keep a
-// stable, readable initial alongside the name in both the floor and details.
-fn catalog_avatar(name: &str) -> Container<'static, ViewMessage> {
-    catalog_avatar_any(name)
-}
-
-fn catalog_initial(name: &str) -> String {
-    name.chars()
-        .find(|ch| ch.is_alphanumeric())
-        .map(|ch| ch.to_uppercase().collect::<String>())
-        .unwrap_or_else(|| "?".into())
-}
-
-fn catalog_avatar_any<M: 'static>(name: &str) -> Container<'static, M> {
-    Container::new(tenshu::label(catalog_initial(name)))
-        .center_x(Length::Fixed(34.0))
-        .center_y(Length::Fixed(34.0))
-        .style(|theme: &theme::Theme| container::Style {
-            background: Some(iced::Background::Color(theme.colors.shell.panel)),
-            border: iced::Border {
-                color: theme.colors.shell.line,
-                width: 1.0,
-                radius: 17.0.into(),
-            },
-            text_color: Some(theme.colors.shell.ink),
-            ..Default::default()
-        })
 }
 
 /// Standalone unlock screens use the saved appearance until the tab's live
@@ -323,7 +295,10 @@ fn local_facts<'a>(
         Row::new()
             .spacing(CELL_GAP)
             .align_y(Alignment::Center)
-            .push(Container::new(icon::cube_icon()).width(Length::Fixed(AVATAR_WIDTH)))
+            .push(
+                Container::new(ring_mark::ring_mark(row.mark_seed.as_deref(), 32.0))
+                    .width(Length::Fixed(AVATAR_WIDTH)),
+            )
             .push(name)
             .push(
                 Container::new(network_label(row.key.chain, network, 16.0, light))
@@ -349,7 +324,7 @@ fn local_facts<'a>(
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(icon::cube_icon())
+                    .push(ring_mark::ring_mark(row.mark_seed.as_deref(), 32.0))
                     .push(name),
             )
             .push(network_label(row.key.chain, network, 16.0, light))
@@ -427,7 +402,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .push(catalog_avatar(&row.name))
+                .push(ring_mark::ring_mark(row.mark_seed.as_deref(), 34.0))
                 .push(
                     tenshu::section(row.name.clone())
                         .width(Length::Fill)
@@ -727,22 +702,7 @@ fn floor_details<'a>(
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::font;
     let (backup_text, backup_tone) = backup(row.cube);
-    let avatar = Container::new(face_words(
-        catalog_initial(&row.name),
-        14.0,
-        font::SEMIBOLD,
-        false,
-    ))
-    .center_x(Length::Fixed(32.0))
-    .center_y(Length::Fixed(32.0))
-    .style(|theme: &theme::Theme| container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.panel)),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    let avatar = ring_mark::ring_mark(row.mark_seed.as_deref(), 32.0);
     let facts = Column::new()
         .spacing(10)
         .push(face_fact(
@@ -852,19 +812,28 @@ fn face_secondary_style(theme: &theme::Theme, status: iced_button::Status) -> ic
     }
 }
 
-/// `.av.ghost`: a dashed ring holding the cloud.
-pub(super) fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
-    let ring = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"15.5\" fill=\"none\" stroke=\"#fff\" stroke-dasharray=\"3 2\"/><g transform=\"translate(8 8) scale(.6667)\"><path d=\"{}\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></g></svg>",
-        launcher_scene::CLOUD
-    );
-    iced::widget::svg(iced::widget::svg::Handle::from_memory(ring.into_bytes()))
+/// `.av.ghost`: a dashed ring holding the Cube's ring mark in the muted
+/// colour, for a Cube that lives on another computer.
+pub(super) fn ghost_avatar<'a, M: 'a>(seed: Option<&str>, size: f32) -> Element<'a, M> {
+    let ring = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"15.5\" fill=\"none\" stroke=\"#fff\" stroke-dasharray=\"3 2\"/></svg>";
+    let ring = iced::widget::svg(iced::widget::svg::Handle::from_memory(ring.as_bytes()))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
         .style(|theme: &theme::Theme, _| iced::widget::svg::Style {
             color: Some(theme.colors.shell.muted),
-        })
-        .into()
+        });
+    // Three quarters of the ring, so the outer arc clears the dashes; never
+    // below the mark's minimum size.
+    let mark = ring_mark::ring_mark_muted(seed, (size * 0.75).max(ring_mark::MIN_SIZE));
+    iced::widget::stack![
+        ring,
+        Container::new(mark)
+            .center_x(Length::Fixed(size))
+            .center_y(Length::Fixed(size))
+    ]
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .into()
 }
 
 /// The Recovery fact on a ghost's face, and the note under the facts.
@@ -973,7 +942,7 @@ fn ghost_details<'a>(
                 Row::new()
                     .spacing(10)
                     .align_y(Alignment::Center)
-                    .push(ghost_avatar(32.0))
+                    .push(ghost_avatar(cube.mark_seed().as_deref(), 32.0))
                     .push(
                         face_words(
                             super::catalog_display_name(&cube.name),
@@ -1015,7 +984,7 @@ fn ghost_details<'a>(
     .into()
 }
 
-/// A ghost's slot: the dashed cloud avatar, its muted name and its Connect
+/// A ghost's slot: the dashed ring with its muted mark, its muted name and its Connect
 /// state, over a hit area that turns it to its details face.
 fn ghost_slot<'a>(
     cube: &super::RemoteCube,
@@ -1028,7 +997,7 @@ fn ghost_slot<'a>(
     let label = Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
-        .push(ghost_avatar(32.0))
+        .push(ghost_avatar(cube.mark_seed().as_deref(), 32.0))
         .push(
             Column::new()
                 .spacing(2)
@@ -1099,7 +1068,8 @@ fn remote_row<'a>(cube: &super::RemoteCube) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
-        .push(icon::cloud_arrow_down_icon())
+        // A Cube on another computer: its mark, muted, in the dashed ring.
+        .push(ghost_avatar(cube.mark_seed().as_deref(), 32.0))
         .push(
             Column::new()
                 .spacing(4)
@@ -1312,6 +1282,7 @@ fn floor_slot<'a>(
     closes_face: bool,
 ) -> Element<'a, ViewMessage> {
     let label = Container::new(floor_label(
+        &launcher_catalog::PeerMark::Local(row.mark_seed.clone()),
         &row.name,
         if row.actionable {
             unlock_prompt(row.cube)
@@ -1362,30 +1333,18 @@ fn floor_slot<'a>(
         .into()
 }
 
-/// `.lbl`: the 32px avatar, then the name (14px semibold, `.cb.dim .nm`
+/// `.lbl`: the 32px ring mark, then the name (14px semibold, `.cb.dim .nm`
 /// muted at weight 500) over the 13px muted state line.
-fn floor_label<'a, M: 'static>(name: &str, state: &'static str, dimmed: bool) -> Row<'a, M> {
-    let initial = name
-        .chars()
-        .find(|ch| ch.is_alphanumeric())
-        .map(|ch| ch.to_uppercase().collect::<String>())
-        .unwrap_or_else(|| "?".into());
-    let avatar = Container::new(
-        iced::widget::text(initial)
-            .size(13)
-            .font(coincube_ui::font::SEMIBOLD),
-    )
-    .center_x(Length::Fixed(32.0))
-    .center_y(Length::Fixed(32.0))
-    .style(|theme: &theme::Theme| container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.panel)),
-        border: iced::Border {
-            radius: 16.0.into(),
-            ..Default::default()
-        },
-        text_color: Some(theme.colors.shell.ink),
-        ..Default::default()
-    });
+fn floor_label<'a, M: 'static>(
+    mark: &launcher_catalog::PeerMark,
+    name: &str,
+    state: &'static str,
+    dimmed: bool,
+) -> Row<'a, M> {
+    let avatar: Element<'a, M> = match mark {
+        launcher_catalog::PeerMark::Local(seed) => ring_mark::ring_mark(seed.as_deref(), 32.0),
+        launcher_catalog::PeerMark::Ghost(seed) => ghost_avatar(seed.as_deref(), 32.0),
+    };
     let name = iced::widget::text(name.to_owned())
         .size(14)
         .font(if dimmed {
@@ -1421,6 +1380,7 @@ fn face_text<'r>(row: &'r launcher_catalog::LocalRow<'_>) -> launcher_scene::Fac
         connect: &row.connect.1,
         wallets: &row.wallets,
         passkey: row.cube.is_passkey_cube(),
+        mark: row.mark_seed.as_deref(),
     }
 }
 
@@ -1840,6 +1800,7 @@ fn floor_layout<'a>(
                 super::catalog_display_name(&cube.name),
                 ghost_copy(cube).0,
                 launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Restorable,
+                cube.mark_seed(),
             )),
             FloorEntry::Local(_) => None,
         })
@@ -1853,11 +1814,14 @@ fn floor_layout<'a>(
                 None,
                 ghost_text[*index]
                     .as_ref()
-                    .map(|(name, backup, restorable)| launcher_scene::GhostText {
-                        name,
-                        backup,
-                        restorable: *restorable,
-                    }),
+                    .map(
+                        |(name, backup, restorable, mark)| launcher_scene::GhostText {
+                            name,
+                            backup,
+                            restorable: *restorable,
+                            mark: mark.as_deref(),
+                        },
+                    ),
             ),
         };
         launcher_gpu::StageCube {
@@ -2185,6 +2149,7 @@ fn lone_cube<'a, M: 'a>(
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     let cube = cube.clone();
     let wallets = local_wallets(&cube);
+    let mark = cube.mark_seed();
     responsive(move |size: Size| {
         let layout = launcher_scene::Layout::new(size.width, size.height);
         let name = crate::cube_display::name(&cube.name);
@@ -2203,6 +2168,7 @@ fn lone_cube<'a, M: 'a>(
                     connect: "Checking…",
                     wallets: &wallets,
                     passkey: cube.is_passkey_cube(),
+                    mark: mark.as_deref(),
                 }),
                 ghost_details: None,
                 unlock_name: Some(&name),
@@ -2380,6 +2346,7 @@ fn floor_stage<'a, M: 'a + 'static>(
     let stage_height = layout.height;
     let count = context.peers.len();
     let name = crate::cube_display::name(&cube.name);
+    let mark = cube.mark_seed();
     let selected_pose = lead.pose;
     // Peers first, the turning Cube last, as on the Launcher page.
     let mut order: Vec<usize> = (0..count).collect();
@@ -2399,6 +2366,7 @@ fn floor_stage<'a, M: 'a + 'static>(
                 connect: &context.connect,
                 wallets: &context.wallets,
                 passkey: cube.is_passkey_cube(),
+                mark: mark.as_deref(),
             }),
             ghost_details: None,
             unlock_name: faces.then_some(name.as_str()),
@@ -2478,7 +2446,7 @@ fn floor_stage_labels<'a, M: 'a + 'static>(
         let label: Element<'a, M> = if selected {
             Space::new().into()
         } else {
-            floor_label(&peer.name, peer.status, true).into()
+            floor_label(&peer.mark, &peer.name, peer.status, true).into()
         };
         let covered = launcher_scene::overlaps(
             launcher_scene::bounds(
@@ -2955,6 +2923,44 @@ pub(crate) fn opening_body<'a>(
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    /// A Cube on another computer is its muted mark in the dashed ring in
+    /// both List renderers, never the cloud glyph.
+    #[test]
+    fn remote_list_rows_show_the_cubes_mark_not_a_cloud() {
+        let cube = super::super::RemoteCube {
+            mark_variation: 2,
+            id: 9,
+            uuid: "9fb93534-081c-4253-b1e2-73a87984a8ab".into(),
+            name: "Elsewhere".into(),
+            network: "mainnet".into(),
+            has_recovery_kit: false,
+            has_encrypted_seed: false,
+            phone_recoverable: false,
+            phone_full_cube: false,
+            encryption_pubkey: None,
+            has_vault: None,
+        };
+        let cloud = '\u{F295}'.to_string();
+        for (name, row) in [
+            ("presenter", remote_row(&cube)),
+            ("catalog", launcher_catalog::remote_row_for_test(&cube)),
+        ] {
+            let mounted = capture::inspect(
+                "remote-row-mark",
+                row,
+                (1024, 200),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(mounted.contains("Elsewhere"), "{}", name);
+            assert!(
+                !mounted.contains(&cloud),
+                "{}: the cloud glyph is drawn",
+                name
+            );
+        }
+    }
     use crate::dir::CoincubeDirectory;
     use coincube_core::miniscript::bitcoin::Network;
     use coincube_ui::font;
@@ -3084,12 +3090,14 @@ mod tests {
             wallets: "Spark".into(),
             peers: vec![
                 launcher_catalog::LauncherScenePeer {
+                    mark: launcher_catalog::PeerMark::Local(None),
                     key: selected,
                     name: "Everyday".into(),
                     status: "PIN prompt",
                     marks: launcher_gpu::marks(cube),
                 },
                 launcher_catalog::LauncherScenePeer {
+                    mark: launcher_catalog::PeerMark::Local(None),
                     key: peer_key,
                     name: "Travel".into(),
                     status: "PIN prompt",
@@ -3098,6 +3106,7 @@ mod tests {
                 // The 420px face covers the two middle labels, as the
                 // prototype's lead Cube does; the last peer stays readable.
                 launcher_catalog::LauncherScenePeer {
+                    mark: launcher_catalog::PeerMark::Local(None),
                     key: CubeCatalogKey {
                         chain: cube.network,
                         cube_id: "studio".into(),
@@ -3107,6 +3116,7 @@ mod tests {
                     marks: launcher_gpu::marks(&peer),
                 },
                 launcher_catalog::LauncherScenePeer {
+                    mark: launcher_catalog::PeerMark::Local(None),
                     key: CubeCatalogKey {
                         chain: cube.network,
                         cube_id: "lab".into(),
@@ -3662,6 +3672,7 @@ mod tests {
             }
         }
         home.remote_cubes.push(super::super::RemoteCube {
+            mark_variation: 0,
             id: 7,
             uuid: "restore-me".into(),
             name: "Connect backup".into(),
@@ -3713,6 +3724,7 @@ mod tests {
 
     fn ghost_fixture(uuid: &str, name: &str, kit: bool) -> super::super::RemoteCube {
         super::super::RemoteCube {
+            mark_variation: 0,
             id: 9,
             uuid: uuid.into(),
             name: name.into(),
@@ -4829,6 +4841,7 @@ mod tests {
     fn search_and_remote_restore_keep_the_catalog_intents() {
         let mut home = home_with_cubes();
         home.remote_cubes.push(super::super::RemoteCube {
+            mark_variation: 0,
             id: 7,
             uuid: "remote-id".into(),
             name: "Travel backup".into(),
