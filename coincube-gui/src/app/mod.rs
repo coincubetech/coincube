@@ -6604,8 +6604,13 @@ impl App {
         if self.cube_settings.is_connect_registered() {
             self.panels.connect.set_cube_has_server_record(true);
         }
-        // A failure line belongs to the Connect session that saw it.
-        if let cache::CubeMarkChange::Failed { generation } = self.cache.cube_mark_change {
+        // A save in flight and a failure line both belong to the Connect
+        // session that started them. Once that session ends, the buttons
+        // are free again; the old call's late result finds a different
+        // state and changes nothing (`on_cube_mark_set`).
+        if let cache::CubeMarkChange::Failed { generation }
+        | cache::CubeMarkChange::Saving { generation } = self.cache.cube_mark_change
+        {
             if generation != self.panels.connect.cube.session_generation() {
                 self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
             }

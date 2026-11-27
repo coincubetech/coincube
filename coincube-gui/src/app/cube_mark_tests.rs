@@ -716,6 +716,37 @@ fn a_failed_registration_says_connect_has_not_confirmed_the_cube() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A save still in flight when its Connect session ends must not hold the
+/// buttons in the next session, and its late answer changes nothing.
+#[test]
+fn a_save_in_flight_does_not_hold_the_next_session() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("saving-session");
+    let server = MockServer::start();
+    let mut app = mark_app(&root);
+    sign_in(&mut app, &server);
+    let old = app.panels.connect.cube.session_generation();
+    app.cache.cube_mark_change = CubeMarkChange::Saving { generation: old };
+    app.sync_panel_derived_cache_fields();
+    assert_eq!(
+        app.cache.cube_mark_change,
+        CubeMarkChange::Saving { generation: old }
+    );
+    // Sign out and back in while the old call is still out.
+    app.panels.connect.cube.clear_client();
+    sign_in(&mut app, &server);
+    assert_eq!(app.cache.cube_mark_change, CubeMarkChange::Idle);
+    // The old call's late answer changes nothing in the new session.
+    let current = app.cube_settings.mark_variation;
+    drop(app.update(Message::CubeMarkSet {
+        generation: old,
+        result: Ok(current + 5),
+    }));
+    assert_eq!(app.cache.cube_mark_change, CubeMarkChange::Idle);
+    assert_eq!(app.cube_settings.mark_variation, current);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A failure line belongs to the Connect session that saw it: signing out
 /// (or into another account) clears it.
 #[test]
