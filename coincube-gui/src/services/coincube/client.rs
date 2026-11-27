@@ -3681,6 +3681,103 @@ mod cube_member_tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].id, 42);
         assert_eq!(received[0].owner_email, "alice@example.com");
+        // A server without `cubes[]` gives an invitation with no Cube.
+        assert!(received[0].cubes.is_empty());
+    }
+
+    /// The list as API CA1a sends it (coincube-api#552): each invite's
+    /// `cubes[]` carries `cubeUuid`, `markVariation` and `markVersion` beside
+    /// `cubeId`, `cubeName`, `network` and `encryptionPubkey`. One Cube with
+    /// a bad `markVariation` and `network`, and one entry that is not a Cube
+    /// at all, must not fail the list.
+    #[tokio::test]
+    async fn get_received_invites_parses_cubes_leniently() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::GET)
+                .path("/api/v1/connect/invites/received");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": [
+                        {
+                            "id": 42,
+                            "ownerEmail": "alice@example.com",
+                            "ownerDisplayName": "",
+                            "role": "keyholder",
+                            "expiresAt": "2026-05-25T12:00:00Z",
+                            "createdAt": "2026-05-18T12:00:00Z",
+                            "cubes": [
+                                {
+                                    "cubeId": 7,
+                                    "cubeUuid": "3F2504E0-4F89-41D3-9A0C-0305E82C3301",
+                                    "cubeName": "Family",
+                                    "network": "mainnet",
+                                    "encryptionPubkey": null,
+                                    "markVariation": 4,
+                                    "markVersion": 1
+                                },
+                                {
+                                    "cubeId": 8,
+                                    "cubeUuid": "6fa459ea-ee8a-4ca4-894e-db77e160355e",
+                                    "cubeName": "Savings",
+                                    "network": 7,
+                                    "encryptionPubkey": "02ab",
+                                    "markVariation": "four",
+                                    "markVersion": 0
+                                },
+                                "not a cube"
+                            ]
+                        },
+                        {
+                            "id": 43,
+                            "ownerEmail": "bob@example.com",
+                            "role": "keyholder",
+                            "expiresAt": "2026-05-25T12:00:00Z",
+                            "createdAt": "2026-05-18T12:00:00Z",
+                            "cubes": []
+                        }
+                    ]
+                }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let received = client
+            .get_received_invites()
+            .await
+            .expect("a bad mark field must not fail the invite list");
+        mock.assert();
+
+        assert_eq!(received.len(), 2);
+        let cubes = &received[0].cubes;
+        assert_eq!(cubes.len(), 2, "the unreadable entry is dropped");
+        assert_eq!(
+            (cubes[0].cube_id, cubes[0].cube_name.as_str()),
+            (7, "Family")
+        );
+        assert_eq!(
+            (cubes[0].mark_variation, cubes[0].mark_version),
+            (Some(4), Some(1))
+        );
+        assert_eq!(cubes[0].network.as_deref(), Some("mainnet"));
+        assert_eq!(
+            cubes[1].network, None,
+            "a bad network is None, not a failure"
+        );
+        assert_eq!(
+            cubes[0].mark_seed().as_deref(),
+            Some("3f2504e0-4f89-41d3-9a0c-0305e82c3301:4")
+        );
+        assert_eq!(
+            (cubes[1].mark_variation, cubes[1].mark_version),
+            (Some(0), None)
+        );
+        assert_eq!(
+            cubes[1].mark_seed().as_deref(),
+            Some("6fa459ea-ee8a-4ca4-894e-db77e160355e")
+        );
+        assert!(received[1].cubes.is_empty());
     }
 
     #[tokio::test]

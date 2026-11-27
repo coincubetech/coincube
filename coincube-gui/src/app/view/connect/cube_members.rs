@@ -515,7 +515,9 @@ fn invite_status(status: &str) -> &str {
     }
 }
 
-fn network_name(network: &str) -> &str {
+/// Connect's network id (`mainnet`, `testnet4`, `bitcoin-blake2b`, …) as a
+/// label. Shared with the received invitations in Contacts.
+pub(super) fn network_name(network: &str) -> &str {
     match network {
         "mainnet" => "Bitcoin mainnet",
         "testnet" => "Bitcoin testnet",
