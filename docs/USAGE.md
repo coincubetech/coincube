@@ -69,7 +69,14 @@ see `docs/mcp/README.md`).
 On Windows the install folder also moved, from `Program Files\Tenshu` to
 `Program Files\COINCUBE`, so pair local MCP clients again after upgrading there too.
 
-We do not yet distribute codesigned binaries for Windows at this time.
+Windows installers produced by the signing-enabled release workflow must carry
+an Authenticode signature from **COINCUBE TECHNOLOGY LLC**, as must the installed
+`coincube.exe`, `coincube-spark-bridge.exe` and `coincube-mcp.exe` executables.
+Historical downloads may predate signing. Check the specific MSI's Digital
+Signatures details as well as the checksums above; do not treat an unknown
+publisher or an invalid signature as acceptable. SmartScreen may still show an
+"unrecognized app" warning while reputation builds, even for a valid signature.
+See the [Windows signing runbook](WINDOWS_CODE_SIGNING.md) for activation checks.
 
 ### Starting the software
 
