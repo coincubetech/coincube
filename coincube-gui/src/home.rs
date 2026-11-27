@@ -8816,9 +8816,12 @@ pub enum DeleteCubeMessage {
     PinInput(pin_input::Message),
     /// How the passkey check a passkey Cube's Delete started ended. `Ok`
     /// admits the delete; `Err` carries the copy to show. Never key material:
-    /// the derived seed is dropped inside the task.
+    /// the derived seed is dropped inside the task. `attempt` names the check
+    /// that produced it, so a result from an earlier check cannot admit a
+    /// later one.
     PasskeyChecked {
         cube_id: String,
+        attempt: u64,
         result: Result<(), String>,
     },
     // Remote-only cube deletion
@@ -8847,9 +8850,10 @@ struct DeleteCubeModal {
     datadir_root: std::path::PathBuf,
     pin_input: pin_input::PinInput,
     pin_error: Option<String>,
-    /// A passkey Cube's confirmation is in flight: the system Touch ID sheet
-    /// is up and Delete waits for its answer.
-    passkey_pending: bool,
+    /// The passkey check in flight, if any: the system Touch ID sheet is up
+    /// and Delete waits for this attempt's answer, and no other's. Cleared
+    /// when the check answers or is cancelled.
+    passkey_attempt: Option<u64>,
     /// Why the last passkey check did not admit the delete.
     passkey_error: Option<String>,
     /// The PIN was accepted, and the delete waits for a daemon this Cube left
@@ -9312,7 +9316,7 @@ impl DeleteCubeModal {
             internal_bitcoind,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
-            passkey_pending: false,
+            passkey_attempt: None,
             passkey_error: None,
             waiting_for_stop: false,
             stop_refused: false,
@@ -9335,11 +9339,18 @@ impl DeleteCubeModal {
     /// native ceremony is main-thread-only; `reauth::begin` parks it and
     /// hands back a plain future.
     fn begin_passkey_check(&mut self) -> Task<Message> {
+        // Unique across the process, not just this modal: closing and
+        // reopening Delete builds a new modal, and a success the closed
+        // one's check had already received can still be queued. A per-modal
+        // counter would restart and let that stale answer match.
+        static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
         self.passkey_error = None;
         let cube_id = self.cube.id.clone();
         match crate::services::passkey::reauth::begin(&self.cube) {
             Ok(fut) => {
-                self.passkey_pending = true;
+                let attempt = NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.passkey_attempt = Some(attempt);
                 Task::perform(
                     async move {
                         // The words are dropped (and zeroized) right here.
@@ -9353,6 +9364,7 @@ impl DeleteCubeModal {
                     move |result| {
                         Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
                             cube_id,
+                            attempt,
                             result,
                         }))
                     },
@@ -9366,10 +9378,11 @@ impl DeleteCubeModal {
     }
 
     /// Cancel a passkey confirmation still in flight, so closing the modal
-    /// also takes down the system sheet.
+    /// also takes down the system sheet. Forgetting the attempt is what
+    /// stops its answer, if one is already on its way, from admitting
+    /// anything.
     fn cancel_passkey_check(&mut self) {
-        if self.passkey_pending {
-            self.passkey_pending = false;
+        if self.passkey_attempt.take().is_some() {
             crate::services::passkey::reauth::cancel();
         }
     }
@@ -9524,14 +9537,16 @@ impl DeleteCubeModal {
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
                 cube_id,
+                attempt,
                 result,
             })) => {
-                // Only the check this modal started may admit it. A late
-                // answer after Cancel, or for another Cube, does nothing.
-                if cube_id != self.cube.id || !self.passkey_pending {
+                // Only the check in flight may admit it. A late answer after
+                // Cancel, one from an earlier check, or one for another Cube
+                // does nothing.
+                if cube_id != self.cube.id || self.passkey_attempt != Some(attempt) {
                     return Task::none();
                 }
-                self.passkey_pending = false;
+                self.passkey_attempt = None;
                 match result {
                     Ok(()) => return self.admit(cube_id),
                     Err(message) => self.passkey_error = Some(message),
@@ -9552,7 +9567,7 @@ impl DeleteCubeModal {
         // asks before showing the master seed. A second press while the
         // system sheet is up must not stack another ceremony.
         if self.confirms_with_passkey() {
-            if self.passkey_pending {
+            if self.passkey_attempt.is_some() {
                 return Task::none();
             }
             return self.begin_passkey_check();
@@ -9657,7 +9672,7 @@ impl DeleteCubeModal {
         // for a passkey Cube, which has no PIN.
         let has_pin = !passkey && self.cube.has_pin(&self.datadir_root);
         let auth_ready = if passkey {
-            !self.passkey_pending
+            self.passkey_attempt.is_none()
         } else {
             !has_pin || self.pin_input.is_complete()
         };
@@ -9739,7 +9754,7 @@ impl DeleteCubeModal {
         // this passkey was set up with.
         if passkey {
             col = col.push(Space::new().height(Length::Fixed(5.0))).push(
-                p1_regular(localized_copy(if self.passkey_pending {
+                p1_regular(localized_copy(if self.passkey_attempt.is_some() {
                     "Confirm with Touch ID to delete this Cube. Look for the system prompt."
                 } else {
                     "You'll be asked to confirm with Touch ID."
@@ -14076,9 +14091,10 @@ mod tests {
             .build()
             .unwrap();
         let _enter = runtime.enter();
-        let checked = |id: &str, result: Result<(), String>| {
+        let checked = |id: &str, attempt: u64, result: Result<(), String>| {
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
                 cube_id: id.to_string(),
+                attempt,
                 result,
             }))
         };
@@ -14146,14 +14162,15 @@ mod tests {
                 continue;
             }
 
-            // The ceremony itself cannot run in a test, so stand in for one
-            // `Confirm` started and drive its outcomes.
-            modal.passkey_pending = true;
+            // The ceremony itself cannot run in a test, so stand in for the
+            // attempts `Confirm` would start and drive their outcomes.
+            modal.passkey_attempt = Some(1);
             let _ = modal.update(checked(
                 &cube.id,
+                1,
                 Err("Touch ID was cancelled, so this Cube was not deleted.".into()),
             ));
-            assert!(!modal.passkey_pending);
+            assert_eq!(modal.passkey_attempt, None);
             assert!(modal.passkey_error.is_some(), "{:?}", chain);
             assert!(
                 !modal.deleted && on_disk(),
@@ -14161,23 +14178,47 @@ mod tests {
                 chain
             );
 
-            // An answer nobody is waiting for (a late one after Cancel) or
-            // one for another Cube admits nothing.
-            let _ = modal.update(checked(&cube.id, Ok(())));
+            // An answer nobody is waiting for (a late one after Cancel)
+            // admits nothing.
+            let _ = modal.update(checked(&cube.id, 1, Ok(())));
             assert!(
                 !modal.deleted && on_disk(),
                 "{:?}: a stale check deleted",
                 chain
             );
-            modal.passkey_pending = true;
-            let _ = modal.update(checked("another-cube", Ok(())));
+
+            // Nor does an earlier attempt's success that lands while a newer
+            // check is in flight, as after Cancel and a second Delete. The
+            // newer check stays in flight for its own answer.
+            modal.passkey_attempt = Some(3);
+            let _ = modal.update(checked(&cube.id, 2, Ok(())));
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: an earlier attempt's success deleted",
+                chain
+            );
+            assert_eq!(modal.passkey_attempt, Some(3), "{:?}", chain);
+
+            // Nor one for another Cube.
+            let _ = modal.update(checked("another-cube", 3, Ok(())));
             assert!(
                 !modal.deleted && on_disk(),
                 "{:?}: another Cube's check",
                 chain
             );
 
-            let _ = modal.update(checked(&cube.id, Ok(())));
+            // Cancelling forgets the attempt, so its answer is stale too.
+            modal.cancel_passkey_check();
+            assert_eq!(modal.passkey_attempt, None);
+            let _ = modal.update(checked(&cube.id, 3, Ok(())));
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: a cancelled check deleted",
+                chain
+            );
+
+            modal.passkey_attempt = Some(4);
+            let _ = modal.update(checked(&cube.id, 4, Ok(())));
             assert!(modal.deleted, "{:?}: {:?}", chain, modal.passkey_error);
             assert!(!on_disk(), "{:?}: the Cube is still listed", chain);
             let _ = std::fs::remove_dir_all(&root);
