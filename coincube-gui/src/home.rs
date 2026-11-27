@@ -2339,6 +2339,7 @@ impl Home {
                             | DeleteCubeMessage::Deleted
                             | DeleteCubeMessage::DaemonStopped(_)
                             | DeleteCubeMessage::PinInput(_)
+                            | DeleteCubeMessage::PasskeyChecked { .. }
                             | DeleteCubeMessage::ShowRemoteModal(_)
                             | DeleteCubeMessage::CloseRemoteModal
                             | DeleteCubeMessage::RemoteNameInput(_)
@@ -4370,6 +4371,9 @@ impl Home {
     }
 
     fn close_delete_modal(&mut self) -> Task<Message> {
+        if let Some(modal) = &mut self.delete_cube_modal {
+            modal.cancel_passkey_check();
+        }
         let opener = self.delete_cube_modal.as_ref().map(|modal| CubeCatalogKey {
             chain: modal.cube.network,
             cube_id: modal.cube.id.clone(),
@@ -8810,6 +8814,13 @@ pub enum DeleteCubeMessage {
     /// a confirmed delete can go ahead. Carries the Cube ID.
     DaemonStopped(String),
     PinInput(pin_input::Message),
+    /// How the passkey check a passkey Cube's Delete started ended. `Ok`
+    /// admits the delete; `Err` carries the copy to show. Never key material:
+    /// the derived seed is dropped inside the task.
+    PasskeyChecked {
+        cube_id: String,
+        result: Result<(), String>,
+    },
     // Remote-only cube deletion
     ConfirmRemoteDelete(String), // uuid
     CloseRemoteModal,
@@ -8836,6 +8847,11 @@ struct DeleteCubeModal {
     datadir_root: std::path::PathBuf,
     pin_input: pin_input::PinInput,
     pin_error: Option<String>,
+    /// A passkey Cube's confirmation is in flight: the system Touch ID sheet
+    /// is up and Delete waits for its answer.
+    passkey_pending: bool,
+    /// Why the last passkey check did not admit the delete.
+    passkey_error: Option<String>,
     /// The PIN was accepted, and the delete waits for a daemon this Cube left
     /// stopping when it was locked.
     waiting_for_stop: bool,
@@ -8851,6 +8867,31 @@ struct DeleteRemoteCubeModal {
     error: Option<String>,
     /// The name typed to confirm deleting a Cube Connect could restore.
     typed_name: String,
+}
+
+/// Copy for a passkey check that did not admit a Cube's Delete.
+///
+/// Not [`crate::services::passkey::PasskeyError::user_message`]: that copy is
+/// about unlocking ("this Cube stayed locked") and points to the Recovery Kit,
+/// neither of which fits a delete the user can simply try again. Each message
+/// says the Cube was not deleted. The detail goes to the log, so the copy
+/// stays fixed and translatable.
+fn passkey_delete_message(error: &crate::services::passkey::PasskeyError) -> String {
+    use crate::services::passkey::PasskeyError;
+    tracing::warn!(%error, "passkey check for Cube delete did not complete");
+    match error {
+        PasskeyError::Cancelled => "Touch ID was cancelled, so this Cube was not deleted.",
+        PasskeyError::CredentialNotFound(_) => {
+            "This Mac couldn't find this Cube's passkey, so the Cube was not deleted. \
+             Sign in to the Apple ID that created it (with iCloud Keychain on), then try again."
+        }
+        PasskeyError::AppIdentityMissing(_) => {
+            "This copy of COINCUBE can't run the Touch ID check, so this Cube was not \
+             deleted. Reinstall COINCUBE from an official release, then try again."
+        }
+        _ => "Couldn't complete the passkey check, so this Cube was not deleted. Try again.",
+    }
+    .to_string()
 }
 
 fn delete_modal_focus(id: Id) -> ViewMessage {
@@ -9271,8 +9312,65 @@ impl DeleteCubeModal {
             internal_bitcoind,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
+            passkey_pending: false,
+            passkey_error: None,
             waiting_for_stop: false,
             stop_refused: false,
+        }
+    }
+
+    /// Whether Delete is confirmed with this Cube's passkey rather than a PIN.
+    ///
+    /// A passkey Cube has no PIN on any chain, so the confirmation is the
+    /// same assertion that unlocks it: Touch ID, or whatever the passkey was
+    /// set up with. macOS only, because only macOS can run that ceremony
+    /// (`reauth::begin` refuses everywhere else). A passkey Cube carried to
+    /// another OS deletes as before, with no prompt, rather than becoming a
+    /// Cube that can never be deleted there.
+    fn confirms_with_passkey(&self) -> bool {
+        cfg!(target_os = "macos") && self.cube.is_passkey_cube()
+    }
+
+    /// Start the passkey confirmation. It runs on the UI thread because the
+    /// native ceremony is main-thread-only; `reauth::begin` parks it and
+    /// hands back a plain future.
+    fn begin_passkey_check(&mut self) -> Task<Message> {
+        self.passkey_error = None;
+        let cube_id = self.cube.id.clone();
+        match crate::services::passkey::reauth::begin(&self.cube) {
+            Ok(fut) => {
+                self.passkey_pending = true;
+                Task::perform(
+                    async move {
+                        // The words are dropped (and zeroized) right here.
+                        // What admits the delete is that the assertion
+                        // succeeded and derived this Cube's own fingerprint,
+                        // which `reauth::begin` enforces. The seed itself
+                        // is not wanted, and must not ride in a message iced
+                        // will clone.
+                        fut.await.map(drop).map_err(|e| passkey_delete_message(&e))
+                    },
+                    move |result| {
+                        Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
+                            cube_id,
+                            result,
+                        }))
+                    },
+                )
+            }
+            Err(e) => {
+                self.passkey_error = Some(passkey_delete_message(&e));
+                Task::none()
+            }
+        }
+    }
+
+    /// Cancel a passkey confirmation still in flight, so closing the modal
+    /// also takes down the system sheet.
+    fn cancel_passkey_check(&mut self) {
+        if self.passkey_pending {
+            self.passkey_pending = false;
+            crate::services::passkey::reauth::cancel();
         }
     }
 
@@ -9307,8 +9405,8 @@ impl DeleteCubeModal {
         directories
     }
 
-    /// The confirmed delete, once the PIN is accepted and no daemon of this
-    /// Cube is still stopping.
+    /// The confirmed delete, once the PIN or passkey is accepted and no daemon
+    /// of this Cube is still stopping.
     fn delete(&mut self) -> Task<Message> {
         // Never remove a directory a daemon may still write to, and never wait
         // for one here on the UI thread.
@@ -9424,6 +9522,21 @@ impl DeleteCubeModal {
                     Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PinInput(m)))
                 });
             }
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
+                cube_id,
+                result,
+            })) => {
+                // Only the check this modal started may admit it. A late
+                // answer after Cancel, or for another Cube, does nothing.
+                if cube_id != self.cube.id || !self.passkey_pending {
+                    return Task::none();
+                }
+                self.passkey_pending = false;
+                match result {
+                    Ok(()) => return self.admit(cube_id),
+                    Err(message) => self.passkey_error = Some(message),
+                }
+            }
             _ => {}
         }
         Task::none()
@@ -9432,6 +9545,17 @@ impl DeleteCubeModal {
     fn confirm_delete(&mut self, cube_id: String) -> Task<Message> {
         if cube_id != self.cube.id {
             return Task::none();
+        }
+
+        // A passkey Cube has no PIN, so it never takes the PIN path below.
+        // Confirming is a fresh assertion with its own passkey, as Settings
+        // asks before showing the master seed. A second press while the
+        // system sheet is up must not stack another ceremony.
+        if self.confirms_with_passkey() {
+            if self.passkey_pending {
+                return Task::none();
+            }
+            return self.begin_passkey_check();
         }
 
         // Verify the PIN before proceeding with deletion. There is no
@@ -9494,6 +9618,12 @@ impl DeleteCubeModal {
             }
         }
 
+        self.admit(cube_id)
+    }
+
+    /// The delete is confirmed and authorized, by PIN, by passkey, or because
+    /// the Cube has neither.
+    fn admit(&mut self, cube_id: String) -> Task<Message> {
         // Deleting a Cube right after locking it: its daemon may still
         // be stopping in the directories removed below. Wait for that in
         // a task, not in `delete_wallet` on the UI thread.
@@ -9522,8 +9652,16 @@ impl DeleteCubeModal {
     }
 
     fn view(&self) -> Element<Message> {
-        let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
-        let can_delete = pin_ready && self.warning.is_none() && !self.waiting_for_stop;
+        let passkey = self.confirms_with_passkey();
+        // Reads the seed folder, so it is asked once per render, and never
+        // for a passkey Cube, which has no PIN.
+        let has_pin = !passkey && self.cube.has_pin(&self.datadir_root);
+        let auth_ready = if passkey {
+            !self.passkey_pending
+        } else {
+            !has_pin || self.pin_input.is_complete()
+        };
+        let can_delete = auth_ready && self.warning.is_none() && !self.waiting_for_stop;
         let display_name = catalog_display_name(&self.cube.name);
         let mut confirm_button = button::secondary_action(
             DELETE_LOCAL_CONFIRM_ID,
@@ -9596,8 +9734,31 @@ impl DeleteCubeModal {
         // Option to also delete the Connect API backup (only when relevant)
         col = self.add_connect_backup_option(col);
 
+        // Passkey confirmation section: no PIN field, since there is no PIN.
+        // Delete raises the system sheet, which asks for Touch ID or whatever
+        // this passkey was set up with.
+        if passkey {
+            col = col.push(Space::new().height(Length::Fixed(5.0))).push(
+                p1_regular(localized_copy(if self.passkey_pending {
+                    "Confirm with Touch ID to delete this Cube. Look for the system prompt."
+                } else {
+                    "You'll be asked to confirm with Touch ID."
+                }))
+                .style(theme::text::secondary),
+            );
+            if let Some(err) = &self.passkey_error {
+                col = col.push(
+                    Container::new(
+                        p1_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .style(theme::text::error),
+                    )
+                    .center_x(Length::Fill),
+                );
+            }
+        }
+
         // PIN entry section
-        if self.cube.has_pin(&self.datadir_root) {
+        if has_pin {
             col = col
                 .push(Space::new().height(Length::Fixed(5.0)))
                 .push(
@@ -13894,6 +14055,118 @@ mod tests {
                 modal.pin_error
             );
             assert!(modal.deleted, "{:?}: {:?}", chain, modal.pin_error);
+            assert!(!on_disk(), "{:?}: the Cube is still listed", chain);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A Bitcoin Blake2b passkey Cube has no PIN, but its chain is dormant and
+    /// the dormant check failed closed to "PIN required" before the passkey
+    /// one ran. Its Delete then showed a PIN field, and every confirm failed
+    /// with "encrypted master seed is unavailable". It must ask for no PIN. On
+    /// macOS it confirms with its passkey, and only an accepted check for this
+    /// Cube deletes it.
+    #[test]
+    fn a_blake2b_passkey_cube_deletes_without_a_pin() {
+        use crate::app::view::shared::landing::capture;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let checked = |id: &str, result: Result<(), String>| {
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PasskeyChecked {
+                cube_id: id.to_string(),
+                result,
+            }))
+        };
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = std::env::temp_dir()
+                .join(format!("delete-blake2b-passkey-{}", uuid::Uuid::new_v4()));
+            let network_dir = CoincubeDirectory::new(root.clone()).network_directory(chain);
+            let mut cube =
+                CubeSettings::new_with_raw_id("blake2b-passkey".into(), "Fork".into(), chain);
+            cube.passkey_metadata = Some(settings::PasskeyMetadata {
+                credential_id: "Y3JlZGVudGlhbA==".into(),
+                rp_id: "coincube.io".into(),
+                created_at: 0,
+                label: None,
+            });
+            let listed = cube.clone();
+            Handle::current()
+                .block_on(settings::update_settings_file(&network_dir, |mut s| {
+                    s.cubes.push(listed);
+                    Some(s)
+                }))
+                .unwrap();
+            let on_disk = || {
+                settings::Settings::from_file(&network_dir)
+                    .map(|s| s.cubes.iter().any(|c| c.id == "blake2b-passkey"))
+                    .unwrap_or(false)
+            };
+            let mut modal = DeleteCubeModal::new(
+                cube.clone(),
+                network_dir.clone(),
+                root.clone(),
+                None,
+                None,
+                false,
+            );
+            assert!(!modal.cube.has_pin(&root), "{:?}: told it has a PIN", chain);
+
+            let shown = capture::inspect_full_window(
+                "delete-blake2b-passkey",
+                modal.view(),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(
+                !shown.contains("Enter your PIN to confirm:"),
+                "{:?}: a passkey Cube was asked for a PIN",
+                chain
+            );
+            assert_eq!(
+                shown.contains("You'll be asked to confirm with Touch ID."),
+                cfg!(target_os = "macos"),
+                "{:?}",
+                chain
+            );
+
+            if !cfg!(target_os = "macos") {
+                // No ceremony to run here, so Delete goes ahead as it does
+                // for a passkey Cube on any other chain.
+                let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+                    DeleteCubeMessage::Confirm(cube.id.clone()),
+                )));
+                assert!(modal.deleted && !on_disk(), "{:?}", chain);
+                let _ = std::fs::remove_dir_all(&root);
+                continue;
+            }
+
+            // The ceremony itself cannot run in a test, so stand in for one
+            // `Confirm` started and drive its outcomes.
+            modal.passkey_pending = true;
+            let _ = modal.update(checked(
+                &cube.id,
+                Err("Touch ID was cancelled, so this Cube was not deleted.".into()),
+            ));
+            assert!(!modal.passkey_pending);
+            assert!(modal.passkey_error.is_some(), "{:?}", chain);
+            assert!(!modal.deleted && on_disk(), "{:?}: a failed check deleted", chain);
+
+            // An answer nobody is waiting for (a late one after Cancel) or
+            // one for another Cube admits nothing.
+            let _ = modal.update(checked(&cube.id, Ok(())));
+            assert!(!modal.deleted && on_disk(), "{:?}: a stale check deleted", chain);
+            modal.passkey_pending = true;
+            let _ = modal.update(checked("another-cube", Ok(())));
+            assert!(!modal.deleted && on_disk(), "{:?}: another Cube's check", chain);
+
+            let _ = modal.update(checked(&cube.id, Ok(())));
+            assert!(modal.deleted, "{:?}: {:?}", chain, modal.passkey_error);
             assert!(!on_disk(), "{:?}: the Cube is still listed", chain);
             let _ = std::fs::remove_dir_all(&root);
         }

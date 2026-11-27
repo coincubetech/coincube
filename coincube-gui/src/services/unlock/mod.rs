@@ -410,6 +410,16 @@ const MASTER_SEED_CREATION_WINDOW_SECS: i64 = 2;
 
 /// Does this Cube need a PIN? Answered from the seed file, not from settings.
 pub fn pin_requirement(loc: &CubeLocation) -> PinRequirement {
+    // A passkey Cube has no PIN on any chain, so this is answered before the
+    // dormant check below. Failing closed to `Required` there assumes a PIN
+    // exists to be refused; for a passkey Cube none does, and nothing could
+    // satisfy the demand. That was the Bitcoin Blake2b passkey Cube's Delete
+    // modal: a PIN field for a Cube that never had one, and an error about a
+    // missing seed file whatever was typed. Answering here reads no file, so
+    // the dormant chain's folder stays untouched.
+    if loc.is_passkey {
+        return PinRequirement::NoLocalSeed;
+    }
     // Fail closed for a chain this build cannot run: `Required` demands a PIN
     // that [`unlock_blocking`] then refuses with the real reason, whereas
     // `NoLocalSeed` would read as "restore this Cube", which is false.
@@ -2925,6 +2935,47 @@ mod tests {
         );
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A dormant chain fails closed to `Required` for a PIN Cube, but a passkey
+    /// Cube on that chain has no PIN to demand. The dormant check used to run
+    /// first, so a Bitcoin Blake2b passkey Cube was told it needed a PIN: its
+    /// Delete modal showed a PIN field no input could satisfy, and duress
+    /// step-up chose the PIN path over the passkey one.
+    #[test]
+    fn a_passkey_cube_on_a_dormant_chain_never_needs_a_pin() {
+        let dir = tmp_dir("dormant-passkey");
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let pin_cube = {
+                let mut c = CubeSettings::new("Fork".to_string(), chain);
+                c.id = "cube-dormant-passkey".to_string();
+                c.created_at = 1000;
+                c
+            };
+            let pin_loc = CubeLocation::new(&dir, &pin_cube);
+            assert!(pin_loc.dormant_reason().is_some(), "{:?}", chain);
+            assert_eq!(
+                pin_requirement(&pin_loc),
+                PinRequirement::Required,
+                "control: a dormant PIN Cube still fails closed ({:?})",
+                chain
+            );
+
+            let passkey_loc = CubeLocation {
+                is_passkey: true,
+                ..CubeLocation::new(&dir, &pin_cube)
+            };
+            assert_eq!(
+                pin_requirement(&passkey_loc),
+                PinRequirement::NoLocalSeed,
+                "a passkey Cube must never be told it needs a PIN ({:?})",
+                chain
+            );
+        }
+        // Nothing was read into existence: the dormant chain's folder is
+        // still absent.
+        assert!(!dir.join("bitcoin-blake2b").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The set-addressed opener `Wallet::load_hotsigners` uses. It exists so a
