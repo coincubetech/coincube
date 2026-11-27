@@ -14189,6 +14189,102 @@ pub(crate) mod tests {
         assert_eq!(reconcile_stable_balance(None, false, false), InSync);
     }
 
+    /// Messages an `App` task produces, in order. Ready outputs only: a task
+    /// that waits on the Spark bridge is not one of these.
+    fn task_outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    /// A failed "Auto-convert received bitcoin" save reaches the user as a
+    /// plain-language error toast. The bridge's `SparkClientError` text is
+    /// logged under the reference and must not be the toast, and the
+    /// in-flight guard is released so another save can start.
+    #[test]
+    fn a_failed_auto_convert_save_hides_the_bridge_error_in_the_toast() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("auto-convert-toast-{}", uuid::Uuid::new_v4()));
+        let mut app = local_app(&root);
+        assert!(app.panels.spark_overview.try_start_stable_balance_save());
+        let detail = "SparkClientError: Rpc { code: -32000, message: \"sdk rejected toggle\" }";
+        let produced = task_outputs(app.update(Message::View(view::Message::SparkSettings(
+            view::SparkSettingsMessage::StableBalanceSaved(Err(detail.to_string())),
+        ))));
+        let toast = produced.into_iter().find_map(|message| match message {
+            Message::View(view::Message::ShowError(text)) => Some(text),
+            _ => None,
+        });
+        let toast = toast.expect("the save failure raises one error toast");
+        assert!(!toast.contains("SparkClientError"), "{}", toast);
+        assert!(!toast.contains("sdk rejected toggle"), "{}", toast);
+        assert!(
+            toast.starts_with("Couldn't change auto-convert"),
+            "{}",
+            toast
+        );
+        assert!(toast.contains(crate::user_error::CC_SPK), "{}", toast);
+        assert!(
+            app.panels.spark_overview.try_start_stable_balance_save(),
+            "a failed save must release the in-flight guard"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Connect's stable-balance field is this device's decision only when
+    /// the device has never made one. A registration answer that disagrees
+    /// with a decision already stored is a stale response to an earlier
+    /// request and must not replace it.
+    #[test]
+    fn a_connect_stable_balance_answer_is_kept_only_when_this_device_has_none() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("auto-convert-stale-{}", uuid::Uuid::new_v4()));
+        let mut app = local_app(&root);
+        app.cube_settings.spark_stable_balance = Some(false);
+        app.cache.spark_notice = Some(cache::SparkNotice::StableBalanceOffWithHolding);
+        let stale = task_outputs(app.update(Message::SparkStableBalanceFromConnect(Some(true))));
+        assert!(
+            stale.is_empty(),
+            "a disagreeing answer writes nothing: {:?}",
+            stale
+        );
+        assert_eq!(app.cube_settings.spark_stable_balance, Some(false));
+        assert_eq!(
+            app.cache.spark_notice,
+            Some(cache::SparkNotice::StableBalanceOffWithHolding)
+        );
+
+        app.cube_settings.spark_stable_balance = None;
+        let adopted = task_outputs(app.update(Message::SparkStableBalanceFromConnect(Some(true))));
+        assert_eq!(app.cube_settings.spark_stable_balance, Some(true));
+        assert!(app.cache.spark_notice.is_none());
+        assert!(
+            adopted
+                .iter()
+                .any(|message| matches!(message, Message::SettingsSaved)),
+            "adopting the only decision records it: {:?}",
+            adopted
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn recovery_alerts_prompt_answered_flag_defaults_false_and_round_trips() {
         // Old settings.json without the field parses as "not answered".
