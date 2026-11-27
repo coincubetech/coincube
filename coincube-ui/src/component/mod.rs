@@ -12,6 +12,7 @@ pub mod notification;
 pub mod pagination;
 pub mod payment_result;
 pub mod quote_display;
+pub mod ring_mark;
 pub mod session_status;
 pub mod spinner;
 pub mod tabs;
