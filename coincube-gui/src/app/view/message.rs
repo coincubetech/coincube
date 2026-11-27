@@ -2003,8 +2003,11 @@ pub enum ContactsMessage {
     /// stale-response guarding. A failure is kept apart from an empty list
     /// so the form never says "Invitations are for a Cube you own." because of a
     /// network error.
+    /// The last `u64` is the load's own request number
+    /// (`ContactsState::invite_cubes_request`): only the latest load applies.
     InviteCubesAvailable(
         Result<Vec<crate::app::state::connect::InviteCubeOption>, String>,
+        u64,
         u64,
     ),
     /// User toggled a cube checkbox in the invite form.

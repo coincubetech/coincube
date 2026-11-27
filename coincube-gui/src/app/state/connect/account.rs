@@ -868,6 +868,12 @@ pub struct ContactsState {
     /// Why the invite form's Cube list could not be loaded. Shown, with a
     /// retry, only while no list has loaded.
     pub invite_cubes_load_error: Option<String>,
+    /// The latest Cube-list load for the invite form. Each load takes the
+    /// next number and only its own answer is applied, so a slower, older
+    /// `list_cubes` (from an earlier open of the form or a 403 reload) can
+    /// never replace the current list. Kept apart from
+    /// `session_generation`, which guards every other Contacts read.
+    pub invite_cubes_request: u64,
     /// Cube ids the user has ticked on the invite form. Cleared when
     /// the user navigates away from the form.
     pub invite_cube_selections: Vec<u64>,
@@ -948,6 +954,7 @@ impl ContactsState {
             error: None,
             invite_available_cubes: None,
             invite_cubes_load_error: None,
+            invite_cubes_request: 0,
             invite_cube_selections: Vec::new(),
             invite_cube_error: None,
             active_network: None,
@@ -7369,7 +7376,7 @@ impl ConnectAccountPanel {
             | ContactsMessage::ReceivedInviteAccepted(_)
             | ContactsMessage::AcceptReceivedInviteFailed(_, _)
             | ContactsMessage::ShowInviteForm
-            | ContactsMessage::InviteCubesAvailable(_, _)
+            | ContactsMessage::InviteCubesAvailable(_, _, _)
             | ContactsMessage::ToggleInviteCube(_)
             | ContactsMessage::BackToList
             | ContactsMessage::ShowDetail(_)
@@ -7429,8 +7436,8 @@ impl ConnectAccountPanel {
 
             ContactsMessage::ShowInviteForm => return self.show_contact_invite_form(),
 
-            ContactsMessage::InviteCubesAvailable(cubes, gen) => {
-                return self.apply_invite_cubes(cubes, gen)
+            ContactsMessage::InviteCubesAvailable(cubes, gen, request) => {
+                return self.apply_invite_cubes(cubes, gen, request)
             }
 
             ContactsMessage::ToggleInviteCube(cube_id) => {
@@ -7558,9 +7565,11 @@ impl ConnectAccountPanel {
         // Refresh the cube list so the checkboxes reflect the
         // user's current memberships. We stay on the form so
         // the user can adjust and retry.
+        let request = self.next_invite_cubes_request();
         load_invite_cubes(
             &self.client,
             self.session_generation,
+            request,
             self.contacts_state.active_network.clone(),
         )
     }
@@ -7701,19 +7710,31 @@ impl ConnectAccountPanel {
         // Load the user's cubes for the form's Cube multi-select (W12).
         // An invitation needs at least one, so the view waits for this
         // and shows "Invitations are for a Cube you own." for an empty list.
+        let request = self.next_invite_cubes_request();
         load_invite_cubes(
             &self.client,
             self.session_generation,
+            request,
             self.contacts_state.active_network.clone(),
         )
+    }
+
+    /// Start a new invite-form Cube-list load: every older one in flight is
+    /// superseded and its answer will be ignored.
+    fn next_invite_cubes_request(&mut self) -> u64 {
+        self.contacts_state.invite_cubes_request =
+            self.contacts_state.invite_cubes_request.wrapping_add(1);
+        self.contacts_state.invite_cubes_request
     }
 
     fn apply_invite_cubes(
         &mut self,
         cubes: Result<Vec<InviteCubeOption>, String>,
         gen: u64,
+        request: u64,
     ) -> iced::Task<Message> {
-        if gen != self.session_generation {
+        // From an ended session, or superseded by a newer load of the list.
+        if gen != self.session_generation || request != self.contacts_state.invite_cubes_request {
             return iced::Task::none();
         }
         let cubes = match cubes {
@@ -8729,6 +8750,7 @@ fn load_duress_state(client: &CoincubeClient, generation: u64) -> iced::Task<Mes
 fn load_invite_cubes(
     client: &CoincubeClient,
     generation: u64,
+    request: u64,
     active_network: Option<String>,
 ) -> iced::Task<Message> {
     let client = client.clone();
@@ -8755,7 +8777,7 @@ fn load_invite_cubes(
         };
         Message::View(view::Message::ConnectAccount(
             ConnectAccountMessage::Contacts(ContactsMessage::InviteCubesAvailable(
-                options, generation,
+                options, generation, request,
             )),
         ))
     })
@@ -9954,6 +9976,7 @@ mod invite_form_tests {
             ContactsMessage::InviteCubesAvailable(
                 Ok(vec![option(1, "Alpha"), option(7, "Bravo")]),
                 gen,
+                0,
             ),
         );
         let cubes = panel
@@ -9971,7 +9994,7 @@ mod invite_form_tests {
         let gen = panel.session_generation();
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Ok(Vec::new()), gen),
+            ContactsMessage::InviteCubesAvailable(Ok(Vec::new()), gen, 0),
         );
         // `Some(empty)` means "loaded, but no Cube": the view replaces the
         // form with "Invitations are for a Cube you own."
@@ -9987,7 +10010,7 @@ mod invite_form_tests {
         let stale_gen = panel.session_generation().wrapping_add(1);
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), stale_gen),
+            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), stale_gen, 0),
         );
         assert!(panel.contacts_state.invite_available_cubes.is_none());
     }
@@ -10001,7 +10024,7 @@ mod invite_form_tests {
         let gen = panel.session_generation();
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Err("Synthetic outage".to_string()), gen),
+            ContactsMessage::InviteCubesAvailable(Err("Synthetic outage".to_string()), gen, 0),
         );
         assert!(panel.contacts_state.invite_available_cubes.is_none());
         assert_eq!(
@@ -10011,7 +10034,7 @@ mod invite_form_tests {
 
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), gen),
+            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), gen, 0),
         );
         assert!(panel.contacts_state.invite_cubes_load_error.is_none());
         assert_eq!(
@@ -10026,9 +10049,46 @@ mod invite_form_tests {
         // A reload that fails after a list has loaded keeps that list.
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Err("Synthetic outage".to_string()), gen),
+            ContactsMessage::InviteCubesAvailable(Err("Synthetic outage".to_string()), gen, 0),
         );
         assert!(panel.contacts_state.invite_available_cubes.is_some());
+    }
+
+    /// Only the latest Cube-list load updates the form: reopening it starts
+    /// a new load, and the earlier, slower answer is ignored when it lands.
+    #[test]
+    fn a_superseded_cube_list_never_replaces_the_current_one() {
+        let mut panel = ConnectAccountPanel::new();
+        let gen = panel.session_generation();
+        dispatch(&mut panel, ContactsMessage::ShowInviteForm);
+        let first = panel.contacts_state.invite_cubes_request;
+        dispatch(&mut panel, ContactsMessage::ShowInviteForm);
+        let second = panel.contacts_state.invite_cubes_request;
+        assert_ne!(first, second);
+
+        dispatch(
+            &mut panel,
+            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), gen, second),
+        );
+        // The first open's answer, empty, lands late: it must not turn the
+        // form into the no-Cube line, nor prune the list.
+        dispatch(
+            &mut panel,
+            ContactsMessage::InviteCubesAvailable(Ok(Vec::new()), gen, first),
+        );
+        dispatch(
+            &mut panel,
+            ContactsMessage::InviteCubesAvailable(Err("Synthetic outage".to_string()), gen, first),
+        );
+        assert_eq!(
+            panel
+                .contacts_state
+                .invite_available_cubes
+                .as_ref()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(panel.contacts_state.invite_cubes_load_error.is_none());
     }
 
     /// Opening the form starts from "loading": no list and no old error, so
@@ -10051,7 +10111,7 @@ mod invite_form_tests {
         let gen = panel.session_generation();
         dispatch(
             &mut panel,
-            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), gen),
+            ContactsMessage::InviteCubesAvailable(Ok(vec![option(1, "Alpha")]), gen, 0),
         );
         dispatch(
             &mut panel,
@@ -10114,6 +10174,7 @@ mod invite_form_tests {
             ContactsMessage::InviteCubesAvailable(
                 Ok(vec![option(1, "Alpha"), option(42, "Gamma")]),
                 gen,
+                0,
             ),
         );
         assert_eq!(panel.contacts_state.invite_cube_selections, vec![1, 42]);
