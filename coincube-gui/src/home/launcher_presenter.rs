@@ -984,7 +984,7 @@ fn ghost_details<'a>(
     .into()
 }
 
-/// A ghost's slot: the dashed cloud avatar, its muted name and its Connect
+/// A ghost's slot: the dashed ring with its muted mark, its muted name and its Connect
 /// state, over a hit area that turns it to its details face.
 fn ghost_slot<'a>(
     cube: &super::RemoteCube,
@@ -1068,7 +1068,8 @@ fn remote_row<'a>(cube: &super::RemoteCube) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
-        .push(icon::cloud_arrow_down_icon())
+        // A Cube on another computer: its mark, muted, in the dashed ring.
+        .push(ghost_avatar(cube.mark_seed().as_deref(), 32.0))
         .push(
             Column::new()
                 .spacing(4)
@@ -2922,6 +2923,44 @@ pub(crate) fn opening_body<'a>(
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    /// A Cube on another computer is its muted mark in the dashed ring in
+    /// both List renderers, never the cloud glyph.
+    #[test]
+    fn remote_list_rows_show_the_cubes_mark_not_a_cloud() {
+        let cube = super::super::RemoteCube {
+            mark_variation: 2,
+            id: 9,
+            uuid: "9fb93534-081c-4253-b1e2-73a87984a8ab".into(),
+            name: "Elsewhere".into(),
+            network: "mainnet".into(),
+            has_recovery_kit: false,
+            has_encrypted_seed: false,
+            phone_recoverable: false,
+            phone_full_cube: false,
+            encryption_pubkey: None,
+            has_vault: None,
+        };
+        let cloud = '\u{F295}'.to_string();
+        for (name, row) in [
+            ("presenter", remote_row(&cube)),
+            ("catalog", launcher_catalog::remote_row_for_test(&cube)),
+        ] {
+            let mounted = capture::inspect(
+                "remote-row-mark",
+                row,
+                (1024, 200),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(mounted.contains("Elsewhere"), "{}", name);
+            assert!(
+                !mounted.contains(&cloud),
+                "{}: the cloud glyph is drawn",
+                name
+            );
+        }
+    }
     use crate::dir::CoincubeDirectory;
     use coincube_core::miniscript::bitcoin::Network;
     use coincube_ui::font;

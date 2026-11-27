@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use coincube_ui::{
     component::{card, ring_mark, text::*},
-    icon, theme,
+    theme,
     widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
 };
 
@@ -2038,6 +2038,12 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
         .into()
 }
 
+/// [`remote_row`] for the presenter's tests.
+#[cfg(test)]
+pub(super) fn remote_row_for_test<'a>(cube: &RemoteCube) -> Element<'a, ViewMessage> {
+    remote_row(cube)
+}
+
 fn remote_row<'a>(cube: &RemoteCube) -> Element<'a, ViewMessage> {
     let restore = remote_restore(cube);
     Row::new()
@@ -2049,7 +2055,12 @@ fn remote_row<'a>(cube: &RemoteCube) -> Element<'a, ViewMessage> {
                 .align_y(Alignment::Center)
                 .width(Length::Fill)
                 .padding([10, 12])
-                .push(icon::cloud_arrow_down_icon().style(muted))
+                // A Cube on another computer: its mark, muted, in the
+                // dashed ring, as on the floor.
+                .push(super::launcher_presenter::ghost_avatar(
+                    cube.mark_seed().as_deref(),
+                    32.0,
+                ))
                 .push(
                     Column::new()
                         .spacing(2)
