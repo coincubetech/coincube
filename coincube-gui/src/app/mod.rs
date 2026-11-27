@@ -3654,6 +3654,9 @@ impl App {
             (cube_signer, spark_backend)
         };
         cache.fiat_chain = cube_settings.network;
+        // The sidebar and Display row draw the open Cube's ring mark from
+        // this seed; every constructor goes through here.
+        cache.cube_mark_seed = cube_settings.mark_seed();
         cache.has_vault = wallet.supports_inheritance() || wallet.is_imported();
         cache.has_imported_bitcoin = wallet.is_imported();
         cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
@@ -4040,6 +4043,7 @@ impl App {
             cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
             cube_id: cube_settings.id.clone(),
+            cube_mark_seed: cube_settings.mark_seed(),
             recovery_kit_last_backed_up_descriptor_fingerprint: cube_settings
                 .recovery_kit_last_backed_up_descriptor_fingerprint
                 .clone(),
@@ -4844,6 +4848,46 @@ impl App {
                 .cube
                 .report_spark_stable_balance(enabled),
         ])
+    }
+
+    /// Take Connect's ring-mark variation for the open Cube when it differs
+    /// from the local one: once the server has a number it is the record
+    /// (`CubeSettings::mark_variation`). Updates memory and the sidebar's
+    /// seed at once, then the settings file off the UI thread.
+    fn adopt_cube_mark_variation(&mut self, server: Option<u32>) -> Task<Message> {
+        match server {
+            Some(variation) if variation != self.cube_settings.mark_variation => {
+                self.set_cube_mark_variation_locally(variation)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Record the open Cube's ring-mark variation in memory, the cache's
+    /// seed and its settings file.
+    fn set_cube_mark_variation_locally(&mut self, variation: u32) -> Task<Message> {
+        self.cube_settings.mark_variation = variation;
+        self.cache.cube_mark_seed = self.cube_settings.mark_seed();
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.chain());
+        let cube_id = self.cube_settings.id.clone();
+        Task::perform(
+            async move {
+                settings::set_cube_mark_variation(&network_dir, &cube_id, variation)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |res: Result<(), String>| {
+                if let Err(e) = res {
+                    // The server keeps the number for a registered Cube, so
+                    // the next registration response puts it back.
+                    log::warn!("failed to persist the Cube's mark variation: {e}");
+                }
+                Message::SettingsSaved
+            },
+        )
     }
 
     /// The local half of [`Self::record_spark_stable_balance`]: memory,
@@ -7134,7 +7178,7 @@ impl App {
         }
     }
 
-    fn sync_connect_sidebar(&mut self, was_authenticated: bool) {
+    fn sync_connect_sidebar(&mut self) {
         if self.cache.chain().is_blake2b() {
             self.cache.marketplace_flags = Default::default();
         }
@@ -7164,9 +7208,6 @@ impl App {
             // has P2P off (the cache flag was just refreshed above).
             p2p.sync_marketplace_flags_from_cache(&self.cache);
         }
-        // Sync avatar handle to cache for sidebar display across all panels.
-        // Only update when Some to avoid blinking during in-flight image loads.
-        // Clear on logout when auth state transitions from true to false.
         self.cache.avatar_regenerations_remaining = self
             .panels
             .connect
@@ -7174,12 +7215,6 @@ impl App {
             .avatar_data
             .as_ref()
             .map(|data| data.regenerations_remaining);
-        if let Some(handle) = self.panels.connect.cube.get_active_avatar_handle() {
-            self.cache.avatar_handle = Some(handle);
-        } else if was_authenticated && !self.cache.connect_authenticated {
-            // Logout occurred - clear the avatar
-            self.cache.avatar_handle = None;
-        }
     }
 
     /// Drop everything this App holds for a Connect session that has ended:
@@ -7424,7 +7459,7 @@ impl App {
             return Task::none();
         }
         self.sync_connect_claim_session(session_epoch, explicit_logout);
-        self.sync_connect_sidebar(was_authenticated);
+        self.sync_connect_sidebar();
         self.sync_connect_stream_after_auth(was_authenticated);
         let save_session = self.save_served_session();
         // Auto-return for the "Switch to Connect" flow. When the user
@@ -9535,6 +9570,9 @@ impl App {
             )
             | Message::ShowReceivedCelebration { .. }) => {
                 return self.route_received_celebration(message)
+            }
+            Message::CubeMarkFromConnect(server) => {
+                return self.adopt_cube_mark_variation(server);
             }
             message @ (Message::CubeSparkStableBalanceReported
             | Message::SparkStableBalanceFromConnect(_)
@@ -17842,6 +17880,110 @@ mod settings_navigation_integration_tests {
     /// An App on Spark's Balances & conversion with its Cube in the settings
     /// file, as a saved Cube is.
     /// A second App over `old`'s Cube, as reopening it builds.
+    const MARK_CUBE: &str = "9fb93534-081c-4253-b1e2-73a87984a8ab";
+
+    /// An open Cube with a UUID id, saved in its network's settings file.
+    fn mark_app(root: &std::path::Path) -> App {
+        let mut app = super::shell_tests::bitcoin_app_with_id(root, MARK_CUBE);
+        app.cache.cube_mark_seed = app.cube_settings.mark_seed();
+        let network_dir = app.datadir.network_directory(app.cube_settings.network);
+        let cube = app.cube_settings.clone();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(settings::update_settings_file(
+                &network_dir,
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            ))
+            .unwrap();
+        app
+    }
+
+    fn saved_mark_variation(app: &App) -> u32 {
+        let network_dir = app.datadir.network_directory(app.cube_settings.network);
+        settings::Settings::from_file(&network_dir)
+            .unwrap()
+            .cubes
+            .into_iter()
+            .find(|cube| cube.id == MARK_CUBE)
+            .unwrap()
+            .mark_variation
+    }
+
+    /// Connect's number is the record once it has one: a registration
+    /// response with a different variation replaces the local number, the
+    /// sidebar's seed and the settings file.
+    #[test]
+    fn connects_mark_variation_replaces_the_local_one() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("cube-mark-adopt-{}", uuid::Uuid::new_v4()));
+        let mut app = mark_app(&root);
+        assert_eq!(app.cache.cube_mark_seed.as_deref(), Some(MARK_CUBE));
+
+        drop(outputs(app.update(Message::CubeMarkFromConnect(Some(2)))));
+        assert_eq!(app.cube_settings.mark_variation, 2);
+        assert_eq!(
+            app.cache.cube_mark_seed.as_deref(),
+            Some("9fb93534-081c-4253-b1e2-73a87984a8ab:2")
+        );
+        assert_eq!(saved_mark_variation(&app), 2);
+
+        // Back to 0 (the owner pressed Back on another computer).
+        drop(outputs(app.update(Message::CubeMarkFromConnect(Some(0)))));
+        assert_eq!(app.cache.cube_mark_seed.as_deref(), Some(MARK_CUBE));
+        assert_eq!(saved_mark_variation(&app), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An API that predates the field sends no number, and an equal one is
+    /// nothing new: neither changes the Cube or writes its file.
+    #[test]
+    fn a_response_without_a_different_mark_changes_nothing() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("cube-mark-keep-{}", uuid::Uuid::new_v4()));
+        let mut app = mark_app(&root);
+        app.cube_settings.mark_variation = 5;
+        app.cache.cube_mark_seed = app.cube_settings.mark_seed();
+        for server in [None, Some(5)] {
+            let produced = outputs(app.update(Message::CubeMarkFromConnect(server)));
+            assert!(produced.is_empty(), "{:?} should write nothing", server);
+            assert_eq!(app.cube_settings.mark_variation, 5);
+            assert_eq!(
+                app.cache.cube_mark_seed.as_deref(),
+                Some("9fb93534-081c-4253-b1e2-73a87984a8ab:5")
+            );
+        }
+        // The file still holds the number it was saved with.
+        assert_eq!(saved_mark_variation(&app), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every App constructor seeds the sidebar's mark from the open Cube,
+    /// with no test setting it by hand (the loader's Cache starts without it).
+    #[test]
+    fn an_opened_cube_draws_its_own_mark() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("cube-mark-open-{}", uuid::Uuid::new_v4()));
+        let (app, _) = super::shell_tests::bitcoin_app(&root);
+        assert!(app.cache.cube_mark_seed.is_some());
+        assert_eq!(app.cache.cube_mark_seed, app.cube_settings.mark_seed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Cube whose id is not a UUID draws the mark's centre dot alone.
+    #[test]
+    fn a_malformed_cube_id_has_no_mark_seed() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("cube-mark-bad-id-{}", uuid::Uuid::new_v4()));
+        let app = super::shell_tests::bitcoin_app_with_id(&root, "not-a-uuid");
+        assert_eq!(app.cube_settings.mark_seed(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn reopened_nickname_app(root: &std::path::Path, old: &App) -> App {
         let mut app = nickname_app(root);
         app.cube_settings = old.cube_settings.clone();

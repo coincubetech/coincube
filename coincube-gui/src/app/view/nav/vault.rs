@@ -126,7 +126,7 @@ mod tests {
             spark_alias: None,
             vault_alias: None,
             lightning_address: None,
-            avatar: None,
+            mark_seed: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             connect_authenticated: btcb2_server_enabled,
             connect_email: None,

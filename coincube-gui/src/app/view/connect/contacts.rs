@@ -555,29 +555,18 @@ fn contact_detail_ux<'a>(
         .as_ref()
         .map(|u| u.email.as_str())
         .unwrap_or("unknown contact");
-    let first_char = email
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
     let rc = role_color(&contact.role);
     let role_label = contact.role.to_string();
     let connected_date = format_date(&contact.created_at);
 
-    let avatar = container(text::h3(first_char).color(color::WHITE))
-        .width(Length::Fixed(64.0))
-        .height(Length::Fixed(64.0))
-        .center_x(Length::Fixed(64.0))
-        .center_y(Length::Fixed(64.0))
-        .style(|_t| container::Style {
-            background: Some(iced::Background::Color(color::ORANGE)),
-            border: iced::Border {
-                radius: 32.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+    // Initials in a thin ring: the display name when the contact set one,
+    // else the email. A person is never drawn as a Cube mark.
+    let user = contact.contact_user.as_ref();
+    let avatar = coincube_ui::component::ring_mark::person_mark(
+        user.and_then(|u| u.display_name.as_deref()),
+        user.map(|u| u.email.as_str()),
+        64.0,
+    );
 
     let role_badge = container(text::p2_regular(role_label).color(rc))
         .padding(iced::Padding {
