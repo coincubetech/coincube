@@ -42,7 +42,8 @@ build` after having `cargo update -p coincube-core`.)
 
 ## Artifact contents check
 
-Before publishing, confirm each artifact actually contains **both** binaries. CI asserts this on
+Before publishing, confirm each artifact contains **all three** binaries: the GUI,
+`coincube-spark-bridge` and `coincube-mcp`. CI asserts this on
 every build, but a hand-made release does not go through those steps, and nothing else catches it:
 a bundle missing `coincube-spark-bridge` signs, notarizes and passes `spctl` exactly like a good
 one — it just has a Spark wallet that never starts. See
@@ -50,14 +51,14 @@ one — it just has a Spark wallet that never starts. See
 
 ```
 # macOS — inside the mounted DMG
-ls "/Volumes/COINCUBE/COINCUBE.app/Contents/MacOS/"        # Coincube + coincube-spark-bridge
+ls "/Volumes/COINCUBE/COINCUBE.app/Contents/MacOS/"        # Coincube + coincube-spark-bridge + coincube-mcp
 codesign --verify --strict "/Volumes/COINCUBE/COINCUBE.app/Contents/MacOS/coincube-spark-bridge"
 
 # Linux
-tar tzf coincube-desktop-<version>-<target>.tar.gz               # coincube + coincube-spark-bridge
+tar tzf coincube-desktop-<version>-<target>.tar.gz         # coincube + coincube-spark-bridge + coincube-mcp
 
 # Windows — after installing
-dir "C:\Program Files\COINCUBE\bin"                      # coincube.exe + coincube-spark-bridge.exe
+dir "C:\Program Files\COINCUBE\bin"                      # coincube.exe + coincube-spark-bridge.exe + coincube-mcp.exe
 ```
 
 Then check the bridge runs, which needs no API key, mnemonic or network:
@@ -70,6 +71,31 @@ echo '{"type":"request","id":1,"method":"shutdown"}' | ./coincube-spark-bridge
 Finally, open the Spark tab once on a machine **with no repository checkout**. A machine that has
 one satisfies the gui's development fallback path and will report success regardless of what the
 artifact contains.
+
+## Windows signing acceptance
+
+Follow [`WINDOWS_CODE_SIGNING.md`](WINDOWS_CODE_SIGNING.md) for Azure onboarding,
+GitHub environment protection, OIDC and identity-validation renewal. No client
+secret is required. Configuration and signing failures must block Windows output,
+not produce an unsigned fallback.
+
+Before approving a tagged Windows build, review its exact source SHA and tag.
+The release environment gates two jobs per tag (executable signing, then MSI
+signing), so expect two approval prompts for the same run; approve both within
+seven days of the build, before its intermediate artifacts expire. Unsigned executables
+are built without token access, signed and verified, packaged by
+`cargo wix --no-build`, then the MSI is signed, verified, extracted and checked
+again before companion execution and upload. The complete tagged-release bundle
+waits for this verification job; do not bypass its existing completeness gate to
+publish a partial release. Until Azure onboarding is finished, every tagged
+release therefore fails at the Windows signing gate.
+
+Activation still requires an actual signed build and a clean Windows VM install:
+download through a browser, verify the MSI and installed executable publisher is
+**COINCUBE TECHNOLOGY LLC**, then launch the app and test Spark and local MCP.
+Keep the run URL, source SHA, MSI hash and VM results. A valid signature may still
+show a SmartScreen reputation warning; "Unknown publisher" is a failure, not an
+expected reputation warning. Historical unsigned assets are not activation proof.
 
 ## Bitcoin Blake2b Mobile keys check
 
