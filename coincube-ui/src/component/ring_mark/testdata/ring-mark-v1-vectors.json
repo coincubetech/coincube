@@ -1,0 +1,436 @@
+{
+ "spec": "SPEC-cube-ring-mark-v1.md",
+ "note": "start and sweep are shown to 6 decimals. Implementations must match fnvState, draws, arcCount, orangeIndex, radius, largeArc and orange exactly, and start and sweep to within 1e-6 of these values. svgPath is the study's own SVG output, for visual comparison only.",
+ "vectors": [
+  {
+   "cubeId": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+   "variation": 0,
+   "seed": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+   "fnvState": "0x4b964221",
+   "draws": [
+    80424,
+    31919,
+    73272,
+    96221,
+    94498,
+    16019,
+    1405,
+    71067
+   ],
+   "arcCount": 3,
+   "orangeIndex": 0,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 4.601482,
+     "sweep": 5.279072,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M29.01 5.17A27 27 0 1 1 7.76 20.12"
+    },
+    {
+     "radius": 18.5,
+     "start": 5.934474,
+     "sweep": 2.712608,
+     "largeArc": false,
+     "orange": false,
+     "svgPath": "M49.39 25.68A18.5 18.5 0 0 1 18.82 44.98"
+    },
+    {
+     "radius": 10,
+     "start": 0.088234,
+     "sweep": 4.474144,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M41.96 32.88A10 10 0 1 1 30.51 22.11"
+    }
+   ]
+  },
+  {
+   "cubeId": "3994693e-a3ae-4e68-9323-451b4a95902a",
+   "variation": 0,
+   "seed": "3994693e-a3ae-4e68-9323-451b4a95902a",
+   "fnvState": "0x5ce5ef12",
+   "draws": [
+    29457,
+    68916,
+    92066,
+    4928,
+    14410,
+    80715
+   ],
+   "arcCount": 2,
+   "orangeIndex": 1,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 5.781745,
+     "sweep": 2.357696,
+     "largeArc": false,
+     "orange": false,
+     "svgPath": "M55.68 19.02A27 27 0 0 1 24.40 57.91"
+    },
+    {
+     "radius": 18.5,
+     "start": 0.904948,
+     "sweep": 4.78288,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M43.43 46.55A18.5 18.5 0 1 1 47.32 21.63"
+    }
+   ]
+  },
+  {
+   "cubeId": "1aa615a9-4b6a-4551-a061-ae14a1dbf721",
+   "variation": 0,
+   "seed": "1aa615a9-4b6a-4551-a061-ae14a1dbf721",
+   "fnvState": "0x7bdf3e8d",
+   "draws": [
+    82506,
+    36828,
+    65149,
+    73933,
+    89650,
+    73350,
+    19391,
+    11514
+   ],
+   "arcCount": 3,
+   "orangeIndex": 1,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 4.091357,
+     "sweep": 4.565856,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M16.29 10.04A27 27 0 1 1 12.57 50.75"
+    },
+    {
+     "radius": 18.5,
+     "start": 5.63002,
+     "sweep": 4.5472,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M46.69 20.76A18.5 18.5 0 1 1 18.49 19.36"
+    },
+    {
+     "radius": 10,
+     "start": 1.217755,
+     "sweep": 2.568448,
+     "largeArc": false,
+     "orange": false,
+     "svgPath": "M35.46 41.38A10 10 0 0 1 24.01 25.99"
+    }
+   ]
+  },
+  {
+   "cubeId": "a7213dfe-8932-4293-a0dd-5386c9cf0800",
+   "variation": 0,
+   "seed": "a7213dfe-8932-4293-a0dd-5386c9cf0800",
+   "fnvState": "0xc98c4d22",
+   "draws": [
+    12854,
+    5247,
+    25446,
+    82947,
+    81252,
+    33853
+   ],
+   "arcCount": 2,
+   "orangeIndex": 0,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 1.598009,
+     "sweep": 4.854304,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M31.27 58.99A27 27 0 1 1 58.61 36.54"
+    },
+    {
+     "radius": 18.5,
+     "start": 5.102626,
+     "sweep": 3.283296,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M39.04 14.89A18.5 18.5 0 1 1 22.62 47.94"
+    }
+   ]
+  },
+  {
+   "cubeId": "3c85b930-b9f0-420f-929e-04e213311e91",
+   "variation": 0,
+   "seed": "3c85b930-b9f0-420f-929e-04e213311e91",
+   "fnvState": "0x40ec810b",
+   "draws": [
+    89069,
+    96031,
+    67426,
+    58750,
+    10328,
+    66041,
+    457,
+    90256
+   ],
+   "arcCount": 3,
+   "orangeIndex": 2,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 4.234353,
+     "sweep": 4.08,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M19.58 8.03A27 27 0 1 1 20.00 56.19"
+    },
+    {
+     "radius": 18.5,
+     "start": 0.648598,
+     "sweep": 4.313312,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M46.74 43.18A18.5 18.5 0 1 1 36.57 14.07"
+    },
+    {
+     "radius": 10,
+     "start": 0.0287,
+     "sweep": 5.088192,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M42.00 32.29A10 10 0 1 1 35.94 22.81"
+    }
+   ]
+  },
+  {
+   "cubeId": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+   "variation": 1,
+   "seed": "9fb93534-081c-4253-b1e2-73a87984a8ab:1",
+   "fnvState": "0x51584510",
+   "draws": [
+    90701,
+    17234,
+    64519,
+    49745,
+    48895,
+    97794,
+    79538,
+    36071
+   ],
+   "arcCount": 3,
+   "orangeIndex": 0,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 4.051793,
+     "sweep": 3.79184,
+     "largeArc": true,
+     "orange": true,
+     "svgPath": "M15.43 10.68A27 27 0 1 1 32.28 59.00"
+    },
+    {
+     "radius": 18.5,
+     "start": 3.070606,
+     "sweep": 5.329408,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M13.55 33.31A18.5 18.5 0 1 1 22.39 47.81"
+    },
+    {
+     "radius": 10,
+     "start": 4.994986,
+     "sweep": 3.354272,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M34.79 22.40A10 10 0 1 1 27.25 40.80"
+    }
+   ]
+  },
+  {
+   "cubeId": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+   "variation": 2,
+   "seed": "9fb93534-081c-4253-b1e2-73a87984a8ab:2",
+   "fnvState": "0x545849c9",
+   "draws": [
+    36281,
+    42392,
+    60992,
+    9189,
+    15375,
+    34867
+   ],
+   "arcCount": 2,
+   "orangeIndex": 0,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 3.830298,
+     "sweep": 2.494048,
+     "largeArc": false,
+     "orange": true,
+     "svgPath": "M11.15 14.84A27 27 0 0 1 58.98 33.11"
+    },
+    {
+     "radius": 18.5,
+     "start": 0.96555,
+     "sweep": 3.315744,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M42.53 47.21A18.5 18.5 0 1 1 24.27 15.19"
+    }
+   ]
+  },
+  {
+   "cubeId": "9fb93534-081c-4253-b1e2-73a87984a8ab",
+   "variation": 17,
+   "seed": "9fb93534-081c-4253-b1e2-73a87984a8ab:17",
+   "fnvState": "0x34f4dc65",
+   "draws": [
+    54553,
+    94408,
+    86389,
+    56095,
+    41323,
+    49097,
+    5318,
+    27458
+   ],
+   "arcCount": 3,
+   "orangeIndex": 2,
+   "arcs": [
+    {
+     "radius": 27,
+     "start": 5.425229,
+     "sweep": 3.99504,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M49.66 11.57A27 27 0 1 1 5.00 32.12"
+    },
+    {
+     "radius": 18.5,
+     "start": 2.595084,
+     "sweep": 3.771104,
+     "largeArc": true,
+     "orange": false,
+     "svgPath": "M16.19 41.61A18.5 18.5 0 1 1 50.44 33.53"
+    },
+    {
+     "radius": 10,
+     "start": 0.33397,
+     "sweep": 3.078656,
+     "largeArc": false,
+     "orange": true,
+     "svgPath": "M41.45 35.28A10 10 0 0 1 22.37 29.32"
+    }
+   ]
+  }
+ ],
+ "initials": [
+  {
+   "displayName": "Ama Adeyemi",
+   "email": null,
+   "initials": "AA"
+  },
+  {
+   "displayName": null,
+   "email": "kofi.mensah@example.com",
+   "initials": "KM"
+  },
+  {
+   "displayName": null,
+   "email": "zainab@example.com",
+   "initials": "Z"
+  },
+  {
+   "displayName": "Émile Ōta",
+   "email": null,
+   "initials": "ÉŌ"
+  },
+  {
+   "displayName": "  ada   lovelace  ",
+   "email": null,
+   "initials": "AL"
+  },
+  {
+   "displayName": "Mary Jane Watson",
+   "email": null,
+   "initials": "MJ"
+  },
+  {
+   "displayName": "(Sam) Rivera",
+   "email": null,
+   "initials": "R"
+  },
+  {
+   "displayName": "3 Little Pigs",
+   "email": null,
+   "initials": "LP"
+  },
+  {
+   "displayName": "ßara Nunes",
+   "email": null,
+   "initials": "ßN"
+  },
+  {
+   "displayName": "",
+   "email": ".kofi..b@example.com",
+   "initials": "KB"
+  },
+  {
+   "displayName": "👋 Lars",
+   "email": null,
+   "initials": "L"
+  },
+  {
+   "displayName": "   ",
+   "email": "mei_tanaka@example.com",
+   "initials": "MT"
+  },
+  {
+   "displayName": "李 小龙",
+   "email": null,
+   "initials": "李小"
+  },
+  {
+   "displayName": "émile",
+   "email": null,
+   "initials": "É"
+  },
+  {
+   "displayName": null,
+   "email": "123@example.com",
+   "initials": ""
+  },
+  {
+   "displayName": null,
+   "email": "ana-maria+test@example.com",
+   "initials": "AM"
+  },
+  {
+   "displayName": "Ⅻ Dynasty",
+   "email": null,
+   "initials": "ⅫD"
+  },
+  {
+   "displayName": "Ada　Obi",
+   "email": null,
+   "initials": "AO"
+  },
+  {
+   "displayName": "👋",
+   "email": "zara.obi@example.com",
+   "initials": "ZO"
+  },
+  {
+   "displayName": "42",
+   "email": "sam@example.com",
+   "initials": "S"
+  },
+  {
+   "displayName": null,
+   "email": null,
+   "initials": ""
+  }
+ ],
+ "initialsNote": "Spec section 7. Compare initials as exact strings (code points, not normalised). An empty string means the ring is drawn alone. Example emails use example.com."
+}
