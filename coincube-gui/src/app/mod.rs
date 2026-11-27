@@ -3657,6 +3657,7 @@ impl App {
         // The sidebar and Display row draw the open Cube's ring mark from
         // this seed; every constructor goes through here.
         cache.cube_mark_seed = cube_settings.mark_seed();
+        cache.cube_mark_variation = cube_settings.mark_variation;
         cache.has_vault = wallet.supports_inheritance() || wallet.is_imported();
         cache.has_imported_bitcoin = wallet.is_imported();
         cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
@@ -3730,6 +3731,13 @@ impl App {
         panels
             .connect
             .set_spark_stable_balance(cube_settings.spark_stable_balance);
+        // The Cube's mark number rides a first registration (API CA1).
+        panels
+            .connect
+            .set_cube_mark_variation(cube_settings.mark_variation);
+        panels
+            .connect
+            .set_cube_has_server_record(cube_settings.is_connect_registered());
         let mut tasks = vec![];
         if wallet.is_imported() {
             if let Some(import) = cube_settings.bitcoin_import.clone() {
@@ -4044,6 +4052,7 @@ impl App {
             current_cube_backed_up: cube_settings.backed_up,
             cube_id: cube_settings.id.clone(),
             cube_mark_seed: cube_settings.mark_seed(),
+            cube_mark_variation: cube_settings.mark_variation,
             recovery_kit_last_backed_up_descriptor_fingerprint: cube_settings
                 .recovery_kit_last_backed_up_descriptor_fingerprint
                 .clone(),
@@ -4094,6 +4103,12 @@ impl App {
         panels
             .connect
             .set_spark_stable_balance(cube_settings.spark_stable_balance);
+        panels
+            .connect
+            .set_cube_mark_variation(cube_settings.mark_variation);
+        panels
+            .connect
+            .set_cube_has_server_record(cube_settings.is_connect_registered());
         let mut cache = cache;
         if fork {
             cache.clear_btcb2_fiat();
@@ -4863,11 +4878,152 @@ impl App {
         }
     }
 
+    /// Whether another Connect account owns the open Cube. The same signal
+    /// the Vault signing picker uses (`ConnectAccountStatus::OtherAccount` in
+    /// `state/vault/psbt.rs`): Connect refused to register the Cube for the
+    /// signed-in account (`CUBE_OWNED_BY_ANOTHER_ACCOUNT`), or the owner
+    /// recorded at registration is not the signed-in email. Signed out, the
+    /// recorded owner cannot be compared, so the Cube is not treated as
+    /// someone else's; Regenerate is then disabled for a registered Cube
+    /// anyway.
+    fn cube_owned_by_another_account(&self) -> bool {
+        let cube = &self.panels.connect.cube;
+        if cube.owned_by_other_account {
+            return true;
+        }
+        if cube.client.is_none() {
+            return false;
+        }
+        match (
+            &self.cache.cube_connect_owner,
+            self.cache.connect_email.as_deref(),
+        ) {
+            (Some(owner), Some(email)) => !owner.is_email(email),
+            _ => false,
+        }
+    }
+
+    /// Regenerate or Back on Cube Settings › Display: set the Cube's mark
+    /// number to current ± 1 (Regenerate stops at
+    /// [`settings::MARK_VARIATION_MAX`], Back at 0). Owner only, free on
+    /// every plan. A registered Cube changes through Connect and takes the
+    /// number from the response; a never-registered Cube changes here and
+    /// sends the number at its first registration; a registered Cube with
+    /// no session does not change (D-R2).
+    fn change_cube_mark(&mut self, intent: view::CubeMarkIntent) -> Task<Message> {
+        if matches!(
+            self.cache.cube_mark_change,
+            cache::CubeMarkChange::Saving { .. }
+        ) {
+            return Task::none();
+        }
+        let current = self.cube_settings.mark_variation;
+        let target = match intent {
+            view::CubeMarkIntent::Regenerate if current < settings::MARK_VARIATION_MAX => {
+                current + 1
+            }
+            view::CubeMarkIntent::Back if current > 0 => current - 1,
+            _ => return Task::none(),
+        };
+        let not_owner = self.cube_owned_by_another_account();
+        match self.panels.connect.cube.mark_access(not_owner) {
+            cache::CubeMarkAccess::Connect => {
+                let cube = &self.panels.connect.cube;
+                let (Some(client), Some(server_id)) = (cube.client.clone(), cube.server_cube_id)
+                else {
+                    return Task::none();
+                };
+                let generation = cube.session_generation();
+                self.cache.cube_mark_change = cache::CubeMarkChange::Saving { generation };
+                Task::perform(
+                    async move {
+                        client
+                            .set_cube_mark(&server_id.to_string(), target)
+                            .await
+                            .map(|mark| mark.mark_variation)
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| Message::CubeMarkSet { generation, result },
+                )
+            }
+            cache::CubeMarkAccess::Local => {
+                self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
+                self.set_cube_mark_variation_locally(target)
+            }
+            cache::CubeMarkAccess::Waiting
+            | cache::CubeMarkAccess::Unconfirmed
+            | cache::CubeMarkAccess::NotOwner
+            | cache::CubeMarkAccess::SignedOut => Task::none(),
+        }
+    }
+
+    /// The answer to [`Self::change_cube_mark`]'s set call. On success the
+    /// local number becomes the server's; on failure nothing changes and the
+    /// Display row says so. A result from an ended Connect session only
+    /// releases the buttons.
+    fn on_cube_mark_set(&mut self, generation: u64, result: Result<u32, String>) -> Task<Message> {
+        let ours = self.cache.cube_mark_change == cache::CubeMarkChange::Saving { generation };
+        if generation != self.panels.connect.cube.session_generation() {
+            if ours {
+                self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
+            }
+            return Task::none();
+        }
+        match result {
+            Ok(variation) => {
+                self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
+                if variation != self.cube_settings.mark_variation {
+                    return self.set_cube_mark_variation_locally(variation);
+                }
+                Task::none()
+            }
+            Err(e) => {
+                log::warn!("failed to change the Cube's mark: {e}");
+                self.cache.cube_mark_change = cache::CubeMarkChange::Failed { generation };
+                Task::none()
+            }
+        }
+    }
+
+    /// Connect has a row for the open Cube (its panel's registration just
+    /// succeeded): record it in memory and the settings file, once, so a
+    /// sign-out or a relaunch still knows the Cube's mark number is the
+    /// server's. Never cleared.
+    fn record_cube_connect_row(&mut self) -> Task<Message> {
+        self.panels.connect.set_cube_has_server_record(true);
+        if self.cube_settings.connect_registered {
+            return Task::none();
+        }
+        self.cube_settings.connect_registered = true;
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.chain());
+        let cube_id = self.cube_settings.id.clone();
+        Task::perform(
+            async move {
+                settings::record_connect_row(&network_dir, &cube_id, None)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |res: Result<(), String>| {
+                if let Err(e) = res {
+                    // The next registration or Launcher listing writes it.
+                    log::warn!("failed to record the Cube's Connect registration: {e}");
+                }
+                Message::SettingsSaved
+            },
+        )
+    }
+
     /// Record the open Cube's ring-mark variation in memory, the cache's
-    /// seed and its settings file.
+    /// seed, the Connect panel (so a first registration carries it) and its
+    /// settings file.
     fn set_cube_mark_variation_locally(&mut self, variation: u32) -> Task<Message> {
         self.cube_settings.mark_variation = variation;
         self.cache.cube_mark_seed = self.cube_settings.mark_seed();
+        self.cache.cube_mark_variation = variation;
+        self.panels.connect.set_cube_mark_variation(variation);
         let network_dir = self
             .cache
             .datadir_path
@@ -5362,13 +5518,10 @@ impl App {
             }
             menu::CubeSettingsOption::About => Some(view::SettingsMessage::AboutSection),
             menu::CubeSettingsOption::Stats => Some(view::SettingsMessage::InstallStatsSection),
-            // Avatar / Members render from `ConnectCubePanel` via
-            // App::view; no section message is dispatched to the
-            // SettingsState. Side-effect loads (avatar fetch,
-            // members fetch) are kicked below.
-            menu::CubeSettingsOption::AiAccess
-            | menu::CubeSettingsOption::Avatar
-            | menu::CubeSettingsOption::Members => None,
+            // Members renders from `ConnectCubePanel` via App::view; no
+            // section message is dispatched to the SettingsState. Its
+            // members fetch is kicked below.
+            menu::CubeSettingsOption::AiAccess | menu::CubeSettingsOption::Members => None,
         };
         if let Some(section_msg) = section_msg {
             // Fire even if daemon is None — the inner settings
@@ -5384,26 +5537,9 @@ impl App {
             }
             return Task::none();
         }
-        // Avatar and Members: trigger the underlying load via
-        // ConnectCubePanel, mirroring the per-Cube Connect arm.
+        // Members: trigger the underlying load via ConnectCubePanel,
+        // mirroring the per-Cube Connect arm.
         match option {
-            menu::CubeSettingsOption::Avatar => {
-                // Display & appearance stays underneath the flow.
-                let daemon = self.daemon.clone();
-                let display = self.panels.global_settings.update(
-                    daemon,
-                    &self.cache,
-                    Message::View(view::Message::Settings(
-                        view::SettingsMessage::GeneralSection,
-                    )),
-                );
-                return Task::batch([
-                    display,
-                    iced::Task::done(Message::View(view::Message::ConnectCube(
-                        view::ConnectCubeMessage::Avatar(view::AvatarMessage::Enter),
-                    ))),
-                ]);
-            }
             menu::CubeSettingsOption::Members if self.panels.connect.account.is_authenticated() => {
                 return iced::Task::done(Message::View(view::Message::ConnectCube(
                     view::ConnectCubeMessage::Members(view::ConnectCubeMembersMessage::Enter),
@@ -6461,6 +6597,29 @@ impl App {
         // panel's id.
         self.cache.current_cube_server_id = self.panels.connect.cube.server_cube_id;
         self.cache.cube_owned_by_other_account = self.panels.connect.cube.owned_by_other_account;
+        // Regenerate and Back on Display read this; resolved after the
+        // ownership mirror above so both describe the same tick. The Cube's
+        // settings can learn it is registered mid-session; the panel's
+        // flag only ever rises.
+        if self.cube_settings.is_connect_registered() {
+            self.panels.connect.set_cube_has_server_record(true);
+        }
+        // A save in flight and a failure line both belong to the Connect
+        // session that started them. Once that session ends, the buttons
+        // are free again; the old call's late result finds a different
+        // state and changes nothing (`on_cube_mark_set`).
+        if let cache::CubeMarkChange::Failed { generation }
+        | cache::CubeMarkChange::Saving { generation } = self.cache.cube_mark_change
+        {
+            if generation != self.panels.connect.cube.session_generation() {
+                self.cache.cube_mark_change = cache::CubeMarkChange::Idle;
+            }
+        }
+        self.cache.cube_mark_access = self
+            .panels
+            .connect
+            .cube
+            .mark_access(self.cube_owned_by_another_account());
 
         // Keep the Connect auth mirror fresh every tick (not just on
         // ConnectAccount/ConnectCube messages) so surfaces that read it —
@@ -7208,13 +7367,6 @@ impl App {
             // has P2P off (the cache flag was just refreshed above).
             p2p.sync_marketplace_flags_from_cache(&self.cache);
         }
-        self.cache.avatar_regenerations_remaining = self
-            .panels
-            .connect
-            .cube
-            .avatar_data
-            .as_ref()
-            .map(|data| data.regenerations_remaining);
     }
 
     /// Drop everything this App holds for a Connect session that has ended:
@@ -9574,6 +9726,15 @@ impl App {
             Message::CubeMarkFromConnect(server) => {
                 return self.adopt_cube_mark_variation(server);
             }
+            Message::View(view::Message::CubeMark(intent)) => {
+                return self.change_cube_mark(intent);
+            }
+            Message::CubeMarkSet { generation, result } => {
+                return self.on_cube_mark_set(generation, result);
+            }
+            Message::CubeRegisteredWithConnect => {
+                return self.record_cube_connect_row();
+            }
             message @ (Message::CubeSparkStableBalanceReported
             | Message::SparkStableBalanceFromConnect(_)
             | Message::SparkStableBalanceState(_)
@@ -10070,23 +10231,15 @@ impl App {
 
     /// Render content for a settings sub-page that needs both its
     /// owning panel and the ConnectCubePanel (Spark → Settings →
-    /// Lightning Address, Cube → Settings → Avatar / Members). Returns
+    /// Lightning Address, Cube → Settings → Members). Returns
     /// `None` for routes the generic panel dispatch can handle.
     ///
-    /// Auth and LN-address preconditions render an inline prompt in
-    /// place of the feature UI; the user signs in or claims an
-    /// address, then the page re-renders with the real form.
+    /// A sign-in precondition renders an inline prompt in place of the
+    /// feature UI; the user signs in, then the page re-renders with the
+    /// real form.
     fn connect_settings_content(&self) -> Option<Element<'_, view::Message>> {
         use crate::app::view::connect::sign_in_prompt;
         let authenticated = self.panels.connect.account.is_authenticated();
-        let has_ln_address = self
-            .panels
-            .connect
-            .cube
-            .lightning_address
-            .as_ref()
-            .and_then(|la| la.lightning_address.as_ref())
-            .is_some();
         match &self.panels.current {
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::AiAccess))
                 if self.cache.ai_access_enabled() =>
@@ -10116,25 +10269,6 @@ impl App {
                         sign_in_prompt::sign_in_prompt("claim a Lightning Address"),
                     ))
                 }
-            }
-            // The avatar flow opens inline under Cube identity on Display &
-            // appearance, rather than replacing the page.
-            Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::Avatar)) => {
-                let spark_unavailable = features::spark(self.cache.chain())
-                    .reason()
-                    .map(str::to_string);
-                let flow = if !authenticated {
-                    sign_in_prompt::sign_in_prompt("set up an Avatar")
-                } else if !has_ln_address {
-                    sign_in_prompt::claim_ln_address_prompt(spark_unavailable)
-                } else {
-                    view::connect::avatar_ux(&self.panels.connect.cube)
-                        .map(view::Message::ConnectCube)
-                };
-                Some(match self.panels.global_settings.general() {
-                    Some(general) => general.display_content(&self.cache, Some(flow)),
-                    None => flow,
-                })
             }
             Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::Members)) => {
                 Some(if authenticated {
@@ -10459,7 +10593,7 @@ impl App {
             )
         } else if let Some(content) = self.connect_settings_content() {
             // Connect-dependent settings sub-pages (Spark → Settings →
-            // Lightning Address, Cube → Settings → Avatar / Members)
+            // Lightning Address, Cube → Settings → Members)
             // need both the relevant panel state and the
             // ConnectCubePanel. The State trait's `view` only sees the
             // active panel + Cache, so the dispatch lives here — App
@@ -15275,6 +15409,18 @@ pub(crate) mod shell_tests {
     /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
     /// with the account grant on so the claim entry is available.
     pub(crate) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+        bitcoin_app_with_settings(
+            root,
+            settings::CubeSettings::new("Fixture".into(), crate::chain::ChainId::Bitcoin),
+        )
+    }
+
+    /// [`bitcoin_app`] opening `cube_settings`, as the loader passes a saved
+    /// Cube's settings to `App::new`.
+    pub(crate) fn bitcoin_app_with_settings(
+        root: &std::path::Path,
+        cube_settings: settings::CubeSettings,
+    ) -> (App, Arc<Wallet>) {
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let wallet = Arc::new(Wallet::new(descriptor.clone()));
         let cfg: coincubed::config::Config = toml::from_str(&format!(
@@ -15304,7 +15450,7 @@ pub(crate) mod shell_tests {
             daemon,
             CoincubeDirectory::new(root.to_path_buf()),
             None,
-            settings::CubeSettings::new("Fixture".into(), chain),
+            cube_settings,
             None,
         );
         drop(startup);
@@ -21371,6 +21517,9 @@ mod stream_startup_routing_tests {
 
 #[cfg(test)]
 mod connect_served_tests;
+
+#[cfg(test)]
+mod cube_mark_tests;
 
 #[cfg(test)]
 mod local_fork_pipeline_tests;

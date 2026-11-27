@@ -19,9 +19,9 @@ use crate::app::{
 };
 use coincube_ui::{
     icon::{
-        bitcoin_icon, chat_icon, coins_outline_icon, graph_icon, home_icon, lightning_outline_icon,
-        person_icon, phone_icon, plus_icon, receipt_icon, recovery_icon, settings_icon,
-        tooltip_icon, wallet_icon, wrench_icon,
+        bitcoin_icon, chat_icon, graph_icon, home_icon, lightning_outline_icon, person_icon,
+        phone_icon, plus_icon, receipt_icon, recovery_icon, settings_icon, tooltip_icon,
+        wallet_icon, wrench_icon,
     },
     theme,
     widget::{Column, Element},
@@ -120,19 +120,6 @@ fn cube_settings_items(ai_access: bool) -> Vec<SubItem> {
                 matches!(
                     m,
                     Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats))
-                )
-            },
-        ),
-        // Placeholder icon — the per-Cube Connect rail used a stacked-coins
-        // glyph; swap to a face icon when one exists.
-        SubItem::new(
-            "Avatar",
-            coins_outline_icon,
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),
-            |m| {
-                matches!(
-                    m,
-                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar))
                 )
             },
         ),

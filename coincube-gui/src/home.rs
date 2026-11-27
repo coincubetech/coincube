@@ -3000,6 +3000,10 @@ impl Home {
                     network: cube.api_network_string(),
                     has_vault: cube.holds_vault().then_some(true),
                     spark_stable_balance: cube.spark_stable_balance,
+                    // A Cube regenerated before it ever registered keeps
+                    // its mark: the server takes this number when it
+                    // creates the row (API CA1).
+                    mark_variation: RegisterCubeRequest::mark_variation_for(cube.mark_variation),
                 };
                 client
                     .register_cube(req)
@@ -3708,6 +3712,7 @@ impl Home {
                 // (PLAN-duress-vault-gate PR 3).
                 has_vault: cube.holds_vault().then_some(true),
                 spark_stable_balance: cube.spark_stable_balance,
+                mark_variation: RegisterCubeRequest::mark_variation_for(cube.mark_variation),
             };
             self.open_after_registration = Some(cube.id.clone());
             let register_task = Task::perform(
@@ -4428,7 +4433,10 @@ impl Home {
                         c.name = name_for_settings;
                         // Mark unsynced so catch-up can pick up the
                         // name change if the remote update fails or
-                        // we're offline.
+                        // we're offline. A Cube that was synced has a
+                        // Connect row; keep that fact first (older files
+                        // record it only as `remote_synced`).
+                        c.connect_registered |= c.remote_synced;
                         c.remote_synced = false;
                     }
                     Some(s)
@@ -5228,6 +5236,7 @@ impl Home {
                         // monotonic and flips later. No Spark decision yet either.
                         has_vault: None,
                         spark_stable_balance: None,
+                        mark_variation: None,
                     })
                     .await
                 {
@@ -5420,6 +5429,7 @@ impl Home {
                 // stops `CubeCreated` registering it a second time.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_registered = true;
                 }
                 // The account signed in while the Cube is created is its
                 // owner, registered or not: a registration that fails now is
@@ -5653,6 +5663,7 @@ impl Home {
                 // `finalize_passkey_cube_creation`, which does the same.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_registered = true;
                 }
                 // The creating account owns it, as on the passkey path.
                 cube.connect_owner = owner;
@@ -17887,5 +17898,50 @@ mod chain_identity_open_tests {
         });
         assert!(matches!(home.state, State::NoCube { .. }));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Launcher's catch-up registers a never-registered Cube with its
+    /// locally regenerated mark number, which the server keeps when it
+    /// creates the row (API CA1); at 0 it sends none.
+    #[tokio::test]
+    async fn catch_up_registration_sends_the_cubes_mark_number() {
+        use httpmock::{Method::POST, MockServer};
+        let server = MockServer::start_async().await;
+        let avatar = server.mock(|when, then| {
+            when.path_contains("/avatar");
+            then.status(410);
+        });
+        let client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+        let mut cube = CubeSettings::new("Mark".into(), crate::chain::ChainId::Bitcoin);
+        cube.mark_variation = 3;
+        let mut with_mark = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/connect/cubes")
+                .json_body_partial(r#"{ "markVariation": 3 }"#);
+            then.status(503);
+        });
+        assert!(Home::sync_catch_up_cube(&client, &cube, None)
+            .await
+            .is_err());
+        with_mark.assert();
+        with_mark.delete();
+
+        cube.mark_variation = 0;
+        let without_mark = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/connect/cubes")
+                .matches(|request| {
+                    request
+                        .body
+                        .as_ref()
+                        .is_none_or(|body| !String::from_utf8_lossy(body).contains("markVariation"))
+                });
+            then.status(503);
+        });
+        assert!(Home::sync_catch_up_cube(&client, &cube, None)
+            .await
+            .is_err());
+        without_mark.assert();
+        avatar.assert_hits(0);
     }
 }

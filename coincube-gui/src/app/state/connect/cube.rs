@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use coincube_core::descriptors::CoincubeDescriptor;
@@ -9,12 +8,11 @@ use crate::{
     app::{
         breez_spark::SparkClient,
         message::Message,
-        view::{self, AvatarMessage, ConnectCubeMessage},
+        view::{self, ConnectCubeMessage},
     },
     services::coincube::{
-        vault_reconcile, AvatarGenerateRequest, AvatarSelectRequest, AvatarUserTraits,
-        CoincubeClient, LightningAddress, PatchConnectVaultRequest, RegisterCubeRequest,
-        UpdateCubeRequest,
+        vault_reconcile, CoincubeClient, LightningAddress, PatchConnectVaultRequest,
+        RegisterCubeRequest, UpdateCubeRequest,
     },
 };
 
@@ -244,9 +242,9 @@ pub enum LightningAddressChangeOutcome {
     },
 }
 
-use super::{cube_members, AvatarFlowStep, ConnectCubeMembersState};
+use super::{cube_members, ConnectCubeMembersState};
 
-/// Per-Cube Connect panel handling Lightning Address and Avatar.
+/// Per-Cube Connect panel handling Lightning Address and Members.
 /// The Lightning Address claim flow is fulfilled by the Cube's
 /// Spark wallet via Breez-hosted LNURL.
 /// Why `POST /connect/cubes` failed, as carried by
@@ -297,6 +295,17 @@ pub struct ConnectCubePanel {
     /// is omitted from the request so a device with no decision never
     /// clobbers another device's.
     pub spark_stable_balance: Option<bool>,
+    /// The Cube's ring-mark variation (`CubeSettings::mark_variation`), seeded
+    /// by the App and kept in step whenever the number changes. Sent on
+    /// registration when above 0: the server takes it only when it creates
+    /// the row (API CA1), so a Cube regenerated before it ever registered
+    /// keeps its mark.
+    pub mark_variation: u32,
+    /// The Cube has a row on Connect: `CubeSettings::remote_synced` when the
+    /// App opened it, or a registration succeeded since. Unlike
+    /// [`Self::server_cube_id`] it survives a sign-out, because a registered
+    /// Cube's number is the server's (D-R2) whether or not a session exists.
+    pub has_server_record: bool,
     /// This Cube's Connect-blinding encryption **public** key (33-byte
     /// compressed secp256k1, lowercase hex), read from
     /// `CubeSettings::connect_encryption_pubkey`. `None` for a Cube whose seed
@@ -366,7 +375,7 @@ pub struct ConnectCubePanel {
     /// signed into another — nothing aborts the request, and the reply is a
     /// plain message. Adopting its `server_cube_id` would name a row in the
     /// *previous* account: every follow-up it triggers (encryption pubkey,
-    /// vault fingerprint, member reconcile, avatar) would then be aimed at a
+    /// vault fingerprint, member reconcile) would then be aimed at a
     /// row this session's token cannot touch, and, worse,
     /// `ensure_cube_registered`'s `server_cube_id.is_some()` short-circuit
     /// would stop the new account's Cube from ever registering — stuck until
@@ -424,13 +433,6 @@ pub struct ConnectCubePanel {
     pub ln_reconcile_needs_reregister: Option<String>,
     /// API client with JWT set — obtained from ConnectAccountPanel after login.
     pub client: Option<CoincubeClient>,
-    // Avatar
-    pub avatar_step: AvatarFlowStep,
-    pub avatar_data: Option<crate::services::coincube::GetAvatarData>,
-    pub avatar_generating: bool,
-    pub avatar_error: Option<String>,
-    pub avatar_image_cache: HashMap<u64, (Vec<u8>, iced::widget::image::Handle)>,
-    pub avatar_draft: AvatarUserTraits,
     // Members (W8)
     pub members: ConnectCubeMembersState,
 }
@@ -453,6 +455,8 @@ impl ConnectCubePanel {
             cube_network,
             cube_has_vault,
             spark_stable_balance: None,
+            mark_variation: 0,
+            has_server_record: false,
             cube_encryption_pubkey: None,
             enc_pubkey_registered: false,
             vault_fingerprint: None,
@@ -483,12 +487,6 @@ impl ConnectCubePanel {
             spark_client,
             ln_reconcile_needs_reregister: None,
             client: None,
-            avatar_step: AvatarFlowStep::Idle,
-            avatar_data: None,
-            avatar_generating: false,
-            avatar_error: None,
-            avatar_image_cache: HashMap::new(),
-            avatar_draft: AvatarUserTraits::default(),
             members: ConnectCubeMembersState::new(),
         }
     }
@@ -504,38 +502,6 @@ impl ConnectCubePanel {
             self.clear_client();
         }
         self.client = Some(client);
-    }
-
-    /// Returns a task to load avatar if conditions are met (client available, cube registered, not already loaded).
-    pub fn load_avatar_if_needed(&self) -> Option<iced::Task<Message>> {
-        if self.client.is_some() && self.server_cube_id.is_some() && self.avatar_data.is_none() {
-            let client = self.client.clone().unwrap();
-            let cid = self.api_cube_id().unwrap();
-            let generation = self.session_generation;
-            return Some(iced::Task::perform(
-                async move { client.get_avatar(&cid).await },
-                move |res| {
-                    Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                        crate::app::view::AvatarMessage::Loaded {
-                            generation,
-                            result: res.map_err(|e| e.to_string()),
-                        },
-                    )))
-                },
-            ));
-        }
-        None
-    }
-
-    /// Returns the active avatar image handle for the sidebar, if available.
-    pub fn get_active_avatar_handle(&self) -> Option<iced::widget::image::Handle> {
-        let id = self
-            .avatar_data
-            .as_ref()
-            .and_then(active_avatar_variant_id)?;
-        self.avatar_image_cache
-            .get(&id)
-            .map(|(_, handle)| handle.clone())
     }
 
     /// Clear the API client and all session-scoped state (called on account logout).
@@ -587,12 +553,6 @@ impl ConnectCubePanel {
             handle.abort();
         }
         self.ln_reconcile_needs_reregister = None;
-        self.avatar_step = AvatarFlowStep::Idle;
-        self.avatar_data = None;
-        self.avatar_generating = false;
-        self.avatar_error = None;
-        self.avatar_image_cache.clear();
-        self.avatar_draft = AvatarUserTraits::default();
         self.members.clear();
     }
 
@@ -624,6 +584,34 @@ impl ConnectCubePanel {
         }
         self.registering = true;
         Some(self.session_generation)
+    }
+
+    /// How the Cube's mark may be changed (Cube Settings › Display), given
+    /// whether another Connect account owns the Cube (`not_owner`).
+    ///
+    /// Registered and signed in goes through Connect; never registered stays
+    /// local and rides the first registration. A registration in flight
+    /// waits, so a local change cannot race the number that request carries;
+    /// a registered Cube whose registration failed this session is
+    /// `Unconfirmed`.
+    pub fn mark_access(&self, not_owner: bool) -> crate::app::cache::CubeMarkAccess {
+        use crate::app::cache::CubeMarkAccess;
+        let signed_in = self.client.is_some();
+        let registered = self.server_cube_id.is_some() || self.has_server_record;
+        if not_owner {
+            CubeMarkAccess::NotOwner
+        } else if signed_in && self.server_cube_id.is_some() {
+            CubeMarkAccess::Connect
+        } else if !self.registering && signed_in && registered && self.registration_error.is_some()
+        {
+            CubeMarkAccess::Unconfirmed
+        } else if self.registering || (signed_in && registered) {
+            CubeMarkAccess::Waiting
+        } else if registered {
+            CubeMarkAccess::SignedOut
+        } else {
+            CubeMarkAccess::Local
+        }
     }
 
     /// Returns the server-side cube ID as a string for API paths.
@@ -760,6 +748,9 @@ impl ConnectCubePanel {
             // reported elsewhere (PLAN-duress-vault-gate PR 3).
             has_vault: self.cube_has_vault.then_some(true),
             spark_stable_balance: self.spark_stable_balance,
+            // Used by the server only when it creates the row (API CA1), so
+            // a Cube regenerated before it ever registered keeps its mark.
+            mark_variation: RegisterCubeRequest::mark_variation_for(self.mark_variation),
         };
         iced::Task::perform(async move { client.register_cube(req).await }, move |res| {
             Message::View(view::Message::ConnectCube(
@@ -1194,10 +1185,6 @@ impl ConnectCubePanel {
 
             ConnectCubeMessage::Error(e) => self.on_connect_cube_error(e),
 
-            ConnectCubeMessage::Avatar(avatar_msg) => {
-                return self.update_avatar(avatar_msg);
-            }
-
             ConnectCubeMessage::Members(msg) => {
                 return cube_members::update(
                     &mut self.members,
@@ -1242,6 +1229,7 @@ impl ConnectCubePanel {
                     cube_resp.id
                 );
                 self.server_cube_id = Some(cube_resp.id);
+                self.has_server_record = true;
                 self.registration_error = None;
                 self.owned_by_other_account = false;
                 // Store the lightning address from the backend (or clear if None)
@@ -1265,8 +1253,6 @@ impl ConnectCubePanel {
                 } else {
                     None
                 };
-                // Trigger avatar load now that cube is registered.
-                let avatar_task = self.load_avatar_if_needed();
                 // The server cube id just became known, which is the
                 // only thing the encryption-pubkey PUT was waiting on.
                 // Publish now so invites created in this session carry
@@ -1310,16 +1296,20 @@ impl ConnectCubePanel {
                 // local copy and the sidebar's seed.
                 let mark_task =
                     iced::Task::done(Message::CubeMarkFromConnect(cube_resp.mark_variation));
+                // Connect now has a row for this Cube: the App records it,
+                // so the Cube is still known to be registered after a
+                // sign-out and a relaunch.
+                let row_task = iced::Task::done(Message::CubeRegisteredWithConnect);
                 let mut tasks = vec![
                     enc_key_task,
                     vault_fp_task,
                     reconcile_members_task,
                     stable_balance_task,
                     mark_task,
+                    row_task,
                 ];
                 tasks.extend(reconcile_task);
                 tasks.extend(recheck_task);
-                tasks.extend(avatar_task);
                 return iced::Task::batch(tasks);
             }
             Err(e) => {
@@ -1952,379 +1942,6 @@ impl ConnectCubePanel {
             self.ln_claim_error = Some(e);
         }
     }
-
-    fn update_avatar(&mut self, msg: AvatarMessage) -> iced::Task<Message> {
-        // Results of requests issued under a previous session must not
-        // populate this account's avatar state or start follow-ups
-        // through the current client.
-        let result_generation = match &msg {
-            AvatarMessage::Loaded { generation, .. }
-            | AvatarMessage::GenerateComplete { generation, .. }
-            | AvatarMessage::VariantSelected { generation, .. }
-            | AvatarMessage::RegenerationsLoaded { generation, .. }
-            | AvatarMessage::ImageLoaded { generation, .. } => Some(*generation),
-            _ => None,
-        };
-        if let Some(generation) = result_generation {
-            if generation != self.session_generation {
-                log::debug!(
-                    "[AVATAR] discarding a result from a previous session \
-                     (generation {}, now {})",
-                    generation,
-                    self.session_generation
-                );
-                return iced::Task::none();
-            }
-        }
-        match msg {
-            AvatarMessage::Enter => return self.enter_avatar(),
-
-            AvatarMessage::Loaded { result, .. } => return self.on_avatar_loaded(result),
-
-            AvatarMessage::SetStep(step) => {
-                self.avatar_step = step;
-            }
-
-            AvatarMessage::GenderChanged(v) => self.avatar_draft.gender = v,
-            AvatarMessage::ArchetypeChanged(v) => self.avatar_draft.archetype = v,
-            AvatarMessage::AgeFeelChanged(v) => self.avatar_draft.age_feel = v,
-            AvatarMessage::DemeanorChanged(v) => self.avatar_draft.demeanor = v,
-            AvatarMessage::ArmorStyleChanged(v) => self.avatar_draft.armor_style = v,
-            AvatarMessage::AccentMotifChanged(v) => self.avatar_draft.accent_motif = v,
-            AvatarMessage::LaserEyesToggled(v) => self.avatar_draft.laser_eyes = v,
-
-            AvatarMessage::Generate => return self.generate_avatar(),
-
-            AvatarMessage::GenerateComplete { result, .. } => {
-                return self.on_avatar_generate_complete(result)
-            }
-
-            AvatarMessage::SelectVariant(variant_id) => {
-                return self.select_avatar_variant(variant_id)
-            }
-
-            AvatarMessage::VariantSelected { result, .. } => {
-                return self.on_avatar_variant_selected(result)
-            }
-
-            AvatarMessage::RegenerationsLoaded { result, .. } => match result {
-                Ok(data) => {
-                    if let Some(ref mut ad) = self.avatar_data {
-                        ad.regenerations_remaining = data.remaining;
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[AVATAR] Regenerations fetch error: {}", e);
-                }
-            },
-
-            AvatarMessage::ImageLoaded {
-                variant_id, result, ..
-            } => match result {
-                Ok(bytes) => {
-                    let handle = iced::widget::image::Handle::from_bytes(bytes.clone());
-                    self.avatar_image_cache.insert(variant_id, (bytes, handle));
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[AVATAR] Image load error for variant {}: {}",
-                        variant_id,
-                        e
-                    );
-                }
-            },
-
-            AvatarMessage::Retry => {
-                self.avatar_error = None;
-                self.avatar_step = AvatarFlowStep::Questionnaire;
-            }
-
-            AvatarMessage::DownloadAvatar => return self.download_avatar(),
-
-            AvatarMessage::SaveError(e) => {
-                log::error!("[AVATAR] Failed to save avatar to disk: {}", e);
-                self.avatar_error = Some(e);
-            }
-
-            AvatarMessage::Noop => {}
-        }
-
-        iced::Task::none()
-    }
-    fn enter_avatar(&mut self) -> iced::Task<Message> {
-        self.avatar_error = None;
-        let Some(client) = self.client.clone() else {
-            self.avatar_error = Some("Not signed in".to_string());
-            return iced::Task::none();
-        };
-        let Some(cid) = self.api_cube_id() else {
-            if let Some(ref e) = self.registration_error {
-                self.avatar_error = Some(e.clone());
-            }
-            return iced::Task::none();
-        };
-        let generation = self.session_generation;
-        iced::Task::perform(async move { client.get_avatar(&cid).await }, move |res| {
-            Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                AvatarMessage::Loaded {
-                    generation,
-                    result: res.map_err(|e| e.to_string()),
-                },
-            )))
-        })
-    }
-
-    fn on_avatar_loaded(
-        &mut self,
-        result: Result<crate::services::coincube::GetAvatarData, String>,
-    ) -> iced::Task<Message> {
-        match result {
-            Ok(data) => {
-                let has = data.has_avatar;
-                let active_id = active_avatar_variant_id(&data);
-                self.avatar_data = Some(data);
-                if has {
-                    self.avatar_step = AvatarFlowStep::Settings;
-                    if let Some(id) = active_id {
-                        return self.fetch_avatar_image_if_missing(id);
-                    }
-                } else {
-                    self.avatar_step = AvatarFlowStep::Questionnaire;
-                }
-            }
-            Err(e) => {
-                log::error!("[AVATAR] Load error: {}", e);
-                self.avatar_error = Some(e);
-            }
-        }
-        iced::Task::none()
-    }
-
-    fn generate_avatar(&mut self) -> iced::Task<Message> {
-        if self.avatar_generating {
-            return iced::Task::none();
-        }
-        let Some(client) = self.client.clone() else {
-            self.avatar_error = Some("Not signed in".to_string());
-            return iced::Task::none();
-        };
-        let req = AvatarGenerateRequest {
-            user_traits: self.avatar_draft.clone(),
-        };
-        let Some(cid) = self.api_cube_id() else {
-            self.avatar_generating = false;
-            self.avatar_error = Some(
-                self.registration_error
-                    .clone()
-                    .unwrap_or_else(|| "Cube registration pending".to_string()),
-            );
-            return iced::Task::none();
-        };
-        self.avatar_generating = true;
-        self.avatar_error = None;
-        self.avatar_step = AvatarFlowStep::Generating;
-        let generation = self.session_generation;
-        iced::Task::perform(
-            async move { client.post_avatar_generate(&cid, req).await },
-            move |res| {
-                Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                    AvatarMessage::GenerateComplete {
-                        generation,
-                        result: res.map_err(|e| e.to_string()),
-                    },
-                )))
-            },
-        )
-    }
-
-    fn on_avatar_generate_complete(
-        &mut self,
-        result: Result<crate::services::coincube::AvatarGenerateData, String>,
-    ) -> iced::Task<Message> {
-        self.avatar_generating = false;
-        match result {
-            Ok(data) => {
-                let variant_id = data.variant.id;
-                let new_variant = data.variant.clone();
-                if let Some(ref mut ad) = self.avatar_data {
-                    ad.has_avatar = true;
-                    ad.active_avatar_url = Some(new_variant.image_url.clone());
-                    if !ad.variants.iter().any(|v| v.id == new_variant.id) {
-                        ad.variants.push(new_variant);
-                    }
-                    ad.identity = Some(data.identity);
-                    // Decrement local regeneration count
-                    if ad.regenerations_remaining > 0 {
-                        ad.regenerations_remaining -= 1;
-                    }
-                } else {
-                    self.avatar_data = Some(crate::services::coincube::GetAvatarData {
-                        has_avatar: true,
-                        active_avatar_url: Some(data.variant.image_url.clone()),
-                        identity: Some(data.identity),
-                        variants: vec![data.variant],
-                        regenerations_remaining: 0,
-                        created_at: None,
-                        updated_at: None,
-                    });
-                }
-                self.avatar_step = AvatarFlowStep::Reveal;
-                if let Some(ref ad) = self.avatar_data {
-                    if let Some(ref identity) = ad.identity {
-                        self.avatar_draft = identity.user_traits.clone();
-                    }
-                }
-                return self.fetch_generated_avatar_details(variant_id);
-            }
-            Err(e) => {
-                log::error!("[AVATAR] Generate error: {}", e);
-                self.avatar_error = Some(e);
-                self.avatar_step = AvatarFlowStep::Questionnaire;
-            }
-        }
-        iced::Task::none()
-    }
-
-    fn fetch_generated_avatar_details(&self, variant_id: u64) -> iced::Task<Message> {
-        // Fetch image + refresh regeneration count in parallel
-        if let Some(client) = self.client.clone() {
-            let client2 = client.clone();
-            let Some(cid) = self.api_cube_id() else {
-                return iced::Task::none();
-            };
-            let generation = self.session_generation;
-            return iced::Task::batch([
-                iced::Task::perform(
-                    async move { client.fetch_avatar_image(variant_id).await },
-                    move |res| {
-                        Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                            AvatarMessage::ImageLoaded {
-                                generation,
-                                variant_id,
-                                result: res.map_err(|e| e.to_string()),
-                            },
-                        )))
-                    },
-                ),
-                iced::Task::perform(
-                    async move { client2.get_avatar_regenerations(&cid).await },
-                    move |res| {
-                        Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                            AvatarMessage::RegenerationsLoaded {
-                                generation,
-                                result: res.map_err(|e| e.to_string()),
-                            },
-                        )))
-                    },
-                ),
-            ]);
-        }
-        iced::Task::none()
-    }
-
-    fn select_avatar_variant(&mut self, variant_id: u64) -> iced::Task<Message> {
-        let Some(client) = self.client.clone() else {
-            self.avatar_error = Some("Not signed in".to_string());
-            return iced::Task::none();
-        };
-        let Some(cid) = self.api_cube_id() else {
-            self.avatar_error = Some(
-                self.registration_error
-                    .clone()
-                    .unwrap_or_else(|| "Cube registration pending".to_string()),
-            );
-            return iced::Task::none();
-        };
-        let generation = self.session_generation;
-        iced::Task::perform(
-            async move {
-                client
-                    .post_avatar_select(&cid, AvatarSelectRequest { variant_id })
-                    .await
-            },
-            move |res| {
-                Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                    AvatarMessage::VariantSelected {
-                        generation,
-                        result: res.map_err(|e| e.to_string()),
-                    },
-                )))
-            },
-        )
-    }
-
-    fn on_avatar_variant_selected(
-        &mut self,
-        result: Result<crate::services::coincube::AvatarSelectData, String>,
-    ) -> iced::Task<Message> {
-        match result {
-            Ok(data) => {
-                if let Some(ref mut ad) = self.avatar_data {
-                    ad.active_avatar_url = Some(data.active_avatar_url);
-                }
-                let variant_id = data.variant_id;
-                return self.fetch_avatar_image_if_missing(variant_id);
-            }
-            Err(e) => {
-                log::error!("[AVATAR] Select error: {}", e);
-                self.avatar_error = Some(e);
-            }
-        }
-        iced::Task::none()
-    }
-
-    fn fetch_avatar_image_if_missing(&self, variant_id: u64) -> iced::Task<Message> {
-        if !self.avatar_image_cache.contains_key(&variant_id) {
-            if let Some(client) = self.client.clone() {
-                let generation = self.session_generation;
-                return iced::Task::perform(
-                    async move { client.fetch_avatar_image(variant_id).await },
-                    move |res| {
-                        Message::View(view::Message::ConnectCube(ConnectCubeMessage::Avatar(
-                            AvatarMessage::ImageLoaded {
-                                generation,
-                                variant_id,
-                                result: res.map_err(|e| e.to_string()),
-                            },
-                        )))
-                    },
-                );
-            }
-        }
-        iced::Task::none()
-    }
-
-    fn download_avatar(&self) -> iced::Task<Message> {
-        let active_id = self.avatar_data.as_ref().and_then(active_avatar_variant_id);
-        if let Some(id) = active_id {
-            if let Some((bytes, _)) = self.avatar_image_cache.get(&id) {
-                let bytes = bytes.clone();
-                return iced::Task::perform(
-                    async move {
-                        let Some(handle) = rfd::AsyncFileDialog::new()
-                            .set_title("Save Avatar")
-                            .set_file_name("coincube-avatar.png")
-                            .add_filter("PNG Image", &["png"])
-                            .save_file()
-                            .await
-                        else {
-                            return Ok(());
-                        };
-                        std::fs::write(handle.path(), &bytes).map_err(|e| e.to_string())
-                    },
-                    |res| match res {
-                        Ok(()) => Message::View(view::Message::ConnectCube(
-                            ConnectCubeMessage::Avatar(AvatarMessage::Noop),
-                        )),
-                        Err(e) => Message::View(view::Message::ConnectCube(
-                            ConnectCubeMessage::Avatar(AvatarMessage::SaveError(e)),
-                        )),
-                    },
-                );
-            }
-        }
-        iced::Task::none()
-    }
 }
 
 async fn rollback_reconcile_domain_mismatch(
@@ -2358,18 +1975,6 @@ async fn rollback_reconcile_domain_mismatch(
          reservation is '{}'{}",
         bound, db_addr, suffix
     ))
-}
-
-/// The variant named by `active_avatar_url`, matched on the URL's last path
-/// segment (without extension) so `.../112.png` never resolves to variant
-/// `12`.
-fn active_avatar_variant_id(data: &crate::services::coincube::GetAvatarData) -> Option<u64> {
-    let url = data.active_avatar_url.as_deref()?;
-    let active_id = url.rsplit('/').next()?.split('.').next()?;
-    data.variants
-        .iter()
-        .find(|v| v.id.to_string() == active_id)
-        .map(|v| v.id)
 }
 
 /// Outcome of a rename whose SDK register succeeded: success only when the
@@ -2471,15 +2076,7 @@ mod tests {
 
     use coincube_spark_protocol::LightningAddressInfo;
 
-    use crate::{
-        app::view::AvatarMessage,
-        services::coincube::{
-            AvatarAccentMotif, AvatarAgeFeel, AvatarArmorStyle, AvatarDemeanor,
-            AvatarDerivedTraits, AvatarGender, AvatarGenerateData, AvatarIdentity,
-            AvatarResolvedDirectives, AvatarSelectData, AvatarVariant, CubeResponse, GetAvatarData,
-            RegenerationData,
-        },
-    };
+    use crate::services::coincube::CubeResponse;
 
     use std::str::FromStr;
 
@@ -2678,79 +2275,6 @@ mod tests {
         );
     }
 
-    fn avatar_variant(id: u64) -> AvatarVariant {
-        AvatarVariant {
-            id,
-            index: id as u32,
-            image_url: format!("https://cdn.example/avatar/{id}.png"),
-        }
-    }
-
-    fn avatar_data(has_avatar: bool, active_id: Option<u64>) -> GetAvatarData {
-        GetAvatarData {
-            has_avatar,
-            active_avatar_url: active_id.map(|id| format!("https://cdn.example/avatar/{id}.png")),
-            identity: None,
-            variants: vec![avatar_variant(7), avatar_variant(8)],
-            regenerations_remaining: 3,
-            created_at: None,
-            updated_at: None,
-        }
-    }
-
-    fn identity() -> AvatarIdentity {
-        AvatarIdentity {
-            version: 1,
-            seed_version: 1,
-            seed_hash: "seed-hash".to_string(),
-            lightning_address: "founder@example.com".to_string(),
-            archetype: "ronin".to_string(),
-            user_traits: AvatarUserTraits {
-                gender: AvatarGender::Woman,
-                archetype: crate::services::coincube::AvatarArchetype::Shogun,
-                age_feel: AvatarAgeFeel::Elder,
-                demeanor: AvatarDemeanor::Fierce,
-                armor_style: AvatarArmorStyle::Heavy,
-                accent_motif: AvatarAccentMotif::OrangeSun,
-                laser_eyes: true,
-            },
-            derived_traits: AvatarDerivedTraits {
-                pose: "front".to_string(),
-                crop_style: "portrait".to_string(),
-                hat_style: "none".to_string(),
-                face_visibility: "visible".to_string(),
-                eye_visibility: "visible".to_string(),
-                weapon_mode: "none".to_string(),
-                shoulder_profile: "square".to_string(),
-                cloak_presence: "none".to_string(),
-                armor_wear: "clean".to_string(),
-                enso_style: "brush".to_string(),
-                ink_density: "medium".to_string(),
-                brush_texture: "dry".to_string(),
-                splash_intensity: "low".to_string(),
-                orange_placement: "accent".to_string(),
-                ornament_level: "simple".to_string(),
-            },
-            resolved_directives: AvatarResolvedDirectives {
-                composition: "composition".to_string(),
-                silhouette: "silhouette".to_string(),
-                face_treatment: "face".to_string(),
-                armor_treatment: "armor".to_string(),
-                mood: "mood".to_string(),
-                orange_treatment: "orange".to_string(),
-                ink_treatment: "ink".to_string(),
-                eyes_treatment: "eyes".to_string(),
-                background: "background".to_string(),
-                archetype_flavor: "flavor".to_string(),
-            },
-        }
-    }
-
-    /// COIN-373 latch semantics. The reconcile's first trigger is the App's
-    /// backfill at `App::new`, which runs before the `CubeRegistered` response
-    /// has set `server_cube_id` — so that pass must NOT consume the latch, or
-    /// the whole cube-open reconcile becomes dead code and a Vault missing a
-    /// member row stays broken on the phone until someone starts a desktop sign.
     #[test]
     fn reconcile_waits_for_the_server_cube_id_before_latching() {
         let mut panel = panel();
@@ -3028,35 +2552,19 @@ mod tests {
     }
 
     #[test]
-    fn registration_client_and_avatar_helpers_reset_session_state() {
+    fn registration_client_helpers_reset_session_state() {
         let mut panel = panel();
         assert!(panel.api_cube_id().is_none());
-        assert!(panel.load_avatar_if_needed().is_none());
         let (_, handle) = panel.register_cube().abortable();
         handle.abort();
 
         panel.set_client(CoincubeClient::new());
         panel.server_cube_id = Some(42);
         assert_eq!(panel.api_cube_id().as_deref(), Some("42"));
-        assert!(panel.load_avatar_if_needed().is_some());
         let (_, handle) = panel.register_cube().abortable();
         handle.abort();
         let _ = panel.report_vault_created();
         assert!(panel.cube_has_vault);
-
-        panel.avatar_data = Some(avatar_data(true, Some(7)));
-        panel.avatar_image_cache.insert(
-            7,
-            (
-                vec![137, 80, 78, 71],
-                iced::widget::image::Handle::from_bytes(vec![137, 80, 78, 71]),
-            ),
-        );
-        assert!(panel.get_active_avatar_handle().is_some());
-        if let Some(data) = panel.avatar_data.as_mut() {
-            data.active_avatar_url = Some("https://cdn.example/avatar/70.png".to_string());
-        }
-        assert!(panel.get_active_avatar_handle().is_none());
 
         panel.ln_username_input = "founder".to_string();
         panel.ln_username_available = Some(true);
@@ -3064,7 +2572,6 @@ mod tests {
         panel.ln_claim_error = Some("old".to_string());
         panel.lightning_address = Some(lightning("founder@example.com"));
         panel.ln_reconcile_needs_reregister = Some("retry".to_string());
-        panel.avatar_error = Some("old".to_string());
         panel.clear_client();
 
         assert!(panel.client.is_none());
@@ -3075,8 +2582,6 @@ mod tests {
         assert!(panel.ln_username_error.is_none());
         assert!(panel.ln_claim_error.is_none());
         assert!(panel.ln_reconcile_needs_reregister.is_none());
-        assert!(panel.avatar_data.is_none());
-        assert!(panel.avatar_image_cache.is_empty());
     }
 
     #[test]
@@ -3292,256 +2797,6 @@ mod tests {
         });
         assert!(!panel.ln_reregistering);
         assert!(panel.ln_reconcile_needs_reregister.is_none());
-    }
-
-    #[test]
-    fn avatar_state_machine_handles_local_transitions_and_results() {
-        let mut panel = panel();
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Enter));
-        assert_eq!(panel.avatar_error.as_deref(), Some("Not signed in"));
-
-        panel.set_client(CoincubeClient::new());
-        panel.registration_error = Some("registration pending".to_string());
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Enter));
-        assert_eq!(panel.avatar_error.as_deref(), Some("registration pending"));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Loaded {
-            generation: panel.session_generation(),
-            result: Ok(avatar_data(false, None)),
-        }));
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Questionnaire));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Loaded {
-            generation: panel.session_generation(),
-            result: Ok(avatar_data(true, Some(7))),
-        }));
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Settings));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Loaded {
-            generation: panel.session_generation(),
-            result: Err("load failed".to_string()),
-        }));
-        assert_eq!(panel.avatar_error.as_deref(), Some("load failed"));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::SetStep(
-            AvatarFlowStep::Reveal,
-        )));
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Reveal));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::GenderChanged(
-            AvatarGender::Woman,
-        )));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::AgeFeelChanged(
-            AvatarAgeFeel::Young,
-        )));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::DemeanorChanged(
-            AvatarDemeanor::Calm,
-        )));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::ArmorStyleChanged(AvatarArmorStyle::Standard),
-        ));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::AccentMotifChanged(AvatarAccentMotif::Seal),
-        ));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::LaserEyesToggled(
-            true,
-        )));
-        assert_eq!(panel.avatar_draft.gender, AvatarGender::Woman);
-        assert_eq!(panel.avatar_draft.age_feel, AvatarAgeFeel::Young);
-        assert!(panel.avatar_draft.laser_eyes);
-
-        panel.avatar_generating = true;
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Generate));
-        assert!(panel.avatar_generating);
-
-        panel.avatar_generating = false;
-        panel.client = None;
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Generate));
-        assert_eq!(panel.avatar_error.as_deref(), Some("Not signed in"));
-
-        panel.set_client(CoincubeClient::new());
-        panel.server_cube_id = None;
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Generate));
-        assert_eq!(panel.avatar_error.as_deref(), Some("registration pending"));
-
-        let generated = AvatarGenerateData {
-            identity: identity(),
-            variant: avatar_variant(9),
-        };
-        panel.avatar_data = Some(avatar_data(true, Some(7)));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::GenerateComplete {
-                generation: panel.session_generation(),
-                result: Ok(generated),
-            },
-        ));
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Reveal));
-        assert_eq!(panel.avatar_draft.gender, AvatarGender::Woman);
-        assert_eq!(
-            panel.avatar_data.as_ref().unwrap().regenerations_remaining,
-            2
-        );
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::GenerateComplete {
-                generation: panel.session_generation(),
-                result: Err("generation failed".to_string()),
-            },
-        ));
-        assert_eq!(panel.avatar_error.as_deref(), Some("generation failed"));
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Questionnaire));
-
-        panel.client = None;
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::SelectVariant(8)));
-        assert_eq!(panel.avatar_error.as_deref(), Some("Not signed in"));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::VariantSelected {
-            generation: panel.session_generation(),
-            result: Ok(AvatarSelectData {
-                active_avatar_url: "https://cdn.example/avatar/8.png".to_string(),
-                variant_id: 8,
-            }),
-        }));
-        assert_eq!(
-            panel
-                .avatar_data
-                .as_ref()
-                .unwrap()
-                .active_avatar_url
-                .as_deref(),
-            Some("https://cdn.example/avatar/8.png")
-        );
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::VariantSelected {
-            generation: panel.session_generation(),
-            result: Err("select failed".to_string()),
-        }));
-        assert_eq!(panel.avatar_error.as_deref(), Some("select failed"));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::RegenerationsLoaded {
-                generation: panel.session_generation(),
-                result: Ok(RegenerationData {
-                    total_allowed: 5,
-                    used: 4,
-                    remaining: 1,
-                }),
-            },
-        ));
-        assert_eq!(
-            panel.avatar_data.as_ref().unwrap().regenerations_remaining,
-            1
-        );
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::ImageLoaded {
-            generation: panel.session_generation(),
-            variant_id: 8,
-            result: Ok(vec![137, 80, 78, 71]),
-        }));
-        assert!(panel.avatar_image_cache.contains_key(&8));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::SaveError(
-            "disk full".to_string(),
-        )));
-        assert_eq!(panel.avatar_error.as_deref(), Some("disk full"));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Retry));
-        assert!(panel.avatar_error.is_none());
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Questionnaire));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Noop));
-    }
-
-    #[test]
-    fn active_avatar_lookup_matches_the_exact_variant_id() {
-        let mut data = avatar_data(true, Some(112));
-        data.variants = vec![avatar_variant(12), avatar_variant(112)];
-        assert_eq!(active_avatar_variant_id(&data), Some(112));
-        data.active_avatar_url = Some("https://cdn.example/avatar/112".to_string());
-        assert_eq!(active_avatar_variant_id(&data), Some(112));
-        data.active_avatar_url = Some("https://cdn.example/avatar/12.png".to_string());
-        assert_eq!(active_avatar_variant_id(&data), Some(12));
-        data.active_avatar_url = Some("https://cdn.example/avatar/2.png".to_string());
-        assert_eq!(active_avatar_variant_id(&data), None);
-        data.active_avatar_url = None;
-        assert_eq!(active_avatar_variant_id(&data), None);
-
-        // Only variant 12's bytes are cached: the sidebar handle for an
-        // active 112 must not fall back to them.
-        let mut panel = panel();
-        let mut data = avatar_data(true, Some(112));
-        data.variants = vec![avatar_variant(12), avatar_variant(112)];
-        panel.avatar_data = Some(data);
-        panel.avatar_image_cache.insert(
-            12,
-            (vec![1], iced::widget::image::Handle::from_bytes(vec![1u8])),
-        );
-        assert!(panel.get_active_avatar_handle().is_none());
-        assert!(iced_runtime::task::into_stream(panel.download_avatar()).is_none());
-    }
-
-    #[test]
-    fn avatar_results_from_a_previous_session_are_dropped() {
-        let mut panel = panel();
-        panel.set_client(CoincubeClient::for_test("http://account-a.invalid"));
-        let stale = panel.session_generation();
-        panel.set_client(CoincubeClient::for_test("http://account-b.invalid"));
-        assert_ne!(stale, panel.session_generation());
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::Loaded {
-            generation: stale,
-            result: Ok(avatar_data(true, Some(7))),
-        }));
-        assert!(panel.avatar_data.is_none());
-        assert!(matches!(panel.avatar_step, AvatarFlowStep::Idle));
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::ImageLoaded {
-            generation: stale,
-            variant_id: 7,
-            result: Ok(vec![137, 80, 78, 71]),
-        }));
-        assert!(panel.avatar_image_cache.is_empty());
-
-        panel.avatar_generating = true;
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::GenerateComplete {
-                generation: stale,
-                result: Err("old account".to_string()),
-            },
-        ));
-        assert!(panel.avatar_generating);
-        assert!(panel.avatar_error.is_none());
-
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::VariantSelected {
-            generation: stale,
-            result: Err("old account".to_string()),
-        }));
-        assert!(panel.avatar_error.is_none());
-
-        panel.avatar_data = Some(avatar_data(true, Some(7)));
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(
-            AvatarMessage::RegenerationsLoaded {
-                generation: stale,
-                result: Ok(RegenerationData {
-                    total_allowed: 5,
-                    used: 5,
-                    remaining: 0,
-                }),
-            },
-        ));
-        assert_eq!(
-            panel.avatar_data.as_ref().unwrap().regenerations_remaining,
-            3
-        );
-
-        // The current session's results still land.
-        let _ = panel.update_message(ConnectCubeMessage::Avatar(AvatarMessage::ImageLoaded {
-            generation: panel.session_generation(),
-            variant_id: 7,
-            result: Ok(vec![137, 80, 78, 71]),
-        }));
-        assert!(panel.avatar_image_cache.contains_key(&7));
     }
 
     #[test]

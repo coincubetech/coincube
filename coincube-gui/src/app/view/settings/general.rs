@@ -100,18 +100,15 @@ fn general_section<'a>(
             show_direction_badges,
             saved,
             name_input,
-            None,
         ),
     )
 }
 
 pub const CUBE_NAME_ID: &str = "tenshu.settings.cube-name";
-pub const AVATAR_ACTION_ID: &str = "tenshu.settings.avatar";
+pub const MARK_REGENERATE_ID: &str = "tenshu.settings.mark-regenerate";
+pub const MARK_BACK_ID: &str = "tenshu.settings.mark-back";
 
-/// The Display & appearance groups (`#h-amt`, `#h-id`). `avatar_flow` is the
-/// avatar set-up or regeneration flow, shown inline under the Avatar row
-/// while it is open.
-#[allow(clippy::too_many_arguments)]
+/// The Display & appearance groups (`#h-amt`, `#h-id`).
 pub(crate) fn display_content<'a>(
     cache: &'a cache::Cache,
     new_price_setting: &'a PriceSetting,
@@ -120,7 +117,6 @@ pub(crate) fn display_content<'a>(
     show_direction_badges: bool,
     saved: bool,
     name_input: Option<&'a str>,
-    avatar_flow: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let amounts = Column::new()
         .push(page::rule())
@@ -160,17 +156,9 @@ pub(crate) fn display_content<'a>(
         .width(Length::Fixed(280.0)),
     );
 
-    let flow_open = avatar_flow.is_some();
-    let mut identity = Column::new()
+    let identity = Column::new()
         .width(Length::Fill)
-        .push(page::rows([name_row.into(), avatar_row(cache, flow_open)]));
-    if let Some(flow) = avatar_flow {
-        identity = identity.push(
-            Container::new(flow)
-                .padding(iced::Padding::default().top(16.0))
-                .width(Length::Fill),
-        );
-    }
+        .push(page::rows([name_row.into(), avatar_row(cache)]));
 
     Column::new()
         .width(Length::Fill)
@@ -216,47 +204,54 @@ pub(crate) fn cube_name_status(
     })
 }
 
-/// The Avatar row: the Cube's 48px ring mark, and the action that opens the
-/// old avatar flow inline until Regenerate replaces it.
-fn avatar_row<'a>(cache: &'a cache::Cache, flow_open: bool) -> Element<'a, Message> {
+/// The line the Avatar row shows when a registered Cube has no Connect
+/// session: the server's number wins at the next sign-in (D-R2), so the
+/// buttons are disabled rather than offering a local change.
+pub(crate) const MARK_SIGN_IN_LINE: &str = "Sign in to Connect to change this Cube's mark.";
+/// The line the Avatar row shows when Connect has a row for the Cube but its
+/// registration failed this session, so the mark cannot be changed yet.
+pub(crate) const MARK_UNCONFIRMED_LINE: &str = "Connect hasn't confirmed this Cube yet.";
+/// The line the Avatar row shows when the set call failed. One line for every
+/// failure, Connect's duress refusal included.
+pub(crate) const MARK_FAILED_LINE: &str = "Couldn't change the mark. Nothing was changed.";
+
+/// The Avatar row: the Cube's 48px ring mark and, for the Cube's owner,
+/// Regenerate and (above 0) Back. Each sets the mark number to one more or
+/// one less; the App decides whether that goes through Connect or stays on
+/// this device (`cache::CubeMarkAccess`).
+pub(crate) fn avatar_row<'a>(cache: &'a cache::Cache) -> Element<'a, Message> {
+    use cache::{CubeMarkAccess, CubeMarkChange};
     let tile: Element<'a, Message> = ring_mark::ring_mark(cache.cube_mark_seed.as_deref(), 48.0);
-    let signed_in = cache.connect_authenticated;
-    let detail = if !signed_in {
-        "Needs Connect sign-in.".to_owned()
-    } else {
-        match cache.avatar_regenerations_remaining {
-            None => "Not set up yet.".to_owned(),
-            Some(n) if n >= 0 => {
-                localized_format!("Regenerations left: {}", "Regeneraciones restantes: {}", n)
-            }
-            _ => "Generated from your Lightning Address.".to_owned(),
-        }
+    let row = page::row(localized_copy("Avatar")).leading(tile);
+    let access = cache.cube_mark_access;
+    if access == CubeMarkAccess::NotOwner {
+        return row.into();
+    }
+    let saving = matches!(cache.cube_mark_change, CubeMarkChange::Saving { .. });
+    let enabled = !saving && matches!(access, CubeMarkAccess::Connect | CubeMarkAccess::Local);
+    let variation = cache.cube_mark_variation;
+    let mut row = match access {
+        CubeMarkAccess::SignedOut => row.description(localized_copy(MARK_SIGN_IN_LINE)),
+        CubeMarkAccess::Unconfirmed => row.description(localized_copy(MARK_UNCONFIRMED_LINE)),
+        _ if matches!(cache.cube_mark_change, CubeMarkChange::Failed { .. }) => row.line(
+            page::status(page::Status::Bad, localized_copy(MARK_FAILED_LINE)),
+        ),
+        _ => row,
     };
-    let (label, target) = if flow_open {
-        (
-            "Close",
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
-        )
-    } else if cache.avatar_regenerations_remaining.is_some() {
-        (
-            "Regenerate…",
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),
-        )
-    } else {
-        (
-            "Set up…",
-            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Avatar)),
-        )
-    };
-    page::row("Avatar")
-        .leading(tile)
-        .description(detail)
-        .control(page::button(
-            AVATAR_ACTION_ID,
-            label,
-            signed_in.then_some(Message::Menu(target)),
-        ))
-        .into()
+    if variation > 0 {
+        row = row.control(page::button(
+            MARK_BACK_ID,
+            localized_copy("Back"),
+            enabled.then_some(Message::CubeMark(CubeMarkIntent::Back)),
+        ));
+    }
+    row.control(page::button(
+        MARK_REGENERATE_ID,
+        localized_copy("Regenerate"),
+        (enabled && variation < crate::app::settings::MARK_VARIATION_MAX)
+            .then_some(Message::CubeMark(CubeMarkIntent::Regenerate)),
+    ))
+    .into()
 }
 
 fn payment_checks_section<'a>(
@@ -3274,5 +3269,200 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mark_row_tests {
+    //! The Avatar row on Cube Settings › Display: the Cube's mark with
+    //! Regenerate and Back (Cube avatars CD3).
+    use super::*;
+    use crate::app::cache::{CubeMarkAccess, CubeMarkChange};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::locale::{render_in, Language};
+    use iced::advanced::widget::Id;
+
+    const OUTER: (u32, u32) = (1024, 768);
+    const CUBE: &str = "9fb93534-081c-4253-b1e2-73a87984a8ab";
+
+    fn cache(access: CubeMarkAccess, variation: u32) -> cache::Cache {
+        cache::Cache {
+            cube_mark_seed: ring_mark::seed(CUBE, variation),
+            cube_mark_variation: variation,
+            cube_mark_access: access,
+            ..cache::Cache::default()
+        }
+    }
+
+    fn inspect(scenario: &str, cache: &cache::Cache) -> capture::Inspection {
+        capture::inspect(
+            scenario,
+            avatar_row(cache),
+            OUTER,
+            "dark",
+            theme::Theme::dark(),
+        )
+    }
+
+    /// The `CubeMark` intents an activation of `id` emits, by pointer or by
+    /// keyboard (Enter on the focused button). A disabled button takes no
+    /// focus, so it can be neither tabbed to nor pressed: nothing.
+    fn pressed(cache: &cache::Cache, id: &'static str, pointer: bool) -> Vec<CubeMarkIntent> {
+        if !inspect("mark-row-press", cache).has_focus(Id::new(id)) {
+            return Vec::new();
+        }
+        capture::activate(avatar_row(cache), Id::new(id), OUTER, pointer)
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::CubeMark(intent) => Some(intent),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn regenerate_and_back_are_focusable_and_answer_pointer_and_keyboard() {
+        for access in [CubeMarkAccess::Local, CubeMarkAccess::Connect] {
+            let cache = cache(access, 2);
+            let shown = inspect("mark-row-owner", &cache);
+            assert!(shown.has_focus(Id::new(MARK_REGENERATE_ID)), "{:?}", access);
+            assert!(shown.has_focus(Id::new(MARK_BACK_ID)), "{:?}", access);
+            assert!(shown.contains("Avatar"));
+            assert!(shown.contains("Regenerate"));
+            assert!(shown.contains("Back"));
+            for pointer in [true, false] {
+                assert_eq!(
+                    pressed(&cache, MARK_REGENERATE_ID, pointer),
+                    [CubeMarkIntent::Regenerate],
+                    "{:?} pointer={}",
+                    access,
+                    pointer
+                );
+                assert_eq!(
+                    pressed(&cache, MARK_BACK_ID, pointer),
+                    [CubeMarkIntent::Back],
+                    "{:?} pointer={}",
+                    access,
+                    pointer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn back_is_absent_at_zero() {
+        let shown = inspect("mark-row-zero", &cache(CubeMarkAccess::Local, 0));
+        assert!(shown.has_focus(Id::new(MARK_REGENERATE_ID)));
+        assert!(!shown.has_focus(Id::new(MARK_BACK_ID)));
+        assert!(!shown.contains("Back"));
+    }
+
+    #[test]
+    fn regenerate_stops_at_the_highest_number_the_api_takes() {
+        let cache = cache(
+            CubeMarkAccess::Connect,
+            crate::app::settings::MARK_VARIATION_MAX,
+        );
+        assert!(pressed(&cache, MARK_REGENERATE_ID, true).is_empty());
+        assert_eq!(pressed(&cache, MARK_BACK_ID, false), [CubeMarkIntent::Back]);
+    }
+
+    #[test]
+    fn another_accounts_cube_shows_the_mark_without_buttons() {
+        let shown = inspect("mark-row-not-owner", &cache(CubeMarkAccess::NotOwner, 3));
+        assert!(shown.contains("Avatar"));
+        assert!(!shown.has_focus(Id::new(MARK_REGENERATE_ID)));
+        assert!(!shown.has_focus(Id::new(MARK_BACK_ID)));
+        assert!(!shown.contains("Regenerate"));
+        assert!(!shown.contains("Back"));
+    }
+
+    #[test]
+    fn a_registered_cube_signed_out_disables_both_and_asks_for_sign_in() {
+        let cache = cache(CubeMarkAccess::SignedOut, 1);
+        let shown = inspect("mark-row-signed-out", &cache);
+        assert!(shown.contains(MARK_SIGN_IN_LINE));
+        assert!(shown.contains("Regenerate"));
+        assert!(shown.contains("Back"));
+        for id in [MARK_REGENERATE_ID, MARK_BACK_ID] {
+            for pointer in [true, false] {
+                assert!(pressed(&cache, id, pointer).is_empty(), "{}", id);
+            }
+        }
+        // A stale failure does not replace the reason the buttons are off.
+        let failed = cube_mark_cache_failed(CubeMarkAccess::SignedOut);
+        assert!(!inspect("mark-row-signed-out-failed", &failed).contains(MARK_FAILED_LINE));
+    }
+
+    fn cube_mark_cache_failed(access: CubeMarkAccess) -> cache::Cache {
+        cache::Cache {
+            cube_mark_change: CubeMarkChange::Failed { generation: 0 },
+            ..cache(access, 1)
+        }
+    }
+
+    #[test]
+    fn a_failed_change_shows_one_line_and_leaves_the_buttons_usable() {
+        let cache = cube_mark_cache_failed(CubeMarkAccess::Connect);
+        let shown = inspect("mark-row-failed", &cache);
+        assert!(shown.contains(MARK_FAILED_LINE));
+        assert!(!shown.contains(MARK_SIGN_IN_LINE));
+        assert_eq!(
+            pressed(&cache, MARK_REGENERATE_ID, true),
+            [CubeMarkIntent::Regenerate]
+        );
+    }
+
+    #[test]
+    fn both_buttons_wait_while_a_change_or_a_registration_is_in_flight() {
+        let saving = cache::Cache {
+            cube_mark_change: CubeMarkChange::Saving { generation: 0 },
+            ..cache(CubeMarkAccess::Connect, 1)
+        };
+        let waiting = cache(CubeMarkAccess::Waiting, 1);
+        for cache in [saving, waiting] {
+            let shown = inspect("mark-row-busy", &cache);
+            assert!(!shown.contains(MARK_SIGN_IN_LINE));
+            assert!(!shown.contains(MARK_FAILED_LINE));
+            for id in [MARK_REGENERATE_ID, MARK_BACK_ID] {
+                assert!(pressed(&cache, id, true).is_empty(), "{}", id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_mark_row_is_spanish() {
+        for cache in [
+            cache(CubeMarkAccess::Local, 1),
+            cache(CubeMarkAccess::SignedOut, 1),
+            cube_mark_cache_failed(CubeMarkAccess::Connect),
+        ] {
+            let shown = render_in(Language::Spanish, || inspect("mark-row-es", &cache));
+            shown.assert_spanish("Cube Settings › Display, Avatar row");
+            assert!(shown.contains("Regenerar"));
+            assert!(shown.contains("Volver"));
+        }
+        let signed_out = render_in(Language::Spanish, || {
+            inspect(
+                "mark-row-es-signed-out",
+                &cache(CubeMarkAccess::SignedOut, 0),
+            )
+        });
+        assert!(signed_out.contains("Inicia sesión en Connect para cambiar la marca de este Cube."));
+        let unconfirmed = render_in(Language::Spanish, || {
+            inspect(
+                "mark-row-es-unconfirmed",
+                &cache(CubeMarkAccess::Unconfirmed, 0),
+            )
+        });
+        unconfirmed.assert_spanish("Cube Settings › Display, Avatar row unconfirmed");
+        assert!(unconfirmed.contains("Connect aún no ha confirmado este Cube."));
+        let failed = render_in(Language::Spanish, || {
+            inspect(
+                "mark-row-es-failed",
+                &cube_mark_cache_failed(CubeMarkAccess::Local),
+            )
+        });
+        assert!(failed.contains("No se pudo cambiar la marca. No se cambió nada."));
     }
 }

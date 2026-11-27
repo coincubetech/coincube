@@ -24,6 +24,10 @@ impl App {
                 settings::update_settings_file(&network_dir, move |mut s| {
                     if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
                         c.name = saved;
+                        // A Cube that was synced has a Connect row; keep that
+                        // fact (older files record it only as `remote_synced`)
+                        // before the rename marks the name unsynced.
+                        c.connect_registered |= c.remote_synced;
                         c.remote_synced = false;
                     }
                     Some(s)
@@ -102,6 +106,8 @@ impl App {
                             .find(|c| c.id == cube_id && c.name == synced_name)
                         {
                             c.remote_synced = true;
+                            // The rename reached the Cube's Connect row.
+                            c.connect_registered = true;
                         }
                         Some(s)
                     })

@@ -78,6 +78,9 @@ repository's. Internal refactors, test-only work and CI are collapsed at the end
 
 #### Features
 
+**Cube marks**
+- Cube avatars are now ring marks drawn from the Cube itself; Regenerate and Back in Cube Settings › Display change a Cube's mark and are free on every plan, and the image-model avatar flow (trait questionnaire, generated pictures, Download PNG) is removed.
+
 **Recipient identity on send (Branta)**
 
 Sources: `coincube-gui/src/services/branta.rs`, `vendor/branta/`
@@ -193,7 +196,7 @@ Sources: `coincube-gui/src/installer/step/coincube_connect.rs`, `coincube-gui/sr
 - Coincube's own remote backend using Esplora, with email/OTP authentication via Coincube API.
 - Distinct from inherited Liana Connect (`services/connect/` which uses Wizardsardine's lianalite.com).
 - Lightning address support.
-- Avatar system with deterministic generation.
+- Avatar system with deterministic generation (replaced by drawn Cube ring marks; see Unreleased).
 
 **Light/Dark Mode**
 

@@ -179,11 +179,8 @@ fn cube_section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             },
             label: label.to_owned(),
             route: Menu::Cube(CubeSubMenu::Settings(section)),
-            // The avatar flow belongs to Cube identity on Display.
             selected: matches!(menu, Menu::Cube(CubeSubMenu::Settings(current))
-                if *current == section
-                    || (*current == CubeSettingsOption::Avatar
-                        && section == CubeSettingsOption::General)),
+                if *current == section),
             enabled: true,
         })
         .collect()

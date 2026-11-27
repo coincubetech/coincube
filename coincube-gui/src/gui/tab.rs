@@ -578,7 +578,7 @@ pub enum Message {
     /// Connect section — fired when the user clicks "Sign In" on the
     /// inline prompt rendered by a Connect-requiring feature page
     /// (Spark → Settings → Lightning Address, Cube → Settings →
-    /// Avatar / Members).
+    /// Members).
     OpenConnectSignIn,
     /// Bubbles up to the pane so it can focus the Home tab on its Connect →
     /// Plan & Billing section — fired when the user clicks "View plans" on a

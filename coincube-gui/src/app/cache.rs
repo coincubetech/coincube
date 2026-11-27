@@ -143,6 +143,47 @@ pub enum NameSave {
     Failed,
 }
 
+/// How the open Cube's ring mark may be changed from Cube Settings › Display
+/// (Regenerate and Back). Resolved by the App every update from the Connect
+/// panel and the Cube's ownership; the view only reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CubeMarkAccess {
+    /// Waiting for Connect: a registration is in flight, or a signed-in
+    /// session has not learned the Cube's server id yet. Both buttons are
+    /// shown disabled, with no line.
+    #[default]
+    Waiting,
+    /// Another Connect account owns this Cube: the mark only, no buttons.
+    NotOwner,
+    /// Signed in to a Cube Connect has a row for, but the last registration
+    /// failed, so its server id is unknown. Both buttons are disabled, with
+    /// one line saying Connect hasn't confirmed the Cube.
+    Unconfirmed,
+    /// Registered and signed in: the set call (`PUT /connect/cubes/{id}/mark`)
+    /// changes the number, and the local copy follows the response.
+    Connect,
+    /// Never registered: the number changes on this device only and is sent
+    /// with the Cube's first registration.
+    Local,
+    /// Registered, but there is no Connect session to change it with. The
+    /// server's number wins at the next sign-in, so no local change is
+    /// offered.
+    SignedOut,
+}
+
+/// The last Regenerate or Back on Cube Settings › Display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CubeMarkChange {
+    #[default]
+    Idle,
+    /// A set call is in flight, issued under the Connect session with this
+    /// generation (`ConnectCubePanel::session_generation`).
+    Saving { generation: u64 },
+    /// The last set call, issued under the Connect session with this
+    /// generation, failed; the mark was not changed. A new session clears it.
+    Failed { generation: u64 },
+}
+
 /// Progress of the last Cube rename, shown under the Cube name field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CubeNameSync {
@@ -411,12 +452,18 @@ pub struct Cache {
     pub show_direction_badges: bool,
     /// Cached Lightning Address for display in the sidebar across all panels
     pub lightning_address: Option<String>,
-    /// Avatar regenerations the Connect account has left, when known.
-    pub avatar_regenerations_remaining: Option<i32>,
     /// The seed the open Cube's ring mark is drawn from
     /// ([`crate::app::settings::CubeSettings::mark_seed`]), kept in step
     /// with the Cube's `mark_variation`. `None` draws the mark's centre dot.
     pub cube_mark_seed: Option<String>,
+    /// The open Cube's ring-mark variation
+    /// ([`crate::app::settings::CubeSettings::mark_variation`]), kept in step
+    /// with [`Self::cube_mark_seed`]. Back shows only above 0.
+    pub cube_mark_variation: u32,
+    /// Whether, and how, this account may change the open Cube's mark.
+    pub cube_mark_access: CubeMarkAccess,
+    /// The last Regenerate or Back, for the Display row's buttons and line.
+    pub cube_mark_change: CubeMarkChange,
     /// Id of the current Cube.
     pub cube_id: String,
     /// Connect's numeric id for the active Cube (mirror of
@@ -608,7 +655,9 @@ impl std::default::Default for Cache {
             show_direction_badges: true,
             lightning_address: None,
             cube_mark_seed: None,
-            avatar_regenerations_remaining: None,
+            cube_mark_variation: 0,
+            cube_mark_access: CubeMarkAccess::Waiting,
+            cube_mark_change: CubeMarkChange::Idle,
             cube_id: String::new(),
             current_cube_server_id: None,
             current_descriptor_fingerprint: None,

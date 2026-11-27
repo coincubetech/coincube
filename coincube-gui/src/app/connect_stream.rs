@@ -100,6 +100,11 @@ impl App {
             // Same for this device's Spark Stable Balance decision:
             // `None` is omitted, so it never clobbers another device's.
             let cube_spark_stable_balance = self.cube_settings.spark_stable_balance;
+            // A Cube regenerated before it ever registered keeps its mark.
+            let cube_mark_variation =
+                crate::services::coincube::RegisterCubeRequest::mark_variation_for(
+                    self.cube_settings.mark_variation,
+                );
             let cube_uuid = cube_uuid.clone();
             let registration_email = expected_email.clone();
             let registration_base_url = base_url.clone();
@@ -141,6 +146,7 @@ impl App {
                             network: net_str,
                             has_vault: cube_has_vault,
                             spark_stable_balance: cube_spark_stable_balance,
+                            mark_variation: cube_mark_variation,
                         }) // upgrade-only Option<bool>
                         .await
                         .map_err(|e| {

@@ -162,6 +162,7 @@ fn classify_create_error(
 /// Cube registration is idempotent on `(user_id, uuid)` server-side so
 /// calling `register_cube` every time is safe — it just reaches into
 /// the existing row.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_connect_vault(
     client: Option<CoincubeClient>,
     cube_uuid: Option<String>,
@@ -175,6 +176,10 @@ pub async fn create_connect_vault(
     // Final step had no descriptor in context; the desktop's backfill supplies
     // it on the next open.
     fingerprint: Option<String>,
+    // The Cube's ring-mark variation when above 0
+    // (`RegisterCubeRequest::mark_variation_for`). Used by the server only if
+    // this registration creates the Cube's row (API CA1).
+    mark_variation: Option<u32>,
 ) -> Result<ConnectVaultOutcome, ConnectVaultError> {
     let (Some(client), Some(cube_uuid), Some(cube_name)) = (client, cube_uuid, cube_name) else {
         return Err(ConnectVaultError::NotApplicable);
@@ -204,6 +209,7 @@ pub async fn create_connect_vault(
             has_vault: Some(true),
             // No Spark decision is known in the installer; leave the server's.
             spark_stable_balance: None,
+            mark_variation,
         })
         .await
         .map_err(|e| ConnectVaultError::Other(format!("Failed to register cube: {}", e)))?;
@@ -412,6 +418,7 @@ mod tests {
             vec![sample_member("deadbeef", 1, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("should short-circuit");
@@ -430,6 +437,7 @@ mod tests {
             vec![],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("should short-circuit");
@@ -440,8 +448,12 @@ mod tests {
     async fn happy_path_creates_vault_and_members_in_one_call() {
         let server = MockServer::start();
 
+        // The Cube's regenerated mark number rides the registration, which
+        // the server uses only if it creates the row (API CA1).
         let register = server.mock(|when, then| {
-            when.method(Method::POST).path("/api/v1/connect/cubes");
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes")
+                .json_body_partial(r#"{ "markVariation": 3 }"#);
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({
@@ -516,6 +528,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            Some(3),
         )
         .await
         .expect("happy path");
@@ -610,6 +623,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("expected W9 409 error");
@@ -703,6 +717,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("expected I2 409 error");
@@ -798,6 +813,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("expected the exhausted-retry error");
@@ -853,6 +869,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("expected W9 409 error");
@@ -914,6 +931,7 @@ mod tests {
             ],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect_err("expected the create to be rejected");
@@ -986,6 +1004,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect("the fallback should still produce a complete vault");
@@ -1067,6 +1086,7 @@ mod tests {
             ],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect("a vault missing one row should be completed, not failed");
@@ -1124,6 +1144,7 @@ mod tests {
             vec![sample_member("deadbeef", 99, None)],
             Some(180),
             Some("8099ee80".to_string()),
+            None,
         )
         .await
         .expect("an already-attached member is not an install failure");
